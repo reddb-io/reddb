@@ -470,16 +470,9 @@ impl RedDBRuntime {
         if !matches!(record.state, ForkState::Ready | ForkState::Dropping) {
             return Ok(false);
         }
-        if record.state == ForkState::Ready {
-            let path = fork_path(self.fork_parent_path()?, &record);
-            let mut options = self.fork_options(&path);
-            options.read_only = true;
-            let fork = crate::storage::RedDB::open_with_options(&options).map_err(failure)?;
-            let origin = read_record(&fork.store(), ORIGIN)?
-                .ok_or_else(|| failure("fork origin is missing"))?;
-            if origin.identity != record.identity {
-                return Err(failure("fork identity differs from its catalog"));
-            }
+        let path = fork_path(self.fork_parent_path()?, &record);
+        if record.state == ForkState::Ready || path.try_exists().map_err(failure)? {
+            self.verify_fork_origin(&path, &record)?;
         }
         record.state = ForkState::Dropping;
         write_record(&store, &key, Some(&record))?;
@@ -488,6 +481,18 @@ impl RedDBRuntime {
         write_record(&store, &key, None)?;
         crash_point("drop_ready");
         Ok(true)
+    }
+
+    fn verify_fork_origin(&self, path: &Path, record: &ForkRecord) -> RedDBResult<()> {
+        let mut options = self.fork_options(path);
+        options.read_only = true;
+        let fork = crate::storage::RedDB::open_with_options(&options).map_err(failure)?;
+        let origin =
+            read_record(&fork.store(), ORIGIN)?.ok_or_else(|| failure("fork origin is missing"))?;
+        if origin.identity != record.identity {
+            return Err(failure("fork identity differs from its catalog"));
+        }
+        Ok(())
     }
 
     fn remove_owned_fork(&self, record: &ForkRecord) -> RedDBResult<()> {
@@ -516,6 +521,9 @@ impl RedDBRuntime {
         ] {
             match std::fs::symlink_metadata(&owned) {
                 Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                    if owned == path {
+                        crash_point("drop_wal");
+                    }
                     std::fs::remove_file(&owned).map_err(failure)?;
                 }
                 Ok(_) => return Err(failure("fork artifact is not a regular file")),
@@ -559,6 +567,10 @@ impl RedDBRuntime {
                     }
                 }
                 ForkState::Dropping => {
+                    let path = fork_path(self.fork_parent_path()?, &record);
+                    if path.try_exists().map_err(failure)? {
+                        self.verify_fork_origin(&path, &record)?;
+                    }
                     self.remove_owned_fork(&record)?;
                     write_record(&store, &key(&record.name)?, None)?;
                 }

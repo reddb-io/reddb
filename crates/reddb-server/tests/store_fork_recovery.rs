@@ -72,36 +72,40 @@ fn fork_crash_child() {
     std::process::exit(0);
 }
 
+fn run_child(path: &Path, operation: &str, mode: &str, point: &str) {
+    let mut child = CrashChild(
+        std::process::Command::new(std::env::current_exe().expect("binary"))
+            .args(["--exact", "fork_crash_child", "--nocapture"])
+            .env("REDDB_FORK_CHILD", &path)
+            .env("REDDB_FORK_MODE", mode)
+            .env("REDDB_FORK_OPERATION", operation)
+            .env("REDDB_FORK_POINT", point)
+            .spawn()
+            .expect("child"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().expect("child status") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fork child stalled: {operation}/{point}/{mode}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(
+        status.code(),
+        Some(if point == "acknowledged" { 0 } else { 173 }),
+        "{operation}/{point}/{mode}"
+    );
+}
+
 fn campaign(operation: &str, mode: &str, points: &[&str]) {
     for point in points {
         let directory = tempfile::tempdir().expect("fixture");
         let path = directory.path().join("data.rdb");
-        let mut child = CrashChild(
-            std::process::Command::new(std::env::current_exe().expect("binary"))
-                .args(["--exact", "fork_crash_child", "--nocapture"])
-                .env("REDDB_FORK_CHILD", &path)
-                .env("REDDB_FORK_MODE", mode)
-                .env("REDDB_FORK_OPERATION", operation)
-                .env("REDDB_FORK_POINT", point)
-                .spawn()
-                .expect("child"),
-        );
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let status = loop {
-            if let Some(status) = child.0.try_wait().expect("child status") {
-                break status;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "fork child stalled: {operation}/{point}/{mode}"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        assert_eq!(
-            status.code(),
-            Some(if *point == "acknowledged" { 0 } else { 173 }),
-            "{operation}/{point}/{mode}"
-        );
+        run_child(&path, operation, mode, point);
         for _ in 0..3 {
             let runtime = RedDBRuntime::with_options(options(&path, mode)).expect("recover parent");
             assert_eq!(
@@ -188,7 +192,7 @@ recovery_modes!(
 recovery_modes!(
     discard,
     "drop",
-    &["drop_intent", "drop_ready", "acknowledged"]
+    &["drop_intent", "drop_wal", "drop_ready", "acknowledged"]
 );
 recovery_modes!(
     detach,
@@ -200,3 +204,40 @@ recovery_modes!(
     "promote",
     &["release_intent", "release_ready", "acknowledged"]
 );
+
+#[test]
+fn interrupted_drop_refuses_a_replaced_database_and_can_retry() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let parent_path = directory.path().join("data.rdb");
+    run_child(&parent_path, "drop", "strict", "drop_intent");
+    let child_path = std::fs::read_dir(directory.path())
+        .expect("directory")
+        .map(|entry| entry.expect("entry").path())
+        .find(|path| {
+            path != &parent_path && path.extension().is_some_and(|extension| extension == "rdb")
+        })
+        .expect("durable fork");
+    let original = std::fs::read(&child_path).expect("fork bytes");
+    let foreign_path = directory.path().join("foreign.rdb");
+    {
+        let foreign =
+            RedDBRuntime::with_options(options(&foreign_path, "strict")).expect("foreign");
+        foreign
+            .execute_query("CREATE TABLE unrelated (id INT)")
+            .expect("foreign schema");
+        foreign.checkpoint().expect("foreign checkpoint");
+    }
+    std::fs::copy(&foreign_path, &child_path).expect("replace fork fixture");
+    let foreign_bytes = std::fs::read(&child_path).expect("foreign bytes");
+    assert!(RedDBRuntime::with_options(options(&parent_path, "strict")).is_err());
+    assert_eq!(
+        std::fs::read(&child_path).expect("foreign preserved"),
+        foreign_bytes
+    );
+    std::fs::write(&child_path, original).expect("restore owned fork");
+    let parent =
+        RedDBRuntime::with_options(options(&parent_path, "strict")).expect("retry recovery");
+    assert!(parent.list_store_forks().expect("listing").is_empty());
+    assert!(!child_path.exists());
+    assert_eq!(rows(&parent), 1);
+}
