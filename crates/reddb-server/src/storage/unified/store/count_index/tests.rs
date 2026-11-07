@@ -18,6 +18,67 @@ fn fixture() -> (tempfile::TempDir, UnifiedStore) {
 }
 
 #[test]
+fn first_count_publication_is_available_and_reused_after_cold_boot() {
+    for empty_checkpoint in [false, true] {
+        let (directory, store) = fixture();
+        if empty_checkpoint {
+            store.persist().expect("empty base");
+        }
+        store
+            .register_count_index_deferred("rows")
+            .expect("prepare");
+        for id in 1..=32 {
+            store
+                .insert(
+                    "rows",
+                    UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]),
+                )
+                .expect("row");
+        }
+        store.persist().expect("first publication");
+        compare(&store, None, 32);
+        assert!(store
+            .start_count_build("rows")
+            .expect("prepared index")
+            .is_none());
+        drop(store);
+        for boot in 0..3 {
+            let store =
+                UnifiedStore::open_with_config(directory.path().join("count.rdb"), config())
+                    .expect("cold boot");
+            store
+                .register_count_index_deferred("rows")
+                .expect("prepare existing base");
+            let root = store
+                .secondary_index("rows", NAME, &identity(None))
+                .expect("persisted index")
+                .root_page_id();
+            store.persist().expect("unchanged checkpoint");
+            assert_eq!(
+                store
+                    .secondary_index("rows", NAME, &identity(None))
+                    .expect("reused index")
+                    .root_page_id(),
+                root
+            );
+            let id = 33 + boot;
+            store
+                .insert(
+                    "rows",
+                    UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]),
+                )
+                .expect("append");
+            store.persist().expect("append checkpoint");
+            compare(&store, None, id);
+            assert!(store
+                .start_count_build("rows")
+                .expect("updated index")
+                .is_none());
+        }
+    }
+}
+
+#[test]
 fn count_batch_limits_mixed_keys_and_groups_uniform_keys() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct CountVisits(Arc<AtomicUsize>);

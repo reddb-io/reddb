@@ -323,18 +323,25 @@ impl UnifiedStore {
         )
     }
 
-    /// Runtime COUNT projections are built incrementally by the background
-    /// worker; explicit storage callers retain synchronous checkpoint behavior.
+    /// Historical COUNT projections are built incrementally by the background
+    /// worker. A first publication has no disk history to backfill: include its
+    /// projection in the same checkpoint so GC can use it immediately.
     pub(crate) fn register_count_index_deferred(&self, collection: &str) -> Result<(), StoreError> {
         let _publication = self.vault_publication_lock.lock();
         self.register_count_index(collection)?;
         let collection = Self::canonical_collection(collection);
+        let manager = self
+            .get_collection(collection)
+            .expect("registered collection");
+        let historical = manager
+            .backing_root_page()
+            .is_some_and(|root| manager.backing_count_at_root(root) != Some(0));
         self.secondary_index_specs
             .write()
             .get_mut(collection)
             .and_then(|specs| specs.get_mut(NAME))
             .expect("registered count projection")
-            .deferred = true;
+            .deferred = historical;
         Ok(())
     }
 
