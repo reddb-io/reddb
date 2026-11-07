@@ -635,10 +635,6 @@ impl RedDBRuntime {
                 .store()
                 .checkpoint_missing_secondary_indices()?;
         }
-        // COUNT has a correct scan fallback. Register its optional projection
-        // for the next checkpoint without backfilling every existing row on
-        // the readiness path.
-        runtime.prepare_paged_counts()?;
         runtime.rehydrate_kv_tags()?;
         runtime
             .load_probabilistic_state()
@@ -909,6 +905,12 @@ impl RedDBRuntime {
         // graph collection (declared WITH ANALYTICS) and its metadata sidecar
         // exist. Idempotent and survives restarts via the WAL-backed contract.
         let _ = crate::application::topology_collections::ensure(&runtime);
+
+        // Bootstrapping topology can publish a metadata checkpoint. Register
+        // the optional COUNT projection only after that publication, so old
+        // data is not backfilled before readiness. Queries scan until the next
+        // checkpoint publishes the projection.
+        runtime.prepare_paged_counts()?;
 
         // #1369 — reserve a fixed internal-id floor so the first user-inserted
         // entity always receives a stable, documented `rid` (FIRST_USER_ENTITY_ID),

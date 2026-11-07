@@ -115,6 +115,9 @@ mod tests {
         let (_directory, runtime, options) = fixture();
         let store = runtime.db().store();
         store.unregister_secondary_index("count_rows", "\0reddb/visibility-count-v1");
+        // Recreating topology publishes metadata during boot. It must not
+        // force the unrelated COUNT projection before runtime readiness.
+        store.drop_collection("red.topology.cluster").unwrap();
         store.persist().expect("publish missing projection");
         drop(store);
         drop(runtime);
