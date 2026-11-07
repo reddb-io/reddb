@@ -34,6 +34,7 @@ pub trait SecondaryIndexProjector: Send + Sync {
 pub(super) struct SecondaryIndexSpec {
     pub(super) identity: SecondaryIndexIdentity,
     pub(super) projector: Arc<dyn SecondaryIndexProjector>,
+    pub(super) deferred: bool,
 }
 
 pub(super) type SecondaryIndexSpecs = HashMap<String, BTreeMap<String, SecondaryIndexSpec>>;
@@ -100,6 +101,7 @@ impl UnifiedStore {
             SecondaryIndexSpec {
                 identity,
                 projector,
+                deferred: false,
             },
         );
         Ok(())
@@ -113,8 +115,10 @@ impl UnifiedStore {
             let specs = self.secondary_index_specs.read();
             specs.iter().any(|(collection, indices)| {
                 indices.iter().any(|(name, spec)| {
-                    self.secondary_index(collection, name, &spec.identity)
-                        .is_none()
+                    !spec.deferred
+                        && self
+                            .secondary_index(collection, name, &spec.identity)
+                            .is_none()
                 })
             })
         };
@@ -191,6 +195,9 @@ impl UnifiedStore {
                 .get(name)
                 .is_some_and(|index| index.identity == spec.identity)
             {
+                continue;
+            }
+            if spec.deferred {
                 continue;
             }
             builds.push((name, spec, Arc::new(BTree::new(Arc::clone(pager)))));
