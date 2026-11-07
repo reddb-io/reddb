@@ -1,0 +1,18 @@
+{
+  "config": {
+    "engine": "rabbitmq",
+    "red_ack_batch": false,
+    "host": "reddb-ackfast-v2-rabbit-1107",
+    "name": "recovery_rabbit_16",
+    "batch": 16,
+    "operations": 1,
+    "bytes": 100,
+    "settle_ms": 2000,
+    "mode": "empty"
+  },
+  "status": "valid-diagnostic",
+  "classification": "shared-host-diagnostic",
+  "latency_contract": "whole batch through consume/ACK; never divided by batch size",
+  "ack_contract": "one-way consumer ACK plus ordered RPC",
+  "verified_empty": true
+}

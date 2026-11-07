@@ -1,0 +1,16 @@
+{
+  "baseline_commit": "cfc34458df09b32176c68fcd37229d63fcd6c5b4",
+  "baseline_rust_commit": "a1f12745d492f45d25f5133628680fc12c2fc459",
+  "candidate_commit": "5705a5a2ebe590ae0c0244fa2b8316bfcd4948c4",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "build_command": "env -u AWS_LC_SYS_NO_ASM cargo build --release --bin red",
+  "binary_sha256": {
+    "before": "ceb820874dece051683d11452002dac0ef29238a4366fc4d8cf4fea476b2640c",
+    "after": "05de552c37f72192b6e37f6842672cade532fd7a92facc8f322a1c58662d550f"
+  },
+  "candidate_source_files_verified": 2072,
+  "candidate_normalized_sources_sha256": "7dfa405c6016020ae9a654ed9654f214479a94e6eca84652ff5dc587a348527a",
+  "isolation": "Builder synced and stopped before timing; fresh dedicated server volumes for probe and full matrix.",
+  "harness_commit": "f7405adc3",
+  "ack_modes": "batch ACK on both native versions"
+}

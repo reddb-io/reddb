@@ -9,20 +9,17 @@
 //! in-flight deliveries created before the cutover can be resolved, but
 //! new lifecycle POP/MOVE/delete paths are owned here.
 //!
-//! Policy fields (`max_attempts`, `lock_deadline_ms`,
-//! `in_flight_cap_per_group`, `dlq_target`) are read from the
-//! `CollectionDescriptor` hot-fields tier (landed in slice 6).
+//! Lifecycle policy comes from the indexed queue configuration row, which also
+//! supplies the catalog descriptor. Hot operations never build a full catalog.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::catalog::CollectionDescriptor;
 use crate::storage::queue::lifecycle::{
     BumpedAttempt, DeliveryId, MessageId, PendingDeliveryView, QueueSide, QueueStore,
     QueueStoreError, QueueTxn, QueueTxnContext, Result, DEFAULT_READ_MAX_ATTEMPTS,
 };
-use crate::storage::queue::QueueMode;
 use crate::storage::unified::entity::{QueueMessageData, RowData};
 use crate::storage::{EntityData, EntityId, EntityKind, UnifiedEntity, UnifiedStore};
 use reddb_types::Value;
@@ -106,7 +103,7 @@ impl PrimaryQueueStore {
         let pending = delivery_ids
             .iter()
             .map(|delivery| {
-                if !seen.insert(delivery) {
+                if delivery_ids.len() > 1 && !seen.insert(delivery) {
                     return Err(QueueStoreError::UnknownDelivery(format!(
                         "duplicate delivery: {delivery}"
                     )));
@@ -180,38 +177,16 @@ impl PrimaryQueueStore {
         Ok(())
     }
 
-    fn descriptor(&self, queue: &str) -> Option<CollectionDescriptor> {
-        self.runtime
-            .db()
-            .catalog_model_snapshot()
-            .collections
-            .into_iter()
-            .find(|c| c.name == queue)
-    }
-
-    /// Build a `LifecycleConfig` for `queue` from the catalog descriptor's
-    /// hot-fields tier. Falls back to crate defaults when the descriptor is
-    /// absent or a field is unset. `max_attempts` is no longer a config
-    /// knob — it lives on each message and is read at decision time via
-    /// [`QueueStore::read_max_attempts`].
+    /// Read only this queue's indexed configuration, including its cold base.
+    /// Do not cache the result: ALTER must affect the next lifecycle operation.
+    /// The loader supplies defaults for missing fields/queues. `max_attempts`
+    /// lives on each message and is read via [`QueueStore::read_max_attempts`].
     pub(crate) fn lifecycle_config(&self, queue: &str) -> LifecycleConfig {
-        use reddb_rql::ast::DEFAULT_QUEUE_LOCK_DEADLINE_MS;
-
-        let desc = self.descriptor(queue);
-        let lock_ms = desc
-            .as_ref()
-            .and_then(|d| d.queue_lock_deadline_ms)
-            .unwrap_or(DEFAULT_QUEUE_LOCK_DEADLINE_MS);
-        let dlq_target = desc.as_ref().and_then(|d| d.queue_dlq_target.clone());
-        let mode = desc
-            .as_ref()
-            .and_then(|d| d.queue_mode)
-            .unwrap_or(QueueMode::Work);
-
+        let config = super::impl_queue::load_queue_config(self.store().as_ref(), queue);
         LifecycleConfig {
-            lock_duration: Duration::from_millis(lock_ms),
-            dlq_target,
-            mode,
+            lock_duration: Duration::from_millis(config.lock_deadline_ms),
+            dlq_target: config.dlq,
+            mode: config.mode,
         }
     }
 
@@ -1445,6 +1420,7 @@ mod tests {
     use super::*;
     use crate::api::RedDBOptions;
     use crate::runtime::queue_lifecycle::{QueueLifecycle, RetirementOutcome};
+    use crate::storage::queue::QueueMode;
     use crate::RedDBRuntime;
 
     fn boot() -> RedDBRuntime {
@@ -1861,6 +1837,91 @@ mod tests {
             7,
             "per-message max_attempts must match the descriptor's value",
         );
+    }
+
+    #[test]
+    fn queue_delivery_and_ack_do_not_scan_catalog_payloads() {
+        let rt = boot();
+        rt.execute_query("CREATE TABLE unrelated (id INT)")
+            .expect("table");
+        for id in 0..64 {
+            rt.execute_query(&format!("INSERT INTO unrelated (id) VALUES ({id})"))
+                .expect("unrelated data");
+        }
+        rt.execute_query("CREATE QUEUE hot_queue").expect("queue");
+        rt.execute_query("QUEUE GROUP CREATE hot_queue workers")
+            .expect("group");
+        for batch in [false, true] {
+            push(&rt, "hot_queue", "payload");
+            crate::catalog::take_observed_entities_for_test();
+            let ids = batch_ids(&rt, "hot_queue", "workers", 1);
+            let sql = if batch {
+                format!("QUEUE ACK hot_queue BATCH GROUP workers ({})", ids[0])
+            } else {
+                format!("QUEUE ACK hot_queue GROUP workers {}", ids[0])
+            };
+            rt.execute_query(&sql).expect("ACK");
+            assert_eq!(
+                crate::catalog::take_observed_entities_for_test(),
+                0,
+                "delivery/ACK must not inspect unrelated collection payloads"
+            );
+        }
+    }
+
+    #[test]
+    fn queue_lifecycle_policy_tracks_alter_and_cold_boot() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let options = RedDBOptions::persistent(directory.path().join("data.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true);
+        for boot_index in 0..3 {
+            let rt = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+                RedDBRuntime::with_options(options.clone())
+            })
+            .expect("runtime");
+            if boot_index == 0 {
+                rt.execute_query(
+                    "CREATE QUEUE policies FANOUT LOCK_DEADLINE_MS 4000 WITH DLQ failures",
+                )
+                .expect("queue");
+            }
+            let ps = PrimaryQueueStore::new(rt.clone());
+            let config = ps.lifecycle_config("policies");
+            assert_eq!(
+                config.mode,
+                if boot_index < 2 {
+                    QueueMode::Fanout
+                } else {
+                    QueueMode::Work
+                }
+            );
+            assert_eq!(
+                config.lock_duration,
+                Duration::from_millis(if boot_index < 2 { 4000 } else { 9000 })
+            );
+            assert_eq!(
+                config.dlq_target.as_deref(),
+                Some(if boot_index < 2 {
+                    "failures"
+                } else {
+                    "other_failures"
+                })
+            );
+            if boot_index == 1 {
+                rt.execute_query("ALTER QUEUE policies SET MODE WORK")
+                    .expect("mode");
+                rt.execute_query("ALTER QUEUE policies SET LOCK_DEADLINE_MS 9000")
+                    .expect("deadline");
+                rt.execute_query("ALTER QUEUE policies SET DLQ other_failures")
+                    .expect("DLQ");
+                let updated = ps.lifecycle_config("policies");
+                assert_eq!(updated.mode, QueueMode::Work);
+                assert_eq!(updated.lock_duration, Duration::from_millis(9000));
+                assert_eq!(updated.dlq_target.as_deref(), Some("other_failures"));
+            }
+            rt.checkpoint().expect("checkpoint policy");
+        }
     }
 
     #[test]

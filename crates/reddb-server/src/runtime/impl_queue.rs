@@ -1548,7 +1548,8 @@ impl RedDBRuntime {
                 let _publication = store.vault_publication_lock.lock();
                 ensure_queue_exists(store.as_ref(), queue)?;
                 require_queue_group(store.as_ref(), queue, group)?;
-                let (_, ps, txn) = runtime_lifecycle(self, queue);
+                let ps = PrimaryQueueStore::new(self.clone());
+                let txn = ps.new_txn();
                 let mut deliveries = Vec::with_capacity(message_ids.len());
                 for message_id in message_ids {
                     let (_, message) =

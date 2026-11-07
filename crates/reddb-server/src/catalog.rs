@@ -706,9 +706,21 @@ impl CollectionObservations {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static OBSERVED_ENTITIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_observed_entities_for_test() -> usize {
+    OBSERVED_ENTITIES.with(|count| count.replace(0))
+}
+
 fn collection_observations(manager: &SegmentManager) -> (CollectionModel, usize, usize) {
     let mut observations = CollectionObservations::default();
     manager.for_each_entity(|entity| {
+        #[cfg(test)]
+        OBSERVED_ENTITIES.with(|count| count.set(count.get() + 1));
         observations.observe(entity);
         true
     });

@@ -45,12 +45,16 @@ def main():
     parser.add_argument("--queues-only", action="store_true")
     parser.add_argument("--queue-baseline", action="store_true", help="include native-before in a queue-only capture")
     parser.add_argument("--red-ack-batch", action="store_true", help="use atomic ACK only on native-after")
+    parser.add_argument("--baseline-red-ack-batch", action="store_true",
+                        help="use atomic ACK on native-before when its version supports it")
     parser.add_argument("--queue-settle-ms", type=int, default=0)
     parser.add_argument("--resume-queues", action="store_true",
                         help="resume only between fully completed engines, preserving all prior samples")
     args = parser.parse_args()
     if args.queues_only and args.resume_queues:
         parser.error("queue-only captures use a fresh output directory")
+    if args.baseline_red_ack_batch and args.queues_only and not args.queue_baseline:
+        parser.error("baseline ACK mode requires --queue-baseline in queue-only captures")
     args.out.mkdir(parents=True, exist_ok=args.resume_queues)
     names = {key: f"{args.prefix}-{key}-{args.suffix}" for key in
              (["client", "native-after", "rabbit", "kafka"] + (["native-before"] if args.queue_baseline else []) if args.queues_only else
@@ -60,6 +64,7 @@ def main():
                 "git_head": command("git", "rev-parse", "HEAD").strip(),
                 "dirty_diff_sha256": hashlib.sha256(command("git", "diff").encode()).hexdigest(),
                 "operations": args.operations, "queue_rounds": 3, "red_ack_batch": args.red_ack_batch,
+                "baseline_red_ack_batch": args.baseline_red_ack_batch,
                 "queue_settle_ms": args.queue_settle_ms, "kv_rounds": 0 if args.queues_only else 3}
     with tempfile.TemporaryDirectory() as temporary:
         for key in ("native-before", "native-after"):
@@ -74,7 +79,8 @@ def main():
         if (previous["containers"] != manifest["containers"]
                 or previous["operations"] != args.operations
                 or previous.get("queue_settle_ms", 0) != args.queue_settle_ms
-                or previous.get("red_ack_batch", False) != args.red_ack_batch):
+                or previous.get("red_ack_batch", False) != args.red_ack_batch
+                or previous.get("baseline_red_ack_batch", False) != args.baseline_red_ack_batch):
             raise RuntimeError("resume requires identical containers, binaries and workload")
         for key in ("native-before", "native-after", "redis"):
             for workers in (1, 8):
@@ -134,7 +140,8 @@ def main():
             "--batch", str(batch), "--mode", mode,
             "--settle-ms", str(args.queue_settle_ms),
             "--operations", str(count or args.operations),
-            *(["--red-ack-batch"] if args.red_ack_batch and key == "native-after" else []), timeout=900))
+            *(["--red-ack-batch"] if (args.red_ack_batch and key == "native-after")
+              or (args.baseline_red_ack_batch and key == "native-before") else []), timeout=900))
         save(label, result)
         if result["status"] != "valid-diagnostic":
             raise RuntimeError(f"invalid queue result: {label}")
