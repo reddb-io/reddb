@@ -31,6 +31,31 @@ fn embedded_combined_open_supports_empty_snapshot() {
     assert_eq!(snapshot, None);
 }
 
+#[test]
+fn nonblocking_format_probes_reject_active_writer_and_reopen_after_release() {
+    let directory = temp_dir("nonblocking-probe");
+    let path = directory.path().join("data.rdb");
+    EmbeddedRdbArtifact::create_with_snapshot(&path, b"RDST-committed snapshot").expect("create");
+    let writer = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("writer");
+    fs2::FileExt::try_lock_exclusive(&writer).expect("writer lock");
+    assert!(EmbeddedRdbArtifact::try_open(&path).is_err());
+    assert!(EmbeddedRdbArtifact::try_open_with_snapshot(&path).is_err());
+    assert!(EmbeddedRdbArtifact::try_open_strict_manifest(&path).is_err());
+    drop(writer);
+    EmbeddedRdbArtifact::try_open(&path).expect("unlocked probe");
+    EmbeddedRdbArtifact::try_open_strict_manifest(&path).expect("unlocked manifest");
+    let (_, snapshot) =
+        EmbeddedRdbArtifact::try_open_with_snapshot(&path).expect("unlocked snapshot");
+    assert_eq!(
+        snapshot.as_deref(),
+        Some(b"RDST-committed snapshot".as_slice())
+    );
+}
+
 // Count actual bytes read by this thread, independently of disk/page-cache
 // latency. A warm append should read roots, not the whole immutable snapshot.
 #[cfg(target_os = "linux")]

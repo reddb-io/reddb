@@ -353,6 +353,21 @@ impl UnifiedStore {
         self.try_set_key_value_tree("red.storage.metadata", key, value)
     }
 
+    pub(crate) fn try_set_fork_metadata(
+        &self,
+        key: &str,
+        value: &crate::serde_json::Value,
+    ) -> Result<usize, StoreError> {
+        self.try_set_key_value_tree("red.storage.forks", key, value)
+    }
+
+    pub(crate) fn try_get_fork_metadata(
+        &self,
+        key: &str,
+    ) -> Result<Option<reddb_types::Value>, StoreError> {
+        self.try_get_key_value("red.storage.forks", key)
+    }
+
     fn try_set_key_value_tree(
         &self,
         collection: &str,

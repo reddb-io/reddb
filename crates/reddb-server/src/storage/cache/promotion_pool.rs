@@ -90,8 +90,7 @@ pub enum ScheduleOutcome {
     Queued,
     /// Queue was full. `evicted_oldest = true` means we dropped the oldest
     /// pending request to admit this one. `evicted_oldest = false` means the
-    /// queue was so contended even the eviction `pop` failed and *this*
-    /// request was dropped instead.
+    /// retry could not enqueue *this* request, or the pool was shut down.
     DroppedQueueFull { evicted_oldest: bool },
 }
 
@@ -182,8 +181,9 @@ impl AsyncPromotionPool {
     /// `Queued` is returned. If the queue is full, the oldest request is
     /// popped (and dropped) to make room — the caller learns this via
     /// `DroppedQueueFull { evicted_oldest: true }`. In the rare case where
-    /// the queue is so contended that even the `pop` fails, the *new*
-    /// request is dropped: `DroppedQueueFull { evicted_oldest: false }`.
+    /// the retry loses its slot to another producer, the *new* request is dropped:
+    /// `DroppedQueueFull { evicted_oldest: false }`. If a worker drains the
+    /// queue first and the retry needs no eviction, the result is `Queued`.
     pub fn schedule(&self, request: PromotionRequest) -> ScheduleOutcome {
         // After shutdown, refuse new work to keep the drain bounded.
         if self.shutdown.load(Ordering::Acquire) {
@@ -207,7 +207,15 @@ impl AsyncPromotionPool {
                 match self.queue.push(rejected) {
                     Ok(()) => {
                         self.queued_total.fetch_add(1, Ordering::Relaxed);
-                        ScheduleOutcome::DroppedQueueFull { evicted_oldest }
+                        if evicted_oldest {
+                            ScheduleOutcome::DroppedQueueFull {
+                                evicted_oldest: true,
+                            }
+                        } else {
+                            // A worker drained the queue before our pop. The retry
+                            // succeeded without dropping either request.
+                            ScheduleOutcome::Queued
+                        }
                     }
                     Err(_) => {
                         // Lost the race — another producer refilled the

@@ -1400,35 +1400,51 @@ impl RedDBRuntime {
 
     pub fn execute_fork_store(
         &self,
-        _raw_query: &str,
-        _query: &ForkStoreQuery,
+        raw_query: &str,
+        query: &ForkStoreQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
-        Err(RedDBError::InvalidOperation(
-            super::impl_primary_replica_file::EXTERNAL_FORK_DISABLED.into(),
+        let fork = self.fork_store_at_lsn(&query.name, query.at_lsn)?;
+        let path = self
+            .fork_store_path(&query.name)?
+            .ok_or_else(|| RedDBError::Internal("created fork path is missing".into()))?;
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!(
+                "store fork '{}' created at LSN {}; database {}",
+                fork.name,
+                fork.fork_lsn,
+                path.display()
+            ),
+            "fork_store",
         ))
     }
 
     pub fn execute_drop_fork(
         &self,
-        _raw_query: &str,
-        _query: &DropForkQuery,
+        raw_query: &str,
+        query: &DropForkQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
-        Err(RedDBError::InvalidOperation(
-            super::impl_primary_replica_file::EXTERNAL_FORK_DISABLED.into(),
+        if !self.drop_fork_store(&query.name)? && !query.if_exists {
+            return Err(RedDBError::NotFound(format!("store fork '{}'", query.name)));
+        }
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!("store fork '{}' dropped", query.name),
+            "drop_fork",
         ))
     }
 
     pub fn execute_promote_fork(
         &self,
-        _raw_query: &str,
-        _query: &PromoteForkQuery,
+        raw_query: &str,
+        query: &PromoteForkQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
-        Err(RedDBError::InvalidOperation(
-            super::impl_primary_replica_file::EXTERNAL_FORK_DISABLED.into(),
-        ))
+        let path = self.promote_fork_store(&query.name)?;
+        Ok(RuntimeQueryResult::ok_message(raw_query.to_string(),
+            &format!("store fork '{}' promoted; reopen the server with database {}; the previous database is preserved", query.name, path.display()), "promote_fork"))
     }
 
     /// Execute EXPLAIN ALTER FOR CREATE TABLE
