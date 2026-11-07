@@ -161,3 +161,13 @@ uses the new atomic ACK command; the baseline retains concurrent individual
 ACK requests. Each engine still consumes the same messages, checks every payload,
 and runs publication and post-ACK SIGKILL/restart checks. The manifest records
 this choice. The protocol and ACK durability differences described above remain.
+
+RedDB samples also include `read_batch_ms` and `ack_batch_ms`, measured at the
+client around each network operation. They separate reservation and ACK latency
+from publication, but include transport, locks and durability waits; they are
+not server CPU or fsync measurements. Compare both ACK syntaxes on the same
+binary when investigating singleton overhead.
+
+When the baseline already supports batch ACK, add `--baseline-red-ack-batch`
+alongside `--red-ack-batch` to compare the same ACK syntax on both versions.
+The manifest records both choices and resume rejects a change to either mode.
