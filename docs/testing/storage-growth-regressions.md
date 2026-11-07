@@ -136,7 +136,8 @@ visible to COUNT. A crash discards the unfinished tree through the retirement
 ledger and a later worker retries from the beginning. If a checkpoint replaces
 the source generation, the build restarts; frequent checkpoints can delay
 completion. COUNT falls back to the ordinary scan until publication. Batch size
-does not bound a slow fsync or an individual large value's decode time. The
+does not bound a slow fsync, WAL verification, or an individual large value's
+decode time. The
 harness samples concurrent reads and writes during the build, reports the
 subsequent checkpoint separately, and verifies the writes after reopen. Its
 timings do not establish a production SLO.
