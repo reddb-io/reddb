@@ -50,13 +50,17 @@ class RedQueue:
         await asyncio.gather(*(self.query(f"QUEUE PUSH {self.args.name} '{value}'") for value in values))
 
     async def consume(self, count, empty=False):
+        started = time.perf_counter()
         rows = await self.query(f"QUEUE READ {self.args.name} GROUP workers CONSUMER bench COUNT {count}")
+        delivered = time.perf_counter()
         values = [row["payload"] for row in rows]
         if self.args.red_ack_batch and rows:
             ids = ",".join(f"'{row['message_id']}'" for row in rows)
             await self.query(f"QUEUE ACK {self.args.name} BATCH GROUP workers ({ids})")
         else:
             await asyncio.gather(*(self.query(f"QUEUE ACK {self.args.name} GROUP workers '{row['message_id']}'") for row in rows))
+        self.last_read_ms = (delivered - started) * 1000
+        self.last_ack_ms = (time.perf_counter() - delivered) * 1000
         return values
 
     async def close(self):
@@ -176,6 +180,8 @@ async def run(args):
         samples = []
         publication = []
         delivery = []
+        read_samples = []
+        ack_samples = []
         started = time.perf_counter()
         for first in range(0, args.operations, args.batch):
             indices = list(range(first, min(first + args.batch, args.operations)))
@@ -187,12 +193,17 @@ async def run(args):
                 values = await adapter.consume(len(indices))
                 # Concurrent producers may reorder a batch, never its membership.
                 validate(values, indices, args.bytes)
+                if args.engine == "reddb":
+                    read_samples.append(adapter.last_read_ms)
+                    ack_samples.append(adapter.last_ack_ms)
             finished = time.perf_counter()
             publication.append((published - batch_started) * 1000)
             delivery.append((finished - published) * 1000)
             samples.append((finished - batch_started) * 1000)
         return {**summary(samples, args.operations, time.perf_counter() - started),
-                "publication_batch_ms": publication, "consume_ack_batch_ms": delivery}
+                "publication_batch_ms": publication, "consume_ack_batch_ms": delivery,
+                **({"read_batch_ms": read_samples, "ack_batch_ms": ack_samples}
+                   if args.engine == "reddb" else {})}
     finally:
         await adapter.close()
 
