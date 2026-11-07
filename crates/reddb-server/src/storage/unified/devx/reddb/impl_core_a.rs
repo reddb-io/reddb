@@ -500,7 +500,9 @@ impl RedDB {
             && (path_buf.exists() || options.create_if_missing)
             && (!path_buf.exists()
                 || Self::is_binary_dump(&path_buf)?
-                || crate::storage::EmbeddedRdbArtifact::open(&path_buf).is_ok())
+                // Detect the embedded container without validating/copying its
+                // snapshot a second time before the actual open below.
+                || crate::storage::EmbeddedRdbArtifact::open_strict_manifest(&path_buf).is_ok())
         {
             Some(reddb_file::EmbeddedRdbWriterLock::acquire(&path_buf)?)
         } else {
