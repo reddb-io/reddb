@@ -20,7 +20,6 @@ use crate::storage::queue::lifecycle::{
     BumpedAttempt, DeliveryId, MessageId, PendingDeliveryView, QueueSide, QueueStore,
     QueueStoreError, QueueTxn, QueueTxnContext, Result, DEFAULT_READ_MAX_ATTEMPTS,
 };
-use crate::storage::queue::QueueMode;
 use crate::storage::unified::entity::{QueueMessageData, RowData};
 use crate::storage::{EntityData, EntityId, EntityKind, UnifiedEntity, UnifiedStore};
 use reddb_types::Value;
@@ -1421,6 +1420,7 @@ mod tests {
     use super::*;
     use crate::api::RedDBOptions;
     use crate::runtime::queue_lifecycle::{QueueLifecycle, RetirementOutcome};
+    use crate::storage::queue::QueueMode;
     use crate::RedDBRuntime;
 
     fn boot() -> RedDBRuntime {
