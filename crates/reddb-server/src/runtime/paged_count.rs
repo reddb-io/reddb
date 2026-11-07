@@ -64,6 +64,7 @@ mod tests {
         seed.flush().expect("seed checkpoint");
         drop(seed);
         let runtime = open(&options);
+        runtime.flush().expect("prepare count projection");
         (directory, runtime, options)
     }
 
