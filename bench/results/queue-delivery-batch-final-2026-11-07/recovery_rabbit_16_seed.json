@@ -1,0 +1,37 @@
+{
+  "config": {
+    "engine": "rabbitmq",
+    "red_ack_batch": false,
+    "host": "reddb-delivery-rabbit-1107",
+    "name": "recovery_rabbit_16",
+    "batch": 16,
+    "operations": 32,
+    "bytes": 100,
+    "settle_ms": 2000,
+    "mode": "seed"
+  },
+  "status": "valid-diagnostic",
+  "classification": "shared-host-diagnostic",
+  "latency_contract": "whole batch through consume/ACK; never divided by batch size",
+  "ack_contract": "one-way consumer ACK plus ordered RPC",
+  "operations": 32,
+  "elapsed_seconds": 0.02262295700006689,
+  "operations_per_second": 1414.4923671960914,
+  "batch_latency_ms": {
+    "p50": 7.591584000010698,
+    "p95": 15.01852800015513,
+    "p99": 15.01852800015513
+  },
+  "batch_samples_ms": [
+    15.01852800015513,
+    7.591584000010698
+  ],
+  "publication_batch_ms": [
+    15.017787000033422,
+    7.590702000015881
+  ],
+  "consume_ack_batch_ms": [
+    0.0007410001217067474,
+    0.0008819999948173063
+  ]
+}

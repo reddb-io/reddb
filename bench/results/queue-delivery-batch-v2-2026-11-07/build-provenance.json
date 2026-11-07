@@ -1,0 +1,19 @@
+{
+  "baseline_commit": "59b3da894f1fec82bfdbcccf3230fd73c969a8ec",
+  "baseline_tag": "v1.28.28",
+  "candidate_rust_commit": "a1f12745d492f45d25f5133628680fc12c2fc459",
+  "harness_commit": "a1f12745d492f45d25f5133628680fc12c2fc459",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "build_command": "env -u AWS_LC_SYS_NO_ASM cargo build --release --bin red",
+  "builder_image_id": "sha256:2fc1c8e353e39e25719a12ab7d43ebb26f61ad4699cf6f1735c0e2e4851af5d4",
+  "source_verification": "2072 Rust/Cargo files in each build tree matched the corresponding committed source with newline normalization; source mtimes were refreshed before both release rebuilds.",
+  "binary_sha256": {
+    "native-before": "e3f8cbf265c665a36cac4a79ff5ecef4500f498a1ad411865e13ed38a93d0da8",
+    "native-after": "ceb820874dece051683d11452002dac0ef29238a4366fc4d8cf4fea476b2640c"
+  },
+  "build_isolation": "Build filesystem synced, builder stopped before timing; no preceding KV workload on either native server.",
+  "initial_setup_failure": "../queue-delivery-batch-2026-11-07/setup-failure.json",
+  "baseline_normalized_sources_sha256": "09b50ed05c45fa517be30dbb7534b3d84b6feff75d17fe03412b44887a586889",
+  "candidate_normalized_sources_sha256": "79b6d91e052a083a4936a601c52333a7c5ad77c684e7096f4c1c5fc0600e50c0",
+  "earlier_complete_capture": "../queue-delivery-batch-final-2026-11-07/"
+}

@@ -49,7 +49,8 @@ QUEUE ACK tasks BATCH GROUP workers ('message-id-1', 'message-id-2')
 
 The batch accepts 1 to 256 message IDs returned by `QUEUE READ`. Unknown or
 duplicate handles reject the batch before retirement. In autocommit, all
-retirements share one WAL publication and success waits for its durability.
+retirements share one WAL publication. With `Strict` or `WalDurableGrouped`,
+success waits for durability; other modes retain their configured guarantees.
 WORK retires messages and their metadata; FANOUT retires only that group's state.
 Inside an explicit transaction, the existing queue transaction behavior applies:
 rollback restores message availability for redelivery, not the old reservation.

@@ -1,0 +1,82 @@
+{
+  "native-before": {
+    "1": {
+      "message_cycles_per_second": 63.39221719674406,
+      "whole_batch_p99_ms": 23.121043000173813,
+      "round_cycles_per_second": [
+        64.87513092146716,
+        63.13089483682051,
+        63.39221719674406
+      ]
+    },
+    "16": {
+      "message_cycles_per_second": 99.93699066429338,
+      "whole_batch_p99_ms": 170.49308600007862,
+      "round_cycles_per_second": [
+        99.93699066429338,
+        100.77119308382774,
+        97.29163724536735
+      ]
+    }
+  },
+  "native-after": {
+    "1": {
+      "message_cycles_per_second": 56.9291475500647,
+      "whole_batch_p99_ms": 26.6502140002558,
+      "round_cycles_per_second": [
+        58.19069986801423,
+        56.9291475500647,
+        55.98476551833223
+      ]
+    },
+    "16": {
+      "message_cycles_per_second": 374.5006410646221,
+      "whole_batch_p99_ms": 50.3294029999779,
+      "round_cycles_per_second": [
+        393.2702742677857,
+        368.85124966793416,
+        374.5006410646221
+      ]
+    }
+  },
+  "rabbit": {
+    "1": {
+      "message_cycles_per_second": 146.98748224972937,
+      "whole_batch_p99_ms": 9.676958000000013,
+      "round_cycles_per_second": [
+        142.89403718851773,
+        146.98748224972937,
+        149.4601080249658
+      ]
+    },
+    "16": {
+      "message_cycles_per_second": 1316.5106719818295,
+      "whole_batch_p99_ms": 14.817248999861476,
+      "round_cycles_per_second": [
+        1331.5942989213324,
+        1293.7679551379003,
+        1316.5106719818295
+      ]
+    }
+  },
+  "kafka": {
+    "1": {
+      "message_cycles_per_second": 60.6774430785242,
+      "whole_batch_p99_ms": 38.326362000134395,
+      "round_cycles_per_second": [
+        59.689496479735396,
+        60.6774430785242,
+        67.78967921337954
+      ]
+    },
+    "16": {
+      "message_cycles_per_second": 803.7079064263017,
+      "whole_batch_p99_ms": 42.76617699997587,
+      "round_cycles_per_second": [
+        795.5596904907646,
+        817.2621680973001,
+        803.7079064263017
+      ]
+    }
+  }
+}

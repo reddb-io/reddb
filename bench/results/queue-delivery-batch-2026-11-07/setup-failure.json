@@ -1,0 +1,5 @@
+{
+  "status": "setup-failed-before-measurement",
+  "reason": "Published GNU binary requires GLIBC_2.38 and GLIBC_2.39; fixture uses Debian bookworm. Rebuild the v1.28.28 source with the same local Linux toolchain and dependencies as the candidate.",
+  "measured_samples": 0
+}
