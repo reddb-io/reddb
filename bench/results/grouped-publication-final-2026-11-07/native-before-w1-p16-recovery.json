@@ -1,0 +1,43 @@
+{
+  "schema": "reddb.kv-compare.v1",
+  "classification": "shared-host-diagnostic",
+  "engine": "reddb-rest",
+  "operation": "get",
+  "config": {
+    "engine": "reddb-rest",
+    "host": "reddb-pub-final-native-before-1107",
+    "port": 5000,
+    "collection": "kv_w1_p16",
+    "profile": "default",
+    "keys": 256,
+    "value_bytes": 100,
+    "operations": 256,
+    "seconds": 0,
+    "workers": 1,
+    "warmup": 25,
+    "rounds": 3,
+    "pipeline": 1,
+    "operation": "get",
+    "prepare_only": false,
+    "verify_only": true,
+    "fence_writes": false,
+    "recovery_from": "/tmp/native-before-w1-p16.json",
+    "verification": "full",
+    "verification_workers": 8,
+    "artifact_state_path": null
+  },
+  "client": {
+    "python": "3.12.15",
+    "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.36",
+    "implementation": "stdlib threads; client saturation must be checked externally"
+  },
+  "created_unix_ms": 1794075957279,
+  "status": "valid-diagnostic",
+  "rounds": [],
+  "latency_contract": "batch completion including response validation; pipeline=1 is one request",
+  "verification": {
+    "keys_checked": 256,
+    "expected_sha256": "95c6b303c244515aca3991ca81d93ad471a3a64d2aa534dc67cdb12a176c753a",
+    "verification_workers": 8
+  }
+}
