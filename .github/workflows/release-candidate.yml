@@ -13,6 +13,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
   CARGO_INCREMENTAL: 0
 
 # Only one manually requested RC for a ref should run at a time.
@@ -59,8 +60,8 @@ jobs:
     name: Build Linux x86_64
     needs: [plan]
     if: needs.plan.outputs.should_skip != 'true'
-    runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -308,7 +309,7 @@ jobs:
   staging-image:
     name: Build STG candidate image
     if: inputs.staging_only
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     permissions:
       contents: read
