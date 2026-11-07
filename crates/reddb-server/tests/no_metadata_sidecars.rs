@@ -42,6 +42,102 @@ fn assert_database_state_files_only(root: &Path) {
 }
 
 #[test]
+fn queue_dedup_and_capacity_recover_after_acknowledged_process_exit() {
+    const CHILD: &str = "REDDB_QUEUE_INDEX_CRASH_CHILD";
+    let queue_options = |path: &Path, bounded: bool, grouped: bool| {
+        options(path, bounded).with_durability_mode(if grouped {
+            DurabilityMode::WalDurableGrouped
+        } else {
+            DurabilityMode::Strict
+        })
+    };
+    if let Some(path) = std::env::var_os(CHILD) {
+        let runtime = RedDBRuntime::with_options(queue_options(
+            Path::new(&path),
+            std::env::var("REDDB_QUEUE_INDEX_BOUNDED").expect("bounded") == "true",
+            std::env::var("REDDB_QUEUE_INDEX_GROUPED").expect("grouped") == "true",
+        ))
+        .expect("child runtime");
+        let delivery = runtime
+            .execute_query("QUEUE READ jobs GROUP workers CONSUMER worker COUNT 1")
+            .expect("deliver");
+        let message_id = match delivery.result.records[0].get("message_id") {
+            Some(reddb_types::Value::Text(value)) => value.to_string(),
+            other => panic!("delivery id: {other:?}"),
+        };
+        runtime
+            .execute_query(&format!("QUEUE ACK jobs GROUP workers '{message_id}'"))
+            .expect("acknowledged ACK");
+        runtime
+            .execute_query("QUEUE PUSH jobs 'kept' DEDUP 'surviving-key'")
+            .expect("ACK releases capacity");
+        // Do not run destructors or a shutdown checkpoint: recover the WAL
+        // overlay over previously published capacity/dedup index roots.
+        std::process::exit(0);
+    }
+    for bounded in [false, true] {
+        for grouped in [false, true] {
+            let directory = tempfile::tempdir().expect("fixture");
+            let path = directory.path().join("data.rdb");
+            {
+                let runtime = RedDBRuntime::with_options(queue_options(&path, bounded, grouped))
+                    .expect("seed");
+                runtime
+                    .execute_query("CREATE QUEUE jobs MAX_SIZE 1 DEDUP_WINDOW 3600 s")
+                    .expect("queue");
+                runtime
+                    .execute_query("QUEUE GROUP CREATE jobs workers")
+                    .expect("group");
+                runtime
+                    .execute_query("QUEUE PUSH jobs 'old' DEDUP 'old-key'")
+                    .expect("seed message");
+                runtime.checkpoint().expect("publish base indices");
+            }
+            let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "queue_dedup_and_capacity_recover_after_acknowledged_process_exit",
+                ])
+                .env(CHILD, &path)
+                .env("REDDB_QUEUE_INDEX_BOUNDED", bounded.to_string())
+                .env("REDDB_QUEUE_INDEX_GROUPED", grouped.to_string())
+                .status()
+                .expect("child process");
+            assert!(status.success(), "bounded={bounded}, grouped={grouped}");
+            for _ in 0..3 {
+                let runtime = RedDBRuntime::with_options(queue_options(&path, bounded, grouped))
+                    .expect("recover");
+                let peek = runtime.execute_query("QUEUE PEEK jobs 10").expect("peek");
+                assert_eq!(peek.result.records.len(), 1, "ACK must survive recovery");
+                assert_eq!(
+                    peek.result.records[0].get("payload"),
+                    Some(&reddb_types::Value::Text("kept".into()))
+                );
+                let retry = runtime
+                    .execute_query("QUEUE PUSH jobs 'duplicate' DEDUP 'surviving-key'")
+                    .expect("duplicate succeeds even at capacity");
+                assert_eq!(
+                    retry.result.records[0].get("message_id"),
+                    peek.result.records[0].get("message_id")
+                );
+                assert!(
+                    runtime.execute_query("QUEUE PUSH jobs 'overflow'").is_err(),
+                    "capacity remains enforced"
+                );
+                assert!(runtime
+                    .execute_query("QUEUE PENDING jobs GROUP workers")
+                    .expect("pending")
+                    .result
+                    .records
+                    .is_empty());
+                runtime.checkpoint().expect("checkpoint recovered overlay");
+                assert_database_state_files_only(directory.path());
+            }
+        }
+    }
+}
+
+#[test]
 fn metadata_stays_inside_database_across_checkpoints_and_cold_boot() {
     for bounded in [true, false] {
         let directory = tempfile::tempdir().expect("fixture");

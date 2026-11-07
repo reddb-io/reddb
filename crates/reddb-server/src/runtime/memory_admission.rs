@@ -214,6 +214,13 @@ impl crate::RedDBRuntime {
         let key_growth = match &applied.entity.data {
             crate::storage::EntityData::Row(row) => {
                 crate::storage::unified::memory_size::key_lookup_growth_bytes(row.get_field("key"))
+                    .saturating_add(
+                        crate::storage::unified::memory_size::queue_dedup_growth_bytes(
+                            row.get_field("kind"),
+                            row.get_field("queue"),
+                            row.get_field("dedup_key"),
+                        ),
+                    )
             }
             _ => 0,
         };
@@ -369,7 +376,20 @@ impl crate::RedDBRuntime {
 }
 
 pub(crate) fn estimate_row_growth(fields: &[(String, Value)]) -> u64 {
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value)
+    };
     entity_base_bytes()
+        .saturating_add(
+            crate::storage::unified::memory_size::queue_dedup_growth_bytes(
+                field("kind"),
+                field("queue"),
+                field("dedup_key"),
+            ) as u64,
+        )
         .saturating_add(
             crate::storage::unified::memory_size::key_lookup_growth_bytes(
                 fields

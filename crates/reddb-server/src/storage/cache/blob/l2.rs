@@ -152,7 +152,7 @@ impl BlobCacheL2 {
             content_metadata: None,
             tags: BTreeSet::new(),
             dependencies: BTreeSet::new(),
-            visited: true,
+            visited: std::sync::atomic::AtomicBool::new(true),
             expires_at_unix_ms: record.expires_at_unix_ms,
             priority: record.priority,
             version: record.version,

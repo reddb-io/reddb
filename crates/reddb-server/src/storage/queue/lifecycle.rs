@@ -351,7 +351,7 @@ pub(crate) trait QueueStore {
     fn reclaim_expired_dedup(&self, txn: &QueueTxn, queue: &str, now_ns: u64) -> Result<usize>;
 
     /// Look up a live push-idempotency key.
-    fn find_dedup(&self, queue: &str, dedup_key: &str, now_ns: u64) -> Option<MessageId>;
+    fn find_dedup(&self, queue: &str, dedup_key: &str, now_ns: u64) -> Result<Option<MessageId>>;
 
     /// Record the first producer push outcome for `dedup_key`.
     fn record_dedup(
@@ -1001,13 +1001,13 @@ impl QueueStore for InMemoryQueueStore {
         Ok(before.saturating_sub(state.dedup.len()))
     }
 
-    fn find_dedup(&self, queue: &str, dedup_key: &str, now_ns: u64) -> Option<MessageId> {
+    fn find_dedup(&self, queue: &str, dedup_key: &str, now_ns: u64) -> Result<Option<MessageId>> {
         let state = self.state.lock().expect("state poisoned");
-        state
+        Ok(state
             .dedup
             .get(&(queue.to_string(), dedup_key.to_string()))
             .filter(|entry| entry.expires_at_ns > now_ns)
-            .map(|entry| entry.message_id)
+            .map(|entry| entry.message_id))
     }
 
     fn record_dedup(
@@ -1167,20 +1167,32 @@ mod tests {
         store
             .record_dedup(&t, "q", "retry-1", 10, 2_000)
             .expect("record dedup");
-        assert_eq!(store.find_dedup("q", "retry-1", 1_000), Some(10));
+        assert_eq!(
+            store
+                .find_dedup("q", "retry-1", 1_000)
+                .expect("dedup lookup"),
+            Some(10)
+        );
 
         let delivery = store
             .mark_pending(&t, "q", 10, "workers", "alice", deadline_in(1000))
             .expect("mark pending");
         store.ack_pending(&t, &delivery).expect("ack original");
         assert_eq!(
-            store.find_dedup("q", "retry-1", 1_500),
+            store
+                .find_dedup("q", "retry-1", 1_500)
+                .expect("dedup lookup"),
             Some(10),
             "consuming the original message must not remove the dedup outcome",
         );
 
         assert_eq!(store.reclaim_expired_dedup(&t, "q", 2_000).unwrap(), 1);
-        assert_eq!(store.find_dedup("q", "retry-1", 2_001), None);
+        assert_eq!(
+            store
+                .find_dedup("q", "retry-1", 2_001)
+                .expect("dedup lookup"),
+            None
+        );
     }
 
     #[test]

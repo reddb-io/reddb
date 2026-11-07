@@ -287,11 +287,19 @@ mod tests {
             (
                 "runtime/impl_queue.rs",
                 include_str!("../../runtime/impl_queue.rs"),
-                10,
+                9,
                 "maintenance: red_queue_meta bookkeeping (config, groups, acks, \
-                 pending, dedup TTL reaper, gauge counts) — queue message bodies are \
+                 pending, gauge counts) — queue message bodies are \
                  read through scan. \
                  TODO(#2138 follow-up): QUEUE PENDING projects meta rows to clients",
+            ),
+            (
+                "runtime/queue_storage_index.rs",
+                include_str!("../../runtime/queue_storage_index.rs"),
+                1,
+                "maintenance: legacy dedup expiry cleanup observes physical rows \
+                 until its first index checkpoint; producer-key lookups retain \
+                 captured snapshot visibility",
             ),
             (
                 "runtime/primary_queue_store.rs",

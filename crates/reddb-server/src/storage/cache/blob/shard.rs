@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::atomic::Ordering;
 
 use indexmap::IndexMap;
 
@@ -42,6 +43,28 @@ impl Shard {
         self.get_by_parts(&key.namespace, &key.key, now_ms, namespace_generation)
     }
 
+    /// Common hot hits only touch SIEVE's advisory visited bit. Idle/stale
+    /// policies and removal still require the exclusive, revalidated path.
+    pub(super) fn shared_hit(
+        &self,
+        namespace: &str,
+        key: &str,
+        now_ms: u64,
+        namespace_generation: u64,
+    ) -> Option<BlobCacheHit> {
+        let entry = self.entries.get(&BlobCacheKey::borrowed(namespace, key))?;
+        if entry.namespace_generation != namespace_generation
+            || entry.extended.is_active()
+            || entry.is_expired_at(now_ms)
+        {
+            return None;
+        }
+        entry.visited.store(true, Ordering::Relaxed);
+        // last_access is used only by immutable extended-TTL policies. An
+        // ordinary hit need not mutate it while holding a shared shard guard.
+        Some(entry.hit())
+    }
+
     pub(super) fn get_by_parts(
         &mut self,
         namespace: &str,
@@ -60,7 +83,7 @@ impl Shard {
                 if entry.is_expired_at(now_ms) {
                     Some(RemovalReason::Expired)
                 } else {
-                    entry.visited = true;
+                    entry.visited.store(true, Ordering::Relaxed);
                     entry.last_access_unix_ms = now_ms;
                     return Lookup::Hit(entry.hit());
                 }
@@ -74,14 +97,14 @@ impl Shard {
                     &entry.extended,
                 ) {
                     ExpiryDecision::Fresh => {
-                        entry.visited = true;
+                        entry.visited.store(true, Ordering::Relaxed);
                         entry.last_access_unix_ms = now_ms;
                         return Lookup::Hit(entry.hit());
                     }
                     ExpiryDecision::Stale {
                         window_remaining_ms,
                     } => {
-                        entry.visited = true;
+                        entry.visited.store(true, Ordering::Relaxed);
                         entry.last_access_unix_ms = now_ms;
                         return Lookup::Hit(entry.hit_stale(window_remaining_ms));
                     }
@@ -131,7 +154,7 @@ impl Shard {
             } else if entry.is_expired_at(now_ms) {
                 Some(RemovalReason::Expired)
             } else {
-                entry.visited = true;
+                entry.visited.store(true, Ordering::Relaxed);
                 return Lookup::Present;
             }
         };
@@ -208,9 +231,9 @@ impl Shard {
                 self.advance_hand();
                 continue;
             };
-            if entry.visited {
+            if entry.visited.load(Ordering::Relaxed) {
                 if let Some(entry) = self.entries.get_mut(&candidate) {
-                    entry.visited = false;
+                    entry.visited.store(false, Ordering::Relaxed);
                 }
                 self.advance_hand();
                 continue;
@@ -295,7 +318,7 @@ impl Shard {
     fn has_lower_priority_unvisited(&self, priority: u8) -> bool {
         self.entries
             .values()
-            .any(|entry| !entry.visited && entry.priority < priority)
+            .any(|entry| !entry.visited.load(Ordering::Relaxed) && entry.priority < priority)
     }
 
     fn advance_hand(&mut self) {

@@ -17,6 +17,21 @@ pub fn key_lookup_growth_bytes(value: Option<&Value>) -> usize {
     }
 }
 
+/// A producer key adds a hash posting and an expiry-tree entry. Include an
+/// initially sparse tree node as well as the amortized hash growth allowance.
+pub fn queue_dedup_growth_bytes(
+    kind: Option<&Value>,
+    queue: Option<&Value>,
+    key: Option<&Value>,
+) -> usize {
+    if !matches!(kind, Some(Value::Text(value)) if value.as_ref() == "queue_push_dedup")
+        || !matches!(queue, Some(Value::Text(_)))
+    {
+        return 0;
+    }
+    key_lookup_growth_bytes(key) + 12 * std::mem::size_of::<(u64, u64, super::entity::EntityId)>()
+}
+
 pub fn canonical_heap_bytes(key: &reddb_types::CanonicalKey) -> usize {
     use reddb_types::CanonicalKey;
     match key {

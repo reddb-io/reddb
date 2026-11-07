@@ -14,6 +14,88 @@ fn small_cache(bytes: usize) -> BlobCache {
     )
 }
 
+#[test]
+fn hot_hit_does_not_require_exclusive_shard_access() {
+    let cache = Arc::new(small_cache(1024));
+    cache
+        .put_at("shared", "key", BlobCachePut::new(vec![7; 32]), 100)
+        .expect("seed cache");
+    let (sent, received) = std::sync::mpsc::channel();
+    let shard = cache.shards[0].read();
+    let reader = Arc::clone(&cache);
+    let worker = std::thread::spawn(move || {
+        let hit = reader.get_at("shared", "key", 101).expect("hot hit");
+        sent.send(hit.bytes().to_vec()).expect("send hit");
+    });
+    let result = received.recv_timeout(std::time::Duration::from_secs(5));
+    drop(shard);
+    worker.join().expect("reader completed");
+    assert_eq!(
+        result.expect("a hot hit must share the read lock"),
+        vec![7; 32]
+    );
+}
+
+#[test]
+fn prepared_put_rechecks_version_before_publishing_either_tier() {
+    let directory = tempfile::tempdir().expect("cache fixture");
+    let path = directory.path().join("cache.rdb");
+    let cache = Arc::new(l2_cache(&path));
+    let newer = Arc::clone(&cache);
+    PUT_PREPARED_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            newer
+                .put(
+                    "race",
+                    "key",
+                    BlobCachePut::new(vec![2; 32])
+                        .with_policy(BlobCachePolicy::default().version(2)),
+                )
+                .expect("publish newer version while old payload is prepared");
+        }));
+    });
+    assert!(matches!(
+        cache.put(
+            "race",
+            "key",
+            BlobCachePut::new(vec![1; 32]).with_policy(BlobCachePolicy::default().version(1))
+        ),
+        Err(CacheError::VersionMismatch {
+            existing: 2,
+            attempted: 1
+        })
+    ));
+    assert_eq!(
+        cache.get("race", "key").expect("newer L1").bytes().as_ref(),
+        &[2; 32]
+    );
+    drop(cache);
+    let reopened = l2_cache(&path);
+    assert_eq!(
+        reopened
+            .get("race", "key")
+            .expect("newer durable L2")
+            .bytes()
+            .as_ref(),
+        &[2; 32]
+    );
+}
+
+#[test]
+fn prepared_put_cannot_resurrect_a_flushed_namespace() {
+    let cache = Arc::new(small_cache(1024));
+    let invalidator = Arc::clone(&cache);
+    PUT_PREPARED_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            assert!(invalidator.invalidate_namespace("race"));
+        }));
+    });
+    cache
+        .put("race", "key", BlobCachePut::new(vec![1; 32]))
+        .expect("overlapping put");
+    assert!(cache.get("race", "key").is_none());
+}
+
 fn l2_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

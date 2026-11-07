@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use super::super::extended_ttl::{EffectiveExpiry, ExpiryDecision, ExtendedTtlPolicy};
@@ -12,7 +13,7 @@ pub(super) struct Entry {
     pub(super) tags: BTreeSet<String>,
     pub(super) dependencies: BTreeSet<String>,
     pub(super) size: usize,
-    pub(super) visited: bool,
+    pub(super) visited: AtomicBool,
     pub(super) expires_at_unix_ms: Option<u64>,
     pub(super) priority: u8,
     pub(super) version: Option<u64>,
@@ -52,7 +53,7 @@ impl Entry {
             tags,
             dependencies,
             size,
-            visited: true,
+            visited: AtomicBool::new(true),
             expires_at_unix_ms: effective_expires_at_unix_ms(policy, now_ms, namespace, key),
             priority: policy.priority_value(),
             version: policy.version_value(),
