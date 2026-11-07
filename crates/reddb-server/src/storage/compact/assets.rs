@@ -244,7 +244,15 @@ impl<'a> Assets<'a> {
         }
         Ok(header)
     }
-    pub fn metadata(&mut self, source: &Path, destination: Option<&Path>) -> Result<()> {
+    pub fn metadata(
+        &mut self,
+        source: &Path,
+        destination: Option<&Path>,
+        internal: Option<&str>,
+    ) -> Result<Option<String>> {
+        if let Some(text) = internal {
+            return self.relocate_metadata_document(text).map(Some);
+        }
         let binary = f::physical_metadata_binary_path(source);
         let json = f::physical_metadata_json_path(source);
         let path = if binary.exists() {
@@ -257,13 +265,28 @@ impl<'a> Assets<'a> {
                     && self.source.header.physical.catalog_collection_count == 0,
                 "physical metadata sidecar is missing",
             )?;
-            return Ok(());
+            return Ok(None);
         };
         ensure(
             std::fs::metadata(&path)?.len() <= 64 * 1024 * 1024,
             "physical metadata exceeds compaction budget",
         )?;
         let text = f::physical_metadata::read_physical_metadata_document(&path)?;
+        let document = self.relocate_metadata_document(&text)?;
+        let Some(destination) = destination else {
+            return Ok(None);
+        };
+        let encoded = f::encode_physical_metadata_binary_document(&document)?;
+        let output = f::physical_metadata_binary_path(destination);
+        write_new(&output, &encoded)?;
+        ensure(
+            f::physical_metadata::read_physical_metadata_document(&output)? == document,
+            "physical metadata failed readback parity",
+        )?;
+        Ok(None)
+    }
+
+    fn relocate_metadata_document(&mut self, text: &str) -> Result<String> {
         let mut document: serde_json::Value = serde_json::from_str(&text)?;
         // Validate the complete native contract, then edit only physical addresses
         // in the JSON value so unrelated and forward-compatible fields survive.
@@ -297,19 +320,7 @@ impl<'a> Assets<'a> {
                 }
             }
         }
-        let Some(destination) = destination else {
-            return Ok(());
-        };
-        let encoded =
-            f::encode_physical_metadata_binary_document(&serde_json::to_string(&document)?)?;
-        let output = f::physical_metadata_binary_path(destination);
-        write_new(&output, &encoded)?;
-        ensure(
-            f::physical_metadata::read_physical_metadata_document(&output)?
-                == serde_json::to_string(&document)?,
-            "physical metadata failed readback parity",
-        )?;
-        Ok(())
+        Ok(serde_json::to_string(&document)?)
     }
 }
 fn relocate(mut page: Page, id: u32) -> Page {

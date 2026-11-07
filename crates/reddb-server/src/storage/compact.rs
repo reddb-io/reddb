@@ -19,6 +19,7 @@ mod assets;
 pub(crate) mod boot_system_wal;
 mod catalog;
 pub(crate) mod catalog_aliases;
+mod internal_metadata;
 mod salvage;
 mod scrub;
 mod source;
@@ -858,7 +859,23 @@ fn compact_paged_inner(
     let mut assets = assets::Assets::new(&source, &target);
     assets.vault()?;
     let physical = assets.physical()?;
-    assets.metadata(&source_path, Some(&output))?;
+    let internal = internal_metadata::read(&source, &catalog)?;
+    let rewritten_document = assets.metadata(
+        &source_path,
+        Some(&output),
+        internal.as_ref().map(|record| record.document.as_str()),
+    )?;
+    let mut rewritten_metadata = None;
+    if let (Some(record), Some(document)) = (internal, rewritten_document) {
+        let old_root = record.root;
+        let key = record.key.clone();
+        let value = record.rewrite(document)?;
+        let tree = BTree::with_root(Arc::clone(&target), roots[&old_root]);
+        tree.upsert(&key, &value)?;
+        roots.insert(old_root, tree.root_page_id());
+        rewritten_metadata = Some((old_root, key, value));
+    }
+    catalog.claim_retired(&source)?;
     if salvage.is_some() || lost_collections.is_some() {
         if let Some(salvage) = salvage {
             for index in &salvage.indexes {
@@ -965,7 +982,13 @@ fn compact_paged_inner(
         if let Some((count, hash)) = recovered_trees.get(&old) {
             verify_recovered_tree(&reopened, new, *count, *hash)?;
         } else {
-            verify_tree(&source, &reopened, old, new)?;
+            verify_tree(
+                &source,
+                &reopened,
+                old,
+                new,
+                rewritten_metadata.as_ref().filter(|record| record.0 == old),
+            )?;
         }
     }
     for (id, expected, checksum) in assets_verification {
@@ -1189,14 +1212,27 @@ fn inventory_tree(
     }
     Ok((expected, repaired))
 }
-fn verify_tree(source: &Arc<Source>, destination: &Arc<Source>, old: u32, new: u32) -> Result<()> {
+fn verify_tree(
+    source: &Arc<Source>,
+    destination: &Arc<Source>,
+    old: u32,
+    new: u32,
+    rewritten: Option<&(u32, Vec<u8>, Vec<u8>)>,
+) -> Result<()> {
     let old = BTree::with_root(Arc::clone(source), old);
     let new = BTree::with_root(Arc::clone(destination), new);
     inventory_tree(destination, &new, false)?;
     let mut left = old.cursor_first()?;
     let mut right = new.cursor_first()?;
     loop {
-        let expected = left.next_with_budget(32 * 1024 * 1024)?;
+        let mut expected = left.next_with_budget(32 * 1024 * 1024)?;
+        if let (Some((key, value)), Some((_, rewritten_key, rewritten_value))) =
+            (&mut expected, rewritten)
+        {
+            if key == rewritten_key {
+                *value = rewritten_value.clone();
+            }
+        }
         let actual = right.next_with_budget(32 * 1024 * 1024)?;
         ensure(
             expected == actual,

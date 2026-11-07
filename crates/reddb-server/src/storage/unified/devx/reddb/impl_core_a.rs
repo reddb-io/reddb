@@ -498,6 +498,9 @@ impl RedDB {
             && !options.bounded_disk_residency
             && !options.read_only
             && (path_buf.exists() || options.create_if_missing)
+            && (!path_buf.exists()
+                || Self::is_binary_dump(&path_buf)?
+                || crate::storage::EmbeddedRdbArtifact::open(&path_buf).is_ok())
         {
             Some(reddb_file::EmbeddedRdbWriterLock::acquire(&path_buf)?)
         } else {
@@ -1269,9 +1272,9 @@ impl RedDB {
                 .as_ref()
                 .map(|(_, source)| source.as_str().to_string()),
             native_header_repair_policy,
-            metadata_sequence: sidecar
-                .as_ref()
-                .map(|(metadata, _)| metadata.superblock.sequence),
+            metadata_sequence: self
+                .physical_metadata()
+                .map(|metadata| metadata.superblock.sequence),
             native_sequence: native_state.as_ref().map(|state| state.header.sequence),
             native_metadata_last_loaded_from: native_state
                 .as_ref()

@@ -575,6 +575,11 @@ impl RedDB {
     pub fn run_maintenance(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.store.run_maintenance()?;
         self.persist_metadata()?;
+        if self.paged_mode {
+            if let Some(path) = self.path() {
+                self.remove_imported_metadata_sidecars(path)?;
+            }
+        }
         Ok(())
     }
 

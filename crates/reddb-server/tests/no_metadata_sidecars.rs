@@ -28,9 +28,12 @@ fn assert_database_state_files_only(root: &Path) {
             let name = entry.file_name();
             let name = name.to_str().expect("file name");
             // Security audit output is diagnostic evidence, not a recovery
-            // sidecar. Its existing sink is preserved pending the policy decision.
+            // sidecar. Preserve the independent security evidence sink.
             assert!(
-                name == "data.rdb" || name == "data.rdb-uwal" || name == ".audit.log",
+                name == "data.rdb"
+                    || Some(entry.file_name().as_os_str())
+                        == reddb_file::unified_wal_path(&root.join("data.rdb")).file_name()
+                    || name == ".audit.log",
                 "unexpected database sidecar: {}",
                 path.display()
             );
@@ -260,4 +263,40 @@ fn corrupt_internal_metadata_cannot_fall_back_to_a_stale_sidecar() {
             .contains("invalid internal physical metadata record"),
         "{error}"
     );
+}
+
+#[test]
+fn embedded_options_reopening_native_store_do_not_create_an_auxiliary_lock() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("data.rdb");
+    {
+        let runtime = RedDBRuntime::with_options(options(&path, false)).expect("native store");
+        runtime
+            .execute_query("CREATE TABLE native_rows (id INT)")
+            .expect("table");
+        runtime
+            .execute_query("INSERT INTO native_rows (id) VALUES (7)")
+            .expect("row");
+        runtime.checkpoint().expect("checkpoint");
+    }
+    for read_only in [false, true, false] {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(&path)
+                .with_memory_budget(64 * 1024 * 1024)
+                .with_bounded_disk_residency(false)
+                .with_read_only(read_only),
+        )
+        .expect("reopen native store under embedded options");
+        assert_eq!(
+            runtime
+                .execute_query("SELECT id FROM native_rows")
+                .expect("row")
+                .result
+                .records
+                .len(),
+            1
+        );
+        runtime.checkpoint().expect("checkpoint");
+        assert_database_state_files_only(directory.path());
+    }
 }

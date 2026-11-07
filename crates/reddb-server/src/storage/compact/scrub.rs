@@ -34,7 +34,7 @@ pub fn scrub_paged(path: &Path) -> Result<PagedScrubReport> {
     let path = canonical_path.as_path();
     let source = Arc::new(Source::open(path)?);
     super::salvage::verify_supported_source_with_audit(path, &source)?;
-    let trees = inspect_all_trees(&source)?;
+    let (trees, catalog) = inspect_all_trees(&source)?;
     if !trees.findings.is_empty() {
         return Ok(PagedScrubReport {
             trees,
@@ -42,10 +42,16 @@ pub fn scrub_paged(path: &Path) -> Result<PagedScrubReport> {
             unclassified_pages: source.unclaimed_pages(),
         });
     }
+    let internal = super::internal_metadata::read(&source, &catalog)?;
     let mut assets = super::assets::Assets::for_verification(&source);
     assets.vault()?;
     assets.physical()?;
-    assets.metadata(path, None)?;
+    assets.metadata(
+        path,
+        None,
+        internal.as_ref().map(|record| record.document.as_str()),
+    )?;
+    catalog.claim_retired(&source)?;
     Ok(PagedScrubReport {
         trees,
         assets_verified: true,
@@ -56,15 +62,21 @@ pub fn scrub_paged(path: &Path) -> Result<PagedScrubReport> {
 pub(super) fn verify_recovery_vector_pages(path: &Path) -> Result<()> {
     let source = Arc::new(Source::open(path)?);
     super::salvage::verify_supported_source(path, &source)?;
-    let trees = inspect_all_trees(&source)?;
+    let (trees, catalog) = inspect_all_trees(&source)?;
     ensure(
         trees.findings.is_empty(),
         "recovered tree verification failed",
     )?;
+    let internal = super::internal_metadata::read(&source, &catalog)?;
     let mut assets = super::assets::Assets::for_verification(&source);
     assets.vault()?;
     assets.physical()?;
-    assets.metadata(path, None)?;
+    assets.metadata(
+        path,
+        None,
+        internal.as_ref().map(|record| record.document.as_str()),
+    )?;
+    catalog.claim_retired(&source)?;
     source.verify_unclaimed_vector_pages()
 }
 
@@ -73,10 +85,10 @@ pub(super) fn verify_recovery_vector_pages(path: &Path) -> Result<()> {
 /// verified. The same layout and WAL restrictions as offline compaction apply.
 pub fn scrub_paged_trees(path: &Path) -> Result<PagedTreeScrubReport> {
     let source = Arc::new(Source::open(path)?);
-    inspect_all_trees(&source)
+    inspect_all_trees(&source).map(|(report, _)| report)
 }
 
-fn inspect_all_trees(source: &Arc<Source>) -> Result<PagedTreeScrubReport> {
+fn inspect_all_trees(source: &Arc<Source>) -> Result<(PagedTreeScrubReport, Catalog)> {
     let catalog = Catalog::read(source)?;
     ensure(
         source.header.version < f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
@@ -128,7 +140,7 @@ fn inspect_all_trees(source: &Arc<Source>) -> Result<PagedTreeScrubReport> {
             }
         }
     }
-    Ok(report)
+    Ok((report, catalog))
 }
 
 fn inspect_tree(

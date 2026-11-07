@@ -9,7 +9,7 @@ use reddb::application::{
     PatchEntityOperationType,
 };
 use reddb::json::json;
-use reddb::{PhysicalMetadataFile, RedDBOptions, RedDBRuntime, StorageDeployPreset};
+use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
@@ -146,16 +146,14 @@ fn graph_payloads_reject_reserved_top_level_properties() {
 fn startup_rejects_persisted_table_contract_reserved_columns() {
     let path = persistent_path("reserved_startup");
 
-    {
+    let mut metadata = {
         let rt = RedDBRuntime::with_options(physical_metadata_options(path.path()))
             .expect("persistent runtime should open");
         rt.execute_query("CREATE TABLE persisted_rows (name TEXT)")
             .expect("table should be created");
         rt.checkpoint().expect("runtime should flush metadata");
-    }
-
-    let mut metadata =
-        PhysicalMetadataFile::load_for_data_path(&path).expect("metadata should exist");
+        rt.db().physical_metadata().expect("internal metadata")
+    };
     let contract = metadata
         .collection_contracts
         .iter_mut()
@@ -178,9 +176,30 @@ fn startup_rejects_persisted_table_contract_reserved_columns() {
             array_element: None,
             decimal_precision: None,
         });
+    let fixture_dir = tempfile::tempdir().expect("contract fixture");
+    let fixture = fixture_dir.path().join("invalid.json");
     metadata
-        .save_for_data_path(&path)
-        .expect("metadata should be saved");
+        .save_to_path(&fixture)
+        .expect("encode invalid contract");
+    {
+        let store = reddb::storage::UnifiedStore::open_with_config(
+            path.path(),
+            reddb::storage::UnifiedStoreConfig {
+                resident_memory_bytes_max: Some(64 * 1024 * 1024),
+                ..Default::default()
+            },
+        )
+        .expect("fixture editor");
+        store
+            .try_set_storage_metadata(
+                "physical",
+                &reddb::serde_json::Value::String(
+                    std::fs::read_to_string(&fixture).expect("fixture document"),
+                ),
+            )
+            .expect("persist invalid semantic contract");
+        store.persist().expect("checkpoint invalid contract");
+    }
 
     let err = match RedDBRuntime::with_options(physical_metadata_options(path.path())) {
         Ok(_) => panic!("reserved persisted contract should fail startup"),

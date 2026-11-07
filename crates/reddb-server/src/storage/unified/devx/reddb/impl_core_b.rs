@@ -808,13 +808,14 @@ impl RedDB {
             if let Some(preference) = self.physical_metadata_preference() {
                 report = report.with_diagnostic("metadata.preference", preference);
             }
-            if let Ok((metadata, source)) =
-                PhysicalMetadataFile::inspect_for_data_path_with_source(path)
-            {
+            if let Ok(metadata) = self.load_or_bootstrap_physical_metadata(false) {
                 let journal_count = PhysicalMetadataFile::journal_paths_for_data_path(path)
                     .map(|paths| paths.len())
                     .unwrap_or(0);
-                report = report.with_diagnostic("metadata.loaded_from", source.as_str());
+                report = report.with_diagnostic(
+                    "metadata.loaded_from",
+                    self.physical_metadata_preference().unwrap_or("unknown"),
+                );
                 report =
                     report.with_diagnostic("metadata.journal_entries", journal_count.to_string());
                 report = report.with_diagnostic(
@@ -920,10 +921,7 @@ impl RedDB {
                     && self.options.storage_profile.packaging
                         == crate::storage::StoragePackaging::SingleFile)
             {
-                report.issue(
-                    "metadata",
-                    "physical metadata sidecar is missing or unreadable",
-                );
+                report.issue("metadata", "physical metadata is missing or unreadable");
             }
         }
         report.with_diagnostic("paged_mode", self.paged_mode.to_string())

@@ -65,7 +65,10 @@ impl RedDB {
         &self,
         path: &Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.options.read_only || self.load_internal_physical_metadata()?.is_none() {
+        if self.options.read_only
+            || !self.has_legacy_metadata_sidecars()?
+            || self.load_internal_physical_metadata()?.is_none()
+        {
             return Ok(());
         }
         reddb_file::physical_metadata::remove_imported_physical_metadata_sidecars(path)?;
@@ -631,9 +634,6 @@ impl RedDB {
         metadata.hypertables = self.hypertable_registry_snapshot();
         #[cfg(test)]
         metadata_qualification_phase(&qualification_started, "metadata-assembled");
-        self.persist_physical_metadata_record(&metadata)?;
-        #[cfg(test)]
-        metadata_qualification_phase(&qualification_started, "metadata-record-save");
         self.persist_native_physical_header(&metadata)?;
         #[cfg(test)]
         metadata_qualification_phase(&qualification_started, "native-header");
@@ -657,7 +657,6 @@ impl RedDB {
         let _publication = self.store.vault_publication_lock.lock();
         let previous = self.load_or_bootstrap_physical_metadata(false).ok();
         let metadata = self.metadata_from_native_state(&native_state, previous.as_ref());
-        self.persist_physical_metadata_record(&metadata)?;
         self.persist_native_physical_header(&metadata)?;
         Ok(true)
     }
@@ -725,7 +724,23 @@ impl RedDB {
             return Err("database path is not available".into());
         };
         let _publication = self.store.vault_publication_lock.lock();
-        let internal_metadata = self.load_internal_physical_metadata()?;
+        let internal_metadata = match self.load_internal_physical_metadata()? {
+            Some(metadata) => {
+                // The internal document is authoritative. Only load all native
+                // summaries when their header proves a newer publication needs
+                // reconciliation; ordinary catalog reads need no artifact I/O.
+                let native_ahead = self.store.physical_file_header().is_some_and(|header| {
+                    Self::repair_policy_for_inspection(
+                        &Self::inspect_native_header_against_metadata(header, &metadata),
+                    ) == NativeHeaderRepairPolicy::NativeAheadOfMetadata
+                });
+                if !native_ahead {
+                    return Ok(metadata);
+                }
+                Some(metadata)
+            }
+            None => None,
+        };
         let native_state = self.native_physical_state();
         let metadata = match internal_metadata {
             Some(metadata) => Ok(metadata),
@@ -744,7 +759,6 @@ impl RedDB {
                         let bootstrapped =
                             self.metadata_from_native_state(native_state, Some(&metadata));
                         if persist_bootstrapped && !self.options.read_only {
-                            self.persist_physical_metadata_record(&bootstrapped)?;
                             self.persist_native_physical_header(&bootstrapped)?;
                         }
                         return Ok(bootstrapped);
@@ -774,7 +788,6 @@ impl RedDB {
                 }
                 let metadata = self.metadata_from_native_state(&native_state, None);
                 if persist_bootstrapped && !self.options.read_only {
-                    self.persist_physical_metadata_record(&metadata)?;
                     self.persist_native_physical_header(&metadata)?;
                 }
                 Ok(metadata)
@@ -1498,7 +1511,6 @@ impl RedDB {
         metadata.superblock.collection_roots = self.physical_collection_roots();
 
         let result = mutator(&mut metadata);
-        self.persist_physical_metadata_record(&metadata)?;
         self.persist_native_physical_header(&metadata)?;
         Ok(result)
     }
@@ -1508,7 +1520,7 @@ impl RedDB {
         metadata: &PhysicalMetadataFile,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.paged_mode {
-            return Ok(());
+            return self.persist_physical_metadata_record(metadata);
         }
 
         let _publication = self.store.vault_publication_lock.lock();

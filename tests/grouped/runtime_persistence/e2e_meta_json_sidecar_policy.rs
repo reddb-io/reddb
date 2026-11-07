@@ -1,8 +1,4 @@
-//! Issue gh-472: tiers minimal/standard/performance no longer auto-write
-//! `<data>.meta.json`. The binary `<data>.meta.rdbx` is always written;
-//! the legacy JSON sidecar is gated behind [`set_meta_json_sidecar_enabled`]
-//! (which a future tier-wiring slice flips on for `Max`) or the
-//! `REDDB_META_JSON_SIDECAR=1` env escape hatch.
+//! Legacy sidecar toggles cannot override the runtime single-database contract.
 
 #[allow(dead_code)]
 #[path = "../../support/mod.rs"]
@@ -24,7 +20,7 @@ fn persistent_path(prefix: &str) -> support::TempDbFile {
 fn sidecar_options(path: &std::path::Path) -> RedDBOptions {
     RedDBOptions::persistent(path)
         .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
-        .expect("production HA profile should write physical metadata sidecars")
+        .expect("production HA profile")
 }
 
 #[test]
@@ -46,18 +42,19 @@ fn standard_tier_default_does_not_write_json_sidecar() {
     let json_path = PhysicalMetadataFile::metadata_path_for(&path);
     let binary_path = PhysicalMetadataFile::metadata_binary_path_for(&path);
     assert!(
-        binary_path.exists(),
-        "binary metadata must always be written: {binary_path:?}",
+        !binary_path.exists(),
+        "runtime must not write binary metadata sidecars: {binary_path:?}",
     );
     assert!(
         !json_path.exists(),
         "JSON sidecar must be absent by default: {json_path:?}",
     );
 
-    // Loader still serves catalog from binary metadata (the substrate used
-    // by `red inspect catalog` for the current-state path).
-    let loaded =
-        PhysicalMetadataFile::load_for_data_path(&path).expect("loader resolves from binary");
+    let reopened = RedDBRuntime::with_options(sidecar_options(path.path())).expect("cold boot");
+    let loaded = reopened
+        .db()
+        .physical_metadata()
+        .expect("internal metadata");
     assert!(
         loaded
             .collection_contracts
@@ -68,7 +65,7 @@ fn standard_tier_default_does_not_write_json_sidecar() {
 }
 
 #[test]
-fn max_opt_in_writes_json_sidecar() {
+fn legacy_opt_in_does_not_enable_runtime_json_sidecars() {
     let _g = POLICY_GUARD.lock().unwrap_or_else(|err| err.into_inner());
     set_meta_json_sidecar_enabled(true);
 
@@ -84,8 +81,8 @@ fn max_opt_in_writes_json_sidecar() {
 
     let json_path = PhysicalMetadataFile::metadata_path_for(&path);
     assert!(
-        json_path.exists(),
-        "JSON sidecar must be written when opt-in is on: {json_path:?}",
+        !json_path.exists(),
+        "legacy opt-in must not create runtime JSON sidecars: {json_path:?}",
     );
 
     set_meta_json_sidecar_enabled(false);
