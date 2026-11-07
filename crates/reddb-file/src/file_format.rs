@@ -8,6 +8,8 @@ use std::fmt;
 /// Magic bytes for database file identification: `RDDB`.
 pub const PAGE_FILE_MAGIC: [u8; 4] = [0x52, 0x44, 0x44, 0x42];
 
+/// The first version that reserves the in-file double-write buffer zone.
+pub const PAGE_DWB_ZONE_FILE_VERSION: u32 = 0x0001_0001;
 /// The first version with durable page-ownership recovery.
 pub const PAGE_OWNERSHIP_FILE_VERSION: u32 = 0x0001_0002;
 /// Checkpoint before-images must be restored before following published roots.

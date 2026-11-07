@@ -177,7 +177,7 @@ pub fn migrate_to_zoned(data_path: &Path) -> Result<ZoneMigrationReport> {
     // Check before creating a backup or mutating any source file.
     let header = reddb_file::decode_database_header(&header_image)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    if header.version < reddb_file::PAGE_FILE_VERSION {
+    if header.version < reddb_file::PAGE_DWB_ZONE_FILE_VERSION {
         return Err(ZoneMigrationError::PrePhase3Unsupported {
             path: data_path.to_path_buf(),
             version: header.version,
