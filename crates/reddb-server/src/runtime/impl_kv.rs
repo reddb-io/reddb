@@ -841,6 +841,9 @@ impl<'a> KvAtomicOps<'a> {
             .check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         self.runtime.check_kv_invalidate_policy(collection)?;
         self.ensure_kv_collection(collection)?;
+        if tags.is_empty() {
+            return Ok(0);
+        }
         let store = self.runtime.inner.db.store();
         let entries = if let Some(manager) = store
             .get_collection(collection)

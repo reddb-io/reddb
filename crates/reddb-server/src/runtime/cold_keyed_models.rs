@@ -1320,6 +1320,18 @@ fn cold_counter_mutations_keep_ttl_and_tags() {
             .tags_for_key("cold_counters", "item"),
         vec!["scope:prod"]
     );
+    store.persist().expect("publish tagged counter");
+    install_cold(&runtime, "cold_counters", 1);
+    let ops = super::impl_kv::KvAtomicOps::new(&runtime);
+    assert!(ops.try_tags_for_key("cold_counters", "item").is_err());
+    assert_eq!(
+        ops.invalidate_tags("cold_counters", &[])
+            .expect("empty tags are a no-op"),
+        0
+    );
+    assert!(ops
+        .invalidate_tags("cold_counters", &["scope:prod".into()])
+        .is_err());
 }
 
 #[test]
