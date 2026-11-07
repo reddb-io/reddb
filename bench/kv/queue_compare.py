@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Network queue diagnostics. Every produced payload is checked at consumption.
 
-Batch means outstanding operations, not an atomic transaction. Rabbit consumer
+Batch means outstanding operations; --red-ack-batch groups only RedDB ACKs
+atomically, not the entire produce/deliver cycle. Rabbit consumer
 ACK is one-way; Kafka commits offsets and retains records. Do not equate these
 completion contracts with RedDB's durable ACK response.
 """

@@ -73,7 +73,8 @@ def main():
         previous = json.loads((args.out / "manifest.json").read_text())
         if (previous["containers"] != manifest["containers"]
                 or previous["operations"] != args.operations
-                or previous.get("queue_settle_ms", 0) != args.queue_settle_ms):
+                or previous.get("queue_settle_ms", 0) != args.queue_settle_ms
+                or previous.get("red_ack_batch", False) != args.red_ack_batch):
             raise RuntimeError("resume requires identical containers, binaries and workload")
         for key in ("native-before", "native-after", "redis"):
             for workers in (1, 8):
