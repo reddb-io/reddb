@@ -126,7 +126,7 @@ def main():
     def queue(key, label, batch, mode="run", count=None, name=None):
         result = json.loads(command("docker", "exec", names["client"], "python",
             "/source/bench/kv/queue_compare.py", "--engine",
-            {"native-after": "reddb", "rabbit": "rabbitmq", "kafka": "kafka"}[key],
+            {"native-before": "reddb", "native-after": "reddb", "rabbit": "rabbitmq", "kafka": "kafka"}[key],
             "--host", names[key], "--name", name or label.replace("-", "_"),
             "--batch", str(batch), "--mode", mode,
             "--settle-ms", str(args.queue_settle_ms),
@@ -134,7 +134,8 @@ def main():
         save(label, result)
         if result["status"] != "valid-diagnostic":
             raise RuntimeError(f"invalid queue result: {label}")
-    for key in ["native-after", "rabbit", "kafka"]:
+    # Full captures compare queue lifecycle performance before and after too.
+    for key in [key for key in ("native-before", "native-after", "rabbit", "kafka") if key in names]:
         if args.resume_queues:
             expected = [f"queue-{key}-b{batch}-r{repeat}" for batch in (1, 16) for repeat in range(3)]
             expected += [f"recovery_{key.replace('-', '_')}_{batch}_{mode}"

@@ -201,6 +201,26 @@ pub(crate) trait QueueStore {
         deadline: Instant,
     ) -> Result<DeliveryId>;
 
+    /// Reserve and count a delivery as one durable transition when supported.
+    fn mark_pending_for_read(
+        &self,
+        txn: &QueueTxn,
+        queue: &str,
+        message_id: MessageId,
+        group: &str,
+        consumer: &str,
+        deadline: Instant,
+        count_attempt: bool,
+    ) -> Result<(DeliveryId, u32)> {
+        let delivery = self.mark_pending(txn, queue, message_id, group, consumer, deadline)?;
+        let attempts = if count_attempt {
+            self.bump_attempt(txn, &delivery)?.attempts
+        } else {
+            1
+        };
+        Ok((delivery, attempts))
+    }
+
     /// Release a pending delivery back to the available pool. No-op if
     /// `delivery_id` is unknown (already released or never existed).
     fn release_pending(&self, txn: &QueueTxn, delivery_id: &str) -> Result<()>;

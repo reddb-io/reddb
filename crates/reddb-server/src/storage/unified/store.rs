@@ -365,6 +365,7 @@ pub struct UnifiedStore {
     /// Reentrant because embedded checkpoint calls the snapshot encoder while
     /// holding the barrier, and storage maintenance may nest those calls.
     pub(crate) vault_publication_lock: parking_lot::ReentrantMutex<()>,
+    row_publications: row_publication::RowPublicationQueue,
     /// Live-only vault rows excluded from a reentrant WAL-full compaction.
     pub(crate) pending_vault_versions: RwLock<std::collections::HashSet<EntityId>>,
     /// Retain transaction outcomes through embedded snapshot-on-drop. Without
@@ -405,6 +406,8 @@ mod impl_pages;
 mod impl_vault_import;
 mod key_index;
 mod keyed_write;
+mod row_publication;
+pub(crate) use row_publication::RowPublication;
 mod mvcc_reclaim;
 pub(crate) use mvcc_reclaim::MvccReclaimCursor;
 pub(crate) mod count_index;

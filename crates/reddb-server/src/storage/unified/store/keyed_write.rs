@@ -88,6 +88,19 @@ impl UnifiedStore {
             !Self::deferred_store_wal_capture_active(),
             "keyed writes cannot nest WAL captures"
         );
+        if self.commit.is_some() && self.config.durability_mode == DurabilityMode::WalDurableGrouped
+        {
+            entity.id = self.next_entity_id();
+            let id = entity.id;
+            self.publish_rows(RowPublication {
+                inserts: vec![(collection.to_string(), entity, metadata)],
+                deletes: previous
+                    .into_iter()
+                    .map(|id| (collection.to_string(), id))
+                    .collect(),
+            })?;
+            return Ok(id);
+        }
         let mut publication = Some(self.vault_publication_lock.lock());
         let session =
             if let Some(path) = self.config.embedded_wal_path.as_deref() {

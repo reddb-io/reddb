@@ -109,6 +109,13 @@ no published host ports. Redis command: `redis-server --appendonly yes
 Kafka's broker/controller environment is captured in the manifest; set
 `KAFKA_LOG_FLUSH_INTERVAL_MESSAGES=1` as well, including the offsets topic.
 
+The full matrix also measures queues on `native-before`, using the same KV
+population as `native-after`; `--queues-only` retains the after/broker
+comparison. Stop builds before measurement and flush their pending
+filesystem writes (`sync` inside the Linux build container) before stopping
+that container. Keep the first capture if a follow-up changes code or setup;
+use a new prefix, volumes and output directory for the follow-up.
+
 The client container mounts this repository read-only at `/source`, stays up
 with `sleep infinity`, and installs pinned dependencies:
 
