@@ -9,6 +9,7 @@ use std::time::Instant;
 
 const VALUE_BYTES: usize = 1024 * 1024;
 const MEMORY_LIMIT: usize = 1536 * 1024 * 1024;
+const DISK_LIMIT: u64 = 1024 * 1024 * 1024;
 const ENV_PATH: &str = "REDDB_POPULATED_STARTUP_PATH";
 
 #[cfg(target_os = "linux")]
@@ -107,6 +108,21 @@ fn config() -> UnifiedStoreConfig {
 fn allocated_bytes(path: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).unwrap().blocks() * 512
+}
+
+fn fixture_bytes(directory: &Path) -> u64 {
+    std::fs::read_dir(directory)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| {
+            let path = entry.path();
+            match entry.metadata() {
+                Ok(metadata) if metadata.is_dir() => fixture_bytes(&path),
+                Ok(metadata) if metadata.is_file() => metadata.len(),
+                _ => 0,
+            }
+        })
+        .sum()
 }
 
 #[cfg(windows)]
@@ -213,13 +229,29 @@ fn run_fixture(rows: u64) {
         } else {
             &path
         };
-        let result = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "populated_startup_child", "--nocapture"])
             .env(ENV_PATH, phase_path)
             .env("REDDB_POPULATED_STARTUP_ROWS", rows.to_string())
             .env("REDDB_POPULATED_STARTUP_PHASE", phase)
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .expect("run fixture child");
+        loop {
+            if fixture_bytes(directory.path()) > DISK_LIMIT {
+                child.kill().expect("stop oversized fixture child");
+                let _ = child.wait();
+                panic!("fixture exceeded the 1 GiB total file-size guard");
+            }
+            if child.try_wait().expect("poll fixture child").is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let result = child
+            .wait_with_output()
+            .expect("collect fixture child output");
         eprint!(
             "{}{}",
             String::from_utf8_lossy(&result.stdout),
@@ -231,10 +263,14 @@ fn run_fixture(rows: u64) {
             result.status
         );
         assert!(
-            std::fs::metadata(phase_path).unwrap().len() < 1024 * 1024 * 1024,
+            fixture_bytes(directory.path()) <= DISK_LIMIT,
             "fixture exceeded 1 GiB on disk"
         );
         if phase == "seed" {
+            assert!(
+                fixture_bytes(directory.path()) + std::fs::metadata(&path).unwrap().len()
+                    <= DISK_LIMIT
+            );
             std::fs::copy(&path, &legacy_runtime_path).expect("copy legacy checkpoint");
         }
     }

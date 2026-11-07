@@ -116,7 +116,9 @@ process, limited to 1.5 GiB of address space or committed memory, opens the
 legacy checkpoint, a prepared checkpoint, and the disk-resident runtime; it
 checks the row count and values at the beginning, middle and end. It reports
 elapsed time, peak resident/working-set memory, file length and allocated file
-bytes. The regular test uses 32 rows; run the full manual measurement with:
+bytes. The parent also polls the whole private fixture directory and stops its
+child if total file lengths exceed 1 GiB (short-lived overshoot is possible).
+The regular test uses 32 rows; run the full manual measurement with:
 
 ```sh
 cargo test -p reddb-io-server --test populated_cold_start populated_startup_50_gib -- --ignored --nocapture
