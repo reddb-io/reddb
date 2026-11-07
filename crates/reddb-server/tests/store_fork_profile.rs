@@ -43,6 +43,7 @@ fn no_metadata_sidecars(root: &Path) {
             name.ends_with(".rdb")
                 || name.ends_with(".wal")
                 || name.ends_with("-wal")
+                || name.ends_with("-uwal")
                 || name.ends_with(".audit.log")
                 || name.ends_with(".writer.lock"),
             "unexpected metadata artifact: {}",
@@ -166,6 +167,10 @@ fn fork_drop_detach_and_promotion_preserve_the_right_database() {
 
 #[test]
 fn forks_reject_read_only_transactions_and_busy_destinations() {
+    assert!(RedDBRuntime::in_memory()
+        .expect("ephemeral runtime")
+        .fork_store("ephemeral")
+        .is_err());
     let directory = tempfile::tempdir().expect("fixture");
     let path = directory.path().join("data.rdb");
     let preset = StorageDeployPreset::Serverless;
@@ -193,4 +198,120 @@ fn forks_reject_read_only_transactions_and_busy_destinations() {
     assert!(readonly.detach_fork_store("denied").is_err());
     assert!(readonly.drop_fork_store("denied").is_err());
     no_metadata_sidecars(directory.path());
+}
+
+#[test]
+fn bounded_fork_excludes_another_connections_uncommitted_versions() {
+    use reddb_server::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("data.rdb");
+    let open = |path: &Path| {
+        RedDBRuntime::with_options(
+            RedDBOptions::persistent(path)
+                .with_memory_budget(64 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .expect("bounded runtime")
+    };
+    let parent = open(&path);
+    seed(&parent);
+    parent.checkpoint().expect("committed baseline");
+    set_current_connection_id(42);
+    parent
+        .execute_query("BEGIN")
+        .expect("begin another connection");
+    parent
+        .execute_query("UPDATE items SET value='pending' WHERE id=1")
+        .expect("uncommitted update");
+    clear_current_connection_id();
+    parent
+        .fork_store("committed")
+        .expect("fork committed checkpoint");
+    let child_path = parent
+        .fork_store_path("committed")
+        .expect("path")
+        .expect("fork");
+    set_current_connection_id(42);
+    parent.execute_query("COMMIT").expect("later commit");
+    clear_current_connection_id();
+    assert_eq!(values(&parent), ["pending"]);
+    parent.checkpoint().expect("parent checkpoint");
+    drop(parent);
+    for _ in 0..3 {
+        let child = open(&child_path);
+        assert!(child
+            .db()
+            .store()
+            .get_collection("items")
+            .expect("table")
+            .has_backing());
+        assert_eq!(values(&child), ["original"]);
+        child.checkpoint().expect("fork checkpoint");
+    }
+    no_metadata_sidecars(directory.path());
+}
+
+#[test]
+fn drop_refuses_a_replaced_fork_file() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("data.rdb");
+    let foreign_path = directory.path().join("foreign.rdb");
+    let preset = StorageDeployPreset::Serverless;
+    let parent = RedDBRuntime::with_options(options(&path, preset)).expect("parent");
+    seed(&parent);
+    parent.fork_store("owned").expect("fork");
+    let child_path = parent
+        .fork_store_path("owned")
+        .expect("path")
+        .expect("fork");
+    {
+        let foreign =
+            RedDBRuntime::with_options(options(&foreign_path, preset)).expect("foreign database");
+        seed(&foreign);
+        foreign.checkpoint().expect("foreign checkpoint");
+    }
+    std::fs::copy(&foreign_path, &child_path).expect("simulate unrelated file replacement");
+    let before = std::fs::read(&child_path).expect("foreign bytes");
+    assert!(parent.drop_fork_store("owned").is_err());
+    assert_eq!(std::fs::read(&child_path).expect("preserved"), before);
+}
+
+#[test]
+fn replacement_primary_does_not_inherit_the_parents_replication_slots() {
+    use reddb_server::replication::ReplicationConfig;
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("data.rdb");
+    let preset = StorageDeployPreset::Serverless;
+    let parent = RedDBRuntime::with_options(
+        options(&path, preset).with_replication(ReplicationConfig::primary()),
+    )
+    .expect("primary");
+    seed(&parent);
+    parent
+        .ack_primary_replica_lsn_and_prune("parent-replica", 10, 8, 0, 0)
+        .expect("slot");
+    parent.fork_store("replacement").expect("fork");
+    let child_path = parent
+        .promote_fork_store("replacement")
+        .expect("replacement");
+    let replacement = RedDBRuntime::with_options(
+        options(&child_path, preset).with_replication(ReplicationConfig::primary()),
+    )
+    .expect("replacement primary");
+    assert!(replacement
+        .primary_replica_slot_catalog()
+        .expect("catalog")
+        .expect("primary catalog")
+        .slots
+        .is_empty());
+    assert_eq!(
+        parent
+            .primary_replica_slot_catalog()
+            .expect("parent catalog")
+            .expect("catalog")
+            .slots
+            .len(),
+        1
+    );
+    assert_eq!(values(&replacement), ["original"]);
 }

@@ -27,8 +27,9 @@ fn tree_bytes(root: &Path) -> BTreeMap<PathBuf, ([u8; 32], std::time::SystemTime
     ) {
         for entry in std::fs::read_dir(path).expect("source directory") {
             let entry = entry.expect("source entry");
-            let metadata = entry.metadata().expect("source metadata");
             let path = entry.path();
+            // Query the path itself: Windows directory entries can retain stale mtimes.
+            let metadata = std::fs::metadata(&path).expect("source metadata");
             let bytes = if metadata.is_dir() {
                 Vec::new()
             } else {

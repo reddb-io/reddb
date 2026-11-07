@@ -31,6 +31,15 @@ struct ForkRecord {
 
 impl crate::serde_json::JsonEncode for ForkRecord {
     fn to_json_value(&self) -> crate::serde_json::Value {
+        let state = match self.state {
+            ForkState::Preparing => "Preparing",
+            ForkState::Ready => "Ready",
+            ForkState::Dropping => "Dropping",
+            ForkState::Detaching => "Detaching",
+            ForkState::Promoting => "Promoting",
+            ForkState::Detached => "Detached",
+            ForkState::Promoted => "Promoted",
+        };
         crate::json!({
             "version": "1",
             "name": self.name.clone(),
@@ -38,7 +47,7 @@ impl crate::serde_json::JsonEncode for ForkRecord {
             "parent_store": self.parent_store.clone(),
             "fork_lsn": self.fork_lsn.to_string(),
             "collections_total": self.collections_total.to_string(),
-            "state": format!("{:?}", self.state)
+            "state": state
         })
     }
 }
@@ -100,10 +109,14 @@ fn read_record(store: &UnifiedStore, key: &str) -> RedDBResult<Option<ForkRecord
     match store.try_get_fork_metadata(key).map_err(failure)? {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Text(text)) => {
+            if text.len() > 256 * 1024 {
+                return Err(failure("fork control record exceeds its size limit"));
+            }
             let record: ForkRecord = crate::serde_json::from_str(&text).map_err(failure)?;
+            let record_key = self::key(&record.name)?;
             if record.identity.len() != 32
                 || !record.identity.bytes().all(|byte| byte.is_ascii_hexdigit())
-                || (key != ORIGIN && self::key(&record.name)? != key)
+                || (key != ORIGIN && record_key != key)
             {
                 return Err(failure("invalid internal fork identity"));
             }
@@ -157,7 +170,11 @@ fn fork_path(parent: &Path, record: &ForkRecord) -> PathBuf {
 
 fn sync_directory(path: &Path) -> RedDBResult<()> {
     reddb_file::StdVfs
-        .sync_dir(path.parent().unwrap_or(Path::new(".")))
+        .sync_dir(
+            path.parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new(".")),
+        )
         .map_err(failure)
 }
 
@@ -184,6 +201,17 @@ impl ForkRecord {
 
 impl RedDBRuntime {
     fn fork_parent_path(&self) -> RedDBResult<&Path> {
+        let options = self.inner.db.options();
+        if options.mode != crate::api::StorageMode::Persistent
+            || options
+                .metadata
+                .get(crate::api::EPHEMERAL_RUNTIME_METADATA_KEY)
+                .is_some_and(|value| value == "true")
+        {
+            return Err(failure(
+                "store forks require an explicitly persistent database",
+            ));
+        }
         self.inner
             .db
             .path()
@@ -231,6 +259,12 @@ impl RedDBRuntime {
     pub fn fork_store_path(&self, name: &str) -> RedDBResult<Option<PathBuf>> {
         let parent = self.fork_parent_path()?;
         Ok(read_record(&self.inner.db.store(), &key(name)?)?
+            .filter(|record| {
+                matches!(
+                    record.state,
+                    ForkState::Ready | ForkState::Detached | ForkState::Promoted
+                )
+            })
             .map(|record| fork_path(parent, &record)))
     }
 
@@ -258,13 +292,14 @@ impl RedDBRuntime {
             return Err(failure("FORK STORE AT LSN requires the current committed LSN; historical points require a retained backup and WAL restore"));
         }
         self.recover_store_forks()?;
-        if read_record(&store, &key)?.is_some()
-            || store
-                .operational_manifest_for_path(parent)
-                .list_forks()
-                .map_err(failure)?
-                .iter()
-                .any(|fork| fork.name == name)
+        if read_record(&store, &key)?.is_some_and(|record| {
+            !matches!(record.state, ForkState::Detached | ForkState::Promoted)
+        }) || store
+            .operational_manifest_for_path(parent)
+            .list_forks()
+            .map_err(failure)?
+            .iter()
+            .any(|fork| fork.name == name)
         {
             return Err(failure(format!("store fork already exists: {name}")));
         }
@@ -344,8 +379,14 @@ impl RedDBRuntime {
                 .delete_batch("red.storage.metadata", &inherited)
                 .map_err(failure)?;
         }
-        fork.update_physical_metadata(|metadata| metadata.exports.clear())
-            .map_err(failure)?;
+        if fork_store
+            .try_get_storage_metadata("physical")
+            .map_err(failure)?
+            .is_some()
+        {
+            fork.update_physical_metadata(|metadata| metadata.exports.clear())
+                .map_err(failure)?;
+        }
         record.state = ForkState::Ready;
         write_record(&fork.store(), ORIGIN, Some(&record))?;
         crash_point("create_origin");
@@ -543,5 +584,33 @@ impl RedDBRuntime {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fork_codec_preserves_full_width_lsns_and_rejects_path_injection() {
+        let store = UnifiedStore::new();
+        let key = key("candidate").expect("name");
+        let mut record = ForkRecord {
+            name: "candidate".into(),
+            identity: "0123456789abcdef0123456789abcdef".into(),
+            parent_store: "parent.rdb".into(),
+            fork_lsn: u64::MAX,
+            collections_total: u64::MAX,
+            state: ForkState::Ready,
+        };
+        write_record(&store, &key, Some(&record)).expect("write");
+        let decoded = read_record(&store, &key).expect("decode").expect("record");
+        assert_eq!(decoded.fork_lsn, u64::MAX);
+        assert_eq!(decoded.collections_total, u64::MAX);
+        record.identity = "../../foreign".into();
+        write_record(&store, &key, Some(&record)).expect("corrupt fixture");
+        assert!(read_record(&store, &key).is_err());
+        write_record(&store, &key, None).expect("tombstone");
+        assert!(read_record(&store, &key).expect("latest wins").is_none());
     }
 }
