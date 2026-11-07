@@ -281,15 +281,15 @@ impl<S: QueueStore> QueueLifecycle<S> {
                 continue;
             }
             let deadline = now + self.config.lock_duration;
-            let delivery_id = self
-                .store
-                .mark_pending(txn, queue, message_id, group, consumer, deadline)?;
-            // WORK counts every (re)delivery against the persistent
-            // attempt budget; FANOUT hands each group its own first copy.
-            let delivery_count = match self.config.mode {
-                QueueMode::Work => self.store.bump_attempt(txn, &delivery_id)?.attempts,
-                QueueMode::Fanout => 1,
-            };
+            let (delivery_id, delivery_count) = self.store.mark_pending_for_read(
+                txn,
+                queue,
+                message_id,
+                group,
+                consumer,
+                deadline,
+                self.config.mode == QueueMode::Work,
+            )?;
             let max_attempts = self.store.read_max_attempts(queue, message_id);
             if delivery_count > max_attempts {
                 self.retire_exhausted(txn, &delivery_id)?;

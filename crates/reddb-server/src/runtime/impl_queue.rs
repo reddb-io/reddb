@@ -1069,9 +1069,28 @@ impl RedDBRuntime {
                     "queue push",
                     bytes.saturating_mul(3),
                 )?;
-                let id = store
-                    .insert_auto(queue, entity)
-                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                let id = if self.current_xid().is_none()
+                    && !UnifiedStore::deferred_store_wal_capture_active()
+                    && dedup_key.is_none()
+                    && available.is_none()
+                    && key.is_none()
+                    && config.ttl_ms.is_none()
+                    && config.max_size.is_none()
+                {
+                    entity.id = store.next_entity_id();
+                    let id = entity.id;
+                    store
+                        .publish_rows(crate::storage::unified::store::RowPublication {
+                            inserts: vec![(queue.clone(), entity, None)],
+                            deletes: Vec::new(),
+                        })
+                        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                    id
+                } else {
+                    store
+                        .insert_auto(queue, entity)
+                        .map_err(|err| RedDBError::Internal(err.to_string()))?
+                };
                 if let Some(dedup_key) = dedup_key.as_deref() {
                     let window_ms = config
                         .dedup_window_ms

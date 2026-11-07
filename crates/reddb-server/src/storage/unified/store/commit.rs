@@ -532,7 +532,7 @@ impl StoreCommitCoordinator {
     ///   2. `config.window_ms != 0` — explicit ms config wins.
     ///   3. `DEFAULT_ADAPTIVE_WINDOW_US` — adaptive floor for the
     ///      historical zero-default. Set the env var to 0 to opt out.
-    fn resolve_window(config: &crate::api::GroupCommitOptions) -> Duration {
+    pub(super) fn resolve_window(config: &crate::api::GroupCommitOptions) -> Duration {
         if let Ok(raw) = std::env::var("REDDB_GROUP_COMMIT_WINDOW_US") {
             if let Ok(parsed) = raw.parse::<u64>() {
                 return Duration::from_micros(parsed);

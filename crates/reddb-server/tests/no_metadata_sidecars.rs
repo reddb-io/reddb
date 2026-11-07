@@ -160,6 +160,102 @@ fn concurrent_kv_batches_recover_values_and_metadata_after_process_exit() {
 }
 
 #[test]
+fn queue_delivery_batches_and_ack_recover_after_process_exit() {
+    const CHILD: &str = "REDDB_QUEUE_PUBLICATION_CHILD";
+    let settings = |path: &Path, bounded: bool, grouped: bool| {
+        options(path, bounded).with_durability_mode(if grouped {
+            DurabilityMode::WalDurableGrouped
+        } else {
+            DurabilityMode::Strict
+        })
+    };
+    if let Some(path) = std::env::var_os(CHILD) {
+        let rt = RedDBRuntime::with_options(settings(
+            Path::new(&path),
+            std::env::var("REDDB_PUBLICATION_BOUNDED").expect("bounded") == "true",
+            std::env::var("REDDB_PUBLICATION_GROUPED").expect("grouped") == "true",
+        ))
+        .expect("child");
+        if std::env::var("REDDB_PUBLICATION_STAGE").expect("stage") == "deliver" {
+            let result = rt
+                .execute_query("QUEUE READ batches GROUP workers CONSUMER c COUNT 16")
+                .expect("delivery");
+            assert_eq!(result.result.records.len(), 16);
+        } else {
+            let result = rt
+                .execute_query("QUEUE PENDING batches GROUP workers")
+                .expect("pending");
+            assert_eq!(result.result.records.len(), 16);
+            for record in &result.result.records {
+                let Some(reddb_types::Value::Text(id)) = record.get("message_id") else {
+                    panic!("message id")
+                };
+                rt.execute_query(&format!("QUEUE ACK batches GROUP workers '{id}'"))
+                    .expect("durable ACK");
+            }
+        }
+        std::process::exit(0);
+    }
+    for bounded in [false, true] {
+        for grouped in [false, true] {
+            let directory = tempfile::tempdir().expect("fixture");
+            let path = directory.path().join("data.rdb");
+            {
+                let rt =
+                    RedDBRuntime::with_options(settings(&path, bounded, grouped)).expect("seed");
+                rt.execute_query("CREATE QUEUE batches").expect("queue");
+                rt.execute_query("QUEUE GROUP CREATE batches workers")
+                    .expect("group");
+                for index in 0..16 {
+                    rt.execute_query(&format!("QUEUE PUSH batches 'value{index}'"))
+                        .expect("push");
+                }
+                rt.checkpoint().expect("base");
+            }
+            for stage in ["deliver", "ack"] {
+                let status =
+                    std::process::Command::new(std::env::current_exe().expect("test binary"))
+                        .args([
+                            "--exact",
+                            "queue_delivery_batches_and_ack_recover_after_process_exit",
+                        ])
+                        .env(CHILD, &path)
+                        .env("REDDB_PUBLICATION_BOUNDED", bounded.to_string())
+                        .env("REDDB_PUBLICATION_GROUPED", grouped.to_string())
+                        .env("REDDB_PUBLICATION_STAGE", stage)
+                        .status()
+                        .expect("process");
+                assert!(status.success());
+                for _ in 0..3 {
+                    let rt = RedDBRuntime::with_options(settings(&path, bounded, grouped))
+                        .expect("cold boot");
+                    let pending = rt
+                        .execute_query("QUEUE PENDING batches GROUP workers")
+                        .expect("pending");
+                    assert_eq!(
+                        pending.result.records.len(),
+                        if stage == "deliver" { 16 } else { 0 }
+                    );
+                    for record in &pending.result.records {
+                        assert_eq!(
+                            record.get("delivery_count"),
+                            Some(&reddb_types::Value::UnsignedInteger(1))
+                        );
+                    }
+                    let peek = rt.execute_query("QUEUE PEEK batches 32").expect("messages");
+                    assert_eq!(
+                        peek.result.records.len(),
+                        if stage == "deliver" { 16 } else { 0 }
+                    );
+                    rt.checkpoint().expect("checkpoint recovered transitions");
+                    assert_database_state_files_only(directory.path());
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn queue_dedup_and_capacity_recover_after_acknowledged_process_exit() {
     const CHILD: &str = "REDDB_QUEUE_INDEX_CRASH_CHILD";
     let queue_options = |path: &Path, bounded: bool, grouped: bool| {

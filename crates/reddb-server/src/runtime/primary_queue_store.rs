@@ -734,6 +734,97 @@ impl QueueStore for PrimaryQueueStore {
         Ok(delivery_id)
     }
 
+    fn mark_pending_for_read(
+        &self,
+        txn: &QueueTxn,
+        queue: &str,
+        message_id: MessageId,
+        group: &str,
+        consumer: &str,
+        deadline: Instant,
+        count_attempt: bool,
+    ) -> Result<(DeliveryId, u32)> {
+        if UnifiedStore::deferred_store_wal_capture_active() || self.runtime.current_xid().is_some()
+        {
+            let delivery = self.mark_pending(txn, queue, message_id, group, consumer, deadline)?;
+            let attempts = if count_attempt {
+                self.bump_attempt(txn, &delivery)?.attempts
+            } else {
+                1
+            };
+            return Ok((delivery, attempts));
+        }
+        let store = self.store();
+        let _publication = store.vault_publication_lock.lock();
+        if !self.queue_exists(queue) {
+            return Err(QueueStoreError::UnknownQueue(queue.to_string()));
+        }
+        let existing = self.find_pending_entry_by_key(queue, message_id, group);
+        let delivery = existing
+            .as_ref()
+            .map(|(_, row)| row.delivery_id.clone())
+            .unwrap_or_else(new_delivery_id);
+        let mut rows = crate::storage::unified::store::RowPublication::default();
+        if let Some((id, _)) = existing {
+            rows.deletes.push((QUEUE_META_COLLECTION.to_string(), id));
+        }
+        let fields = HashMap::from([
+            ("kind".into(), Value::text(KIND_PENDING_LC)),
+            ("queue".into(), Value::text(queue)),
+            ("group".into(), Value::text(group)),
+            ("message_id".into(), Value::UnsignedInteger(message_id)),
+            ("delivery_id".into(), Value::text(delivery.clone())),
+            ("consumer".into(), Value::text(consumer)),
+            (
+                "lock_deadline_ns".into(),
+                Value::UnsignedInteger(instant_to_unix_ns(deadline)),
+            ),
+        ]);
+        rows.inserts.push((
+            QUEUE_META_COLLECTION.to_string(),
+            queue_meta_entity(fields),
+            None,
+        ));
+        let attempts = if count_attempt {
+            let attempts = self
+                .read_attempts(queue, message_id, group)
+                .saturating_add(1);
+            for (id, _) in self.subject_rows(KIND_ATTEMPTS_LC, queue, Some(group), Some(message_id))
+            {
+                rows.deletes.push((QUEUE_META_COLLECTION.to_string(), id));
+            }
+            let fields = HashMap::from([
+                ("kind".into(), Value::text(KIND_ATTEMPTS_LC)),
+                ("queue".into(), Value::text(queue)),
+                ("group".into(), Value::text(group)),
+                ("message_id".into(), Value::UnsignedInteger(message_id)),
+                ("attempts".into(), Value::UnsignedInteger(attempts as u64)),
+            ]);
+            rows.inserts.push((
+                QUEUE_META_COLLECTION.to_string(),
+                queue_meta_entity(fields),
+                None,
+            ));
+            attempts
+        } else {
+            1
+        };
+        store
+            .publish_rows(rows)
+            .map_err(|error| QueueStoreError::UnknownQueue(error.to_string()))?;
+        if count_attempt {
+            if let Some(manager) = store.get_collection(queue) {
+                if let Some(mut entity) = manager.get(EntityId::new(message_id)) {
+                    if let EntityData::QueueMessage(message) = &mut entity.data {
+                        message.attempts = attempts;
+                        let _ = manager.update(entity);
+                    }
+                }
+            }
+        }
+        Ok((delivery, attempts))
+    }
+
     fn release_pending(&self, _txn: &QueueTxn, delivery_id: &str) -> Result<()> {
         if let Some((entity_id, _)) = self.find_pending_by_delivery(delivery_id) {
             let _ = self.store().delete(QUEUE_META_COLLECTION, entity_id);
@@ -742,6 +833,40 @@ impl QueueStore for PrimaryQueueStore {
     }
 
     fn ack_pending(&self, txn: &QueueTxn, delivery_id: &str) -> Result<()> {
+        if !UnifiedStore::deferred_store_wal_capture_active()
+            && self.runtime.current_xid().is_none()
+        {
+            let store = self.store();
+            let _publication = store.vault_publication_lock.lock();
+            let (_, row) = self
+                .find_pending_by_delivery(delivery_id)
+                .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
+            let mut deletes = vec![(row.queue.clone(), EntityId::new(row.message_id))];
+            for kind in [
+                KIND_PENDING_LC,
+                KIND_ACKED_LC,
+                KIND_ATTEMPTS_LC,
+                KIND_PENDING_LEGACY,
+            ] {
+                deletes.extend(
+                    self.subject_rows(kind, &row.queue, None, Some(row.message_id))
+                        .into_iter()
+                        .map(|(id, _)| (QUEUE_META_COLLECTION.to_string(), id)),
+                );
+            }
+            store
+                .publish_rows(crate::storage::unified::store::RowPublication {
+                    inserts: Vec::new(),
+                    deletes,
+                })
+                .map_err(|error| QueueStoreError::UnknownQueue(error.to_string()))?;
+            super::impl_queue::forget_queue_message_lock(
+                &self.runtime,
+                &row.queue,
+                EntityId::new(row.message_id),
+            );
+            return Ok(());
+        }
         let (entity_id, row) = self
             .find_pending_by_delivery(delivery_id)
             .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
@@ -759,6 +884,42 @@ impl QueueStore for PrimaryQueueStore {
     }
 
     fn retire_for_group(&self, _txn: &QueueTxn, delivery_id: &str) -> Result<()> {
+        if !UnifiedStore::deferred_store_wal_capture_active()
+            && self.runtime.current_xid().is_none()
+        {
+            let store = self.store();
+            let _publication = store.vault_publication_lock.lock();
+            let (pending, row) = self
+                .find_pending_by_delivery(delivery_id)
+                .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
+            let mut deletes = vec![(QUEUE_META_COLLECTION.to_string(), pending)];
+            deletes.extend(
+                self.subject_rows(
+                    KIND_ATTEMPTS_LC,
+                    &row.queue,
+                    Some(&row.group),
+                    Some(row.message_id),
+                )
+                .into_iter()
+                .map(|(id, _)| (QUEUE_META_COLLECTION.to_string(), id)),
+            );
+            let fields = HashMap::from([
+                ("kind".into(), Value::text(KIND_ACKED_LC)),
+                ("queue".into(), Value::text(row.queue)),
+                ("group".into(), Value::text(row.group)),
+                ("message_id".into(), Value::UnsignedInteger(row.message_id)),
+            ]);
+            return store
+                .publish_rows(crate::storage::unified::store::RowPublication {
+                    inserts: vec![(
+                        QUEUE_META_COLLECTION.to_string(),
+                        queue_meta_entity(fields),
+                        None,
+                    )],
+                    deletes,
+                })
+                .map_err(|error| QueueStoreError::UnknownQueue(error.to_string()));
+        }
         let (entity_id, row) = self
             .find_pending_by_delivery(delivery_id)
             .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
@@ -1136,6 +1297,21 @@ impl QueueStore for PrimaryQueueStore {
     }
 }
 
+fn queue_meta_entity(fields: HashMap<String, Value>) -> UnifiedEntity {
+    UnifiedEntity::new(
+        EntityId::new(0),
+        EntityKind::TableRow {
+            table: Arc::from(QUEUE_META_COLLECTION),
+            row_id: 0,
+        },
+        EntityData::Row(RowData {
+            columns: Vec::new(),
+            named: Some(fields),
+            schema: None,
+        }),
+    )
+}
+
 fn row_text(row: &RowData, field: &str) -> Option<String> {
     match row.get_field(field)? {
         Value::Text(value) => Some(value.to_string()),
@@ -1223,6 +1399,115 @@ mod tests {
             .into_iter()
             .map(|m| m.id.raw())
             .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paged_delivery_and_ack_each_publish_one_wal_batch() {
+        for mode in [
+            crate::api::DurabilityMode::Strict,
+            crate::api::DurabilityMode::WalDurableGrouped,
+        ] {
+            let directory = tempfile::tempdir().expect("directory");
+            let path = directory.path().join("data.rdb");
+            let rt = RedDBRuntime::with_options(
+                crate::RedDBOptions::persistent(&path)
+                    .with_memory_budget(64 * 1024 * 1024)
+                    .with_bounded_disk_residency(true)
+                    .with_durability_mode(mode),
+            )
+            .expect("runtime");
+            rt.execute_query("CREATE QUEUE batches").expect("queue");
+            rt.execute_query("QUEUE GROUP CREATE batches workers")
+                .expect("group");
+            push(&rt, "batches", "payload");
+            rt.checkpoint().expect("base checkpoint");
+            let batches = || {
+                crate::storage::wal::WalReader::open(reddb_file::unified_wal_path(&path))
+                    .expect("WAL")
+                    .iter()
+                    .collect::<std::io::Result<Vec<_>>>()
+                    .expect("records")
+                    .into_iter()
+                    .filter(|(_, record)| {
+                        matches!(record, crate::storage::wal::WalRecord::TxCommitBatch { .. })
+                    })
+                    .count()
+            };
+            let before = batches();
+            let result = rt
+                .execute_query("QUEUE READ batches GROUP workers CONSUMER c COUNT 1")
+                .expect("read");
+            assert_eq!(batches() - before, 1, "one reservation and attempt batch");
+            let Some(Value::Text(id)) = result.result.records[0].get("message_id") else {
+                panic!("message id")
+            };
+            let before = batches();
+            rt.execute_query(&format!("QUEUE ACK batches GROUP workers '{id}'"))
+                .expect("ACK");
+            assert_eq!(
+                batches() - before,
+                1,
+                "one message and metadata retirement batch"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_delivery_and_ack_do_not_publish_partial_queue_state() {
+        let rt = boot();
+        rt.execute_query("CREATE QUEUE publication_queue")
+            .expect("queue");
+        push(&rt, "publication_queue", "payload");
+        let ps = PrimaryQueueStore::new(rt.clone());
+        let message = ps.list_queue_messages("publication_queue")[0].id.raw();
+        let store = rt.db().store();
+        let txn = ps.new_txn();
+        store
+            .test_fail_deferred_wal_append
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(ps
+            .mark_pending_for_read(
+                &txn,
+                "publication_queue",
+                message,
+                "workers",
+                "c",
+                Instant::now() + Duration::from_secs(60),
+                true
+            )
+            .is_err());
+        assert!(ps
+            .find_pending_by_key("publication_queue", message, "workers")
+            .is_none());
+        assert_eq!(ps.read_attempts("publication_queue", message, "workers"), 0);
+        let (delivery, attempts) = ps
+            .mark_pending_for_read(
+                &txn,
+                "publication_queue",
+                message,
+                "workers",
+                "c",
+                Instant::now() + Duration::from_secs(60),
+                true,
+            )
+            .expect("reserve");
+        assert_eq!(attempts, 1);
+        store
+            .test_fail_deferred_wal_append
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(ps.ack_pending(&txn, &delivery).is_err());
+        assert!(ps.read_message("publication_queue", message).is_some());
+        assert_eq!(
+            ps.find_pending_by_key("publication_queue", message, "workers"),
+            Some(delivery.clone())
+        );
+        assert_eq!(ps.read_attempts("publication_queue", message, "workers"), 1);
+        ps.ack_pending(&txn, &delivery).expect("retry ACK");
+        assert!(ps.read_message("publication_queue", message).is_none());
+        assert!(ps
+            .find_pending_by_key("publication_queue", message, "workers")
+            .is_none());
     }
 
     #[test]

@@ -1080,6 +1080,7 @@ impl UnifiedStore {
             #[cfg(test)]
             test_require_deferred_publication_fence: std::sync::atomic::AtomicBool::new(false),
             vault_publication_lock: parking_lot::ReentrantMutex::new(()),
+            row_publications: Default::default(),
             pending_vault_versions: RwLock::new(std::collections::HashSet::new()),
         }
     }
@@ -1246,6 +1247,7 @@ impl UnifiedStore {
             #[cfg(test)]
             test_require_deferred_publication_fence: std::sync::atomic::AtomicBool::new(false),
             vault_publication_lock: parking_lot::ReentrantMutex::new(()),
+            row_publications: Default::default(),
             pending_vault_versions: RwLock::new(std::collections::HashSet::new()),
         };
 
