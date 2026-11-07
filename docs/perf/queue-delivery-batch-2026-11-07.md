@@ -114,6 +114,12 @@ compilation and persistence verification were performed on Linux. The first CI
 run reached 7,917 passing unit tests but exhausted its job time budget; it is
 not counted as an overall successful run.
 
+The final [Linux CI run 42415182947](https://github.com/reddb-io/reddb/actions/runs/42415182947)
+passed on runtime commit `a1f12745`: unit tests, all four integration shards,
+doctests, persistent multimodel tests, formatting/check/clippy, RQL and driver
+conformance. Subsequent commits only record documentation and benchmark
+artifacts; the tested Rust sources, Cargo inputs and CI workflow are unchanged.
+
 ## Queue/table relevance joins
 
 Ordinary collection queries already join a queue with a table:
