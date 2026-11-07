@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn failed_internal_slot_publication_blocks_wal_pruning_until_durable_retry() {
-    use crate::storage::unified::{StoreWalCaptureGuard, UnifiedStore};
+    use crate::storage::unified::{store::StoreWalCaptureGuard, UnifiedStore};
     let directory = tempfile::tempdir().expect("fixture");
     let path = directory.path().join("data.rdb");
     let store = Arc::new(UnifiedStore::open(&path).expect("store"));

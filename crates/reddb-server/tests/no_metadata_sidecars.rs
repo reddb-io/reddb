@@ -58,6 +58,15 @@ fn metadata_stays_inside_database_across_checkpoints_and_cold_boot() {
                 .execute_query("CREATE INDEX names ON documents (name) USING HASH")
                 .expect("index");
             runtime.checkpoint().expect("checkpoint");
+            assert!(
+                runtime
+                    .db()
+                    .native_vector_artifact_pages()
+                    .unwrap_or_default()
+                    .iter()
+                    .all(|artifact| artifact.collection != "red.storage.metadata"),
+                "physical control documents must not become their own derived search artifacts"
+            );
             assert_database_state_files_only(directory.path());
         }
         for read_only in [false, true, false] {

@@ -104,6 +104,9 @@ fn recovery_handles_present_absent_and_corrupt_binary() {
         metadata
             .save_for_data_path(&path)
             .expect("explicit legacy fixture");
+        metadata
+            .save_for_data_path(&path)
+            .expect("journal the previous legacy generation");
         let (_, source) = PhysicalMetadataFile::load_for_data_path_with_source(&path)
             .expect("present binary loads");
         assert_eq!(source.as_str(), "binary");

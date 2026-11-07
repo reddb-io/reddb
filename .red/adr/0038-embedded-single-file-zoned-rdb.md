@@ -11,6 +11,10 @@
 > preserved; runtime fork mutations that depend on those artifacts are disabled.
 > Explicit backup/export artifacts and explicitly configured diagnostic sinks
 > are distinct from the live database's storage contract.
+> Primary runtime slots, timeline history and relay manifests also use
+> `red.storage.metadata`. Control writes wait for the WAL durability barrier,
+> including async mode, before retiring their recognized legacy source files.
+> A failed slot publication blocks WAL pruning until a durable retry succeeds.
 
 Status: accepted
 Date: 2026-07-08 (rewritten; originally proposed as "Embedded Single-file Zoned RDB");
