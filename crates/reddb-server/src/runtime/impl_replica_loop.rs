@@ -457,8 +457,36 @@ impl RedDBRuntime {
             }
         }
         // Issue #812 — stable identity sent on every WAL pull so the primary
-        // can self-register this replica and attribute pulls to it.
-        let replica_id = self.resolve_replica_id();
+        // can self-register this replica and attribute pulls to it. When the
+        // primary authenticates replication, its principal is also the slot
+        // identity; allowing those names to drift would let this process forge
+        // acknowledgements for another replica.
+        let request_auth = match crate::replication::request_auth::ReplicaRequestAuth::from_env() {
+            Ok(auth) => auth,
+            Err(message) => {
+                self.persist_replication_health("auth_error", message, None, None);
+                return;
+            }
+        };
+        let replica_id = if let Some(principal) = request_auth.principal() {
+            let configured = self.config_string("red.replication.replica_id", "");
+            if !configured.is_empty() && configured != principal {
+                self.persist_replication_health(
+                    "auth_error",
+                    "replica identity differs from replication credential principal",
+                    None,
+                    None,
+                );
+                return;
+            }
+            self.inner.db.store().set_config_tree(
+                "red.replication",
+                &crate::json!({ "replica_id": principal }),
+            );
+            principal.to_string()
+        } else {
+            self.resolve_replica_id()
+        };
 
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -554,7 +582,7 @@ impl RedDBRuntime {
                     await_data,
                     await_timeout_ms: 30_000,
                 };
-                let request = tonic::Request::new(JsonPayloadRequest {
+                let request = request_auth.request(JsonPayloadRequest {
                     payload_json: String::from_utf8(payload.encode_json())
                         .unwrap_or_else(|_| "{}".to_string()),
                 });
@@ -851,7 +879,7 @@ impl RedDBRuntime {
                                         apply_errors_total,
                                         divergence_total,
                                     };
-                                    let ack_request = tonic::Request::new(JsonPayloadRequest {
+                                    let ack_request = request_auth.request(JsonPayloadRequest {
                                         payload_json: String::from_utf8(ack_payload.encode_json())
                                             .unwrap_or_else(|_| "{}".to_string()),
                                     });
