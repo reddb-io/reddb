@@ -147,6 +147,23 @@ fn incremental_count_build_allows_writes_and_restarts_after_checkpoint() {
     let reopened =
         UnifiedStore::open_with_config(directory.path().join("count.rdb"), config()).unwrap();
     compare(&reopened, None, 194);
+    reopened.register_count_index_deferred("rows").unwrap();
+    reopened
+        .insert(
+            "rows",
+            UnifiedEntity::table_row(EntityId::new(195), "rows", 195, vec![]),
+        )
+        .unwrap();
+    reopened.persist().unwrap();
+    if reopened
+        .try_count_from_index("rows", None)
+        .unwrap()
+        .is_none()
+    {
+        let mut retry = reopened.start_count_build("rows").unwrap().unwrap();
+        while !retry.step(&reopened).unwrap() {}
+    }
+    compare(&reopened, None, 195);
 }
 
 #[test]
