@@ -108,6 +108,30 @@ latency for a fully populated database, remote hydration, or cold physical I/O.
 The embedded startup test separately uses a real multi-megabyte snapshot and a
 fresh process to bound total snapshot read bytes. The embedded format still
 materializes the complete snapshot and decoded data in memory.
+
+For actual recoverable values, the Linux/Windows populated fixture writes
+51,200 distinct rows with a shared, repetitive 1 MiB text value (50 GiB of
+logical value bytes). RedDB compresses each value before writing it. A separate
+process, limited to 1.5 GiB of address space or committed memory, opens the
+legacy checkpoint, a prepared checkpoint, and the disk-resident runtime; it
+then reopens the runtime after its visibility projection is prepared. It checks
+the row count and values at the beginning, middle and end. It reports
+elapsed time, peak resident/working-set memory, file length and allocated file
+bytes. The parent also polls the whole private fixture directory and stops its
+child if total file lengths exceed 1 GiB (short-lived overshoot is possible).
+The regular test uses 32 rows; run the full manual measurement with:
+
+```sh
+cargo test -p reddb-io-server --test populated_cold_start populated_startup_50_gib -- --ignored --nocapture
+```
+
+This fixture exercises decompression and actual persisted records but is highly
+compressible and uses an OS-warm cache. It is not a 50 GiB populated *file*, a
+high-cardinality small-row workload, a SQL benchmark, cold physical I/O, or a
+remote-storage measurement. A missing visibility-count projection is registered
+at boot but built by the next checkpoint; COUNT falls back to a normal scan until
+then. The harness reports that checkpoint separately and checks the following
+reopen. Its timings do not establish a production SLO.
 The serverless generation crash matrix separately
 checks that the selected published generation hydrates to queryable rows after
 each publication interruption; the partial-cache/source fixture checks failed

@@ -1729,6 +1729,10 @@ impl UnifiedStore {
                 let mut migrated_catalog = !outcome.collisions.is_empty();
                 let mut empty_duplicate_roots = std::collections::HashSet::new();
                 let mut recovery_config_roots = [0u8; 2];
+                // Older catalogs have no resume state, so the bounded loader
+                // must already decode every physical entity to restore IDs.
+                // Reuse that complete pass for the transaction floor too.
+                let mut scanned_xid_high_water_mark = 0u64;
 
                 // Read collection names and their B-tree root pages
                 for _ in 0..collection_count {
@@ -1881,6 +1885,9 @@ impl UnifiedStore {
                             let (entity, metadata) = decoded.map_err(|err| {
                                 page_integrity(root_page, Some(name.clone()), err.to_string())
                             })?;
+                            scanned_xid_high_water_mark = scanned_xid_high_water_mark
+                                .max(entity.xmin)
+                                .max(entity.xmax);
                             if let Some(m) = &manager {
                                 let id = entity.id;
                                 if let EntityKind::TableRow { row_id, .. } = &entity.kind {
@@ -2130,6 +2137,13 @@ impl UnifiedStore {
                 }
                 if self.format_version() < STORE_VERSION_V11 {
                     self.set_format_version(STORE_VERSION_V11);
+                }
+                if self.config.resident_memory_bytes_max.is_some()
+                    && resume.is_none()
+                    && !migrated_catalog
+                    && !retain_canonical_system_config
+                {
+                    self.remember_startup_xid_high_water_mark(scanned_xid_high_water_mark);
                 }
                 outcome.migrated = migrated_catalog;
                 return Ok(outcome);
