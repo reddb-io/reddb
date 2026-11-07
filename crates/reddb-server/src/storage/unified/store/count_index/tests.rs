@@ -18,6 +18,57 @@ fn fixture() -> (tempfile::TempDir, UnifiedStore) {
 }
 
 #[test]
+fn count_batch_limits_mixed_keys_and_groups_uniform_keys() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CountVisits(Arc<AtomicUsize>);
+    impl SecondaryIndexProjector for CountVisits {
+        fn project(
+            &self,
+            entity: &UnifiedEntity,
+            key: &mut [u8; SECONDARY_KEY_BYTES_MAX],
+        ) -> Result<Option<usize>, StoreError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            VisibilityProjection { schema: None }.project(entity, key)
+        }
+    }
+    for (mode, expected_visits) in [
+        ("uniform", UNIFORM_BATCH_ROWS),
+        ("mixed", MIXED_BATCH_ROWS),
+        ("boundary", MIXED_BATCH_ROWS + 1),
+    ] {
+        let (_directory, store) = fixture();
+        let rows = UNIFORM_BATCH_ROWS as u64 + 1;
+        store
+            .get_collection("rows")
+            .unwrap()
+            .bulk_insert(
+                (1..=rows)
+                    .map(|id| {
+                        let mut entity =
+                            UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]);
+                        entity.xmin = match mode {
+                            "mixed" => id % 2,
+                            "boundary" if id > MIXED_BATCH_ROWS as u64 => 1,
+                            _ => 0,
+                        };
+                        entity
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        store.persist().unwrap();
+        store.register_count_index_deferred("rows").unwrap();
+        let mut build = store.start_count_build("rows").unwrap().unwrap();
+        let visits = Arc::new(AtomicUsize::new(0));
+        build.projector = Arc::new(CountVisits(Arc::clone(&visits)));
+        assert!(!build.step(&store).unwrap());
+        assert_eq!(visits.load(Ordering::Relaxed), expected_visits);
+        while !build.step(&store).unwrap() {}
+        compare(&store, None, rows);
+    }
+}
+
+#[test]
 fn count_batch_does_not_hold_publication_lock_while_decoding() {
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -44,14 +95,16 @@ fn count_batch_does_not_hold_publication_lock_while_decoding() {
     }
     let (_directory, store) = fixture();
     let store = Arc::new(store);
-    for id in 1..=65 {
-        store
-            .insert(
-                "rows",
-                UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]),
-            )
-            .unwrap();
-    }
+    let rows = UNIFORM_BATCH_ROWS as u64 + 1;
+    store
+        .get_collection("rows")
+        .unwrap()
+        .bulk_insert(
+            (1..=rows)
+                .map(|id| UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]))
+                .collect(),
+        )
+        .unwrap();
     store.persist().unwrap();
     store.register_count_index_deferred("rows").unwrap();
     let mut build = store.start_count_build("rows").unwrap().unwrap();
@@ -79,7 +132,7 @@ fn count_batch_does_not_hold_publication_lock_while_decoding() {
             .is_some();
         let write = writer_store.insert(
             "rows",
-            UnifiedEntity::table_row(EntityId::new(66), "rows", 66, vec![]),
+            UnifiedEntity::table_row(EntityId::new(rows + 1), "rows", rows + 1, vec![]),
         );
         written.send((read, write.is_ok())).unwrap();
     });
@@ -93,20 +146,29 @@ fn count_batch_does_not_hold_publication_lock_while_decoding() {
     );
     assert!(!result.unwrap());
     while !build.step(&store).unwrap() {}
-    compare(&store, None, 66);
+    compare(&store, None, rows + 1);
 }
 
 #[test]
 fn incremental_count_build_allows_writes_and_restarts_after_checkpoint() {
     let (directory, store) = fixture();
-    for id in 1..=192 {
-        store
-            .insert(
-                "rows",
-                UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![Value::text("data")]),
-            )
-            .unwrap();
-    }
+    let rows = UNIFORM_BATCH_ROWS as u64 * 3;
+    store
+        .get_collection("rows")
+        .unwrap()
+        .bulk_insert(
+            (1..=rows)
+                .map(|id| {
+                    UnifiedEntity::table_row(
+                        EntityId::new(id),
+                        "rows",
+                        id,
+                        vec![Value::text("data")],
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
     store.persist().unwrap();
     store.register_count_index_deferred("rows").unwrap();
     let mut build = store.start_count_build("rows").unwrap().unwrap();
@@ -117,11 +179,11 @@ fn incremental_count_build_allows_writes_and_restarts_after_checkpoint() {
     store
         .insert(
             "rows",
-            UnifiedEntity::table_row(EntityId::new(193), "rows", 193, vec![]),
+            UnifiedEntity::table_row(EntityId::new(rows + 1), "rows", rows + 1, vec![]),
         )
         .unwrap();
     assert!(store
-        .try_get("rows", EntityId::new(193), 1024 * 1024)
+        .try_get("rows", EntityId::new(rows + 1), 1024 * 1024)
         .unwrap()
         .is_some());
     store.persist().unwrap();
@@ -132,26 +194,26 @@ fn incremental_count_build_allows_writes_and_restarts_after_checkpoint() {
     drop(build);
     let mut build = store.start_count_build("rows").unwrap().unwrap();
     while !build.step(&store).unwrap() {}
-    compare(&store, None, 193);
+    compare(&store, None, rows + 1);
     drop(build);
     // Completed batch epochs remain in the WAL until the next checkpoint.
     // A subsequent acknowledged write must still replay after restart.
     store
         .insert(
             "rows",
-            UnifiedEntity::table_row(EntityId::new(194), "rows", 194, vec![]),
+            UnifiedEntity::table_row(EntityId::new(rows + 2), "rows", rows + 2, vec![]),
         )
         .unwrap();
-    compare(&store, None, 194);
+    compare(&store, None, rows + 2);
     drop(store);
     let reopened =
         UnifiedStore::open_with_config(directory.path().join("count.rdb"), config()).unwrap();
-    compare(&reopened, None, 194);
+    compare(&reopened, None, rows + 2);
     reopened.register_count_index_deferred("rows").unwrap();
     reopened
         .insert(
             "rows",
-            UnifiedEntity::table_row(EntityId::new(195), "rows", 195, vec![]),
+            UnifiedEntity::table_row(EntityId::new(rows + 3), "rows", rows + 3, vec![]),
         )
         .unwrap();
     reopened.persist().unwrap();
@@ -163,7 +225,7 @@ fn incremental_count_build_allows_writes_and_restarts_after_checkpoint() {
         let mut retry = reopened.start_count_build("rows").unwrap().unwrap();
         while !retry.step(&reopened).unwrap() {}
     }
-    compare(&reopened, None, 195);
+    compare(&reopened, None, rows + 3);
 }
 
 #[test]
@@ -204,6 +266,50 @@ fn incremental_count_replacement_retires_the_old_definition() {
 }
 
 #[test]
+fn incremental_count_handles_out_of_order_visibility_keys_across_leaves() {
+    let (directory, store) = fixture();
+    let manager = store.get_collection("rows").unwrap();
+    let schema = Arc::new(vec!["__moderation_status".to_owned()]);
+    manager.set_column_schema_if_empty(schema.as_ref().clone());
+    let mut expected = 0u64;
+    let entities = (1..=1301)
+        .map(|id| {
+            let hidden = id % 7 == 0;
+            let deleted = id % 5 == 0;
+            expected += u64::from(!hidden && !deleted);
+            let mut row = UnifiedEntity::table_row(
+                EntityId::new(id),
+                "rows",
+                id,
+                vec![Value::text(if hidden { "pending" } else { "" })],
+            );
+            row.xmin = (id % 13) * 3;
+            row.xmax = if deleted { id % 11 + 1 } else { 0 };
+            if let EntityData::Row(data) = &mut row.data {
+                data.schema = Some(Arc::clone(&schema));
+            }
+            row
+        })
+        .collect();
+    manager.bulk_insert(entities).unwrap();
+    store.persist().unwrap();
+    store.register_count_index_deferred("rows").unwrap();
+    let mut build = store.start_count_build("rows").unwrap().unwrap();
+    while !build.step(&store).unwrap() {}
+    compare(&store, None, expected);
+    drop(build);
+    drop(manager);
+    drop(store);
+    let reopened =
+        UnifiedStore::open_with_config(directory.path().join("count.rdb"), config()).unwrap();
+    reopened
+        .get_collection("rows")
+        .unwrap()
+        .set_column_schema_if_empty(schema.as_ref().clone());
+    compare(&reopened, None, expected);
+}
+
+#[test]
 fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
     const CHILD: &str = "REDDB_TEST_COUNT_BATCH_PATH";
     if let Some(path) = std::env::var_os(CHILD) {
@@ -215,12 +321,16 @@ fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
             "publish one recoverable partial batch"
         );
         let stage = std::env::var("REDDB_TEST_COUNT_BATCH_STAGE").unwrap();
+        let rows: u64 = std::env::var("REDDB_TEST_COUNT_BATCH_ROWS")
+            .unwrap()
+            .parse()
+            .unwrap();
         if stage == "finished" {
             while !build.step(&store).unwrap() {}
             store
                 .insert(
                     "rows",
-                    UnifiedEntity::table_row(EntityId::new(129), "rows", 129, vec![]),
+                    UnifiedEntity::table_row(EntityId::new(rows + 1), "rows", rows + 1, vec![]),
                 )
                 .unwrap();
             std::process::exit(185);
@@ -228,11 +338,14 @@ fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
         if stage == "final" {
             assert!(!build.step(&store).unwrap());
         }
-        let failpoint = if stage == "before" {
+        let failpoint = if stage == "before" || stage == "split" {
             "REDDB_TEST_EXIT_DURING_COUNT_BATCH"
         } else {
             "REDDB_TEST_EXIT_AFTER_COUNT_BATCH_PUBLICATION"
         };
+        if stage == "split" {
+            std::env::set_var("REDDB_TEST_REQUIRE_COUNT_SPLIT", "1");
+        }
         std::env::set_var(failpoint, "1");
         let _ = build.step(&store);
         panic!("crash injection did not fire");
@@ -242,25 +355,28 @@ fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
         ("after", 184),
         ("final", 184),
         ("finished", 185),
+        ("split", 183),
     ] {
         let (directory, store) = fixture();
-        for id in 1..=128 {
-            store
-                .insert(
-                    "rows",
-                    UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]),
-                )
-                .unwrap();
-        }
+        let rows = UNIFORM_BATCH_ROWS as u64 * 2 + u64::from(stage == "split");
+        store
+            .get_collection("rows")
+            .unwrap()
+            .bulk_insert(
+                (1..=rows)
+                    .map(|id| UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]))
+                    .collect(),
+            )
+            .unwrap();
         store.persist().unwrap();
         drop(store);
         let path = directory.path().join("count.rdb");
         let result = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "storage::unified::store::count_index::tests::interrupted_count_batch_preserves_rows_and_can_rebuild", "--nocapture"])
-        .env(CHILD, &path).env("REDDB_TEST_COUNT_BATCH_STAGE", stage).output().unwrap();
+        .env(CHILD, &path).env("REDDB_TEST_COUNT_BATCH_ROWS", rows.to_string()).env("REDDB_TEST_COUNT_BATCH_STAGE", stage).output().unwrap();
         assert_eq!(result.status.code(), Some(exit_code), "crash stage {stage}");
         let store = UnifiedStore::open_with_config(&path, config()).unwrap();
-        let expected = if stage == "finished" { 129 } else { 128 };
+        let expected = (rows + u64::from(stage == "finished")) as usize;
         assert_eq!(store.get_collection("rows").unwrap().count(), expected);
         let projected = store.try_count_from_index("rows", None).unwrap();
         if stage == "final" || stage == "finished" {

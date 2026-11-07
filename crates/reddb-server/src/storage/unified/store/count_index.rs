@@ -15,6 +15,8 @@ use sha2::{Digest, Sha256};
 // Separate from SQL-visible registry names; a different definition can never
 // accidentally qualify because reads also verify the full fingerprint.
 const NAME: &str = "\0reddb/visibility-count-v1";
+const MIXED_BATCH_ROWS: usize = 64;
+const UNIFORM_BATCH_ROWS: usize = 256;
 
 fn identity(schema: Option<&[String]>) -> SecondaryIndexIdentity {
     let mut digest = Sha256::new();
@@ -89,14 +91,17 @@ pub(crate) struct CountBuild {
 }
 
 impl CountBuild {
-    /// Decode at most 64 source rows outside the publication fence, then
-    /// publish only this small batch under a separate ownership epoch.
+    /// Decode outside the publication fence. Uniform visibility keys can be
+    /// appended together with bounded leaf work; mixed keys retain the smaller
+    /// batch to limit the number of distinct leaves touched under the fence.
     pub(crate) fn step(&mut self, store: &UnifiedStore) -> Result<bool, StoreError> {
         let limit = usize::try_from(store.config.resident_memory_bytes_max.unwrap_or(0))
             .unwrap_or(usize::MAX);
-        let mut postings = Vec::with_capacity(64);
+        let mut postings = Vec::with_capacity(UNIFORM_BATCH_ROWS);
         let mut finished = false;
-        for _ in 0..64 {
+        let mut first_key = None::<Vec<u8>>;
+        let mut mixed = false;
+        for position in 0..UNIFORM_BATCH_ROWS {
             let Some(record) = self.cursor.next_record(limit)? else {
                 finished = true;
                 break;
@@ -109,12 +114,25 @@ impl CountBuild {
                         "count projection key too large".into(),
                     ));
                 }
+                match &first_key {
+                    Some(first) if first.as_slice() != &key[..length] => mixed = true,
+                    None => first_key = Some(key[..length].to_vec()),
+                    _ => {}
+                }
                 let mut posting = Vec::with_capacity(length + 8);
                 posting.extend_from_slice(&key[..length]);
                 posting.extend_from_slice(&entity.id.raw().to_be_bytes());
-                postings.push(posting);
+                postings.push((posting, Vec::new()));
+            } else {
+                mixed = true;
+            }
+            if position + 1 >= MIXED_BATCH_ROWS && mixed {
+                break;
             }
         }
+        // IDs are ordered, but visibility keys need not be. Sorting the
+        // bounded batch lets the B-tree coalesce writes to the same leaf.
+        postings.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         let _publication = store.vault_publication_lock.lock();
         let current = store.btree_indices.read().get(&self.collection).cloned();
         let spec_matches = store
@@ -157,13 +175,20 @@ impl CountBuild {
             pager,
             active: true,
         };
-        for posting in postings {
-            self.tree
-                .insert(&posting, &[])
-                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
-        }
+        #[cfg(test)]
+        let root_before = self.tree.root_page_id();
+        self.tree
+            .bulk_insert_sorted(&postings)
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
         #[cfg(test)]
         if std::env::var_os("REDDB_TEST_EXIT_DURING_COUNT_BATCH").is_some() {
+            if std::env::var_os("REDDB_TEST_REQUIRE_COUNT_SPLIT").is_some() {
+                assert_ne!(
+                    root_before,
+                    self.tree.root_page_id(),
+                    "fixture must split the root"
+                );
+            }
             std::process::exit(183);
         }
         if finished {

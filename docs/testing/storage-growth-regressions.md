@@ -130,7 +130,9 @@ compressible and uses an OS-warm cache. It is not a 50 GiB populated *file*, a
 high-cardinality small-row workload, a SQL benchmark, cold physical I/O, or a
 remote-storage measurement. In writable disk-resident runtimes, a missing
 visibility-count projection is built in background batches against a pinned
-immutable generation. Each batch publishes
+immutable generation. Batches contain up to 65 rows when visibility keys vary;
+uniform keys can be grouped up to 256 rows because their postings share an
+ordered range. Each batch publishes
 its private pages in an ownership epoch; only the finished projection becomes
 visible to COUNT. A crash discards the unfinished tree through the retirement
 ledger and a later worker retries from the beginning. If a checkpoint replaces

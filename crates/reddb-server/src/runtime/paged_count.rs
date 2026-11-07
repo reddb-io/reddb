@@ -20,13 +20,13 @@ impl super::RedDBRuntime {
             std::thread::Builder::new().name("reddb-count-projection".into()),
             move |stopped| {
                 let mut build = None;
-                let mut delay = std::time::Duration::from_millis(20);
+                let mut delay = std::time::Duration::from_millis(1);
                 loop {
                     std::thread::park_timeout(delay);
                     if stopped.load(Ordering::Acquire) { break; }
                     let Some(inner) = weak.upgrade() else { break };
                     let store = inner.db.store();
-                    delay = std::time::Duration::from_millis(20);
+                    delay = std::time::Duration::from_millis(1);
                     if build.is_none() {
                         for collection in store.list_collections() {
                             match store.start_count_build(&collection) {
