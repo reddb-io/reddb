@@ -5,9 +5,6 @@ pub(super) const ZFS_SUPER_MAGIC: i64 = 0x2fc1_2fc1;
 pub(super) const FS_NOCOW_FL: u64 = 0x0080_0000;
 
 #[cfg(test)]
-const PHASE3_DWB_ZONE_FILE_VERSION: u32 = 0x0001_0001;
-
-#[cfg(test)]
 pub(super) const SUPERBLOCK_SLOT_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
 #[cfg(test)]
 pub(super) const SUPERBLOCK_ZONE_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_ZONE_SIZE;
@@ -767,8 +764,11 @@ mod tests {
             let mut slot = zone[start..start + SUPERBLOCK_SLOT_SIZE].to_vec();
             let generation = reddb_file::paged_superblock_slot_generation(&slot, copy_index)
                 .expect("fresh store should publish both slots");
-            reddb_file::set_database_header_version(&mut slot, PHASE3_DWB_ZONE_FILE_VERSION - 1)
-                .expect("set_database_header_version() should succeed");
+            reddb_file::set_database_header_version(
+                &mut slot,
+                reddb_file::PAGE_DWB_ZONE_FILE_VERSION - 1,
+            )
+            .expect("set_database_header_version() should succeed");
             reddb_file::set_database_header_page_count(&mut slot, page_count)
                 .expect("set_database_header_page_count() should succeed");
             reddb_file::seal_paged_superblock_slot(&mut slot, copy_index, generation)
