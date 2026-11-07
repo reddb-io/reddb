@@ -1,5 +1,8 @@
 # KV benchmark suite
 
+For durable KV pipelines and complete queue cycles against Redis, RabbitMQ and
+Kafka, see [BATCHING.md](BATCHING.md). That matrix includes process-crash checks.
+
 For verified comparative diagnostics, use [COMPARE.md](COMPARE.md). The legacy
 runner below remains a historical regression fixture: it opens new HTTP
 connections while reusing RESP connections and does not validate returned values.

@@ -42,6 +42,124 @@ fn assert_database_state_files_only(root: &Path) {
 }
 
 #[test]
+fn concurrent_kv_batches_recover_values_and_metadata_after_process_exit() {
+    const CHILD: &str = "REDDB_KV_BATCH_CRASH_CHILD";
+    let kv_options = |path: &Path, bounded: bool, grouped: bool| {
+        options(path, bounded).with_durability_mode(if grouped {
+            DurabilityMode::WalDurableGrouped
+        } else {
+            DurabilityMode::Strict
+        })
+    };
+    if let Some(path) = std::env::var_os(CHILD) {
+        let runtime = RedDBRuntime::with_options(kv_options(
+            Path::new(&path),
+            std::env::var("REDDB_KV_BATCH_BOUNDED").expect("bounded") == "true",
+            std::env::var("REDDB_KV_BATCH_GROUPED").expect("grouped") == "true",
+        ))
+        .expect("child runtime");
+        std::thread::scope(|scope| {
+            for worker in 0..4 {
+                let runtime = &runtime;
+                scope.spawn(move || {
+                    for generation in 1..=3 {
+                        for key in 0..8 {
+                            runtime
+                                .execute_query(&format!(
+                                "KV PUT batch_keys.k{} = {generation} EXPIRE 10m TAGS ['daily']",
+                                worker * 8 + key
+                            ))
+                                .expect("durably acknowledged replacement");
+                        }
+                    }
+                });
+            }
+        });
+        std::process::exit(0);
+    }
+    for bounded in [false, true] {
+        for grouped in [false, true] {
+            let directory = tempfile::tempdir().expect("fixture");
+            let path = directory.path().join("data.rdb");
+            {
+                let runtime =
+                    RedDBRuntime::with_options(kv_options(&path, bounded, grouped)).expect("seed");
+                for key in 0..32 {
+                    runtime
+                        .execute_query(&format!("KV PUT batch_keys.k{key} = 0"))
+                        .expect("seed key");
+                }
+                runtime.checkpoint().expect("publish base");
+            }
+            let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "concurrent_kv_batches_recover_values_and_metadata_after_process_exit",
+                ])
+                .env(CHILD, &path)
+                .env("REDDB_KV_BATCH_BOUNDED", bounded.to_string())
+                .env("REDDB_KV_BATCH_GROUPED", grouped.to_string())
+                .status()
+                .expect("child process");
+            assert!(status.success(), "bounded={bounded}, grouped={grouped}");
+            for _ in 0..3 {
+                let runtime = RedDBRuntime::with_options(kv_options(&path, bounded, grouped))
+                    .expect("recover");
+                for key in 0..32 {
+                    let read = runtime
+                        .execute_query(&format!("KV GET batch_keys.k{key}"))
+                        .expect("recovered key");
+                    assert_eq!(read.result.records.len(), 1);
+                    assert_eq!(
+                        read.result.records[0].get("value"),
+                        Some(&reddb_types::Value::Integer(3))
+                    );
+                    assert_eq!(
+                        read.result.records[0].get("tags"),
+                        Some(&reddb_types::Value::Json(br#"["daily"]"#.to_vec()))
+                    );
+                }
+                runtime.checkpoint().expect("checkpoint recovered keys");
+                assert_database_state_files_only(directory.path());
+            }
+            let runtime = RedDBRuntime::with_options(kv_options(&path, bounded, grouped))
+                .expect("cold tag mutation");
+            runtime
+                .execute_query("KV INCR batch_keys.k0 BY 1")
+                .expect("increment");
+            runtime
+                .execute_query("KV CAS batch_keys.k0 EXPECT 4 SET 5")
+                .expect("CAS");
+            let read = runtime
+                .execute_query("KV GET batch_keys.k0")
+                .expect("changed key");
+            assert_eq!(
+                read.result.records[0].get("value"),
+                Some(&reddb_types::Value::Integer(5))
+            );
+            assert_eq!(
+                read.result.records[0].get("tags"),
+                Some(&reddb_types::Value::Json(br#"["daily"]"#.to_vec()))
+            );
+            let invalidated = runtime
+                .execute_query("INVALIDATE TAGS [daily] FROM batch_keys")
+                .expect("invalidate cold and resident tagged keys");
+            assert_eq!(invalidated.affected_rows, 32);
+            runtime.checkpoint().expect("publish invalidation");
+            drop(runtime);
+            let runtime = RedDBRuntime::with_options(kv_options(&path, bounded, grouped))
+                .expect("reopen invalidation");
+            assert!(runtime
+                .execute_query("KV LIST batch_keys")
+                .expect("empty keys")
+                .result
+                .records
+                .is_empty());
+        }
+    }
+}
+
+#[test]
 fn queue_dedup_and_capacity_recover_after_acknowledged_process_exit() {
     const CHILD: &str = "REDDB_QUEUE_INDEX_CRASH_CHILD";
     let queue_options = |path: &Path, bounded: bool, grouped: bool| {

@@ -676,11 +676,7 @@ impl<'a> KvAtomicOps<'a> {
         // which drops whatever the previous version carried — so a plain
         // INCR silently made an expiring key permanent and cleared its tags.
         // Carry both forward unless the caller asked to change them.
-        let carried_tags = self
-            .runtime
-            .inner
-            .kv_tag_index
-            .tags_for_key(collection, key);
+        let carried_tags = self.try_tags_for_key(collection, key)?;
         let carried_ttl_ms = if ttl_ms.is_none() {
             self.existing_ttl_ms(collection, key)?
         } else {
@@ -783,11 +779,7 @@ impl<'a> KvAtomicOps<'a> {
         // an optional EXPIRE, so — exactly as with INCR — the delete-then-
         // create below would drop a TTL and tags the caller never asked to
         // change. Carry both across the swap.
-        let carried_tags = self
-            .runtime
-            .inner
-            .kv_tag_index
-            .tags_for_key(collection, key);
+        let carried_tags = self.try_tags_for_key(collection, key)?;
         let carried_ttl_ms = if ttl_ms.is_none() {
             self.existing_ttl_ms(collection, key)?
         } else {
@@ -849,16 +841,54 @@ impl<'a> KvAtomicOps<'a> {
             .check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         self.runtime.check_kv_invalidate_policy(collection)?;
         self.ensure_kv_collection(collection)?;
-        let entries = self
-            .runtime
-            .inner
-            .kv_tag_index
-            .entries_for_tags(collection, tags);
+        let store = self.runtime.inner.db.store();
+        let entries = if let Some(manager) = store
+            .get_collection(collection)
+            .filter(|manager| manager.has_backing())
+        {
+            // The hot tag cache contains resident rows only after a bounded
+            // cold boot. Explicit invalidation must also consult durable rows;
+            // do this on demand, never by materializing the collection at boot.
+            let mut keys = std::collections::BTreeSet::new();
+            super::function_budget::try_scan(
+                |visit| manager.try_for_each_entity(usize::MAX, visit),
+                |entity| {
+                    if let Some(Value::Text(key)) =
+                        entity.data.as_row().and_then(|row| row.get_field("key"))
+                    {
+                        keys.insert(key.to_string());
+                    }
+                    true
+                },
+            )?;
+            let resolver = super::kv_read::KvReadResolver::for_keyed_model(
+                self.runtime,
+                CollectionModel::Kv,
+                collection,
+            )?;
+            let mut entries = Vec::new();
+            for key in keys {
+                if self
+                    .try_tags_for_key(collection, &key)?
+                    .iter()
+                    .any(|tag| tags.contains(tag))
+                {
+                    if let Some(id) = resolver.identity(&key)? {
+                        entries.push((key, id));
+                    }
+                }
+            }
+            entries
+        } else {
+            self.runtime
+                .inner
+                .kv_tag_index
+                .entries_for_tags(collection, tags)
+        };
         if entries.is_empty() {
             return Ok(0);
         }
 
-        let store = self.runtime.inner.db.store();
         let mut removed = 0usize;
         for (key, id) in entries {
             let Some(entity) = store.get(collection, id) else {
@@ -897,10 +927,47 @@ impl<'a> KvAtomicOps<'a> {
     }
 
     pub fn tags_for_key(&self, collection: &str, key: &str) -> Vec<String> {
-        self.runtime
-            .inner
-            .kv_tag_index
-            .tags_for_key(collection, key)
+        self.try_tags_for_key(collection, key).unwrap_or_default()
+    }
+
+    /// Read authoritative tags, propagating cold storage errors to the caller.
+    pub fn try_tags_for_key(&self, collection: &str, key: &str) -> RedDBResult<Vec<String>> {
+        let store = self.runtime.inner.db.store();
+        if !store
+            .get_collection(collection)
+            .is_some_and(|manager| manager.has_backing())
+        {
+            return Ok(self
+                .runtime
+                .inner
+                .kv_tag_index
+                .tags_for_key(collection, key));
+        }
+        let _publication = store.vault_publication_lock.lock();
+        let resolver = super::kv_read::KvReadResolver::for_keyed_model(
+            self.runtime,
+            CollectionModel::Kv,
+            collection,
+        )?;
+        let Some(id) = resolver.identity(key)? else {
+            return Ok(Vec::new());
+        };
+        let metadata = store.try_get_metadata(collection, id, usize::MAX)?;
+        Ok(
+            match metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("_kv_tags"))
+            {
+                Some(MetadataValue::Array(tags)) => tags
+                    .iter()
+                    .filter_map(|tag| match tag {
+                        MetadataValue::String(tag) => Some(tag.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
+        )
     }
 
     /// Auto-create a KV collection if it does not exist yet.
@@ -2635,7 +2702,10 @@ impl RedDBRuntime {
                                 "value",
                                 kv_value_from_entity(&entity).unwrap_or(reddb_types::Value::Null),
                             );
-                            record.set("tags", kv_tags_value(&ops.tags_for_key(collection, &key)));
+                            record.set(
+                                "tags",
+                                kv_tags_value(&ops.try_tags_for_key(collection, &key)?),
+                            );
                             result.push(record);
                         }
                         Ok(RuntimeQueryResult {
@@ -2850,7 +2920,12 @@ impl RedDBRuntime {
                     "value",
                     entry.and_then(|entry| entry.value).unwrap_or(Value::Null),
                 );
-                record.set("tags", kv_tags_value(&ops.tags_for_key(collection, key)));
+                let tags = if *model == CollectionModel::Kv {
+                    ops.try_tags_for_key(collection, key)?
+                } else {
+                    ops.tags_for_key(collection, key)
+                };
+                record.set("tags", kv_tags_value(&tags));
                 result.push(record);
 
                 Ok(RuntimeQueryResult {
@@ -3963,6 +4038,80 @@ mod tests {
             "KV list temporary peak bytes, full/3 keys: {} / {}",
             all_allocations.peak_live_bytes, allocations.peak_live_bytes
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paged_replacements_batch_value_ttl_and_tags_across_cold_boots() {
+        use crate::api::{DurabilityMode, RedDBOptions};
+        use crate::storage::profile::StorageDeployPreset;
+
+        for mode in [DurabilityMode::Strict, DurabilityMode::WalDurableGrouped] {
+            let directory = tempfile::tempdir().expect("directory");
+            let options = RedDBOptions::persistent(directory.path().join("keys.rdb"))
+                .with_durability_mode(mode)
+                .with_memory_budget(64 * 1024 * 1024)
+                .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+                .expect("paged profile");
+            for generation in 0..3 {
+                let runtime = RedDBRuntime::with_options(options.clone()).expect("runtime");
+                let ops = super::KvAtomicOps::new(&runtime);
+                if generation > 0 {
+                    assert_eq!(
+                        ops.get(CollectionModel::Kv, "keys", "item")
+                            .expect("cold read"),
+                        Some(Value::Integer(generation - 1))
+                    );
+                    assert_eq!(
+                        ops.existing_ttl_ms("keys", "item").expect("TTL"),
+                        Some(600_000)
+                    );
+                    assert_eq!(
+                        runtime.inner.kv_tag_index.tags_for_key("keys", "item"),
+                        vec!["daily"]
+                    );
+                }
+                let batches = || {
+                    crate::storage::wal::WalReader::open(reddb_file::unified_wal_path(
+                        options.data_path.as_ref().expect("persistent path"),
+                    ))
+                    .expect("WAL")
+                    .iter()
+                    .filter(|record| {
+                        matches!(
+                            &record.as_ref().expect("record").1,
+                            crate::storage::wal::WalRecord::TxCommitBatch { .. }
+                        )
+                    })
+                    .count()
+                };
+                let before = batches();
+                ops.set_with_tags(
+                    "keys",
+                    "item",
+                    Value::Integer(generation),
+                    Some(600_000),
+                    &["daily".into()],
+                    false,
+                )
+                .expect("replacement");
+                if generation > 0 {
+                    assert_eq!(
+                        batches() - before,
+                        1,
+                        "value, deletion and metadata share one WAL batch"
+                    );
+                }
+                assert!(runtime.db().store().pager().is_some());
+                assert!(super::super::kv_write::atomic_available(&runtime, "keys")
+                    .expect("atomic path"));
+                assert_eq!(
+                    ops.get(CollectionModel::Kv, "keys", "item").expect("read"),
+                    Some(Value::Integer(generation))
+                );
+                runtime.checkpoint().expect("checkpoint");
+            }
+        }
     }
 
     #[test]

@@ -72,6 +72,10 @@ impl<'a> KvReadResolver<'a> {
         self.project(key, Clone::clone)
     }
 
+    pub(super) fn identity(&self, key: &str) -> RedDBResult<Option<EntityId>> {
+        self.project(key, |entity| entity.id)
+    }
+
     fn project<T>(
         &self,
         key: &str,

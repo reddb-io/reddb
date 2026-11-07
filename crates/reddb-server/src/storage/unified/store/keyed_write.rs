@@ -102,17 +102,20 @@ impl UnifiedStore {
                 .check()
                 .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
         }
-        let before = previous
-            .and_then(|id| self.get(collection, id))
-            .map(|entity| {
-                let metadata = self.get_metadata(collection, entity.id);
-                StoreWalAction::upsert_entity(
-                    collection,
-                    &entity,
-                    metadata.as_ref(),
-                    self.format_version(),
-                )
-            });
+        let before = if let Some(previous) = previous {
+            let entity = self
+                .try_get(collection, previous, usize::MAX)?
+                .ok_or(StoreError::EntityNotFound(previous))?;
+            let metadata = self.try_get_metadata(collection, previous, usize::MAX)?;
+            Some(StoreWalAction::upsert_entity(
+                collection,
+                &entity,
+                metadata.as_ref(),
+                self.format_version(),
+            ))
+        } else {
+            None
+        };
         entity.id = self.next_entity_id();
         let id = entity.id;
         let capture = StoreWalCaptureGuard::begin(session);

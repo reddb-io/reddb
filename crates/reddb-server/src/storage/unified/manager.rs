@@ -264,9 +264,11 @@ mod tests {
             (
                 "runtime/impl_kv.rs",
                 include_str!("../../runtime/impl_kv.rs"),
-                1,
+                2,
                 "non-versioned KV listings intentionally read physical rows; \
-                 versioned listings use the captured snapshot. Vault history/export \
+                 versioned listings use the captured snapshot. Cold tag invalidation \
+                 collects physical keys, then re-resolves each visible version before \
+                 selecting its tags and deletion identity. Vault history/export \
                  and point visibility are centralized in keyed_spine",
             ),
             (

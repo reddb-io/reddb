@@ -167,8 +167,8 @@ class RedClient:
         return result
 
     def batch(self, operation, indices, size, generation=0):
-        if len(indices) != 1:
-            raise ProtocolError("HTTP pipelining is not implemented by this harness")
+        if len(indices) > 1:
+            return self.pipeline(operation, indices, size, generation)
         index = indices[0]
         value = payload(index, size, generation)
         if self.query:
@@ -185,6 +185,57 @@ class RedClient:
                                   None if operation == "get" else {"value": value})
             if operation == "get" and result.get("value") != value:
                 raise ProtocolError(f"incorrect REST readback: {result}")
+
+    def pipeline(self, operation, indices, size, generation):
+        # One persistent buffered reader owns the entire response stream: a
+        # fresh makefile per response can discard a prefetched next response.
+        class SharedReader:
+            def __init__(self, reader):
+                self.reader = reader
+
+            def makefile(self, *args, **kwargs):
+                return self
+
+            def __getattr__(self, name):
+                return getattr(self.reader, name)
+
+            def close(self):
+                pass
+
+        requests = []
+        for index in indices:
+            value = payload(index, size, generation)
+            path = f"/collections/{self.collection}/kvs/k{index}"
+            method = "GET" if operation == "get" else "PUT"
+            body = b"" if operation == "get" else json.dumps({"value": value}).encode()
+            if self.query:
+                key = f"{self.collection}.k{index}"
+                sql = f"KV GET {key}" if operation == "get" else f"KV PUT {key} = '{value}'"
+                method, path, body = "POST", "/query", json.dumps({"query": sql}).encode()
+            requests.append((f"{method} {path} HTTP/1.1\r\n"
+                             f"Host: {self.connection.host}:{self.connection.port}\r\n"
+                             f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n"
+                             "Connection: keep-alive\r\n\r\n").encode() + body)
+        self.connection.sock.sendall(b"".join(requests))
+        with self.connection.sock.makefile("rb") as reader:
+            shared = SharedReader(reader)
+            for index in indices:
+                response = http.client.HTTPResponse(shared)
+                response.begin()
+                raw = response.read()
+                if response.status not in (200, 201) or response.will_close:
+                    raise ProtocolError(f"pipeline HTTP {response.status}: {raw[:512]!r}")
+                result = json.loads(raw)
+                if result.get("ok") is False or "error" in result:
+                    raise ProtocolError(f"pipeline query error: {result}")
+                if operation == "get":
+                    if self.query:
+                        rows = result["result"]["records"]
+                        if len(rows) != 1:
+                            raise ProtocolError(f"incorrect query readback: {result}")
+                        result = rows[0]["values"]
+                    if result.get("value") != payload(index, size, generation):
+                        raise ProtocolError(f"incorrect pipelined readback: {result}")
 
 
 def client(args):
@@ -356,9 +407,7 @@ def main():
         "latency_contract": "batch completion including response validation; pipeline=1 is one request",
     }
     try:
-        if args.engine.startswith("reddb") and args.pipeline != 1:
-            result.update(status="unsupported", reason="this harness does not implement HTTP pipelining")
-        elif args.prepare_only:
+        if args.prepare_only:
             result.update(verification=prepare(args), status="prepared")
         elif args.verify_only:
             generations = None
