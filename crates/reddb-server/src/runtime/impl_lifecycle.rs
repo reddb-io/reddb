@@ -618,9 +618,8 @@ impl RedDBRuntime {
             .bootstrap_system_keyed_collections()
             .map_err(|err| RedDBError::Internal(format!("bootstrap system collections: {err}")))?;
         runtime.rehydrate_declared_column_schemas();
-        runtime.prepare_paged_counts()?;
-        // Registry restoration can checkpoint missing projections on any
-        // collection. Register every internal projector before that epoch.
+        // Registry restoration can checkpoint missing required projections.
+        // Register their projectors before that epoch.
         super::control_event_index::prepare(&runtime)?;
         super::queue_storage_index::prepare(&runtime)?;
         runtime.rehydrate_runtime_index_registry()?;
@@ -906,6 +905,12 @@ impl RedDBRuntime {
         // graph collection (declared WITH ANALYTICS) and its metadata sidecar
         // exist. Idempotent and survives restarts via the WAL-backed contract.
         let _ = crate::application::topology_collections::ensure(&runtime);
+
+        // Bootstrapping topology can publish a metadata checkpoint. Register
+        // the optional COUNT projection only after that publication, so old
+        // data is not backfilled before readiness. Queries scan until the next
+        // checkpoint publishes the projection.
+        runtime.prepare_paged_counts()?;
 
         // #1369 — reserve a fixed internal-id floor so the first user-inserted
         // entity always receives a stable, documented `rid` (FIRST_USER_ENTITY_ID),

@@ -64,6 +64,7 @@ mod tests {
         seed.flush().expect("seed checkpoint");
         drop(seed);
         let runtime = open(&options);
+        runtime.flush().expect("prepare count projection");
         (directory, runtime, options)
     }
 
@@ -107,6 +108,34 @@ mod tests {
         let runtime = open(&options);
         deny_payload_reads(&runtime);
         assert_eq!(count(&runtime), 12);
+    }
+
+    #[test]
+    fn missing_count_projection_falls_back_until_the_next_checkpoint() {
+        let (_directory, runtime, options) = fixture();
+        let store = runtime.db().store();
+        store.unregister_secondary_index("count_rows", "\0reddb/visibility-count-v1");
+        // Recreating topology publishes metadata during boot. It must not
+        // force the unrelated COUNT projection before runtime readiness.
+        store.drop_collection("red.topology.cluster").unwrap();
+        store.persist().expect("publish missing projection");
+        drop(store);
+        drop(runtime);
+
+        let runtime = open(&options);
+        let store = runtime.db().store();
+        assert_eq!(
+            store.try_count_from_index("count_rows", None).unwrap(),
+            None
+        );
+        assert_eq!(count(&runtime), 12, "scan fallback remains exact");
+        runtime.flush().expect("prepare projection at checkpoint");
+        assert_eq!(
+            store.try_count_from_index("count_rows", None).unwrap(),
+            Some(12)
+        );
+        deny_payload_reads(&runtime);
+        assert_eq!(count(&runtime), 12, "prepared count needs no payloads");
     }
 
     #[test]
