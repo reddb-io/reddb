@@ -3213,6 +3213,12 @@ pub enum QueueCommand {
         /// kept for one minor release as a wire-compat bridge.
         delivery_id: Option<String>,
     },
+    /// Atomic ACK of up to 256 legacy message handles in one consumer group.
+    AckBatch {
+        queue: String,
+        group: String,
+        message_ids: Vec<String>,
+    },
     Nack {
         queue: String,
         group: String,

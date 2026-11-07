@@ -7954,3 +7954,28 @@ fn test_parse_canonical_vault_reveal_and_secret_namespaces() {
         );
     }
 }
+
+#[test]
+fn queue_ack_batch_is_bounded_and_keeps_single_ack_syntax() {
+    let query = parse("QUEUE ACK tasks BATCH GROUP workers ('one', 'two')").expect("batch");
+    assert!(
+        matches!(query, QueryExpr::QueueCommand(QueueCommand::AckBatch { queue, group, message_ids })
+        if queue == "tasks" && group == "workers" && message_ids == ["one", "two"])
+    );
+    for bad in [
+        "QUEUE ACK tasks BATCH GROUP workers ()",
+        "QUEUE ACK tasks BATCH GROUP workers ('one',)",
+    ] {
+        assert!(parse(bad).is_err());
+    }
+    let ids = vec!["'one'"; 256].join(",");
+    assert!(parse(&format!("QUEUE ACK tasks BATCH GROUP workers ({ids})")).is_ok());
+    assert!(parse(&format!(
+        "QUEUE ACK tasks BATCH GROUP workers ({ids}, 'extra')"
+    ))
+    .is_err());
+    assert!(matches!(
+        parse("QUEUE ACK tasks GROUP workers 'one'").expect("legacy"),
+        QueryExpr::QueueCommand(QueueCommand::Ack { .. })
+    ));
+}

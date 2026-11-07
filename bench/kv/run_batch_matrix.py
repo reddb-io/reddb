@@ -43,6 +43,8 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--operations", type=int, default=256)
     parser.add_argument("--queues-only", action="store_true")
+    parser.add_argument("--queue-baseline", action="store_true", help="include native-before in a queue-only capture")
+    parser.add_argument("--red-ack-batch", action="store_true", help="use atomic ACK only on native-after")
     parser.add_argument("--queue-settle-ms", type=int, default=0)
     parser.add_argument("--resume-queues", action="store_true",
                         help="resume only between fully completed engines, preserving all prior samples")
@@ -51,13 +53,13 @@ def main():
         parser.error("queue-only captures use a fresh output directory")
     args.out.mkdir(parents=True, exist_ok=args.resume_queues)
     names = {key: f"{args.prefix}-{key}-{args.suffix}" for key in
-             (["client", "native-after", "rabbit", "kafka"] if args.queues_only else
+             (["client", "native-after", "rabbit", "kafka"] + (["native-before"] if args.queue_baseline else []) if args.queues_only else
               ["client", "native-before", "native-after", "redis", "rabbit", "kafka"])}
     manifest = {"containers": {key: inspect(name) for key, name in names.items()},
                 "classification": "shared-host diagnostic; single-node local durability",
                 "git_head": command("git", "rev-parse", "HEAD").strip(),
                 "dirty_diff_sha256": hashlib.sha256(command("git", "diff").encode()).hexdigest(),
-                "operations": args.operations, "queue_rounds": 3,
+                "operations": args.operations, "queue_rounds": 3, "red_ack_batch": args.red_ack_batch,
                 "queue_settle_ms": args.queue_settle_ms, "kv_rounds": 0 if args.queues_only else 3}
     with tempfile.TemporaryDirectory() as temporary:
         for key in ("native-before", "native-after"):
@@ -130,7 +132,8 @@ def main():
             "--host", names[key], "--name", name or label.replace("-", "_"),
             "--batch", str(batch), "--mode", mode,
             "--settle-ms", str(args.queue_settle_ms),
-            "--operations", str(count or args.operations), timeout=900))
+            "--operations", str(count or args.operations),
+            *(["--red-ack-batch"] if args.red_ack_batch and key == "native-after" else []), timeout=900))
         save(label, result)
         if result["status"] != "valid-diagnostic":
             raise RuntimeError(f"invalid queue result: {label}")

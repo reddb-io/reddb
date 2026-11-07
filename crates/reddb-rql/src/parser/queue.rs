@@ -371,6 +371,27 @@ impl<'a> Parser<'a> {
             Token::Ack => {
                 self.advance()?;
                 let queue = self.parse_collection_name()?;
+                if self.consume_ident_ci("BATCH")? {
+                    self.expect(Token::Group)?;
+                    let group = self.expect_ident()?;
+                    self.expect(Token::LParen)?;
+                    let mut message_ids = vec![self.parse_string()?];
+                    while self.consume(&Token::Comma)? {
+                        if message_ids.len() >= 256 {
+                            return Err(ParseError::new(
+                                "QUEUE ACK BATCH supports at most 256 messages".to_string(),
+                                self.position(),
+                            ));
+                        }
+                        message_ids.push(self.parse_string()?);
+                    }
+                    self.expect(Token::RParen)?;
+                    return Ok(QueryExpr::QueueCommand(QueueCommand::AckBatch {
+                        queue,
+                        group,
+                        message_ids,
+                    }));
+                }
                 let (group, message_id, delivery_id, _delay_ms) =
                     self.parse_ack_nack_handle(false)?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Ack {
