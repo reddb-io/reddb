@@ -157,7 +157,7 @@ fn populated_startup_child() {
             .expect("insert fixture rows");
         store.persist().expect("persist fixture");
     } else {
-        let runtime = if phase == "runtime" {
+        let runtime = if phase.starts_with("runtime") {
             Some(
                 RedDBRuntime::with_options(
                     RedDBOptions::persistent(path)
@@ -177,6 +177,7 @@ fn populated_startup_child() {
         };
         let ready = start.elapsed();
         assert_eq!(store.get_collection("rows").unwrap().count() as u64, rows);
+        assert!(store.segment_memory_bytes() <= 64 * 1024 * 1024);
         for id in [1, rows / 2, rows] {
             let row = store
                 .try_get("rows", EntityId::new(id), 64 * 1024 * 1024)
@@ -188,10 +189,11 @@ fn populated_startup_child() {
                 matches!(&values[1], Value::Text(text) if text.len() == VALUE_BYTES && text.as_bytes().iter().all(|&b| b == b'x'))
             );
         }
+        let first_samples = start.elapsed();
         if phase == "prepare" {
             store.persist().expect("publish derived roots");
         }
-        eprintln!("phase={phase} ready={ready:?} first_samples={:?} resident_segment_bytes={} peak_working_set_bytes={}", start.elapsed(), store.segment_memory_bytes(), peak_memory());
+        eprintln!("phase={phase} ready={ready:?} first_samples={first_samples:?} resident_segment_bytes={} peak_working_set_bytes={}", store.segment_memory_bytes(), peak_memory());
     }
     eprintln!(
         "phase={phase} elapsed={:?} peak_working_set_bytes={}",
@@ -203,11 +205,17 @@ fn populated_startup_child() {
 fn run_fixture(rows: u64) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("populated.rdb");
-    for phase in ["seed", "prepare", "open", "runtime"] {
+    let legacy_runtime_path = directory.path().join("legacy-runtime.rdb");
+    for phase in ["seed", "runtime-legacy", "prepare", "open", "runtime"] {
         eprintln!("starting phase={phase}");
+        let phase_path = if phase == "runtime-legacy" {
+            &legacy_runtime_path
+        } else {
+            &path
+        };
         let result = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "populated_startup_child", "--nocapture"])
-            .env(ENV_PATH, &path)
+            .env(ENV_PATH, phase_path)
             .env("REDDB_POPULATED_STARTUP_ROWS", rows.to_string())
             .env("REDDB_POPULATED_STARTUP_PHASE", phase)
             .output()
@@ -223,9 +231,12 @@ fn run_fixture(rows: u64) {
             result.status
         );
         assert!(
-            std::fs::metadata(&path).unwrap().len() < 1024 * 1024 * 1024,
+            std::fs::metadata(phase_path).unwrap().len() < 1024 * 1024 * 1024,
             "fixture exceeded 1 GiB on disk"
         );
+        if phase == "seed" {
+            std::fs::copy(&path, &legacy_runtime_path).expect("copy legacy checkpoint");
+        }
     }
     eprintln!(
         "logical_value_bytes={} file_bytes={} allocated_database_bytes={}",
