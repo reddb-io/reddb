@@ -1210,6 +1210,26 @@ impl StoreCommitCoordinator {
         store: &UnifiedStore,
         epoch: u64,
     ) -> io::Result<()> {
+        self.finish_page_ownership_epoch_inner(store, epoch, true)
+    }
+
+    /// A batch may leave completed ownership records protected in the WAL.
+    /// The next ordinary checkpoint (or recovery) validates the complete
+    /// journal before truncation; no user WAL is discarded here.
+    pub(super) fn finish_count_batch_ownership_epoch(
+        &self,
+        store: &UnifiedStore,
+        epoch: u64,
+    ) -> io::Result<()> {
+        self.finish_page_ownership_epoch_inner(store, epoch, false)
+    }
+
+    fn finish_page_ownership_epoch_inner(
+        &self,
+        store: &UnifiedStore,
+        epoch: u64,
+        validate_for_truncation: bool,
+    ) -> io::Result<()> {
         if epoch == 0 || store.ownership_active_epoch.load(Ordering::Acquire) != epoch {
             return Err(io::Error::other("page ownership epoch is not active"));
         }
@@ -1228,7 +1248,11 @@ impl StoreCommitCoordinator {
         )?;
         pager.clear_ownership_recorder()?;
         store.ownership_active_epoch.store(0, Ordering::Release);
-        self.release_completed_ownership_wal()
+        if validate_for_truncation {
+            self.release_completed_ownership_wal()
+        } else {
+            Ok(())
+        }
     }
 
     pub(crate) fn replay_into(

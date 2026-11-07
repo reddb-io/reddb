@@ -134,10 +134,19 @@ fn incremental_count_build_allows_writes_and_restarts_after_checkpoint() {
     while !build.step(&store).unwrap() {}
     compare(&store, None, 193);
     drop(build);
+    // Completed batch epochs remain in the WAL until the next checkpoint.
+    // A subsequent acknowledged write must still replay after restart.
+    store
+        .insert(
+            "rows",
+            UnifiedEntity::table_row(EntityId::new(194), "rows", 194, vec![]),
+        )
+        .unwrap();
+    compare(&store, None, 194);
     drop(store);
     let reopened =
         UnifiedStore::open_with_config(directory.path().join("count.rdb"), config()).unwrap();
-    compare(&reopened, None, 193);
+    compare(&reopened, None, 194);
 }
 
 #[test]
@@ -189,6 +198,16 @@ fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
             "publish one recoverable partial batch"
         );
         let stage = std::env::var("REDDB_TEST_COUNT_BATCH_STAGE").unwrap();
+        if stage == "finished" {
+            while !build.step(&store).unwrap() {}
+            store
+                .insert(
+                    "rows",
+                    UnifiedEntity::table_row(EntityId::new(129), "rows", 129, vec![]),
+                )
+                .unwrap();
+            std::process::exit(185);
+        }
         if stage == "final" {
             assert!(!build.step(&store).unwrap());
         }
@@ -201,7 +220,12 @@ fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
         let _ = build.step(&store);
         panic!("crash injection did not fire");
     }
-    for (stage, exit_code) in [("before", 183), ("after", 184), ("final", 184)] {
+    for (stage, exit_code) in [
+        ("before", 183),
+        ("after", 184),
+        ("final", 184),
+        ("finished", 185),
+    ] {
         let (directory, store) = fixture();
         for id in 1..=128 {
             store
@@ -219,17 +243,18 @@ fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
         .env(CHILD, &path).env("REDDB_TEST_COUNT_BATCH_STAGE", stage).output().unwrap();
         assert_eq!(result.status.code(), Some(exit_code), "crash stage {stage}");
         let store = UnifiedStore::open_with_config(&path, config()).unwrap();
-        assert_eq!(store.get_collection("rows").unwrap().count(), 128);
+        let expected = if stage == "finished" { 129 } else { 128 };
+        assert_eq!(store.get_collection("rows").unwrap().count(), expected);
         let projected = store.try_count_from_index("rows", None).unwrap();
-        if stage == "final" {
-            assert_eq!(projected, Some(128));
+        if stage == "final" || stage == "finished" {
+            assert_eq!(projected, Some(expected as u64));
         } else {
             assert_eq!(projected, None);
             store.register_count_index_deferred("rows").unwrap();
             let mut build = store.start_count_build("rows").unwrap().unwrap();
             while !build.step(&store).unwrap() {}
         }
-        compare(&store, None, 128);
+        compare(&store, None, expected as u64);
     }
 }
 

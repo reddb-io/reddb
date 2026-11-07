@@ -198,7 +198,7 @@ impl CountBuild {
             std::process::exit(184);
         }
         commit
-            .finish_page_ownership_epoch(store, epoch)
+            .finish_count_batch_ownership_epoch(store, epoch)
             .map_err(StoreError::Io)?;
         fence.active = false;
         Ok(finished)
