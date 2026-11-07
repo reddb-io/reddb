@@ -4,6 +4,87 @@ use reddb_engine::storage::collection_read::{CollectionCursor, PagedCollection};
 use reddb_engine::storage::segment_key_lookup::SegmentKeyLookup;
 
 impl UnifiedStore {
+    /// Physical redo can change records without changing their root address.
+    /// Recount bases and discard derived indexes before this private copy is
+    /// published; normal startup recreates secondary indexes from definitions.
+    pub(crate) fn reconcile_physical_recovery(&self) -> Result<(), StoreError> {
+        let _publication = self.vault_publication_lock.lock();
+        if self.config.resident_memory_bytes_max.is_none() {
+            return Ok(());
+        }
+        for (name, tree) in self.btree_indices.read().iter() {
+            let manager = self
+                .get_collection(name)
+                .ok_or_else(|| StoreError::CollectionNotFound(name.clone()))?;
+            let root = tree.root_page_id();
+            if root == 0 {
+                continue;
+            }
+            if manager.backing_count_at_root(root).is_none() {
+                return Err(StoreError::Io(std::io::Error::other(
+                    "physical recovery cannot verify the collection backing",
+                )));
+            }
+            if manager.backing_count_at_root(root).is_some() {
+                let pages = tree
+                    .retired_pages()
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+                let pager = self.pager.as_ref().ok_or_else(|| {
+                    StoreError::Io(std::io::Error::other("recovered pager missing"))
+                })?;
+                let mut leaves = Vec::new();
+                let mut count = 0u64;
+                for id in pages.into_iter().rev() {
+                    let page = pager.read_page(id).map_err(|error| {
+                        StoreError::Io(std::io::Error::other(error.to_string()))
+                    })?;
+                    if page
+                        .page_type()
+                        .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                        == crate::storage::engine::PageType::BTreeLeaf
+                    {
+                        let next = u32::from_le_bytes(
+                            page.content()[4..8].try_into().expect("leaf header"),
+                        );
+                        count =
+                            count
+                                .checked_add(u64::from(page.cell_count()))
+                                .ok_or_else(|| {
+                                    StoreError::Io(std::io::Error::other(
+                                        "recovered count overflow",
+                                    ))
+                                })?;
+                        leaves.push((id, next));
+                    }
+                }
+                if leaves.is_empty()
+                    || leaves.iter().enumerate().any(|(index, (_, next))| {
+                        *next != leaves.get(index + 1).map_or(0, |leaf| leaf.0)
+                    })
+                {
+                    return Err(StoreError::Io(std::io::Error::other(
+                        "recovered leaf chain differs from tree ownership",
+                    )));
+                }
+                if !manager.set_recovered_backing_count(root, count) {
+                    return Err(StoreError::Io(std::io::Error::other(
+                        "recovered backing changed",
+                    )));
+                }
+            }
+        }
+        let previous = std::mem::take(&mut *self.key_indices.write());
+        for index in previous.values() {
+            for tree in index.trees() {
+                self.retire_btree(Arc::clone(tree));
+            }
+        }
+        self.resident
+            .paged_registry_dirty
+            .store(true, Ordering::Release);
+        Ok(())
+    }
+
     pub(super) fn checkpoint_key_indices(
         &self,
         pager: &Arc<Pager>,

@@ -1,15 +1,13 @@
 name: Dependabot
 
-# Runs only on Dependabot PRs.
-# All other workflows skip Dependabot (gate/job-level if conditions).
+# Optional dependency-update validation, dispatched on the selected branch.
+# Automatic PR feedback is limited to Quick checks.
 #
 # Checks that the dependency update compiles and passes unit tests,
-# then auto-approves patch and minor bumps so Dependabot can
-# auto-merge them without manual review.
+# Dependency updates are reviewed and merged separately.
 
 on:
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -26,7 +24,7 @@ env:
 jobs:
   check:
     name: Verify update compiles
-    if: github.actor == 'dependabot[bot]'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -59,27 +57,3 @@ jobs:
 
       - name: Unit tests
         run: cargo test --locked --lib
-
-  auto-approve:
-    name: Auto-approve patch/minor bumps
-    needs: check
-    if: github.actor == 'dependabot[bot]'
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
-    steps:
-      - name: Fetch Dependabot metadata
-        id: meta
-        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Approve patch and minor updates
-        if: |
-          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
-          steps.meta.outputs.update-type == 'version-update:semver-minor'
-        run: |
-          gh pr review "$PR_URL" --approve --body "Auto-approved: ${{ steps.meta.outputs.update-type }} bump verified by CI."
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

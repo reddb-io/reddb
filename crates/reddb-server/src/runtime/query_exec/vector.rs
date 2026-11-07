@@ -173,7 +173,7 @@ pub(crate) fn runtime_vector_matches(
             // scheduled); the explicit populate doubles as a
             // last-chance unblock so a SEARCH after restart on a
             // single-vector collection never spuriously 503s.
-            state.ensure_populated(&db.store(), &query.collection);
+            state.ensure_populated(&db.store(), &query.collection)?;
             if !state.is_ready() {
                 return Err(RedDBError::InvalidOperation(format!(
                     "NOT_READY: vector.turbo collection '{}' is rebuilding (turbo index recovery); retry shortly",
@@ -331,22 +331,35 @@ pub(crate) fn runtime_vector_matches(
     // The segment cursor fixes membership and append boundaries without an
     // O(N) ID list. Scoring, top-k copies and reentrant policies stay outside
     // segment locks; only one bounded payload batch is resident here.
-    manager.scan_batches(
-        snapshot.as_ref(),
-        || crate::runtime::function_budget::charge(1).is_ok(),
-        |batch| {
-            if crate::runtime::function_budget::charge(0).is_err() {
-                return false;
-            }
-            for entity in batch {
-                if crate::runtime::function_budget::charge(1).is_err() {
+    let cold_cursor = {
+        let store = db.store();
+        let _publication = store.vault_publication_lock.lock();
+        manager.try_paged_entity_cursor(snapshot.clone())?
+    };
+    if let Some(cursor) = cold_cursor {
+        for record in cursor {
+            crate::runtime::function_budget::charge(1)?;
+            let (entity, _) = record?;
+            consider(&entity);
+        }
+    } else {
+        manager.scan_batches(
+            snapshot.as_ref(),
+            || crate::runtime::function_budget::charge(1).is_ok(),
+            |batch| {
+                if crate::runtime::function_budget::charge(0).is_err() {
                     return false;
                 }
-                consider(entity);
-            }
-            true
-        },
-    );
+                for entity in batch {
+                    if crate::runtime::function_budget::charge(1).is_err() {
+                        return false;
+                    }
+                    consider(entity);
+                }
+                true
+            },
+        );
+    }
     crate::runtime::function_budget::charge(0)?;
     stats.peak_topk_entries = top.len() as u64;
     Ok(top.finish())

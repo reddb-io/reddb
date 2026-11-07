@@ -42,6 +42,83 @@ impl UnifiedStore {
         })
     }
 
+    /// Inventory at most `budget` physical positions for retention. The caller
+    /// must recheck the current row and retention predicate before deletion.
+    pub(crate) fn retention_scan_tick(
+        &self,
+        cursor: &mut MvccReclaimCursor,
+        budget: usize,
+    ) -> Result<(Vec<EntityId>, usize), StoreError> {
+        let Some(_publication) = self.vault_publication_lock.try_lock() else {
+            return Ok((Vec::new(), 0));
+        };
+        let Some(manager) = self.get_collection(&cursor.collection) else {
+            cursor.invalidated = true;
+            return Ok((Vec::new(), 0));
+        };
+        if !Arc::ptr_eq(&manager, &cursor.manager) {
+            cursor.invalidated = true;
+            return Ok((Vec::new(), 0));
+        }
+        let mut work_left = budget;
+        let mut ids = Vec::with_capacity(budget.min(128));
+        while work_left > 0 && !cursor.scan.finished() {
+            ids.extend(manager.physical_scan_batch(&mut cursor.scan, &mut work_left));
+        }
+        if !manager.has_backing() {
+            cursor.cold_finished = true;
+        }
+        if work_left > 0 && !cursor.cold_finished {
+            let tree = self
+                .btree_indices
+                .read()
+                .get(&cursor.collection)
+                .cloned()
+                .ok_or_else(|| {
+                    StoreError::Serialization("retention base has no published tree".into())
+                })?;
+            let start = match cursor.cold_after.as_deref() {
+                Some(after) => {
+                    let raw: [u8; 8] = after.try_into().map_err(|_| {
+                        StoreError::Serialization("invalid retention cursor identity".into())
+                    })?;
+                    let Some(next) = u64::from_be_bytes(raw).checked_add(1) else {
+                        cursor.cold_finished = true;
+                        ids.sort_unstable();
+                        ids.dedup();
+                        return Ok((ids, budget - work_left));
+                    };
+                    next.to_be_bytes()
+                }
+                None => 0_u64.to_be_bytes(),
+            };
+            let mut native = tree
+                .cursor_seek(&start)
+                .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+            while work_left > 0 {
+                let Some(key) = native
+                    .peek_key()
+                    .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+                else {
+                    cursor.cold_finished = true;
+                    break;
+                };
+                let raw: [u8; 8] = key.as_slice().try_into().map_err(|_| {
+                    StoreError::Serialization("invalid retention physical identity".into())
+                })?;
+                native
+                    .skip_next()
+                    .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+                cursor.cold_after = Some(key);
+                ids.push(EntityId::new(u64::from_be_bytes(raw)));
+                work_left -= 1;
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        Ok((ids, budget - work_left))
+    }
+
     /// A busy checkpoint leaves the cursor untouched. Work is bounded by
     /// inspected positions, reclaimed versions and decoded bytes. Generation
     /// pins never survive the tick and force unrelated appends to copy history.

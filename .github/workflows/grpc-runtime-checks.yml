@@ -1,0 +1,34 @@
+name: Optional gRPC runtime checks
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: grpc-runtime-release
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  verify:
+    name: Runtime and codec qualification
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22'
+      - name: Verify versions, provenance and fixed dependency graphs
+        run: |
+          bash scripts/check-versions.sh
+          node --test scripts/release_tooling_contract.test.mjs
+      - name: Verify runtime and codec behavior
+        run: cargo test --locked -p reddb-io-tonic --features gzip,zstd,transport -p reddb-io-tonic-prost --lib

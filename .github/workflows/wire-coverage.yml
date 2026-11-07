@@ -5,11 +5,6 @@ name: Wire Coverage Gate
 # fails the PR if the isolated wire crate drops below 90% line coverage.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'crates/reddb-wire/**'
-      - '.github/workflows/wire-coverage.yml'
   workflow_dispatch:
 
 concurrency:

@@ -200,6 +200,48 @@ fn runtime_serverless_publish_survives_pack_and_current_crash_points() {
                 .expect("advanced CURRENT must reference a complete generation");
         }
 
+        let selected_plan = reddb_file::ServerlessFilePlan::new(
+            current_plan.root.clone(),
+            current_plan.namespace.clone(),
+            current.generation,
+        );
+        let extents =
+            reddb_file::ServerlessExtentIndex::read_from_path(selected_plan.extent_index_path())
+                .expect("read selected extent index");
+        let hydration = extents.hydration_plan_for_key("serverless_items", b"1");
+        let ranges = selected_plan
+            .hydrate_local_plan(&hydration)
+            .expect("hydrate selected generation");
+        assert_eq!(ranges.len(), 1);
+        let recovered_dir = tempfile::tempdir().expect("recovered store directory");
+        let recovered_path = recovered_dir.path().join("recovered.rdb");
+        reddb_server::storage::EmbeddedRdbArtifact::create_with_snapshot(
+            &recovered_path,
+            &ranges[0].payload,
+        )
+        .expect("materialize selected collection");
+        let recovered = RedDBRuntime::with_options(RedDBOptions::persistent(&recovered_path))
+            .expect("open hydrated collection");
+        assert_eq!(
+            recovered
+                .execute_query("SELECT id FROM serverless_items WHERE id = 1 AND name = 'alpha'")
+                .expect("query original row")
+                .result
+                .len(),
+            1,
+            "published row missing after crash at {point}"
+        );
+        let new_rows = recovered
+            .execute_query("SELECT id FROM serverless_items WHERE id = 99 AND name = 'crash'")
+            .expect("query next generation row")
+            .result
+            .len();
+        assert_eq!(
+            new_rows,
+            usize::from(current.generation != first_pointer.generation)
+        );
+        drop(recovered);
+
         primary_replica_file::cleanup(&data_path);
     }
 }
@@ -283,6 +325,33 @@ fn runtime_hydrates_current_serverless_collection_from_verified_pointer() {
     assert!(
         cache_path.exists(),
         "cached hydrate should persist a validated range"
+    );
+    // A partial cache write plus an interrupted source transfer cannot be
+    // returned as a successful hydration; retry only after the source recovers.
+    let request = &hydration.requests[0];
+    let pack_path = current_plan.generation_dir().join(&request.relative_path);
+    let pack = fs::read(&pack_path).expect("read source pack");
+    fs::write(
+        &cache_path,
+        &key_ranges[0].payload[..key_ranges[0].payload.len() / 2],
+    )
+    .expect("simulate interrupted cache write");
+    let incomplete_len =
+        usize::try_from(request.offset + request.bytes - 1).expect("hydration range fits memory");
+    fs::write(&pack_path, &pack[..incomplete_len]).expect("simulate incomplete source pack");
+    current_plan
+        .hydrate_local_request_cached(request, &cache)
+        .expect_err("partial cache and source must fail closed");
+    cache
+        .read_hydrated_range(request)
+        .expect_err("partial cache entry must not be served");
+    fs::write(&pack_path, &pack).expect("restore source pack");
+    assert_eq!(
+        current_plan
+            .hydrate_local_request_cached(request, &cache)
+            .expect("retry hydration after source recovery")
+            .payload,
+        key_ranges[0].payload
     );
     fs::write(&cache_path, b"corrupt cache entry").expect("corrupt cache entry");
     let healed_cached_ranges = runtime

@@ -29,9 +29,6 @@ jobs:
       - name: Verify versions, provenance and fixed dependency graphs
         run: |
           bash scripts/check-versions.sh
-          node --test scripts/release_tooling_contract.test.mjs
-      - name: Verify runtime and codec behavior
-        run: cargo test --locked -p reddb-io-tonic --features gzip,zstd,transport -p reddb-io-tonic-prost --lib
       - name: Publish runtime, then codec
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

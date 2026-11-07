@@ -58,6 +58,11 @@ pub(crate) fn active() -> bool {
     CURRENT.with(|slot| slot.get().is_some()) || super::query_budget::active()
 }
 
+/// Stored-function work limits cannot be charged a second time for a retry.
+pub(crate) fn stored_function_active() -> bool {
+    CURRENT.with(|slot| slot.get().is_some())
+}
+
 /// Charge work before doing it. Zero forces a deadline check at a statement or
 /// phase boundary. Row loops sample the clock every 256 units; no timer thread,
 /// allocation, lock, or atomic operation is needed per unit.

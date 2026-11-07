@@ -73,6 +73,46 @@ loss. This is a standalone public-contract fixture; it does not contain the
 private Hunter schema, migration sequence or client application from #2536.
 Its success must not be described as reproducing or qualifying that private run.
 
+Each reopen records monotonic durations from process launch to HTTP readiness,
+readiness to the first successful RedWire query, and launch to its result in
+`reopenTimings`. The first query checks an acknowledged table row; subsequent
+checks verify the named secondary index, all expected table and KV values and
+collection models. The first-query duration includes starting the CLI client.
+On Linux, each sample also records the server's peak RSS, process read-byte
+count and bytes returned by read calls through the first result. These counters
+include all server activity, not just the database; missing counters are null.
+No universal latency threshold is imposed: use repeated runs on the target
+hardware and compare against the POC's chosen SLO. Restarting a process does not
+flush the OS page cache, simulate remote object storage, or prove a hosted
+scale-to-zero orchestrator. These receipts therefore measure local reopens,
+not a production cold-cache or remote-hydration SLO.
+The four-case fixture remains available through the manually dispatched storage
+recovery workflow, which retains its receipt. A single case can be selected
+locally with `--case serverless`.
+
+The Linux and Windows sparse-file startup regressions measure pager data-file
+reads on the calling thread through the first query for identical live data at
+compact and 50 GiB logical sizes, in both resident and bounded disk-resident
+profiles. They also start separate processes and report process-wide read bytes,
+readiness, and first-result time, then write, checkpoint, and reopen the sparse
+database. Run them with:
+
+```sh
+cargo test -p reddb-io-server --lib runtime::startup_io_budget:: -- --test-threads=1 --nocapture
+```
+
+Physical allocation remains small; the sparse extent contains holes, not 50 GiB
+of populated rows. Process restarts do not evict the OS page cache. This guards
+against work proportional to the logical file extent, but does not establish
+latency for a fully populated database, remote hydration, or cold physical I/O.
+The embedded startup test separately uses a real multi-megabyte snapshot and a
+fresh process to bound total snapshot read bytes. The embedded format still
+materializes the complete snapshot and decoded data in memory.
+The serverless generation crash matrix separately
+checks that the selected published generation hydrates to queryable rows after
+each publication interruption; the partial-cache/source fixture checks failed
+hydration and retry. They do not model a process kill at every hydration write.
+
 ## Interpreting space checks
 
 The crash matrix uses four warmup generations, then allows at most two database

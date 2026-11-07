@@ -1,0 +1,507 @@
+//! Reproductions from Hunter and Red Router. Only disposable stores are opened.
+use reddb_server::{RedDBOptions, RedDBRuntime};
+
+#[test]
+fn historical_empty_system_aliases_survive_runtime_cold_boot() {
+    use reddb_server::storage::{EntityId, UnifiedEntity};
+    use reddb_types::Value;
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let path = directory.path().join("historical.rdb");
+    let mut bytes = reddb_file::encode_native_store_header(12);
+    reddb_file::encode_native_dump_count(&mut bytes, 3);
+    for name in ["red_config", "red.config"] {
+        reddb_file::encode_native_dump_collection_header(&mut bytes, name, 0);
+    }
+    reddb_file::encode_native_dump_collection_header(&mut bytes, "fixture_owner", 1);
+    let row = UnifiedEntity::table_row(
+        EntityId::new(41),
+        "fixture_owner",
+        1,
+        vec![Value::Integer(7)],
+    );
+    reddb_file::encode_native_dump_entity_record(
+        &mut bytes,
+        &reddb_engine::storage::metadata_codec::serialize_entity_record(&row, None, 12),
+    );
+    reddb_file::encode_native_dump_count(&mut bytes, 0);
+    reddb_file::encode_native_dump_entity_record(&mut bytes, &[]);
+    reddb_file::append_native_store_crc32_footer(&mut bytes);
+    std::fs::write(&path, &bytes).expect("historical fixture");
+    for _ in 0..3 {
+        let runtime =
+            RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("cold boot");
+        let store = runtime.db().store();
+        let owner = store
+            .get_collection("fixture_owner")
+            .expect("preserved collection");
+        let rows = owner.query_all(|_| true);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, row.id);
+        assert!(store
+            .list_collections()
+            .iter()
+            .all(|name| name != "red_config"));
+        assert!(store.get_collection("red.config").is_some());
+        runtime.flush().expect("checkpoint migrated data");
+    }
+}
+
+#[test]
+fn read_only_open_query_and_drop_preserve_database_bytes() {
+    read_only_fixture(false);
+}
+
+#[test]
+fn read_only_legacy_snapshot_is_not_promoted() {
+    read_only_fixture(true);
+}
+
+fn read_only_fixture(legacy: bool) {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let path = directory.path().join("readonly.rdb");
+    {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("create");
+        runtime
+            .execute_query("CREATE TABLE owner (id INT PRIMARY KEY, payload TEXT)")
+            .expect("schema");
+        runtime
+            .execute_query("INSERT INTO owner (id, payload) VALUES (1, 'preserved')")
+            .expect("seed");
+        runtime.flush().expect("checkpoint");
+    }
+    if legacy {
+        let artifact = reddb_server::storage::EmbeddedRdbArtifact::open(&path).expect("artifact");
+        let snapshot = reddb_server::storage::EmbeddedRdbArtifact::read_snapshot(&artifact)
+            .expect("read snapshot")
+            .expect("snapshot exists");
+        std::fs::write(&path, snapshot).expect("legacy fixture");
+    }
+    let before = std::fs::read(&path).expect("cold bytes");
+    {
+        let runtime =
+            RedDBRuntime::with_options(RedDBOptions::persistent(&path).with_read_only(true))
+                .expect("read-only open");
+        let result = runtime
+            .execute_query("SELECT payload FROM owner WHERE id = 1")
+            .expect("read");
+        assert_eq!(result.result.records.len(), 1);
+        assert!(runtime
+            .execute_query("INSERT INTO owner (id, payload) VALUES (2, 'denied')")
+            .is_err());
+        let entity = runtime
+            .db()
+            .store()
+            .get_collection("owner")
+            .expect("owner")
+            .query_all(|entity| entity.xmax == 0)
+            .pop()
+            .expect("preserved row");
+        let deletion = reddb_server::replication::cdc::change_record_from_entity(
+            1,
+            1,
+            reddb_server::replication::cdc::ChangeOperation::Delete,
+            "owner",
+            "table",
+            &entity,
+            12,
+            None,
+        );
+        let applier = reddb_server::replication::logical::LogicalChangeApplier::new(0);
+        assert!(applier
+            .apply(
+                &runtime.db(),
+                &deletion,
+                reddb_server::replication::logical::ApplyMode::Replica
+            )
+            .is_err());
+        assert_eq!(applier.last_applied_lsn(), 0);
+        assert_eq!(
+            runtime
+                .execute_query("SELECT id FROM owner")
+                .expect("unchanged row")
+                .result
+                .records
+                .len(),
+            1
+        );
+        runtime.flush().expect("read-only checkpoint is a no-op");
+        runtime
+            .db()
+            .flush_local_only()
+            .expect("read-only local checkpoint");
+        let opened = std::fs::read(&path).expect("bytes after read");
+        assert!(
+            opened == before,
+            "read-only open/query changed the database bytes ({} -> {})",
+            before.len(),
+            opened.len()
+        );
+    }
+    assert!(
+        std::fs::read(&path).expect("bytes after drop") == before,
+        "read-only drop changed the database bytes"
+    );
+}
+
+#[test]
+fn replica_replay_updates_populated_secondary_index_before_advancing_lsn() {
+    use reddb_server::replication::cdc::{change_record_from_entity, ChangeOperation};
+    use reddb_server::replication::logical::{ApplyMode, LogicalChangeApplier};
+
+    let primary = RedDBRuntime::in_memory().expect("primary fixture");
+    let replica = RedDBRuntime::in_memory().expect("replica fixture");
+    for runtime in [&primary, &replica] {
+        runtime
+            .execute_query("CREATE TABLE replicated (id INT, status TEXT)")
+            .expect("schema");
+    }
+    primary
+        .execute_query("INSERT INTO replicated (id, status) VALUES (1, 'ready'), (2, 'ready')")
+        .expect("source rows");
+    let mut entities = primary
+        .db()
+        .store()
+        .get_collection("replicated")
+        .expect("source collection")
+        .query_all(|_| true);
+    entities.sort_by_key(|entity| entity.id.raw());
+    assert_eq!(entities.len(), 2);
+    let applier = LogicalChangeApplier::new(0);
+    let record = |index: usize| {
+        change_record_from_entity(
+            index as u64 + 1,
+            1,
+            ChangeOperation::Insert,
+            "replicated",
+            "table",
+            &entities[index],
+            12,
+            None,
+        )
+    };
+    applier
+        .apply(&replica.db(), &record(0), ApplyMode::Replica)
+        .expect("first replay");
+    replica
+        .execute_query("CREATE INDEX replica_status ON replicated (status) USING HASH")
+        .expect("populate index");
+    let index = replica
+        .index_store_ref()
+        .find_index_for_column("replicated", "status")
+        .expect("registered index");
+    assert_eq!(replica.index_store_ref().entries_indexed(&index), Some(1));
+    applier
+        .apply(&replica.db(), &record(1), ApplyMode::Replica)
+        .expect("second replay");
+    assert_eq!(applier.last_applied_lsn(), 2);
+    let all = replica
+        .execute_query("SELECT id FROM replicated")
+        .expect("full scan");
+    assert_eq!(
+        all.result.records.len(),
+        2,
+        "storage must contain both replayed rows"
+    );
+    let filtered = replica
+        .execute_query("SELECT id FROM replicated WHERE status = 'ready'")
+        .expect("indexed query");
+    assert_eq!(
+        (
+            replica.index_store_ref().entries_indexed(&index),
+            filtered.result.records.len()
+        ),
+        (Some(2), 2),
+        "applied frontier advanced but the secondary index and indexed SQL omit a replayed row"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_memory_probe_detects_host_ram() {
+    use reddb_server::storage::{memory_budget, DeployProfile};
+    let inputs = memory_budget::host_inputs(DeployProfile::Embedded, None);
+    assert!(
+        inputs.physical_ram_bytes > 0,
+        "Windows must detect RAM instead of silently selecting the 64 MiB fallback"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn cold_boot_fits_one_mib_windows_stack() {
+    const CHILD_PATH: &str = "REDDB_CONSUMER_STACK_CHILD_PATH";
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        // A stack overflow aborts only this subprocess, not the test runner.
+        std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(path))
+                    .expect("cold boot on 1 MiB stack");
+                let rows = runtime
+                    .execute_query("SELECT id FROM stack_fixture")
+                    .expect("read restored data");
+                assert_eq!(rows.result.records.len(), 1);
+            })
+            .expect("bounded-stack worker")
+            .join()
+            .expect("worker completed");
+        return;
+    }
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let path = directory.path().join("stack.rdb");
+    {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("create");
+        runtime
+            .execute_query("CREATE TABLE stack_fixture (id INT)")
+            .expect("schema");
+        runtime
+            .execute_query("INSERT INTO stack_fixture (id) VALUES (1)")
+            .expect("seed");
+        runtime.flush().expect("checkpoint");
+    }
+    let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "cold_boot_fits_one_mib_windows_stack",
+            "--nocapture",
+        ])
+        .env(CHILD_PATH, &path)
+        .status()
+        .expect("child boot process");
+    assert!(
+        status.success(),
+        "cold boot failed on a 1 MiB Windows stack: {status}"
+    );
+}
+
+#[test]
+fn read_only_missing_path_creates_no_artifacts() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let path = directory.path().join("missing").join("database.rdb");
+    assert!(
+        RedDBRuntime::with_options(RedDBOptions::persistent(&path).with_read_only(true)).is_err()
+    );
+    assert!(!path.parent().unwrap().exists());
+}
+
+#[test]
+fn replica_update_and_delete_survive_wal_only_recovery_with_indexes() {
+    use reddb_server::replication::cdc::{change_record_from_entity, ChangeOperation};
+    use reddb_server::replication::logical::{ApplyMode, LogicalChangeApplier};
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("replica.rdb");
+    let primary = RedDBRuntime::in_memory().expect("primary");
+    let replica = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("replica");
+    for runtime in [&primary, &replica] {
+        runtime
+            .execute_query("CREATE TABLE replay_rows (id INT, status TEXT)")
+            .expect("schema");
+    }
+    primary
+        .execute_query("INSERT INTO replay_rows (id, status) VALUES (1, 'old')")
+        .expect("source");
+    let source_row = || {
+        primary
+            .db()
+            .store()
+            .get_collection("replay_rows")
+            .expect("collection")
+            .query_all(|entity| entity.xmax == 0)
+            .pop()
+            .expect("live row")
+    };
+    let record = |lsn, operation| {
+        change_record_from_entity(
+            lsn,
+            1,
+            operation,
+            "replay_rows",
+            "table",
+            &source_row(),
+            12,
+            None,
+        )
+    };
+    let applier = LogicalChangeApplier::new(0);
+    applier
+        .apply(
+            &replica.db(),
+            &record(1, ChangeOperation::Insert),
+            ApplyMode::Replica,
+        )
+        .expect("insert replay");
+    replica
+        .execute_query("CREATE INDEX replay_status ON replay_rows (status) USING HASH")
+        .expect("index");
+    replica.flush().expect("baseline checkpoint");
+    primary
+        .execute_query("UPDATE replay_rows SET status = 'new' WHERE id = 1")
+        .expect("source update");
+    applier
+        .apply(
+            &replica.db(),
+            &record(2, ChangeOperation::Update),
+            ApplyMode::Replica,
+        )
+        .expect("update replay");
+    let verify = |runtime: &RedDBRuntime, live: usize| {
+        assert_eq!(
+            runtime
+                .execute_query("SELECT id FROM replay_rows WHERE status = 'old'")
+                .expect("old index key")
+                .result
+                .records
+                .len(),
+            0
+        );
+        assert_eq!(
+            runtime
+                .execute_query("SELECT id FROM replay_rows WHERE status = 'new'")
+                .expect("new index key")
+                .result
+                .records
+                .len(),
+            live
+        );
+        assert_eq!(
+            runtime
+                .execute_query("SELECT id FROM replay_rows")
+                .expect("full scan")
+                .result
+                .records
+                .len(),
+            live
+        );
+    };
+    verify(&replica, 1);
+    let recovered_update = directory.path().join("update.rdb");
+    std::fs::copy(&path, &recovered_update).expect("crash image before checkpoint or drop");
+    verify(
+        &RedDBRuntime::with_options(RedDBOptions::persistent(&recovered_update))
+            .expect("WAL recovery"),
+        1,
+    );
+    applier
+        .apply(
+            &replica.db(),
+            &record(3, ChangeOperation::Delete),
+            ApplyMode::Replica,
+        )
+        .expect("delete replay");
+    assert_eq!(applier.last_applied_lsn(), 3);
+    verify(&replica, 0);
+    let recovered_delete = directory.path().join("delete.rdb");
+    std::fs::copy(&path, &recovered_delete).expect("delete crash image");
+    for _ in 0..2 {
+        verify(
+            &RedDBRuntime::with_options(RedDBOptions::persistent(&recovered_delete))
+                .expect("delete recovery and cold boot"),
+            0,
+        );
+    }
+}
+
+#[test]
+fn read_only_native_pager_opens_without_recovery_writes() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("paged.rdb");
+    {
+        let store = reddb_server::storage::UnifiedStore::open(&path).expect("native pager");
+        store.persist().expect("checkpoint");
+    }
+    let before = std::fs::read(&path).expect("native bytes");
+    let reader = RedDBRuntime::with_options(RedDBOptions::persistent(&path).with_read_only(true))
+        .expect("read-only native open");
+    reader.flush().expect("read-only flush");
+    drop(reader);
+    assert_eq!(std::fs::read(&path).expect("unchanged bytes"), before);
+}
+
+#[test]
+fn promoted_legacy_snapshot_keeps_new_writes_in_wal() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("legacy.rdb");
+    {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("create");
+        runtime
+            .execute_query("CREATE TABLE promoted_rows (id INT)")
+            .expect("schema");
+        runtime
+            .execute_query("INSERT INTO promoted_rows (id) VALUES (1)")
+            .expect("seed");
+        runtime.flush().expect("checkpoint");
+    }
+    let artifact = reddb_server::storage::EmbeddedRdbArtifact::open(&path).expect("artifact");
+    let snapshot = reddb_server::storage::EmbeddedRdbArtifact::read_snapshot(&artifact)
+        .expect("read")
+        .expect("snapshot");
+    std::fs::write(&path, snapshot).expect("legacy image");
+    let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("promote");
+    runtime
+        .execute_query("INSERT INTO promoted_rows (id) VALUES (2)")
+        .expect("durable insert");
+    let crash_path = directory.path().join("crash.rdb");
+    std::fs::copy(&path, &crash_path).expect("copy before drop/checkpoint");
+    let recovered =
+        RedDBRuntime::with_options(RedDBOptions::persistent(crash_path)).expect("recover");
+    assert_eq!(
+        recovered
+            .execute_query("SELECT id FROM promoted_rows")
+            .expect("rows")
+            .result
+            .records
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn rejected_replica_payload_does_not_publish_data_or_advance_frontier() {
+    use reddb_server::replication::cdc::{change_record_from_entity, ChangeOperation};
+    use reddb_server::replication::logical::{ApplyMode, LogicalChangeApplier};
+    use reddb_server::storage::{EntityId, UnifiedEntity};
+    let replica = RedDBRuntime::in_memory().expect("replica");
+    replica
+        .execute_query("CREATE TABLE validated_replay (id INT)")
+        .expect("schema");
+    let row = UnifiedEntity::table_row(
+        EntityId::new(91000),
+        "validated_replay",
+        1,
+        vec![reddb_types::Value::Integer(1)],
+    );
+    let record = change_record_from_entity(
+        1,
+        1,
+        ChangeOperation::Insert,
+        "validated_replay",
+        "table",
+        &row,
+        12,
+        None,
+    );
+    let applier = LogicalChangeApplier::new(0);
+    let mut invalid_metadata = record.clone();
+    invalid_metadata.metadata = Some(reddb_wire::replication::ChangeRecordJsonValue::Null);
+    let mut invalid_identity = record.clone();
+    invalid_identity.entity_id += 1;
+    for invalid in [invalid_metadata, invalid_identity] {
+        assert!(applier
+            .apply(&replica.db(), &invalid, ApplyMode::Replica)
+            .is_err());
+        assert_eq!(applier.last_applied_lsn(), 0);
+        assert_eq!(
+            replica
+                .execute_query("SELECT id FROM validated_replay")
+                .expect("read")
+                .result
+                .records
+                .len(),
+            0
+        );
+    }
+    applier
+        .apply(&replica.db(), &record, ApplyMode::Replica)
+        .expect("valid retry");
+    assert_eq!(applier.last_applied_lsn(), 1);
+}

@@ -556,6 +556,182 @@ mod tests {
         );
     }
 
+    fn add_duplicate_system_value(store: &UnifiedStore) {
+        let mut row = UnifiedEntity::table_row(EntityId::new(0), "red_config", 0, vec![]);
+        row.data = EntityData::Row(RowData::with_names(
+            vec![Value::text("red.system.value"), Value::text("duplicate")],
+            vec!["key".into(), "value".into()],
+        ));
+        store.insert_auto("red_config", row).unwrap();
+    }
+
+    #[test]
+    fn embedded_config_replacement_is_one_wal_publication_and_replays() {
+        for mode in [DurabilityMode::Strict, DurabilityMode::WalDurableGrouped] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("config.rdb");
+            let mut store = UnifiedStore::new();
+            store
+                .try_set_config_tree("red.system", &crate::json!({"value": "old", "other": 1}))
+                .unwrap();
+            add_duplicate_system_value(&store);
+            let snapshot = store.to_binary_dump_bytes();
+            let initial =
+                crate::storage::EmbeddedRdbArtifact::create_with_snapshot(&path, &snapshot)
+                    .unwrap();
+            store.config.embedded_wal_path = Some(path.clone());
+            store.config.durability_mode = mode;
+            store
+                .try_set_config_tree("red.system", &crate::json!({"value": "new", "other": 2}))
+                .unwrap();
+            let open = crate::storage::EmbeddedRdbArtifact::open(&path).unwrap();
+            assert_eq!(
+                open.selected_superblock.generation,
+                initial.selected_superblock.generation + 1
+            );
+            let replay = UnifiedStore::load_from_bytes(&snapshot).unwrap();
+            for payload in crate::storage::EmbeddedRdbArtifact::read_wal_payloads(&open).unwrap() {
+                replay.apply_encoded_store_wal_action(&payload).unwrap();
+            }
+            assert_eq!(
+                replay.get_config("red.system.value"),
+                Some(reddb_types::Value::text("new"))
+            );
+            assert_eq!(
+                replay
+                    .get_collection("red_config")
+                    .unwrap()
+                    .query_all(|_| true)
+                    .len(),
+                2
+            );
+            assert_eq!(
+                replay.get_config("red.system.other"),
+                Some(reddb_types::Value::UnsignedInteger(2))
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_config_replacement_restores_old_value_when_wal_fails() {
+        for mode in [DurabilityMode::Strict, DurabilityMode::WalDurableGrouped] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = UnifiedStore::new();
+            store
+                .try_set_config_tree("red.system", &crate::json!({"value": "old", "other": 1}))
+                .unwrap();
+            add_duplicate_system_value(&store);
+            // A directory cannot be opened as the embedded WAL artifact.
+            store.config.embedded_wal_path = Some(directory.path().to_path_buf());
+            store.config.durability_mode = mode;
+            assert!(store
+                .try_set_config_tree("red.system", &crate::json!({"value": "new", "other": 2}))
+                .is_err());
+            assert_eq!(
+                store.get_config("red.system.value"),
+                Some(reddb_types::Value::text("duplicate"))
+            );
+            assert_eq!(
+                store
+                    .get_collection("red_config")
+                    .unwrap()
+                    .query_all(|_| true)
+                    .len(),
+                3
+            );
+            assert_eq!(
+                store.get_config("red.system.other"),
+                Some(reddb_types::Value::UnsignedInteger(1))
+            );
+            assert!(!UnifiedStore::deferred_store_wal_capture_active());
+        }
+    }
+
+    #[test]
+    fn embedded_system_config_batch_survives_interrupted_wal_publication() {
+        const CHILD: &str = "REDDB_TEST_SYSTEM_CONFIG_CRASH_PATH";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let path = PathBuf::from(path);
+            let (_, snapshot) =
+                crate::storage::EmbeddedRdbArtifact::open_with_snapshot(&path).unwrap();
+            let mut store = UnifiedStore::load_from_bytes(&snapshot.unwrap()).unwrap();
+            store.config.embedded_wal_path = Some(path);
+            store.config.durability_mode =
+                if std::env::var("REDDB_TEST_SYSTEM_CONFIG_GROUPED").is_ok() {
+                    DurabilityMode::WalDurableGrouped
+                } else {
+                    DurabilityMode::Strict
+                };
+            store
+                .try_set_config_tree("red.system", &crate::json!({"value": "new", "other": 2}))
+                .unwrap();
+            panic!("crash point was not reached");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        for mode in [DurabilityMode::Strict, DurabilityMode::WalDurableGrouped] {
+            for point in [
+                "wal_after_frame_write",
+                "wal_after_frame_sync",
+                "wal_after_superblock_write",
+            ] {
+                let path = directory.path().join(format!("{mode:?}-{point}.rdb"));
+                let store = UnifiedStore::new();
+                store
+                    .try_set_config_tree("red.system", &crate::json!({"value": "old", "other": 1}))
+                    .unwrap();
+                let snapshot = store.to_binary_dump_bytes();
+                crate::storage::EmbeddedRdbArtifact::create_with_snapshot(&path, &snapshot)
+                    .unwrap();
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command.args(["--exact", "storage::unified::store::builder::tests::embedded_system_config_batch_survives_interrupted_wal_publication", "--nocapture"])
+                    .env(CHILD, &path).env("REDDB_EMBEDDED_RDB_CRASH_AT", point);
+                if mode == DurabilityMode::WalDurableGrouped {
+                    command.env("REDDB_TEST_SYSTEM_CONFIG_GROUPED", "1");
+                }
+                let output = command.output().unwrap();
+                assert_eq!(
+                    output.status.code(),
+                    Some(173),
+                    "child did not reach {point}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let (open, snapshot) =
+                    crate::storage::EmbeddedRdbArtifact::open_with_snapshot(&path).unwrap();
+                let recovered = UnifiedStore::load_from_bytes(&snapshot.unwrap()).unwrap();
+                for payload in
+                    crate::storage::EmbeddedRdbArtifact::read_wal_payloads(&open).unwrap()
+                {
+                    recovered.apply_encoded_store_wal_action(&payload).unwrap();
+                }
+                let values = (
+                    recovered.get_config("red.system.value"),
+                    recovered.get_config("red.system.other"),
+                );
+                assert!(
+                    values
+                        == (
+                            Some(reddb_types::Value::text("old")),
+                            Some(reddb_types::Value::UnsignedInteger(1))
+                        )
+                        || values
+                            == (
+                                Some(reddb_types::Value::text("new")),
+                                Some(reddb_types::Value::UnsignedInteger(2))
+                            ),
+                    "partial config after {mode:?} {point}: {values:?}"
+                );
+                assert_eq!(
+                    recovered
+                        .get_collection("red_config")
+                        .unwrap()
+                        .query_all(|_| true)
+                        .len(),
+                    2
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_global_ids_unique_across_collections() {
         let store = UnifiedStore::new();

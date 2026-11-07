@@ -1,17 +1,5 @@
-//! `.tv` snapshot files for `vector.turbo` (issue #674).
-//!
-//! Verifies the slice-F acceptance criteria end-to-end:
-//!
-//! 1. Under a non-`Minimal` `StorageLayout` (the default `Standard`),
-//!    `runtime.checkpoint()` emits a `.tv` file at the path derived by
-//!    `TieredLayoutPaths::turbo_snapshot_path`.
-//! 2. Under `StorageLayout::Minimal`, no `.tv` file is written even
-//!    after explicit checkpoint.
-//! 3. After deleting the `.tv` between runs, a restarted runtime still
-//!    finds every previously-inserted vector via the slice-E
-//!    extent/WAL rebuild path.
-//! 4. A corrupted `.tv` is logged + ignored; boot falls back to
-//!    rebuild and the runtime still answers SEARCH correctly.
+//! Turbo vectors recover from the database without automatic `.tv` sidecars.
+//! Old derived snapshots are ignored and never replace authoritative rows.
 
 use std::path::{Path, PathBuf};
 
@@ -56,7 +44,7 @@ fn snapshot_path_for(dir: &Path, layout: StorageLayout, collection: &str) -> Opt
 }
 
 #[test]
-fn standard_layout_writes_tv_snapshot_at_checkpoint() {
+fn standard_layout_keeps_turbo_snapshot_inside_database() {
     let dir = db_dir("standard-writes");
     let path = dir.path().join("data.rdb");
     let snap = snapshot_path_for(dir.path(), StorageLayout::Standard, "turbo_snap")
@@ -80,8 +68,8 @@ fn standard_layout_writes_tv_snapshot_at_checkpoint() {
     }
 
     assert!(
-        snap.exists(),
-        ".tv snapshot should exist at {} after checkpoint",
+        !snap.exists(),
+        "checkpoint must not publish an external .tv at {}",
         snap.display()
     );
 }
@@ -122,7 +110,7 @@ fn minimal_layout_writes_no_tv_snapshot() {
 }
 
 #[test]
-fn deleting_tv_snapshot_falls_back_to_rebuild() {
+fn turbo_vectors_recover_without_external_snapshot() {
     let dir = db_dir("delete-fallback");
     let path = dir.path().join("data.rdb");
     let n = BLOCK_LANES + 5;
@@ -144,25 +132,7 @@ fn deleting_tv_snapshot_falls_back_to_rebuild() {
     }
 
     let snap = snapshot_path_for(dir.path(), StorageLayout::Standard, "turbo_del").unwrap();
-    assert!(snap.exists(), "precondition: .tv exists after checkpoint");
-
-    // Wipe every .tv file under the support tree before restarting. The
-    // engine must fall back to the slice-E extent/WAL rebuild path and
-    // still answer SEARCH.
-    fn rm_tv(p: &Path) {
-        if let Ok(rd) = std::fs::read_dir(p) {
-            for entry in rd.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    rm_tv(&path);
-                } else if path.extension().and_then(|s| s.to_str()) == Some("tv") {
-                    let _ = std::fs::remove_file(&path);
-                }
-            }
-        }
-    }
-    rm_tv(dir.path());
-    assert!(!snap.exists(), ".tv should be gone after manual deletion");
+    assert!(!snap.exists(), "checkpoint must not create a .tv sidecar");
 
     let rt = RedDBRuntime::with_options(
         RedDBOptions::persistent(&path).with_layout(StorageLayout::Standard),
@@ -207,14 +177,9 @@ fn corrupt_tv_snapshot_is_ignored_on_boot() {
     }
 
     let snap = snapshot_path_for(dir.path(), StorageLayout::Standard, "turbo_corrupt").unwrap();
-    assert!(snap.exists(), "precondition: .tv exists after checkpoint");
-    // Overwrite the magic bytes so the loader rejects the file and the
-    // runtime falls back to extent/WAL rebuild.
-    let mut bytes = std::fs::read(&snap).unwrap();
-    for b in &mut bytes[..8] {
-        *b = b'X';
-    }
-    std::fs::write(&snap, &bytes).unwrap();
+    assert!(!snap.exists());
+    std::fs::create_dir_all(snap.parent().unwrap()).unwrap();
+    std::fs::write(&snap, b"corrupt legacy turbo snapshot").unwrap();
 
     let rt = RedDBRuntime::with_options(
         RedDBOptions::persistent(&path).with_layout(StorageLayout::Standard),
@@ -233,5 +198,80 @@ fn corrupt_tv_snapshot_is_ignored_on_boot() {
     assert!(
         !hits.result.records.is_empty(),
         "boot must succeed and rebuild from extent when .tv is corrupt"
+    );
+}
+
+#[test]
+fn stale_snapshot_includes_newer_persisted_vectors_after_restart() {
+    let dir = db_dir("stale-snapshot");
+    let path = dir.path().join("data.rdb");
+    let snapshot = snapshot_path_for(dir.path(), StorageLayout::Standard, "turbo_stale").unwrap();
+    {
+        let rt = RedDBRuntime::with_options(
+            RedDBOptions::persistent(&path).with_layout(StorageLayout::Standard),
+        )
+        .unwrap();
+        rt.execute_query("CREATE COLLECTION turbo_stale KIND vector.turbo DIM 8 METRIC cosine")
+            .unwrap();
+        rt.execute_query(
+            "INSERT INTO turbo_stale VECTOR (embedding, content) VALUES ([1,0,0,0,0,0,0,0], 'old')",
+        )
+        .unwrap();
+        rt.checkpoint().unwrap();
+        assert!(!snapshot.exists());
+        let manager = rt.db().store().get_collection("turbo_stale").unwrap();
+        let vectors = manager
+            .query_all(|_| true)
+            .into_iter()
+            .filter_map(|entity| match entity.data {
+                reddb_server::storage::EntityData::Vector(data) => {
+                    Some((entity.id.raw(), data.dense.to_vec()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+        reddb_file::write_turboquant_snapshot(&snapshot, 8, 0x7155_8807_FED4_2913, 0, &vectors)
+            .unwrap();
+    }
+    assert_eq!(
+        reddb_file::read_turboquant_snapshot(&snapshot, 8, 0x7155_8807_FED4_2913)
+            .unwrap()
+            .vectors
+            .len(),
+        1
+    );
+    {
+        let rt = RedDBRuntime::with_options(
+            RedDBOptions::persistent(&path).with_layout(StorageLayout::Standard),
+        )
+        .unwrap();
+        // Persist a vector without updating the existing derived snapshot.
+        rt.db()
+            .vector("turbo_stale")
+            .dense(vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            .content("new")
+            .save()
+            .unwrap();
+        rt.checkpoint().unwrap();
+    }
+    assert_eq!(
+        reddb_file::read_turboquant_snapshot(&snapshot, 8, 0x7155_8807_FED4_2913)
+            .unwrap()
+            .vectors
+            .len(),
+        1
+    );
+    let rt = RedDBRuntime::with_options(
+        RedDBOptions::persistent(&path).with_layout(StorageLayout::Standard),
+    )
+    .unwrap();
+    let result = rt
+        .execute_query(
+            "VECTOR SEARCH turbo_stale SIMILAR TO [0,1,0,0,0,0,0,0] MODE APPROXIMATE LIMIT 1",
+        )
+        .unwrap();
+    assert!(
+        matches!(result.result.records[0].get("content"), Some(reddb_types::Value::Text(content)) if content.as_ref() == "new")
     );
 }

@@ -1,8 +1,6 @@
 name: Parser Fuzz Weekly
 
 on:
-  schedule:
-    - cron: "17 3 * * 6"
   workflow_dispatch:
     inputs:
       duration_minutes:

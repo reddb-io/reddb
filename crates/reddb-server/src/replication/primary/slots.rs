@@ -97,7 +97,7 @@ pub(super) fn persist_replication_slot_catalog(
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
 }
 
-fn slot_catalog_from_map(
+pub(super) fn slot_catalog_from_map(
     slots: &BTreeMap<String, ReplicationSlot>,
 ) -> reddb_file::RdbFileResult<reddb_file::ReplicationSlotCatalog> {
     let mut catalog = reddb_file::ReplicationSlotCatalog::new(reddb_file::TimelineId::initial());

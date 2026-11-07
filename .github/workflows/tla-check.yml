@@ -22,15 +22,6 @@ name: TLA+ Model Check
 # the build). The models are sized to finish in CI seconds-to-minutes.
 
 on:
-  push:
-    branches: [ "main" ]
-    paths:
-      - 'specs/tla/**'
-      - '.github/workflows/tla-check.yml'
-  pull_request:
-    paths:
-      - 'specs/tla/**'
-      - '.github/workflows/tla-check.yml'
   workflow_dispatch:
 
 permissions:

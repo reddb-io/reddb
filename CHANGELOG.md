@@ -1,5 +1,97 @@
 # Changelog
 
+## 1.28.25
+
+### Patch Changes
+
+- [#2702](https://github.com/reddb-io/reddb/pull/2702) [`1b8c4d0`](https://github.com/reddb-io/reddb/commit/1b8c4d07527a2726a785cb0b6f2b10c43fb2dd2c) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve snapshot-visible rows during secondary-index publication and logical replay. Persist replayed version changes in WAL, retain table-delete tombstones, and update indexes before advancing the replica frontier. Keep embedded read-only opens and legacy snapshots unchanged, detect Windows memory, and preserve client projection and cancellation contracts. Interrupted RedWire connections must be reopened without automatically retrying writes; unsupported read-only native paged recovery now fails before writing.
+
+- [#2709](https://github.com/reddb-io/reddb/pull/2709) [`c023b67`](https://github.com/reddb-io/reddb/commit/c023b67b925f5c8f30196078c04e321d34654d22) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Read materialized-view definitions from disk-backed collections during boot, replacement and deletion. Decode both named and schema-backed rows, propagate storage scan failures, and prevent descriptor accumulation across cold restarts.
+
+- [#2707](https://github.com/reddb-io/reddb/pull/2707) [`08ecd91`](https://github.com/reddb-io/reddb/commit/08ecd914e75f0c344affa95c09f43946f3d4698f) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reconcile duplicate runtime metadata during explicit canonical-config WAL recovery. Preserve missing index and view definitions, verify equivalent queue-group identities, keep canonical planner observations, and reject conflicting definitions, delivery state, references and overlapping metadata WAL.
+
+- [#2705](https://github.com/reddb-io/reddb/pull/2705) [`ce38731`](https://github.com/reddb-io/reddb/commit/ce387314a3112b95feec72bea897950cd8359e9c) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Recover a canonical system-config copy when its pending WAL only targets proved boot-derived legacy metadata. Preserve all other transactions, original WAL framing and consumed identities; reject unknown deletes and user configuration changes.
+
+## 1.28.24
+
+### Patch Changes
+
+- [#2703](https://github.com/reddb-io/reddb/pull/2703) [`0181217`](https://github.com/reddb-io/reddb/commit/0181217b2c856bc3140d7438b51064f866ca8438) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow explicit recovery of pending WAL on an isolated copy while retaining the canonical system configuration. Reject WAL actions and cross-references targeting the divergent legacy identity instead of silently redirecting them.
+
+## 1.28.23
+
+### Patch Changes
+
+- [#2700](https://github.com/reddb-io/reddb/pull/2700) [`d2a71da`](https://github.com/reddb-io/reddb/commit/d2a71da5655d58fe819cb098b951945b510d545f) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Recover a closed store with pending WAL without dropping its verified active or rotated audit logs, preserving byte parity and hash-chain continuity in the published copy.
+
+- [#2694](https://github.com/reddb-io/reddb/pull/2694) [`2e92525`](https://github.com/reddb-io/reddb/commit/2e92525373fe8bc08d73de82f206a4d7eb2b1457) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve probabilistic and vector WAL records across internal checkpoints until their runtime state is durable, and recover supported multimodel WAL on an isolated verified copy.
+
+## 1.28.22
+
+### Patch Changes
+
+- [#2697](https://github.com/reddb-io/reddb/pull/2697) [`4ae7e01`](https://github.com/reddb-io/reddb/commit/4ae7e01acd86babb481c755a0647f76d88327b4d) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Restore snapshots containing an empty system collection alias alongside its populated predecessor, preserving all records while continuing to reject collisions between populated aliases.
+
+## 1.28.21
+
+### Patch Changes
+
+- [#2695](https://github.com/reddb-io/reddb/pull/2695) [`7971bac`](https://github.com/reddb-io/reddb/commit/7971baca120cc93d97d26b72352785c6a87d2de0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add an explicit offline compaction repair that retires a divergent legacy `red_config` collection while preserving `red.config` as the canonical system configuration store, leaving the source unchanged and failing closed on ambiguous catalog shapes or cross-references.
+
+## 1.28.20
+
+### Patch Changes
+
+- [#2691](https://github.com/reddb-io/reddb/pull/2691) [`5c24dc9`](https://github.com/reddb-io/reddb/commit/5c24dc9e3eba92a551b310d4bf455feafc700e76) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reconcile legacy and canonical system collection aliases when they share the same physical data and index roots but carry different resume counters, preserving the roots, recounting the shared tree, and retaining conservative identity high-water marks.
+
+## 1.28.19
+
+### Patch Changes
+
+- [#2689](https://github.com/reddb-io/reddb/pull/2689) [`7a94140`](https://github.com/reddb-io/reddb/commit/7a94140eec3f640a5a13dfb8beb47a3d7c875de4) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reconcile populated legacy and canonical system collection names only when their complete physical state is identical, preserving shared data and index roots while continuing to fail closed on divergent collections.
+
+## 1.28.18
+
+### Patch Changes
+
+- [#2687](https://github.com/reddb-io/reddb/pull/2687) [`b3d2025`](https://github.com/reddb-io/reddb/commit/b3d202592a874c2aa06dbca3262c87c0a33da8b9) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Rebuild a missing physical metadata sidecar for legacy paged stores after an in-place catalogue migration while preserving native collection roots and failing closed on partial summary publications.
+
+## 1.28.17
+
+### Patch Changes
+
+- [#2685](https://github.com/reddb-io/reddb/pull/2685) [`f3ed5eb`](https://github.com/reddb-io/reddb/commit/f3ed5ebb80ebe486034d137c26b623c558fd6419) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Recover catalogues containing an empty duplicate legacy system collection while preserving the populated collection and its existing data and index roots.
+
+## 1.28.16
+
+### Patch Changes
+
+- [#2683](https://github.com/reddb-io/reddb/pull/2683) [`2f32b89`](https://github.com/reddb-io/reddb/commit/2f32b89cd8b0c99c885c0ac12ea01e79aeb36513) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Bound logical restores by the configured memory budget and seek exact composite BTREE prefixes containing NULL values.
+
+## 1.28.15
+
+### Patch Changes
+
+- [#2679](https://github.com/reddb-io/reddb/pull/2679) [`b41962a`](https://github.com/reddb-io/reddb/commit/b41962ad17db4863a97ee20f5d17fde7531c49df) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Enforce configured authentication for native wire transports.
+
+## 1.28.14
+
+### Patch Changes
+
+- [#2669](https://github.com/reddb-io/reddb/pull/2669) [`91eeaa5`](https://github.com/reddb-io/reddb/commit/91eeaa5256d405ab868f1c9ed28eba2d8987a5b0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Bound synchronous `red.collections` disk accounting and skip legacy payload inspection when projected catalog fields do not require it, preventing large collections from blocking metadata requests.
+
+## 1.28.13
+
+### Patch Changes
+
+- [#2665](https://github.com/reddb-io/reddb/pull/2665) [`04d29a4`](https://github.com/reddb-io/reddb/commit/04d29a49956c41cf4ac562e95f93e2c4c92961e5) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Push collection-name filters and projected fields into `red.collections` catalog snapshots so targeted introspection no longer decodes unrelated collection payloads or computes unrequested on-disk sizes.
+
+## 1.28.12
+
+### Patch Changes
+
+- [#2662](https://github.com/reddb-io/reddb/pull/2662) [`768275c`](https://github.com/reddb-io/reddb/commit/768275c591b832d0333441129bd1b2d5345000a4) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Serve `SHOW INDEXES` from the operational index registry so introspection no longer scans unrelated collection payloads or starves query workers on large databases.
+
 ## 1.28.11
 
 ### Patch Changes

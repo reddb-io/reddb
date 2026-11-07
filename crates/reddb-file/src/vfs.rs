@@ -90,6 +90,14 @@ pub struct VfsDirEntry {
 pub trait VfsFile: Sized {
     /// Duplicate this handle while retaining access to the same file.
     fn try_clone(&self) -> io::Result<Self>;
+    /// Compare two still-open handles to the same immutable file generation.
+    /// Backends that cannot establish identity must fail closed.
+    fn same_file(&self, _other: &Self) -> io::Result<bool> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "file identity is unavailable",
+        ))
+    }
     /// Return the file's logical length.
     fn file_len(&self) -> io::Result<u64>;
     /// Change the file's logical length.
@@ -163,6 +171,64 @@ pub struct StdFile(std::fs::File);
 impl VfsFile for StdFile {
     fn try_clone(&self) -> io::Result<Self> {
         self.0.try_clone().map(Self)
+    }
+
+    fn same_file(&self, other: &Self) -> io::Result<bool> {
+        let left = self.0.metadata()?;
+        let right = other.0.metadata()?;
+        if !left.is_file() || !right.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "manifest is not a regular file",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(left.dev() == right.dev() && left.ino() == right.ino())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
+            };
+
+            fn identity(file: &std::fs::File) -> io::Result<FILE_ID_INFO> {
+                let mut info = FILE_ID_INFO::default();
+                // SAFETY: `file` owns a live handle and `info` is a correctly
+                // sized, writable FILE_ID_INFO buffer for the duration of the call.
+                let result = unsafe {
+                    GetFileInformationByHandleEx(
+                        file.as_raw_handle() as _,
+                        FileIdInfo,
+                        (&mut info as *mut FILE_ID_INFO).cast(),
+                        std::mem::size_of::<FILE_ID_INFO>() as u32,
+                    )
+                };
+                if result == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(info)
+            }
+            let a = identity(&self.0)?;
+            let b = identity(&other.0)?;
+            if a.FileId.Identifier == [0; 16] || b.FileId.Identifier == [0; 16] {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "file identity is not stable",
+                ));
+            }
+            Ok(a.VolumeSerialNumber == b.VolumeSerialNumber
+                && a.FileId.Identifier == b.FileId.Identifier)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "file identity is unavailable",
+            ))
+        }
     }
 
     fn file_len(&self) -> io::Result<u64> {

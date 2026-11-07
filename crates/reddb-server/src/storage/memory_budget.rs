@@ -313,7 +313,23 @@ fn physical_ram_bytes() -> u64 {
         .map_or(0, |kb| kb.saturating_mul(1024))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+fn physical_ram_bytes() -> u64 {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX {
+        dwLength: u32::try_from(std::mem::size_of::<MEMORYSTATUSEX>())
+            .expect("Windows memory status size"),
+        ..Default::default()
+    };
+    // SAFETY: status is initialized, correctly sized, and exclusively borrowed
+    // for the synchronous Windows call. The API does not retain the pointer.
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return 0;
+    }
+    status.ullTotalPhys
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn physical_ram_bytes() -> u64 {
     0
 }

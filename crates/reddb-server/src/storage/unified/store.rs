@@ -322,6 +322,7 @@ pub struct UnifiedStore {
     pager: Option<Arc<Pager>>,
     /// Database file path (for paged mode)
     db_path: Option<PathBuf>,
+    operational_manifest: parking_lot::Mutex<Option<(PathBuf, reddb_file::OperationalManifest)>>,
     /// B-tree indices for O(log n) entity lookups by ID (per collection).
     /// Stored as `Arc<BTree>` so hot-path callers can clone the handle out
     /// under a read lock and release the map-level lock before doing the
@@ -409,7 +410,7 @@ mod native_helpers;
 mod recovery_xid;
 pub mod secondary_index;
 
-pub(crate) use self::commit::DeferredStoreWalActions;
+pub(crate) use self::commit::{DeferredStoreWalActions, StoreWalCaptureGuard};
 use self::commit::{StoreCommitCoordinator, StoreWalAction};
 use self::native_helpers::*;
 

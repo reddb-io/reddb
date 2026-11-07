@@ -79,25 +79,24 @@ impl std::fmt::Display for PagerError {
                 f,
                 "superblock zone of {} is unrecoverable: both ping-pong copies failed \
                  validation, so no generation can be trusted to root the store. The store \
-                 will not be opened. Recover what survives with red salvage \
-                 (ADR 0074 §4); it reads the damaged file without writing to it and \
-                 reports what it could not verify.",
+                 will not be opened. Preserve the database and its recovery files; \
+                 restore from a verified backup.",
                 path.display()
             ),
             Self::ManifestZoneCorrupt(path) => write!(
                 f,
                 "internal manifest zone of {} failed its checksum: the zone that names \
                  collections, indexes and the checkpoint boundary cannot be trusted, so no \
-                 rows are returned rather than garbage ones. Run the `SCRUB` statement to classify the fault \
-                 and `red salvage` to extract what survives (ADR 0074 §2/§4).",
+                 rows are returned. Preserve the database and its recovery files; \
+                 restore from a verified backup.",
                 path.display()
             ),
             Self::DwbZoneCorrupt(path) => write!(
                 f,
                 "double-write zone of {} failed validation: page recovery cannot prove \
                  whether the protected in-place write completed. The store will not be opened \
-                 silently; run the `SCRUB` statement to classify the fault and `red salvage` to extract trusted \
-                 rows (ADR 0074 §2/§4).",
+                 silently. Preserve the database and its recovery files; restore from \
+                 a verified backup.",
                 path.display()
             ),
             Self::LegacySidecarStore { sidecar } => write!(
@@ -237,6 +236,8 @@ pub struct Pager<F: VfsFile, W: WalBarrier> {
     writeback_failed: std::sync::atomic::AtomicBool,
     /// Page cache
     cache: PageCache,
+    /// Recovery images must survive cache eviction without writing the source.
+    read_only_recovery: RwLock<std::collections::HashMap<u32, Page>>,
     /// Free page list
     freelist: RwLock<FreeList>,
     /// Store-managed frees stay unavailable until their removal from the
@@ -311,6 +312,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             dwb_enabled: config.double_write && !config.read_only,
             writeback_failed: std::sync::atomic::AtomicBool::new(false),
             cache: PageCache::new(config.cache_size),
+            read_only_recovery: RwLock::new(std::collections::HashMap::new()),
             freelist: RwLock::new(FreeList::new()),
             deferred_reclamation: Mutex::new(DeferredPageReclamation::default()),
             ownership_mutations: parking_lot::ReentrantMutex::new(()),
@@ -432,8 +434,8 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// The newest valid superblock copy, with its slot image.
     ///
     /// Both copies invalid is the one unrecoverable superblock state (ADR 0074
-    /// §2): the store does not open, and the error names the zone and points
-    /// at salvage rather than panicking or silently re-initialising.
+    /// §2): the store does not open, and the error names the zone rather
+    /// than panicking or silently re-initialising.
     #[doc(hidden)]
     pub fn newest_superblock(&self) -> Result<NewestSuperblock, PagerError> {
         let zone = self.read_superblock_zone()?;
@@ -450,6 +452,13 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let (_, image) = self.newest_superblock()?;
         let header = reddb_file::decode_database_header(&image)
             .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
+        if header.version == reddb_file::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION
+            && !self.config.read_only
+        {
+            return Err(PagerError::InvalidDatabase(
+                "recovered database is read-only; export verified data into a new store".into(),
+            ));
+        }
         if header.version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
             && !self.config.disk_residency
             && !self.config.read_only
@@ -527,6 +536,11 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
+        if version == reddb_file::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION {
+            return Err(PagerError::InvalidDatabase(
+                "recovery read-only format is reserved".into(),
+            ));
+        }
         if version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
             && !self.config.disk_residency
         {
@@ -577,9 +591,24 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // entire physical extent before allocating; never overwrite that tail.
         // A partial last page is reserved too, without treating it as verified.
         let physical_pages = self.file_lock()?.file_len()?.div_ceil(PAGE_SIZE as u64);
-        let physical_pages = u32::try_from(physical_pages).map_err(|_| {
+        let mut physical_pages = u32::try_from(physical_pages).map_err(|_| {
             PagerError::InvalidDatabase("data file exceeds the page address space".into())
         })?;
+        if self.config.read_only {
+            if let Some(id) = self
+                .read_only_recovery
+                .read()
+                .map_err(|_| PagerError::LockPoisoned)?
+                .keys()
+                .max()
+            {
+                physical_pages = physical_pages.max(id.checked_add(1).ok_or_else(|| {
+                    PagerError::InvalidDatabase(
+                        "recovery page exceeds the page address space".into(),
+                    )
+                })?);
+            }
+        }
         if decoded_header.page_count < physical_pages {
             decoded_header.page_count = physical_pages;
             if !self.config.read_only {
@@ -687,6 +716,19 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Read a page (cache-aware)
     pub fn read_page(&self, page_id: u32) -> Result<Page, PagerError> {
+        if self.config.read_only {
+            if let Some(page) = self
+                .read_only_recovery
+                .read()
+                .map_err(|_| PagerError::LockPoisoned)?
+                .get(&page_id)
+            {
+                if self.config.verify_checksums {
+                    page.verify_checksum()?;
+                }
+                return Ok(page.clone());
+            }
+        }
         // Check cache first
         if let Some(page) = self.cache.get(page_id) {
             return Ok(page);
@@ -717,6 +759,16 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// Use this when the page content has its own integrity protection
     /// (e.g., AES-GCM authentication tag for encrypted pages).
     pub fn read_page_no_checksum(&self, page_id: u32) -> Result<Page, PagerError> {
+        if self.config.read_only {
+            if let Some(page) = self
+                .read_only_recovery
+                .read()
+                .map_err(|_| PagerError::LockPoisoned)?
+                .get(&page_id)
+            {
+                return Ok(page.clone());
+            }
+        }
         // Check cache first
         if let Some(page) = self.cache.get(page_id) {
             return Ok(page);
@@ -1475,6 +1527,14 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// this times the page size is the cache's memory footprint (ADR 0073 §2).
     pub fn cache_len(&self) -> usize {
         self.cache.len()
+            + if self.config.read_only {
+                self.read_only_recovery
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .len()
+            } else {
+                0
+            }
     }
 
     /// Preallocated page-cache slots — the sizing this process derived from
@@ -1583,7 +1643,47 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// interrupted writing to their home locations. Re-apply them.
     fn recover_from_dwb(&self) -> Result<(), PagerError> {
         let mut file = self.file_lock()?;
+        if self.config.read_only {
+            for (id, page) in pager_io::read_dwb_pages(&mut *file)? {
+                // The DWB checksum seals raw bytes, which may be ciphertext.
+                // Normal reads check the page checksum; encryption hosts use
+                // read_page_no_checksum and authenticate after decrypting.
+                self.install_read_only_page(id, page)?;
+            }
+            return Ok(());
+        }
         Ok(pager_io::recover_from_dwb(&mut *file)?)
+    }
+
+    /// Install a validated recovery image only in this reader's private view.
+    /// The source and ordinary mutation APIs remain read-only. Bound pinned
+    /// images by the cache budget (with room for one complete DWB frame).
+    pub fn restore_read_only_page(&self, page_id: u32, page: Page) -> Result<(), PagerError> {
+        if !self.config.read_only || page_id == 0 || page.page_id() != page_id {
+            return Err(PagerError::InvalidDatabase(
+                "invalid read-only recovery image".into(),
+            ));
+        }
+        page.verify_checksum()?;
+        self.install_read_only_page(page_id, page)
+    }
+
+    fn install_read_only_page(&self, page_id: u32, page: Page) -> Result<(), PagerError> {
+        let mut images = self
+            .read_only_recovery
+            .write()
+            .map_err(|_| PagerError::LockPoisoned)?;
+        let limit = self
+            .config
+            .cache_size
+            .max(pager_io::DWB_MAX_PAGES_PER_FRAME);
+        if images.len() >= limit && !images.contains_key(&page_id) {
+            return Err(PagerError::InvalidDatabase(
+                "read-only recovery exceeds the page cache budget".into(),
+            ));
+        }
+        images.insert(page_id, page);
+        Ok(())
     }
 
     /// Finish a consumed trunk's durable ownership change, retaining errors
@@ -1636,5 +1736,26 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         *self.header_dirty_lock()? = true;
         drop(header);
         self.write_header_and_sync()
+    }
+}
+
+#[cfg(test)]
+mod integrity_guidance_tests {
+    use super::PagerError;
+    use std::path::PathBuf;
+
+    #[test]
+    fn damaged_paged_zones_recommend_preserving_files_and_a_verified_backup() {
+        for error in [
+            PagerError::SuperblockZoneUnrecoverable(PathBuf::from("data.rdb")),
+            PagerError::ManifestZoneCorrupt(PathBuf::from("data.rdb")),
+            PagerError::DwbZoneCorrupt(PathBuf::from("data.rdb")),
+        ] {
+            let message = error.to_string();
+            assert!(message.contains("Preserve the database"), "{message}");
+            assert!(message.contains("verified backup"), "{message}");
+            assert!(!message.contains("salvage"), "{message}");
+            assert!(!message.contains("SCRUB"), "{message}");
+        }
     }
 }

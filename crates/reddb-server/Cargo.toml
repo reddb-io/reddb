@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-server"
-version = "1.28.11"
+version = "1.28.25"
 edition.workspace = true
 authors.workspace = true
 description = "RedDB server-side engine: storage, runtime, replication, MCP, AI, and the gRPC/HTTP/RedWire/PG-wire dispatchers. Re-exported by the umbrella `reddb` crate."
@@ -141,6 +141,7 @@ serde = { version = "1", features = ["derive"] }
 # randomized iteration order into the merge or sort step.
 indexmap = "2"
 argon2 = "0.6.0"
+zeroize = "1"
 
 [features]
 default = []
@@ -229,6 +230,12 @@ http = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Threading"] }
 
 [lints]
 workspace = true

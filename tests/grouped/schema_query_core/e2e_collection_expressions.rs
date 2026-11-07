@@ -332,7 +332,7 @@ fn expressions_invalid_single_file_contract_refuses_reopen() {
 
 #[test]
 fn expressions_invalid_operational_contract_cannot_fall_back_to_old_schema() {
-    use reddb::{PhysicalMetadataFile, StorageDeployPreset};
+    use reddb::StorageDeployPreset;
     use reddb_rql::schema_expression::SchemaExpression;
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("operational.rdb");
@@ -341,14 +341,15 @@ fn expressions_invalid_operational_contract_cannot_fall_back_to_old_schema() {
             .with_storage_profile(StorageDeployPreset::PrimaryReplicaProductionHa.selection())
             .expect("operational profile")
     };
-    {
+    let mut metadata = {
         let runtime = RedDBRuntime::with_options(options()).expect("open");
         schema(&runtime);
         runtime
             .execute_query("INSERT INTO orders (id, quantity) VALUES (1, 2)")
             .expect("seed");
-    }
-    let mut metadata = PhysicalMetadataFile::load_for_data_path(&path).expect("metadata");
+        runtime.checkpoint().expect("checkpoint");
+        runtime.db().physical_metadata().expect("metadata")
+    };
     let contract = metadata
         .collection_contracts
         .iter_mut()
@@ -357,9 +358,22 @@ fn expressions_invalid_operational_contract_cannot_fall_back_to_old_schema() {
     contract.declared_columns[4].generated = Some(
         SchemaExpression::parse("missing * quantity".into()).expect("syntactically valid fault"),
     );
+    let fixture = directory.path().join("invalid-contract.json");
     metadata
-        .save_for_data_path(&path)
-        .expect("persist invalid semantic contract");
+        .save_to_path(&fixture)
+        .expect("encode invalid contract fixture");
+    {
+        let store = reddb::storage::UnifiedStore::open(&path).expect("fixture editor");
+        store
+            .try_set_storage_metadata(
+                "physical",
+                &reddb::serde_json::Value::String(
+                    std::fs::read_to_string(&fixture).expect("fixture document"),
+                ),
+            )
+            .expect("persist invalid semantic contract");
+        store.persist().expect("checkpoint invalid contract");
+    }
     let error = RedDBRuntime::with_options(options())
         .err()
         .expect("must not heal away invalid constraints");

@@ -1,17 +1,6 @@
 name: Deploy Documentation
 
 on:
-  push:
-    branches: [ "main" ]
-    paths:
-      - 'docs/**'
-      - 'packages/browser-example/**'
-      - 'vendor/ds/**'
-      - 'design-system.manifest.json'
-      - 'svelte.config.js'
-      - 'pnpm-workspace.yaml'
-      - 'pnpm-lock.yaml'
-      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 permissions:

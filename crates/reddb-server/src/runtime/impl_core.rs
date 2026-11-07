@@ -1285,7 +1285,7 @@ impl RedDBRuntime {
                 self.check_config_read_privilege()?;
                 let store = self.inner.db.store();
                 let all_collections = store.list_collections();
-                if !all_collections.contains(&"red_config".to_string()) {
+                if !all_collections.contains(&"red.config".to_string()) {
                     if as_json {
                         return Ok(show_config_json_result(
                             query,
@@ -1308,8 +1308,8 @@ impl RedDBRuntime {
                     });
                 }
                 let manager = store
-                    .get_collection("red_config")
-                    .ok_or_else(|| RedDBError::NotFound("red_config".to_string()))?;
+                    .get_collection("red.config")
+                    .ok_or_else(|| RedDBError::NotFound("red.config".to_string()))?;
                 let entities = manager.query_all(|_| true);
                 let mut latest = std::collections::BTreeMap::<String, (u64, Value, Value)>::new();
                 for entity in entities {

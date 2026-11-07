@@ -2107,7 +2107,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.28.11"
+version = "1.28.25"
 dependencies = [
  "reddb-io-client",
  "reddb-io-engine",
@@ -2121,7 +2121,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.28.11"
+version = "1.28.25"
 dependencies = [
  "async-trait",
  "getrandom 0.4.3",
@@ -2142,7 +2142,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.28.11"
+version = "1.28.25"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2152,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-engine"
-version = "1.28.11"
+version = "1.28.25"
 dependencies = [
  "crc32fast",
  "hex",
@@ -2169,7 +2169,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-file"
-version = "1.28.11"
+version = "1.28.25"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2181,12 +2181,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "windows-sys 0.61.2",
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.28.11"
+version = "1.28.25"
 dependencies = [
  "prost",
  "reddb-io-tonic",
@@ -2198,7 +2199,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-python"
-version = "1.28.11"
+version = "1.28.25"
 dependencies = [
  "prost",
  "pyo3",
@@ -2217,14 +2218,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.28.11"
+version = "1.28.25"
 dependencies = [
  "reddb-io-types",
 ]
 
 [[package]]
 name = "reddb-io-server"
-version = "1.28.11"
+version = "1.28.25"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2278,13 +2279,15 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "webpki-roots",
+ "windows-sys 0.61.2",
  "x509-parser",
+ "zeroize",
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-tonic"
-version = "1.28.11"
+version = "1.28.25"
 dependencies = [
  "async-trait",
  "axum",
@@ -2315,7 +2318,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-tonic-prost"
-version = "1.28.11"
+version = "1.28.25"
 dependencies = [
  "bytes",
  "prost",
@@ -2324,14 +2327,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.28.11"
+version = "1.28.25"
 dependencies = [
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.28.11"
+version = "1.28.25"
 dependencies = [
  "hmac",
  "reddb-io-types",

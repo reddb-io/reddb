@@ -11,7 +11,8 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use reddb_server::storage::query::batch::column_batch_from_block;
 use reddb_server::storage::timeseries::chunk::{
-    points_from_column_block, TimeSeriesChunk, COLUMNAR_TS_COLUMN_ID, COLUMNAR_VALUE_COLUMN_ID,
+    points_from_column_block, query_column_block_range, TimeSeriesChunk, COLUMNAR_TS_COLUMN_ID,
+    COLUMNAR_VALUE_COLUMN_ID,
 };
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -150,8 +151,47 @@ fn paired_projection_ratio(block: &[u8], projection: &[u32]) -> (Duration, Durat
     )
 }
 
+/// Compare a full decode to index pruning when a time range falls entirely
+/// between two groups of granules in the same chunk.
+fn bench_range_gap(c: &mut Criterion) {
+    let mut chunk = TimeSeriesChunk::with_max_points("gap", Default::default(), 50_000);
+    for i in 0..50_000u64 {
+        let timestamp = if i < 25_000 { i } else { i + 75_000 };
+        assert!(chunk.append(timestamp, ((i * 17) % 1009) as f64));
+    }
+    let block = chunk
+        .seal_columnar_with_granule_size(7, 1, 1_000)
+        .expect("seal columnar chunk");
+    let start = 25_000;
+    let end = 99_999;
+    let scan = query_column_block_range(&block, start, end).expect("range scan");
+    assert!(scan.points.is_empty());
+    assert_eq!(scan.granules_scanned, 0);
+
+    let mut group = c.benchmark_group("columnar-read/range-gap");
+    group.sample_size(10);
+    group.bench_function("full-decode-and-filter", |b| {
+        b.iter(|| {
+            let points = points_from_column_block(black_box(&block)).expect("decode");
+            black_box(
+                points
+                    .into_iter()
+                    .filter(|point| point.timestamp_ns >= start && point.timestamp_ns <= end)
+                    .count(),
+            )
+        });
+    });
+    group.bench_function("index-pruned", |b| {
+        b.iter(|| {
+            black_box(query_column_block_range(black_box(&block), start, end).expect("range scan"))
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_range_gap,
     bench_row_path,
     bench_columnar_path,
     bench_columnar_ts_only,

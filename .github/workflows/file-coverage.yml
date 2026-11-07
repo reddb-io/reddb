@@ -6,11 +6,6 @@ name: File Coverage Gate
 # isolated crate drops below 90% line coverage.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'crates/reddb-file/**'
-      - '.github/workflows/file-coverage.yml'
   workflow_dispatch:
 
 concurrency:

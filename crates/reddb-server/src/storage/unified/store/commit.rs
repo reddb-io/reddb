@@ -18,7 +18,9 @@ struct NativeReplayTarget<'a> {
 
 impl reddb_engine::storage::store_wal::StoreReplayTarget for NativeReplayTarget<'_> {
     fn set_aux_metadata(&self, bytes: &[u8]) -> Result<(), StoreError> {
-        self.store.resident.set_aux_metadata(bytes.to_vec());
+        let bytes = reddb_engine::catalog::codec::canonicalize_collection_contract_blob(bytes)
+            .map_err(|err| StoreError::Serialization(err.to_string()))?;
+        self.store.resident.set_aux_metadata(bytes);
         Ok(())
     }
     fn has_collection(&self, name: &str) -> bool {
@@ -88,13 +90,13 @@ pub(crate) struct DeferredStoreWalActions {
     pub(super) actions: Vec<StoreWalAction>,
 }
 
-pub(super) struct StoreWalCaptureGuard<'a> {
+pub(crate) struct StoreWalCaptureGuard<'a> {
     active: bool,
     session: Option<&'a crate::storage::embedded::EmbeddedCommitSession>,
 }
 
 impl<'a> StoreWalCaptureGuard<'a> {
-    pub(super) fn begin(
+    pub(crate) fn begin(
         session: Option<&'a crate::storage::embedded::EmbeddedCommitSession>,
     ) -> Self {
         assert!(
@@ -108,7 +110,7 @@ impl<'a> StoreWalCaptureGuard<'a> {
         }
     }
 
-    pub(super) fn finish(mut self) -> DeferredStoreWalActions {
+    pub(crate) fn finish(mut self) -> DeferredStoreWalActions {
         let actions = take_deferred_store_wal_capture();
         self.active = false;
         actions
@@ -335,6 +337,8 @@ pub(crate) struct StoreCommitCoordinator {
     ownership_last_epoch: AtomicU64,
     // 0: existing WAL not scanned; 1: no ownership records; 2: protected.
     ownership_wal_state: AtomicU8,
+    // 0: existing WAL not scanned; 1: no runtime records; 2: retained.
+    runtime_wal_state: AtomicU8,
 }
 
 /// Connects a fenced pager ownership epoch to the store's durable WAL.
@@ -516,6 +520,7 @@ impl StoreCommitCoordinator {
             wal_generation: AtomicU64::new(0),
             ownership_last_epoch: AtomicU64::new(0),
             ownership_wal_state: AtomicU8::new(0),
+            runtime_wal_state: AtomicU8::new(0),
         })
     }
 
@@ -706,6 +711,12 @@ impl StoreCommitCoordinator {
             ));
         }
         let _epoch = self.queue.epoch.read();
+        if matches!(
+            record,
+            WalRecord::ProbabilisticDelta { .. } | WalRecord::VectorInsert { .. }
+        ) {
+            self.runtime_wal_state.store(2, Ordering::Release);
+        }
         let blob = record.encode();
         let wal_bytes = blob.len() as u64;
         if matches!(self.mode, DurabilityMode::Strict) {
@@ -806,8 +817,54 @@ impl StoreCommitCoordinator {
         Ok(())
     }
 
+    /// Control records need a durable boundary even when user DML is async.
+    /// Observe the queue's end under the epoch lease: syncing only WalWriter
+    /// would miss records that have been accepted but not drained yet.
+    fn sync_pending(&self) -> io::Result<()> {
+        if matches!(self.mode, DurabilityMode::Strict) {
+            return self.force_sync();
+        }
+        let _epoch = self.queue.epoch.read();
+        let target = self.queue.pending.lock().next_lsn;
+        let (state_lock, cond) = &*self.state;
+        let mut state = state_lock.lock();
+        state.pending_target_lsn = state.pending_target_lsn.max(target);
+        state.pending_statements = state.pending_statements.saturating_add(1);
+        state.first_pending_at.get_or_insert_with(Instant::now);
+        cond.notify_all();
+        loop {
+            if let Some(error) = &state.last_error {
+                return Err(io::Error::other(error.clone()));
+            }
+            if state.durable_lsn >= target {
+                return Ok(());
+            }
+            cond.wait(&mut state);
+        }
+    }
+
     pub(crate) fn truncate(&self) -> io::Result<()> {
+        self.truncate_inner(false)
+    }
+
+    pub(super) fn truncate_after_runtime_checkpoint(&self) -> io::Result<()> {
+        self.truncate_inner(true)
+    }
+
+    fn truncate_inner(&self, runtime_snapshots_durable: bool) -> io::Result<()> {
         let _epoch = self.queue.epoch.write();
+        // Async appenders may have returned while their entries remain queued.
+        // Drain them before deciding what the checkpoint may discard.
+        {
+            let mut wal = self.wal.lock();
+            for (offset, bytes) in self.queue.drain_sorted() {
+                if offset != wal.current_lsn() {
+                    return Err(io::Error::other("WAL queue offset differs from writer"));
+                }
+                wal.append_bytes(&bytes)?;
+            }
+            wal.sync()?;
+        }
         if self.ownership_wal_state.load(Ordering::Acquire) == 0 {
             let reader = WalReader::open(&self.wal_path)?;
             let mut protected = false;
@@ -832,9 +889,29 @@ impl StoreCommitCoordinator {
                 "cannot truncate WAL while page ownership records require recovery",
             ));
         }
+        if self.runtime_wal_state.load(Ordering::Acquire) == 0 {
+            let mut protected = false;
+            for item in WalReader::open(&self.wal_path)?.iter() {
+                if matches!(
+                    item?.1,
+                    WalRecord::ProbabilisticDelta { .. } | WalRecord::VectorInsert { .. }
+                ) {
+                    protected = true;
+                }
+            }
+            self.runtime_wal_state
+                .store(if protected { 2 } else { 1 }, Ordering::Release);
+        }
         self.wal_generation.fetch_add(1, Ordering::AcqRel);
         let mut wal = self.wal.lock();
-        wal.truncate()?;
+        let retain_runtime =
+            !runtime_snapshots_durable && self.runtime_wal_state.load(Ordering::Acquire) == 2;
+        if retain_runtime {
+            self.retain_runtime_wal(&mut wal)?;
+        } else {
+            wal.truncate()?;
+            self.runtime_wal_state.store(1, Ordering::Release);
+        }
         let durable = wal.durable_lsn();
         let current = wal.current_lsn();
         drop(wal);
@@ -854,7 +931,105 @@ impl StoreCommitCoordinator {
         state.first_pending_at = None;
         state.last_error = None;
         cond.notify_all();
+        drop(state);
+        if retain_runtime {
+            use reddb_file::Vfs;
+            let parent = self
+                .wal_path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            reddb_file::StdVfs.sync_dir(parent)?;
+        }
         Ok(())
+    }
+
+    /// Replace the checkpointed WAL with the exact runtime-owned frames. The
+    /// temporary file is synced before atomic publication, so interruption
+    /// leaves either the original WAL or a complete retained journal.
+    fn retain_runtime_wal(&self, wal: &mut WalWriter) -> io::Result<()> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+        let mut name = self
+            .wal_path
+            .file_name()
+            .ok_or_else(|| io::Error::other("WAL filename missing"))?
+            .to_os_string();
+        name.push(format!(
+            ".{}.{}.runtime.tmp",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let temporary = self.wal_path.with_file_name(name);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut temp_file = options.open(&temporary)?;
+        let result = (|| -> io::Result<()> {
+            let mut source = std::fs::File::open(&self.wal_path)?;
+            let mut header = [0u8; reddb_file::WAL_FILE_HEADER_BYTES];
+            source.read_exact(&mut header)?;
+            reddb_file::decode_wal_file_header(&header)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            temp_file.write_all(&header)?;
+            temp_file.sync_all()?;
+            drop(temp_file);
+            let mut retained = WalWriter::open(&temporary)?;
+            let mut previous = None;
+            let end = wal.current_lsn();
+            let mut buffer = [0u8; 64 * 1024];
+            let mut copy_frame = |start: u64, end: u64| -> io::Result<()> {
+                source.seek(SeekFrom::Start(start))?;
+                let mut remaining = end
+                    .checked_sub(start)
+                    .ok_or_else(|| io::Error::other("invalid WAL frame boundary"))?;
+                while remaining > 0 {
+                    let length = usize::try_from(remaining.min(buffer.len() as u64))
+                        .map_err(|_| io::Error::other("invalid WAL frame length"))?;
+                    source.read_exact(&mut buffer[..length])?;
+                    retained.append_bytes(&buffer[..length])?;
+                    remaining -= length as u64;
+                }
+                Ok(())
+            };
+            for item in WalReader::open(&self.wal_path)?.iter() {
+                let (offset, record) = item?;
+                if let Some((start, true)) = previous.take() {
+                    copy_frame(start, offset)?;
+                }
+                previous = Some((
+                    offset,
+                    matches!(
+                        record,
+                        WalRecord::ProbabilisticDelta { .. } | WalRecord::VectorInsert { .. }
+                    ),
+                ));
+            }
+            if let Some((start, true)) = previous {
+                copy_frame(start, end)?;
+            }
+            drop(source);
+            retained.sync()?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_TEST_EXIT_BEFORE_RUNTIME_WAL_RENAME").is_some() {
+                std::process::exit(211);
+            }
+            std::fs::rename(&temporary, &self.wal_path)?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_TEST_EXIT_AFTER_RUNTIME_WAL_RENAME").is_some() {
+                std::process::exit(212);
+            }
+            *wal = retained;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
     }
 
     fn release_completed_ownership_wal(&self) -> io::Result<()> {
@@ -887,7 +1062,11 @@ impl StoreCommitCoordinator {
         Ok(())
     }
 
-    fn recover_page_ownership(&self, store: &UnifiedStore, journal: &[u8]) -> io::Result<()> {
+    fn recover_page_ownership(
+        coordinator: Option<&Self>,
+        store: &UnifiedStore,
+        journal: &[u8],
+    ) -> io::Result<()> {
         use reddb_file::page_ownership_journal::{
             pending_epoch, recovery_plan, PageOwnershipRecord,
         };
@@ -942,6 +1121,10 @@ impl StoreCommitCoordinator {
             pager
                 .validate_owned_pages(&plan.preserve)
                 .map_err(|error| io::Error::other(error.to_string()))?;
+            let Some(coordinator) = coordinator else {
+                // Readers validate ownership but never reclaim or finish an epoch.
+                return Ok(());
+            };
             pager
                 .recover_unowned_pages(&plan.release)
                 .map_err(|error| io::Error::other(error.to_string()))?;
@@ -956,7 +1139,7 @@ impl StoreCommitCoordinator {
             if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_OWNERSHIP_SYNC").is_some() {
                 std::process::exit(188);
             }
-            self.append_durable_page_ownership(PageOwnershipRecord::Finish {
+            coordinator.append_durable_page_ownership(PageOwnershipRecord::Finish {
                 epoch: pending.epoch,
             })?;
             #[cfg(test)]
@@ -964,7 +1147,7 @@ impl StoreCommitCoordinator {
                 std::process::exit(189);
             }
         }
-        self.release_completed_ownership_wal()
+        coordinator.map_or(Ok(()), Self::release_completed_ownership_wal)
     }
 
     pub(super) fn next_page_ownership_epoch(&self, store: &UnifiedStore) -> io::Result<u64> {
@@ -1048,26 +1231,43 @@ impl StoreCommitCoordinator {
         self.release_completed_ownership_wal()
     }
 
-    pub(crate) fn replay_into(&self, store: &UnifiedStore) -> io::Result<()> {
-        if !self.wal_path.exists() {
+    pub(crate) fn replay_into(
+        &self,
+        store: &UnifiedStore,
+        boot_wal: Option<&crate::storage::compact::boot_system_wal::BootSystemWalPlan>,
+    ) -> io::Result<()> {
+        Self::replay_from_wal(store, &self.wal_path, Some(self), boot_wal)
+    }
+
+    pub(crate) fn replay_read_only(store: &UnifiedStore, wal_path: &Path) -> io::Result<()> {
+        Self::replay_from_wal(store, wal_path, None, None)
+    }
+
+    fn replay_from_wal(
+        store: &UnifiedStore,
+        wal_path: &Path,
+        coordinator: Option<&Self>,
+        boot_wal: Option<&crate::storage::compact::boot_system_wal::BootSystemWalPlan>,
+    ) -> io::Result<()> {
+        if !wal_path.exists() {
             return Ok(());
         }
 
-        let reader = match WalReader::open(&self.wal_path) {
+        let reader = match WalReader::open(wal_path) {
             Ok(reader) => reader,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(err) => return Err(err),
         };
 
         let mut tx_states = std::collections::HashMap::<u64, bool>::new();
-        let mut pending = Vec::<(u64, Vec<u8>)>::new();
+        let mut has_page_writes = false;
         let mut ownership_journal = Vec::new();
         let mut latest_ownership_epoch = 0;
         let mut incomplete_wal_tail = false;
         let mut applied = false;
 
         for record in reader.iter() {
-            let (_lsn, record) = match record {
+            let (lsn, record) = match record {
                 Ok(record) => record,
                 Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
                     incomplete_wal_tail = true;
@@ -1078,13 +1278,19 @@ impl StoreCommitCoordinator {
             match record {
                 WalRecord::PageOwnership { record } => {
                     latest_ownership_epoch = latest_ownership_epoch.max(record.epoch());
-                    self.ownership_last_epoch
-                        .fetch_max(record.epoch(), Ordering::AcqRel);
+                    if let Some(coordinator) = coordinator {
+                        coordinator
+                            .ownership_last_epoch
+                            .fetch_max(record.epoch(), Ordering::AcqRel);
+                    }
                     ownership_journal
                         .extend_from_slice(&reddb_file::page_ownership_journal::encode(record)?);
                 }
                 WalRecord::TxCommitBatch { actions, .. } => {
-                    for payload in actions {
+                    for (index, payload) in actions.into_iter().enumerate() {
+                        if boot_wal.is_some_and(|proof| proof.skips_action(lsn, index)) {
+                            continue;
+                        }
                         let action = StoreWalAction::decode(&payload)?;
                         applied = true;
                         store.apply_replayed_action(&action, false).map_err(|err| {
@@ -1105,24 +1311,27 @@ impl StoreCommitCoordinator {
                 WalRecord::Rollback { tx_id } => {
                     tx_states.remove(&tx_id);
                 }
-                WalRecord::PageWrite {
-                    tx_id,
-                    page_id: _,
-                    data,
-                } => pending.push((tx_id, data)),
+                WalRecord::PageWrite { .. } => has_page_writes = true,
                 WalRecord::Checkpoint { .. } => {}
                 WalRecord::VectorInsert {
                     collection,
                     entity_id,
                     vector,
                 } => {
+                    if let Some(coordinator) = coordinator {
+                        coordinator.runtime_wal_state.store(2, Ordering::Release);
+                    }
                     // Issue #694 — capture `vector.turbo` WAL inserts so the
                     // boot-time TurboQuant index rebuild can drain them in
                     // WAL order (deterministic against the pre-restart
                     // state under a fixed codec seed). The legacy `vector`
                     // path doesn't read this map.
                     let mut map = store.replayed_turbo_inserts.lock();
-                    map.entry(collection).or_default().push((entity_id, vector));
+                    map.entry(
+                        reddb_engine::storage::system_collection_names::canonical_owned(collection),
+                    )
+                    .or_default()
+                    .push((entity_id, vector));
                 }
                 WalRecord::ProbabilisticDelta {
                     kind,
@@ -1130,6 +1339,9 @@ impl StoreCommitCoordinator {
                     name,
                     operands,
                 } => {
+                    if let Some(coordinator) = coordinator {
+                        coordinator.runtime_wal_state.store(2, Ordering::Release);
+                    }
                     let mut deltas = store.replayed_probabilistic_deltas.lock();
                     deltas.push((kind, operation, name, operands));
                 }
@@ -1145,20 +1357,36 @@ impl StoreCommitCoordinator {
                 "incomplete WAL prevents ownership recovery",
             ));
         }
-        self.recover_page_ownership(store, &ownership_journal)?;
+        Self::recover_page_ownership(coordinator, store, &ownership_journal)?;
 
-        for (tx_id, payload) in pending {
-            if !tx_states.get(&tx_id).copied().unwrap_or(false) {
-                continue;
+        if has_page_writes {
+            // Do not retain every transaction's page payload while scanning a
+            // large WAL. The writer remains open and ownership recovery may
+            // append a Finish record, but it does not truncate the journal.
+            for item in WalReader::open(wal_path)?.iter() {
+                let record = match item {
+                    Ok((_, record)) => record,
+                    Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
+                    Err(err) => return Err(err),
+                };
+                let WalRecord::PageWrite { tx_id, data, .. } = record else {
+                    continue;
+                };
+                if !tx_states.get(&tx_id).copied().unwrap_or(false) {
+                    continue;
+                }
+                let action = StoreWalAction::decode(&data)?;
+                applied = true;
+                store.apply_replayed_action(&action, false).map_err(|err| {
+                    io::Error::other(format!("failed to replay store wal action: {err}"))
+                })?;
+                store.remember_checkpoint_rows(vec![action], Default::default());
             }
-            let action = StoreWalAction::decode(&payload)?;
-            applied = true;
-            store.apply_replayed_action(&action, false).map_err(|err| {
-                io::Error::other(format!("failed to replay store wal action: {err}"))
-            })?;
-            store.remember_checkpoint_rows(vec![action], Default::default());
         }
 
+        let Some(coordinator) = coordinator else {
+            return Ok(());
+        };
         if applied && store.config.resident_memory_bytes_max.is_some() {
             // The immutable base plus committed WAL overlay is authoritative.
             // Keep the WAL until a paced checkpoint publishes the replacement;
@@ -1172,14 +1400,14 @@ impl StoreCommitCoordinator {
                 .max(store.ownership_catalog_epoch.load(Ordering::Acquire))
                 .checked_add(1)
                 .ok_or_else(|| io::Error::other("page ownership epoch exhausted"))?;
-            self.begin_page_ownership_epoch(store, epoch)?;
+            coordinator.begin_page_ownership_epoch(store, epoch)?;
             // Even when the replayed actions leave all B-trees unchanged, the
             // epoch must be in the catalog before its journal can finish.
             store.mark_paged_registry_dirty();
             store
                 .reconcile_replayed_btrees()
                 .map_err(|err| io::Error::other(err.to_string()))?;
-            self.finish_page_ownership_epoch(store, epoch)?;
+            coordinator.finish_page_ownership_epoch(store, epoch)?;
         }
         Ok(())
     }
@@ -1351,6 +1579,14 @@ impl Drop for StoreCommitCoordinator {
 }
 
 impl UnifiedStore {
+    pub(crate) fn sync_control_metadata(&self) -> Result<(), StoreError> {
+        if let Some(commit) = &self.commit {
+            commit.sync_pending().map_err(StoreError::Io)?;
+        }
+        // Embedded appends wait for their own group-commit completion.
+        Ok(())
+    }
+
     pub(crate) fn deferred_store_wal_capture_active() -> bool {
         deferred_store_wal_capture_active()
     }
@@ -1462,6 +1698,9 @@ impl UnifiedStore {
         actions: impl IntoIterator<Item = StoreWalAction>,
         track: bool,
     ) -> Result<(), StoreError> {
+        if self.is_read_only() {
+            return Ok(());
+        }
         let actions: Vec<StoreWalAction> = actions.into_iter().collect();
         if deferred_store_wal_capture_active() {
             let captured = capture_deferred_store_wal_actions(actions);
@@ -1694,6 +1933,7 @@ impl UnifiedStore {
         name: &str,
         entities: Vec<UnifiedEntity>,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
+        let name = Self::canonical_collection(name);
         let fv = self.format_version();
 
         // Build a fresh manager. Done outside the collections lock so
@@ -1705,6 +1945,7 @@ impl UnifiedStore {
 
         let mut prepared = entities;
         for entity in &mut prepared {
+            entity.canonicalize_system_collection_names();
             if entity.id.raw() == 0 {
                 entity.id = self.next_entity_id();
             } else {
@@ -1785,6 +2026,7 @@ impl UnifiedStore {
         records: &[Vec<u8>],
         update_btrees: bool,
     ) -> Result<(), StoreError> {
+        let collection = Self::canonical_collection(collection);
         let (new_manager, prepared) = self.resident.prepare_replayed_refresh_collection(
             collection,
             records,
@@ -1813,6 +2055,7 @@ impl UnifiedStore {
         name: &str,
         records: Vec<Vec<u8>>,
     ) -> Result<(), StoreError> {
+        let name = Self::canonical_collection(name);
         self.apply_replayed_refresh_collection(name, &records, true)?;
         self.finish_paged_write([StoreWalAction::RefreshCollection {
             collection: name.to_string(),
@@ -1822,11 +2065,13 @@ impl UnifiedStore {
     }
 
     pub(crate) fn create_collection_in_memory(&self, name: &str) -> Result<(), StoreError> {
+        let name = Self::canonical_collection(name);
         self.resident
             .create_collection_in_memory(name, &self.config.manager_config)
     }
 
-    fn drop_collection_in_memory(&self, name: &str) -> Result<(), StoreError> {
+    pub(super) fn drop_collection_in_memory(&self, name: &str) -> Result<(), StoreError> {
+        let name = Self::canonical_collection(name);
         self.resident.drop_collection_in_memory(name, || {
             if let Some(tree) = self.btree_indices.write().remove(name) {
                 self.retire_btree(tree);
@@ -1840,6 +2085,7 @@ impl UnifiedStore {
         record: &[u8],
         update_btrees: bool,
     ) -> Result<(), StoreError> {
+        let collection = Self::canonical_collection(collection);
         let id = self.resident.apply_replayed_upsert(
             collection,
             record,
@@ -1884,6 +2130,7 @@ impl UnifiedStore {
         id: EntityId,
         update_btrees: bool,
     ) -> Result<(), StoreError> {
+        let collection = Self::canonical_collection(collection);
         self.resident.apply_replayed_delete(collection, id, || {
             if self.pager.is_some()
                 && update_btrees
@@ -1913,6 +2160,200 @@ mod tests {
     use crate::api::{DurabilityMode, GroupCommitOptions};
     use std::sync::{Barrier, Mutex as StdMutex, OnceLock};
     use std::time::SystemTime;
+
+    #[test]
+    fn runtime_wal_retention_serializes_concurrent_appends() {
+        let directory = tempfile::tempdir().expect("temporary WAL directory");
+        let path = directory.path().join("data.wal");
+        let coordinator = Arc::new(
+            StoreCommitCoordinator::open(
+                &path,
+                DurabilityMode::WalDurableGrouped,
+                GroupCommitOptions::default(),
+            )
+            .expect("coordinator"),
+        );
+        let barrier = Arc::new(Barrier::new(5));
+        let mut workers = Vec::new();
+        for worker in 0..4u8 {
+            let coordinator = Arc::clone(&coordinator);
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                for index in 0..20u8 {
+                    coordinator
+                        .append_single_record(WalRecord::ProbabilisticDelta {
+                            kind: 1,
+                            operation: 1,
+                            name: "visitors".into(),
+                            operands: vec![vec![worker, index]],
+                        })
+                        .expect("append delta");
+                }
+            }));
+        }
+        barrier.wait();
+        for _ in 0..5 {
+            coordinator.truncate().expect("retain while appending");
+        }
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+        coordinator.truncate().expect("final retention");
+        let entries: std::collections::HashSet<_> = WalReader::open(&path)
+            .expect("reader")
+            .iter()
+            .map(|entry| match entry.expect("record").1 {
+                WalRecord::ProbabilisticDelta { operands, .. } => operands[0].clone(),
+                _ => panic!("unexpected retained record"),
+            })
+            .collect();
+        assert_eq!(entries.len(), 80);
+    }
+
+    #[test]
+    fn runtime_wal_retention_preserves_exact_frames_and_append_order() {
+        use crate::storage::wal::record::WalRecordAuthority;
+        for mode in [
+            DurabilityMode::Strict,
+            DurabilityMode::WalDurableGrouped,
+            DurabilityMode::Async,
+        ] {
+            let directory = tempfile::tempdir().expect("temporary WAL directory");
+            let path = directory.path().join("data.wal");
+            let record = WalRecord::ProbabilisticDelta {
+                kind: 1,
+                operation: 1,
+                name: "visitors".into(),
+                operands: vec![b"alice".to_vec()],
+            };
+            let mut frame = Vec::new();
+            record.encode_with_authority_into(
+                &mut frame,
+                WalRecordAuthority {
+                    term: 42,
+                    ownership_epoch: Some(9),
+                },
+            );
+            {
+                let mut writer = WalWriter::open(&path).expect("WAL writer");
+                writer
+                    .append(&WalRecord::Begin { tx_id: 1 })
+                    .expect("logical begin");
+                writer.append_bytes(&frame).expect("runtime record");
+                writer
+                    .append(&WalRecord::Commit { tx_id: 1 })
+                    .expect("logical commit");
+                writer.sync().expect("sync");
+            }
+            let coordinator =
+                StoreCommitCoordinator::open(&path, mode, GroupCommitOptions::default())
+                    .expect("coordinator");
+            coordinator.truncate().expect("retain runtime records");
+            let mut expected = reddb_file::encode_wal_file_header().to_vec();
+            expected.extend_from_slice(&frame);
+            assert_eq!(std::fs::read(&path).expect("retained WAL"), expected);
+            let later = WalRecord::ProbabilisticDelta {
+                kind: 1,
+                operation: 1,
+                name: "visitors".into(),
+                operands: vec![b"bob".to_vec()],
+            };
+            coordinator
+                .append_single_record(later.clone())
+                .expect("append after rewrite");
+            coordinator.truncate().expect("retain queued record");
+            let records: Vec<_> = WalReader::open(&path)
+                .expect("reader")
+                .iter()
+                .map(|entry| entry.expect("record").1)
+                .collect();
+            assert_eq!(records, vec![record, later]);
+            coordinator
+                .truncate_after_runtime_checkpoint()
+                .expect("runtime snapshot permits truncation");
+            assert_eq!(
+                std::fs::read(&path).expect("checkpointed WAL"),
+                reddb_file::encode_wal_file_header()
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_wal_rewrite_survives_interruption() {
+        const TEST: &str =
+            "storage::unified::store::commit::tests::runtime_wal_rewrite_survives_interruption";
+        const CHILD: &str = "REDDB_TEST_RUNTIME_WAL_REWRITE_PATH";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let coordinator = StoreCommitCoordinator::open(
+                path,
+                DurabilityMode::Strict,
+                GroupCommitOptions::default(),
+            )
+            .expect("child coordinator");
+            coordinator.truncate().expect("fault injection");
+            panic!("interruption point was not reached");
+        }
+        for (hook, code, replaced) in [
+            ("REDDB_TEST_EXIT_BEFORE_RUNTIME_WAL_RENAME", 211, false),
+            ("REDDB_TEST_EXIT_AFTER_RUNTIME_WAL_RENAME", 212, true),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary WAL directory");
+            let path = directory.path().join("data.wal");
+            let record = WalRecord::ProbabilisticDelta {
+                kind: 1,
+                operation: 1,
+                name: "visitors".into(),
+                operands: vec![b"alice".to_vec()],
+            };
+            {
+                let mut writer = WalWriter::open(&path).expect("WAL writer");
+                writer
+                    .append(&WalRecord::Begin { tx_id: 1 })
+                    .expect("begin");
+                writer.append(&record).expect("runtime record");
+                writer
+                    .append(&WalRecord::Commit { tx_id: 1 })
+                    .expect("commit");
+                writer.sync().expect("sync");
+            }
+            let original = std::fs::read(&path).expect("original WAL");
+            let child =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(CHILD, &path)
+                    .env(hook, "1")
+                    .output()
+                    .expect("child");
+            assert_eq!(
+                child.status.code(),
+                Some(code),
+                "{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
+            let after = std::fs::read(&path).expect("WAL after interruption");
+            if replaced {
+                let mut expected = reddb_file::encode_wal_file_header().to_vec();
+                expected.extend_from_slice(&record.encode());
+                assert_eq!(after, expected);
+            } else {
+                assert_eq!(after, original);
+            }
+            let coordinator = StoreCommitCoordinator::open(
+                &path,
+                DurabilityMode::Strict,
+                GroupCommitOptions::default(),
+            )
+            .expect("reopen");
+            coordinator.truncate().expect("retry rewrite");
+            let records: Vec<_> = WalReader::open(&path)
+                .expect("reader")
+                .iter()
+                .map(|entry| entry.expect("record").1)
+                .collect();
+            assert_eq!(records, vec![record]);
+        }
+    }
 
     #[test]
     fn ownership_epoch_rejects_nested_begin_and_wrong_finish() {

@@ -1,6 +1,6 @@
 //! Logical catalog structures for the unified multi-structure model.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::SystemTime;
 
 use crate::api::{CatalogSnapshot, CollectionStats};
@@ -237,6 +237,7 @@ pub fn snapshot_store_with_declarations(
         declarations,
         contracts,
         queue_policies,
+        None,
         |manager| Ok::<_, std::convert::Infallible>(collection_observations(manager)),
     );
     match result {
@@ -274,7 +275,62 @@ pub fn try_snapshot_store_with_declarations(
         declarations,
         contracts,
         queue_policies,
+        None,
         |manager| {
+            let mut observations = CollectionObservations::default();
+            manager.try_for_each_entity_unordered(read_bytes_max, |entity| {
+                observations.observe(entity);
+                true
+            })?;
+            Ok(observations.finish())
+        },
+    )
+}
+
+/// Catalog inventory for a known subset of collection names.
+///
+/// Declared collections already carry their model and schema contract, while
+/// entity/segment counts are maintained by the segment manager. Avoid decoding
+/// their payload rows merely to serve a filtered metadata query. Legacy
+/// contract-less collections retain the observation fallback, scoped to the
+/// requested names only.
+pub fn try_snapshot_store_inventory_with_declarations(
+    name: &str,
+    store: &UnifiedStore,
+    index_catalog: Option<&IndexCatalog>,
+    declarations: Option<&CatalogDeclarations>,
+    contracts: Option<&[CollectionContract]>,
+    collection_names: &HashSet<String>,
+    observe_legacy_payloads: bool,
+    read_bytes_max: usize,
+) -> Result<CatalogModelSnapshot, crate::storage::StoreError> {
+    let _publication = store.vault_publication_lock.lock();
+    let mut queue_policies = HashMap::new();
+    if let Some(manager) = store.get_collection("red_queue_meta") {
+        manager.try_for_each_entity_unordered(read_bytes_max, |entity| {
+            if let Some((queue, policy)) = queue_policy_from_entity(entity) {
+                queue_policies.insert(queue, policy);
+            }
+            true
+        })?;
+    }
+    snapshot_store_observations(
+        name,
+        store,
+        index_catalog,
+        declarations,
+        contracts,
+        queue_policies,
+        Some(collection_names),
+        |manager| {
+            if let Some(contract) = collection_contract(manager.collection(), contracts) {
+                let stats = manager.stats();
+                return Ok((contract.declared_model, stats.total_entities, 0));
+            }
+            if !observe_legacy_payloads {
+                let stats = manager.stats();
+                return Ok((CollectionModel::Mixed, stats.total_entities, 0));
+            }
             let mut observations = CollectionObservations::default();
             manager.try_for_each_entity_unordered(read_bytes_max, |entity| {
                 observations.observe(entity);
@@ -292,6 +348,7 @@ fn snapshot_store_observations<E>(
     declarations: Option<&CatalogDeclarations>,
     contracts: Option<&[CollectionContract]>,
     queue_policies: HashMap<String, QueuePolicySnapshot>,
+    collection_names: Option<&HashSet<String>>,
     mut observe: impl FnMut(&SegmentManager) -> Result<(CollectionModel, usize, usize), E>,
 ) -> Result<CatalogModelSnapshot, E> {
     let index_statuses = index_statuses(declarations);
@@ -301,7 +358,11 @@ fn snapshot_store_observations<E>(
     let mut stats_by_collection = BTreeMap::new();
     let mut collections = Vec::new();
 
-    for collection_name in store.list_collections() {
+    for collection_name in store
+        .list_collections()
+        .into_iter()
+        .filter(|name| collection_names.is_none_or(|selected| selected.contains(name)))
+    {
         let manager = store.get_collection(&collection_name);
         let (inferred_model, entity_count, cross_refs) = manager
             .as_ref()
