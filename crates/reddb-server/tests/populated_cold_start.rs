@@ -287,6 +287,11 @@ fn populated_startup_child() {
             eprintln!("visibility_checkpoint={:?}", checkpoint.elapsed());
         }
         if phase == "runtime-reopen" {
+            assert_eq!(
+                store.try_count_from_index("rows", None).unwrap(),
+                Some(rows),
+                "completed projection survives reopen"
+            );
             let samples = store.get_collection("fixture_writes").unwrap().count() as u64;
             assert!(samples > 0);
             for sample in 1..=samples {

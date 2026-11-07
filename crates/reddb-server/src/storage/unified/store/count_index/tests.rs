@@ -141,6 +141,43 @@ fn incremental_count_build_allows_writes_and_restarts_after_checkpoint() {
 }
 
 #[test]
+fn incremental_count_replacement_retires_the_old_definition() {
+    let (_directory, store) = fixture();
+    store
+        .insert(
+            "rows",
+            UnifiedEntity::table_row(EntityId::new(1), "rows", 1, vec![]),
+        )
+        .unwrap();
+    store.register_count_index("rows").unwrap();
+    store.persist().unwrap();
+    let old = Arc::clone(
+        &store
+            .key_indices
+            .read()
+            .get("rows")
+            .unwrap()
+            .secondary
+            .get(NAME)
+            .unwrap()
+            .tree,
+    );
+    store
+        .get_collection("rows")
+        .unwrap()
+        .set_column_schema_if_empty(vec!["value".into()]);
+    store.register_count_index_deferred("rows").unwrap();
+    let mut build = store.start_count_build("rows").unwrap().unwrap();
+    while !build.step(&store).unwrap() {}
+    assert!(store
+        .retired_btrees
+        .lock()
+        .iter()
+        .any(|entry| Arc::ptr_eq(&entry.tree, &old)));
+    compare(&store, None, 1);
+}
+
+#[test]
 fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
     const CHILD: &str = "REDDB_TEST_COUNT_BATCH_PATH";
     if let Some(path) = std::env::var_os(CHILD) {
@@ -151,33 +188,49 @@ fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
             !build.step(&store).unwrap(),
             "publish one recoverable partial batch"
         );
-        std::env::set_var("REDDB_TEST_EXIT_DURING_COUNT_BATCH", "1");
+        let stage = std::env::var("REDDB_TEST_COUNT_BATCH_STAGE").unwrap();
+        if stage == "final" {
+            assert!(!build.step(&store).unwrap());
+        }
+        let failpoint = if stage == "before" {
+            "REDDB_TEST_EXIT_DURING_COUNT_BATCH"
+        } else {
+            "REDDB_TEST_EXIT_AFTER_COUNT_BATCH_PUBLICATION"
+        };
+        std::env::set_var(failpoint, "1");
         let _ = build.step(&store);
         panic!("crash injection did not fire");
     }
-    let (directory, store) = fixture();
-    for id in 1..=128 {
-        store
-            .insert(
-                "rows",
-                UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]),
-            )
-            .unwrap();
-    }
-    store.persist().unwrap();
-    drop(store);
-    let path = directory.path().join("count.rdb");
-    let result = std::process::Command::new(std::env::current_exe().unwrap())
+    for (stage, exit_code) in [("before", 183), ("after", 184), ("final", 184)] {
+        let (directory, store) = fixture();
+        for id in 1..=128 {
+            store
+                .insert(
+                    "rows",
+                    UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]),
+                )
+                .unwrap();
+        }
+        store.persist().unwrap();
+        drop(store);
+        let path = directory.path().join("count.rdb");
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "storage::unified::store::count_index::tests::interrupted_count_batch_preserves_rows_and_can_rebuild", "--nocapture"])
-        .env(CHILD, &path).output().unwrap();
-    assert_eq!(result.status.code(), Some(183));
-    let store = UnifiedStore::open_with_config(&path, config()).unwrap();
-    assert_eq!(store.get_collection("rows").unwrap().count(), 128);
-    assert_eq!(store.try_count_from_index("rows", None).unwrap(), None);
-    store.register_count_index_deferred("rows").unwrap();
-    let mut build = store.start_count_build("rows").unwrap().unwrap();
-    while !build.step(&store).unwrap() {}
-    compare(&store, None, 128);
+        .env(CHILD, &path).env("REDDB_TEST_COUNT_BATCH_STAGE", stage).output().unwrap();
+        assert_eq!(result.status.code(), Some(exit_code), "crash stage {stage}");
+        let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+        assert_eq!(store.get_collection("rows").unwrap().count(), 128);
+        let projected = store.try_count_from_index("rows", None).unwrap();
+        if stage == "final" {
+            assert_eq!(projected, Some(128));
+        } else {
+            assert_eq!(projected, None);
+            store.register_count_index_deferred("rows").unwrap();
+            let mut build = store.start_count_build("rows").unwrap().unwrap();
+            while !build.step(&store).unwrap() {}
+        }
+        compare(&store, None, 128);
+    }
 }
 
 fn context(manager: &Arc<SnapshotManager>) -> SnapshotContext {

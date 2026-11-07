@@ -128,8 +128,9 @@ cargo test -p reddb-io-server --test populated_cold_start populated_startup_50_g
 This fixture exercises decompression and actual persisted records but is highly
 compressible and uses an OS-warm cache. It is not a 50 GiB populated *file*, a
 high-cardinality small-row workload, a SQL benchmark, cold physical I/O, or a
-remote-storage measurement. A missing visibility-count projection is built in
-background batches against a pinned immutable generation. Each batch publishes
+remote-storage measurement. In writable disk-resident runtimes, a missing
+visibility-count projection is built in background batches against a pinned
+immutable generation. Each batch publishes
 its private pages in an ownership epoch; only the finished projection becomes
 visible to COUNT. A crash discards the unfinished tree through the retirement
 ledger and a later worker retries from the beginning. If a checkpoint replaces

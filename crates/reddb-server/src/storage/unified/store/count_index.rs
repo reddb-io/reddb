@@ -178,17 +178,25 @@ impl CountBuild {
                     "count source generation changed".into(),
                 ));
             }
-            generation.secondary.insert(
+            let previous = generation.secondary.insert(
                 NAME.to_string(),
                 super::secondary_index::PublishedSecondaryIndex {
                     identity: self.identity.clone(),
                     tree: Arc::clone(&self.tree),
                 },
             );
+            drop(keys);
+            if let Some(previous) = previous {
+                store.retire_btree(previous.tree);
+            }
         } else {
             store.retire_btree(Arc::clone(&self.tree));
         }
         store.flush_paged_registry()?;
+        #[cfg(test)]
+        if std::env::var_os("REDDB_TEST_EXIT_AFTER_COUNT_BATCH_PUBLICATION").is_some() {
+            std::process::exit(184);
+        }
         commit
             .finish_page_ownership_epoch(store, epoch)
             .map_err(StoreError::Io)?;
