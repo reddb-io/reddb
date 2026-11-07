@@ -3962,7 +3962,7 @@ mod tests {
         assert!(acknowledged.load(Ordering::Acquire));
         assert_eq!(coordinator.fsync_count(), 1);
         drop(coordinator);
-        std::fs::remove_file(path).expect("remove fixture WAL");
+        let _ = std::fs::remove_file(path);
     }
 
     /// Concurrent autocommits MUST coalesce into far fewer fsyncs
