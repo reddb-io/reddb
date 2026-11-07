@@ -255,7 +255,7 @@ mod tests {
             let path = directory.path().join("group.rdb");
             let mut config = UnifiedStoreConfig::default()
                 .with_durability_mode(DurabilityMode::WalDurableGrouped);
-            config.group_commit.window_ms = 200;
+            config.group_commit.window_ms = 10;
             config.group_commit.max_statements = WRITERS;
             if bounded {
                 config.resident_memory_bytes_max = Some(64 * 1024 * 1024);
@@ -294,12 +294,72 @@ mod tests {
                             .try_get("keys", *id, usize::MAX)
                             .expect("read")
                             .expect("row")
-                            .data,
-                        row(key).data
+                            .data
+                            .as_row()
+                            .expect("row data")
+                            .columns,
+                        row(key).data.as_row().expect("expected row").columns
                     );
                 }
                 store.persist().expect("repeat checkpoint");
             }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_publication_checkpoint_and_failed_replacement_recover() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("concurrent.rdb");
+        let mut config =
+            UnifiedStoreConfig::default().with_durability_mode(DurabilityMode::WalDurableGrouped);
+        config.resident_memory_bytes_max = Some(64 * 1024 * 1024);
+        let store = UnifiedStore::open_with_config(&path, config.clone()).expect("open");
+        store.create_collection("keys").expect("keys");
+        let ids = std::thread::scope(|scope| {
+            let checkpoint = scope.spawn(|| {
+                for _ in 0..4 {
+                    store.persist().expect("concurrent checkpoint");
+                }
+            });
+            let writers: Vec<_> = (0..8)
+                .map(|key| {
+                    let store = &store;
+                    scope.spawn(move || {
+                        store
+                            .write_keyed_row("keys", row(key), None, None)
+                            .expect("publish")
+                    })
+                })
+                .collect();
+            let ids: Vec<_> = writers
+                .into_iter()
+                .map(|writer| writer.join().expect("writer"))
+                .collect();
+            checkpoint.join().expect("checkpoint");
+            ids
+        });
+        store
+            .test_fail_deferred_wal_append
+            .store(true, Ordering::Release);
+        assert!(store
+            .write_keyed_row("keys", row(99), None, Some(ids[0]))
+            .is_err());
+        store.persist().expect("checkpoint restored preimage");
+        drop(store);
+        for _ in 0..3 {
+            let store = UnifiedStore::open_with_config(&path, config.clone()).expect("cold boot");
+            for (key, id) in ids.iter().enumerate() {
+                let value = store
+                    .try_get("keys", *id, usize::MAX)
+                    .expect("read")
+                    .expect("row");
+                assert_eq!(
+                    value.data.as_row().expect("row").columns,
+                    vec![Value::Integer(key as i64)]
+                );
+            }
+            store.persist().expect("checkpoint");
         }
     }
 
@@ -320,12 +380,24 @@ mod tests {
         assert!(!UnifiedStore::deferred_store_wal_capture_active());
         assert_eq!(store.get_collection("keys").expect("keys").count(), 2);
         assert_eq!(
-            store.get("keys", first).expect("restored first").data,
-            row(1).data
+            store
+                .get("keys", first)
+                .expect("restored first")
+                .data
+                .as_row()
+                .expect("row")
+                .columns,
+            row(1).data.as_row().expect("row").columns
         );
         assert_eq!(
-            store.get("keys", second).expect("restored second").data,
-            row(2).data
+            store
+                .get("keys", second)
+                .expect("restored second")
+                .data
+                .as_row()
+                .expect("row")
+                .columns,
+            row(2).data.as_row().expect("row").columns
         );
     }
 }

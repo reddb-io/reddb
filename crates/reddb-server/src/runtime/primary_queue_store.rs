@@ -860,11 +860,9 @@ impl QueueStore for PrimaryQueueStore {
                     deletes,
                 })
                 .map_err(|error| QueueStoreError::UnknownQueue(error.to_string()))?;
-            super::impl_queue::forget_queue_message_lock(
-                &self.runtime,
-                &row.queue,
-                EntityId::new(row.message_id),
-            );
+            // Preserve the transaction bridge notification. Its physical deletes
+            // are now no-ops because the compound publication retired the rows.
+            self.retire_message_mvcc(txn, &row.queue, row.message_id);
             return Ok(());
         }
         let (entity_id, row) = self
