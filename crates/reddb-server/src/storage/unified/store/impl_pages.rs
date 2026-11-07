@@ -1725,6 +1725,48 @@ impl UnifiedStore {
                     return Ok(CatalogLoadOutcome::default());
                 }
 
+                if resume.is_none() {
+                    // Old native catalogs have no advisory entity counters. A
+                    // zero root is the only proof that an alias owns no rows;
+                    // two nonzero roots still require explicit reconciliation.
+                    let mut roots = std::collections::HashMap::new();
+                    let mut root_pos = pos;
+                    for _ in 0..collection_count {
+                        let root =
+                            reddb_file::decode_native_paged_collection_root(content, &mut root_pos)
+                                .map_err(|err| page_integrity(1, None, err.to_string()))?;
+                        if roots.insert(root.collection, root.root_page).is_some() {
+                            return Err(page_integrity(
+                                1,
+                                None,
+                                "duplicate raw collection identity",
+                            ));
+                        }
+                    }
+                    for &(legacy, canonical) in
+                        reddb_engine::storage::system_collection_names::LEGACY_NAMES
+                    {
+                        let (Some(&legacy_root), Some(&canonical_root)) =
+                            (roots.get(legacy), roots.get(canonical))
+                        else {
+                            continue;
+                        };
+                        let (survivor, loser) = match (legacy_root == 0, canonical_root == 0) {
+                            (false, true) => (legacy, canonical),
+                            (true, _) => (canonical, legacy),
+                            (false, false) => continue,
+                        };
+                        ignored_collections.insert(loser.to_owned());
+                        outcome.collisions.push(SystemCollectionCollision {
+                            survivor: survivor.to_owned(),
+                            loser: loser.to_owned(),
+                            canonical: canonical.to_owned(),
+                            shared_physical_state: false,
+                            resume_counter_drift: false,
+                            merged_resume: None,
+                        });
+                    }
+                }
                 let mut source_names = std::collections::HashMap::<String, String>::new();
                 let mut migrated_catalog = !outcome.collisions.is_empty();
                 let mut empty_duplicate_roots = std::collections::HashSet::new();
@@ -1764,6 +1806,9 @@ impl UnifiedStore {
                         }
                     }
                     if ignored_collections.contains(&stored_name) {
+                        if resume.is_none() && root_page == 0 {
+                            continue;
+                        }
                         let shared_physical_state = outcome
                             .collisions
                             .iter()
@@ -3783,6 +3828,84 @@ mod checkpoint_work_tests {
             legacy_secondary_root,
             index_identity,
         }
+    }
+
+    fn remove_fixture_catalog_resume(fixture: &DuplicateSystemCatalogFixture) {
+        let pager = Pager::open(
+            &fixture.path,
+            PagerConfig {
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
+        )
+        .expect("fixture pager");
+        let mut metadata = read_meta_payload(&pager).unwrap().unwrap();
+        assert!(reddb_file::native_resume::decode_catalog_resume(&metadata)
+            .unwrap()
+            .is_some());
+        let trailer = metadata
+            .windows(4)
+            .rposition(|bytes| bytes == b"RDRS")
+            .unwrap();
+        metadata.truncate(trailer);
+        publish_paged_metadata(&pager, &metadata).unwrap();
+        pager.sync().unwrap();
+        assert!(reddb_file::native_resume::decode_catalog_resume(
+            &read_meta_payload(&pager).unwrap().unwrap()
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn no_resume_catalog_keeps_populated_config_beside_zero_root_alias() {
+        for (legacy_populated, canonical_populated) in
+            [(true, false), (false, true), (false, false)]
+        {
+            let fixture =
+                duplicate_system_catalog_fixture(legacy_populated, canonical_populated, false);
+            remove_fixture_catalog_resume(&fixture);
+            let store = UnifiedStore::open_with_config(&fixture.path, fixture.config.clone())
+                .expect("resolve physically empty alias without resume counters");
+            assert_eq!(store.list_collections(), vec!["red.config".to_owned()]);
+            assert_eq!(
+                store.get("red.config", EntityId::new(1)).is_some(),
+                legacy_populated
+            );
+            assert_eq!(
+                store.get("red.config", EntityId::new(2)).is_some(),
+                canonical_populated
+            );
+            if legacy_populated {
+                assert_eq!(
+                    store.collection_root_page("red.config"),
+                    fixture.legacy_root
+                );
+            }
+            store.persist().expect("checkpoint canonical catalog");
+            drop(store);
+            let cold = UnifiedStore::open_with_config(&fixture.path, fixture.config)
+                .expect("cold reopen canonical catalog");
+            assert_eq!(cold.list_collections(), vec!["red.config".to_owned()]);
+            assert_eq!(
+                cold.get("red.config", EntityId::new(1)).is_some(),
+                legacy_populated
+            );
+            assert_eq!(
+                cold.get("red.config", EntityId::new(2)).is_some(),
+                canonical_populated
+            );
+        }
+    }
+
+    #[test]
+    fn no_resume_catalog_refuses_two_populated_config_roots() {
+        let fixture = duplicate_system_catalog_fixture(true, true, false);
+        remove_fixture_catalog_resume(&fixture);
+        let error = UnifiedStore::open_with_config(&fixture.path, fixture.config)
+            .err()
+            .expect("two populated roots require reconciliation");
+        assert!(error.to_string().contains("both legacy collection"));
     }
 
     fn alias_duplicate_system_catalog_state_with(
