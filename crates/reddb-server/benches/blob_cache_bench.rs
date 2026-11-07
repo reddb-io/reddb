@@ -283,6 +283,56 @@ fn redis_client(env_var: &str) -> Option<RedisBenchClient> {
 // 32 × 1 KB keys, warm in L1. Drives Arc<[u8]> clone path.
 // Compares: BlobCache L1 | ResultCache | Redis GET single-shot | pipelined.
 
+// Shared-shard and distributed-shard contention, using persistent workers per
+// sample and prebuilt keys. This measures the cache API, not network throughput.
+fn w1_concurrent_hot_hits(c: &mut Criterion) {
+    let mut group = c.benchmark_group("w1-concurrent-hot-hits");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+    for shards in [1, 64] {
+        let cache = make_cache_l1_only_with_shards(L1, shards);
+        let keys: Vec<String> = (0..32).map(key).collect();
+        for key in &keys {
+            cache
+                .put(NS, key, BlobCachePut::new(vec![7; 1024]))
+                .expect("seed hot key");
+        }
+        for threads in [1, 4, 8] {
+            group.throughput(Throughput::Elements(threads as u64));
+            group.bench_function(format!("shards-{shards}/threads-{threads}"), |bench| {
+                bench.iter_custom(|iterations| {
+                    let barrier = std::sync::Barrier::new(threads + 1);
+                    std::thread::scope(|scope| {
+                        let mut workers = Vec::with_capacity(threads);
+                        for worker in 0..threads {
+                            let cache = &cache;
+                            let keys = &keys;
+                            let barrier = &barrier;
+                            workers.push(scope.spawn(move || {
+                                barrier.wait();
+                                for iteration in 0..iterations {
+                                    let hit = cache
+                                        .get(NS, &keys[(iteration as usize + worker) % keys.len()])
+                                        .expect("hot key");
+                                    black_box(hit);
+                                }
+                            }));
+                        }
+                        let started = Instant::now();
+                        barrier.wait();
+                        for worker in workers {
+                            worker.join().expect("cache worker");
+                        }
+                        started.elapsed()
+                    })
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
 fn w1_hot_l1_hit(c: &mut Criterion) {
     const KEY_COUNT: usize = 32;
     const PAYLOAD_SIZE: usize = 1024; // 1 KB
@@ -1024,6 +1074,7 @@ fn w9_shard_insert_remove_slot_index(c: &mut Criterion) {
 criterion_group!(
     benches,
     w1_hot_l1_hit,
+    w1_concurrent_hot_hits,
     w2_cold_l2_miss,
     w3_cold_absent,
     w4_large_blob_l2_hit,

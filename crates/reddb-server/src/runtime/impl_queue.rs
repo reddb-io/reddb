@@ -2556,12 +2556,7 @@ fn load_queue_message_views(
     load_queue_message_views_with_runtime(None, store, queue)
 }
 
-/// Kind-aware queue scan (Phase 2.5.5 RLS universal). When the
-/// caller has a `RedDBRuntime` reference, the gate also applies
-/// any `CREATE POLICY ... ON MESSAGES OF <queue>` predicate. In
-/// autocommit / embedded paths that only have the raw store (e.g.
-/// purge loops) we skip RLS because there's no session identity
-/// to match against.
+/// Count visible messages without cloning payloads or loading ordering metadata.
 fn queue_capacity_reached_by_scan(
     runtime: &RedDBRuntime,
     store: &UnifiedStore,
@@ -2608,6 +2603,12 @@ fn queue_capacity_reached_by_scan(
     Ok(count >= limit)
 }
 
+/// Kind-aware queue scan (Phase 2.5.5 RLS universal). When the
+/// caller has a `RedDBRuntime` reference, the gate also applies
+/// any `CREATE POLICY ... ON MESSAGES OF <queue>` predicate. In
+/// autocommit / embedded paths that only have the raw store (e.g.
+/// purge loops) we skip RLS because there's no session identity
+/// to match against.
 pub(super) fn load_queue_message_views_with_runtime(
     runtime: Option<&RedDBRuntime>,
     store: &UnifiedStore,

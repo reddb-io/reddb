@@ -33,6 +33,7 @@ use super::super::promotion_pool::{
 // with other tests in the harness's parallel executor.
 #[cfg(test)]
 thread_local! {
+    static PUT_PREPARED_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(super) static EFFECTIVE_EXPIRY_COMPUTE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -804,6 +805,10 @@ impl BlobCache {
         } else {
             None
         };
+        #[cfg(test)]
+        if let Some(hook) = PUT_PREPARED_HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
         let mut shard = self.shards[shard_idx].write();
         // Another writer may have published while compression ran. Recheck
         // under the publication guard before changing either cache tier.
