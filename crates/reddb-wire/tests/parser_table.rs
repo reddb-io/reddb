@@ -232,6 +232,17 @@ fn ok_cases() -> Vec<OkCase> {
     ]
 }
 
+#[cfg(windows)]
+#[test]
+fn file_uri_with_windows_drive_letter_is_a_native_absolute_path() {
+    assert_eq!(
+        parse("file:///C:/data/reddb/app.rdb").expect("Windows file URI"),
+        ConnectionTarget::File {
+            path: PathBuf::from("C:/data/reddb/app.rdb"),
+        }
+    );
+}
+
 fn err_cases() -> Vec<ErrCase> {
     vec![
         ErrCase {
