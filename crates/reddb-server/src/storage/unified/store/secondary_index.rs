@@ -156,9 +156,6 @@ impl UnifiedStore {
     pub fn unregister_secondary_index(&self, collection: &str, name: &str) {
         let collection = Self::canonical_collection(collection);
         let _publication = self.vault_publication_lock.lock();
-        if name == super::count_index::NAME {
-            self.remove_count_projection(collection);
-        }
         if let Some(specs) = self.secondary_index_specs.write().get_mut(collection) {
             specs.remove(name);
         }
