@@ -7,6 +7,20 @@ from queue_compare import RedQueue
 
 
 class QueueAckBatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_reads_keep_separate_atomic_ack_batches(self):
+        adapter = RedQueue()
+        adapter.args = SimpleNamespace(name="jobs", red_ack_batch=True, red_read_concurrency=2)
+        adapter.query = AsyncMock(side_effect=[
+            [{"message_id": "1", "payload": "one"}, {"message_id": "2", "payload": "two"}],
+            [{"message_id": "3", "payload": "three"}, {"message_id": "4", "payload": "four"}],
+            [], [],
+        ])
+        self.assertEqual(await adapter.consume(4), ["one", "two", "three", "four"])
+        self.assertEqual([call.args[0] for call in adapter.query.call_args_list[2:]], [
+            "QUEUE ACK jobs BATCH GROUP workers ('1','2')",
+            "QUEUE ACK jobs BATCH GROUP workers ('3','4')",
+        ])
+
     async def test_read_requests_overlap_and_preserve_uneven_window(self):
         adapter = RedQueue()
         adapter.args = SimpleNamespace(name="jobs", red_ack_batch=False, red_read_concurrency=3)

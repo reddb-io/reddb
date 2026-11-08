@@ -59,8 +59,13 @@ class RedQueue:
         delivered = time.perf_counter()
         values = [row["payload"] for row in rows]
         if self.args.red_ack_batch and rows:
-            ids = ",".join(f"'{row['message_id']}'" for row in rows)
-            await self.query(f"QUEUE ACK {self.args.name} BATCH GROUP workers ({ids})")
+            acknowledgements = []
+            for batch in batches:
+                if batch:
+                    ids = ",".join(f"'{row['message_id']}'" for row in batch)
+                    acknowledgements.append(self.query(
+                        f"QUEUE ACK {self.args.name} BATCH GROUP workers ({ids})"))
+            await asyncio.gather(*acknowledgements)
         else:
             await asyncio.gather(*(self.query(f"QUEUE ACK {self.args.name} GROUP workers '{row['message_id']}'") for row in rows))
         self.last_read_ms = (delivered - started) * 1000
