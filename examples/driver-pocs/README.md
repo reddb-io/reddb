@@ -6,8 +6,9 @@ table, inserts parameterized values, reads the row back, validates it, and
 closes the connection.
 
 The PoCs deliberately use the strongest mode that the facade actually ships
-today. Rust, Go, .NET, Java, Kotlin, PHP, and Dart exercise a real `red` server.
-JavaScript, Python, C++, and Zig exercise the in-process engine. A passing PoC
+today. JavaScript, Python, Go, .NET, Java, Kotlin, PHP, Dart, C++, and Zig
+exercise the in-process engine through their public facade. Rust currently uses
+its live server journey in this inventory. A passing PoC
 does **not** claim that the facade supports all four deployment modes; the
 authoritative gaps remain in
 [`deployment-mode-matrix.json`](../../docs/conformance/deployment-mode-matrix.json).
@@ -31,6 +32,6 @@ export RED_BIN="$PWD/target/debug/red"
 export RED_SMOKE=1
 ```
 
-Then run the command for the language in `manifest.json`. Embedded JavaScript,
-Python, C++, and Zig additionally need their native component built as described
+Then run the command for the language in `manifest.json`. Embedded drivers
+additionally need their native component built as described
 by the corresponding driver README.

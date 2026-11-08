@@ -15,14 +15,14 @@ For the wire-level details every driver implements, see
 | Rust | crates.io: [`reddb-io-client`](https://crates.io/crates/reddb-io-client) | ✅ (feature `embedded`) | ✅ | ✅ | ✅ | Stable | [rust](./drivers/rust.md) |
 | Python (embedded, PyO3) | PyPI: [`reddb`](https://pypi.org/project/reddb/) | ✅ | — | — | ✅ | Preview | [python](./drivers/python.md) |
 | Python (pure asyncio, remote) | PyPI: [`reddb-asyncio`](https://pypi.org/project/reddb-asyncio/) | ❌ | ✅ | ✅ | — | Preview | [python-asyncio](./drivers/python-asyncio.md) |
-| Go | `github.com/reddb-io/reddb-go` | ❌ | ✅ | ✅ | — | Preview | [go](./drivers/go.md) |
-| PHP | Composer: [`reddb-io/reddb`](https://packagist.org/packages/reddb-io/reddb) | ❌ | ✅ | ✅ | — | Preview | [php](./drivers/php.md) |
-| Dart / Flutter | pub.dev: [`reddb`](https://pub.dev/packages/reddb) | ❌ | ✅ (VM only) | ✅ | — | Preview | [dart](./drivers/dart.md) |
+| Go | `github.com/reddb-io/reddb-go` | ✅ (shared ABI) | ✅ | ✅ | — | Preview | [go](./drivers/go.md) |
+| PHP | Composer: [`reddb-io/reddb`](https://packagist.org/packages/reddb-io/reddb) | ✅ (FFI + shared ABI) | ✅ | ✅ | — | Preview | [php](./drivers/php.md) |
+| Dart / Flutter | pub.dev: [`reddb`](https://pub.dev/packages/reddb) | ✅ (native VM + shared ABI) | ✅ (VM only) | ✅ | — | Preview | [dart](./drivers/dart.md) |
 | C++ (17+) | source: `drivers/cpp/` (CMake) | ✅ (shared ABI) | ✅ | ✅ | — | Preview | [cpp](./drivers/cpp.md) |
 | Zig (0.14.1+) | source: `drivers/zig/` | ✅ (shared ABI) | ✅ | ✅ | — | Preview | [zig](./drivers/zig.md) |
-| .NET (C# / F#) | NuGet: `Reddb` | ❌ | ✅ | ✅ | — | Preview | [dotnet](../../drivers/dotnet/README.md) |
-| Java | Maven: `dev.reddb:reddb-jvm` | ❌ | ✅ | ✅ | — | Preview | [java](../../drivers/java/README.md) |
-| Kotlin | Maven: `dev.reddb:reddb-kotlin` | ❌ | ✅ | ✅ | — | Preview | [kotlin](../../drivers/kotlin/README.md) |
+| .NET (C# / F#) | NuGet: `Reddb` | ✅ (shared ABI) | ✅ | ✅ | — | Preview | [dotnet](../../drivers/dotnet/README.md) |
+| Java | Maven: `dev.reddb:reddb-jvm` | ✅ (JNA + shared ABI) | ✅ | ✅ | — | Preview | [java](../../drivers/java/README.md) |
+| Kotlin | Maven: `dev.reddb:reddb-kotlin` | ✅ (JNA + shared ABI) | ✅ | ✅ | — | Preview | [kotlin](../../drivers/kotlin/README.md) |
 
 > **Status legend.** *Stable* — version-locked with the engine, covered by CI, semver-stable public API.
 > *Preview* — feature-complete for the documented transports but the public surface may still shift in minor releases; pin the version in production.
@@ -40,10 +40,10 @@ The release-gated source of truth is the
 defined by [ADR 0081](../../.red/adr/0081-four-deployment-mode-driver-contract.md).
 It accounts for **serverless**, **embedded single-file**, **server with read
 replicas**, and **cluster** for every official language facade. At the time of
-this matrix, no facade is four-mode ready; Rust, JavaScript and Python have
-qualified embedded journeys, while the other cells remain partial or missing
-with an explicit gap. C++ also has a qualified embedded journey backed by the
-version-matched shared ABI in stable release assets. A mode becomes qualified
+this matrix, no facade is four-mode ready. Every listed facade now has a
+qualified embedded journey; the remaining serverless, replica, and cluster
+cells retain explicit gaps. Native-language drivers use the version-matched
+shared ABI from stable release assets. A mode becomes qualified
 only through its executable integration journey.
 
 ## Common connection strings
@@ -71,7 +71,7 @@ Full reference: [Connection Strings](./connection-strings.md).
 ## Pick the right driver for your shape
 
 - **App talks to a remote RedDB server, latency-critical.** Use the RedWire-speaking driver for your language. RedWire gives sub-50µs round-trips on point reads.
-- **App needs to embed the engine.** Use a driver that links the engine: `@reddb-io/sdk` (Node native addon, with a legacy stdio fallback), `reddb-io-client` Rust (feature `embedded`), or the `reddb` Python PyO3 package.
+- **App needs to embed the engine.** Use `memory://` or `file://` with the public facade and install the version-matched native component documented for that driver.
 - **No driver for your language.** Fall back to one of the standard transports — every RedDB server speaks **PostgreSQL wire v3** (use any `libpq`-compatible client), **HTTP REST**, and **gRPC** (generate stubs from [`proto/reddb.proto`](../../proto/reddb.proto)). See [SDK & Client Compatibility](./sdk-compatibility.md) for the verified-client matrix.
 
 ## Reporting driver issues

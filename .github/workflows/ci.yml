@@ -372,7 +372,7 @@ jobs:
       - platforms
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
@@ -394,6 +394,24 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: '0.14.1'
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.25'
+          cache-dependency-path: drivers/go/go.sum
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
+        with:
+          dotnet-version: '8.0.x'
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+        with:
+          sdk: stable
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.3'
+          extensions: curl, ffi, hash, json, openssl
       - name: Build workflow contracts
         run: node --test scripts/build_workflow_contract.test.mjs
       - run: cargo fmt --all -- --check
@@ -402,6 +420,45 @@ jobs:
         run: |
           cargo test --locked -p reddb-io-ffi
           cargo build --locked -p reddb-io-ffi
+      - name: Go embedded single-file journey
+        working-directory: drivers/go
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: go test -run TestEmbeddedNativeABI -v .
+      - name: .NET embedded single-file journey
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: dotnet test drivers/dotnet/tests/Reddb.Tests/Reddb.Tests.csproj --filter FullyQualifiedName~EmbeddedTests
+      - name: Java embedded single-file journey
+        working-directory: drivers/java
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: ./gradlew test --tests dev.reddb.EmbeddedTest
+      - name: Kotlin embedded single-file journey
+        working-directory: drivers/kotlin
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: ./gradlew test --tests dev.reddb.EmbeddedTest
+      - name: Dart embedded single-file journey
+        working-directory: drivers/dart
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: |
+          dart pub get
+          dart test test/embedded_test.dart
+      - name: PHP embedded single-file journey
+        working-directory: drivers/php
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: |
+          composer install --no-interaction --no-progress
+          php -d ffi.enable=true vendor/bin/phpunit --filter EmbeddedTest
       - name: C++ embedded single-file journey
         run: |
           ffi_library="$(find "$GITHUB_WORKSPACE/target/debug" -name 'libreddb_ffi.so' -print -quit)"

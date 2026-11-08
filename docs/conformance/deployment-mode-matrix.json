@@ -118,8 +118,8 @@
           "gap": "Remote execution is covered, but no managed attach/warm/cold journey exists."
         },
         "embedded": {
-          "status": "missing",
-          "gap": "Embedded URIs explicitly return the future-cgo-build error."
+          "status": "qualified",
+          "tests": ["drivers/go/embedded_test.go"]
         },
         "server_replica": {
           "status": "missing",
@@ -144,8 +144,8 @@
           "gap": "HTTP connectivity is covered, but no managed attach/warm/cold journey exists."
         },
         "embedded": {
-          "status": "missing",
-          "gap": "Embedded URIs are parsed but the native library is not shipped or loaded."
+          "status": "qualified",
+          "tests": ["drivers/dotnet/tests/Reddb.Tests/EmbeddedTests.cs"]
         },
         "server_replica": {
           "status": "missing",
@@ -170,8 +170,8 @@
           "gap": "Remote connectivity is covered, but no managed attach/warm/cold journey exists."
         },
         "embedded": {
-          "status": "missing",
-          "gap": "Embedded URIs explicitly throw until a native binding is packaged."
+          "status": "qualified",
+          "tests": ["drivers/java/src/test/java/dev/reddb/EmbeddedTest.java"]
         },
         "server_replica": {
           "status": "missing",
@@ -196,8 +196,8 @@
           "gap": "Remote connectivity is covered, but no managed attach/warm/cold journey exists."
         },
         "embedded": {
-          "status": "missing",
-          "gap": "Embedded URIs explicitly throw until a native binding is packaged."
+          "status": "qualified",
+          "tests": ["drivers/kotlin/src/test/kotlin/dev/reddb/EmbeddedTest.kt"]
         },
         "server_replica": {
           "status": "missing",
@@ -222,8 +222,8 @@
           "gap": "Remote connectivity is covered, but no managed attach/warm/cold journey exists."
         },
         "embedded": {
-          "status": "missing",
-          "gap": "Embedded URIs explicitly throw because the native library is not shipped."
+          "status": "qualified",
+          "tests": ["drivers/php/tests/EmbeddedTest.php"]
         },
         "server_replica": {
           "status": "missing",
@@ -248,8 +248,8 @@
           "gap": "HTTP connectivity is covered, but no managed attach/warm/cold journey exists."
         },
         "embedded": {
-          "status": "missing",
-          "gap": "Embedded URIs explicitly throw because no native library is shipped."
+          "status": "qualified",
+          "tests": ["drivers/dart/test/embedded_test.dart"]
         },
         "server_replica": {
           "status": "missing",

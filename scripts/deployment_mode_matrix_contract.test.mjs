@@ -23,9 +23,20 @@ test("every official language facade has an executable PoC", () => {
 
 test("embedded evidence belongs to the correct facade", () => {
   const matrix = JSON.parse(read("docs/conformance/deployment-mode-matrix.json"));
-  const dart = matrix.drivers.find((driver) => driver.id === "dart");
+  const nativeAbiDrivers = new Map([
+    ["go", "drivers/go/embedded_test.go"],
+    ["dotnet", "drivers/dotnet/tests/Reddb.Tests/EmbeddedTests.cs"],
+    ["java", "drivers/java/src/test/java/dev/reddb/EmbeddedTest.java"],
+    ["kotlin", "drivers/kotlin/src/test/kotlin/dev/reddb/EmbeddedTest.kt"],
+    ["php", "drivers/php/tests/EmbeddedTest.php"],
+    ["dart", "drivers/dart/test/embedded_test.dart"],
+  ]);
   const zig = matrix.drivers.find((driver) => driver.id === "zig");
-  assert.equal(dart.modes.embedded.status, "missing");
+  for (const [id, evidence] of nativeAbiDrivers) {
+    const driver = matrix.drivers.find((candidate) => candidate.id === id);
+    assert.equal(driver.modes.embedded.status, "qualified", id);
+    assert.deepEqual(driver.modes.embedded.tests, [evidence], id);
+  }
   assert.equal(zig.modes.embedded.status, "qualified");
   assert.deepEqual(zig.modes.embedded.tests, ["drivers/zig/tests/embedded_test.zig"]);
 });
@@ -38,6 +49,12 @@ test("CI and release both enforce the four-mode contract", () => {
   assert.match(ci, /test\/native-engine\.e2e\.test\.mjs/);
   assert.match(ci, /tests\/test_smoke\.py/);
   assert.match(ci, /cargo test --locked -p reddb-io-ffi/);
+  assert.match(ci, /Go embedded single-file journey[\s\S]*TestEmbeddedNativeABI/);
+  assert.match(ci, /\.NET embedded single-file journey[\s\S]*EmbeddedTests/);
+  assert.match(ci, /Java embedded single-file journey[\s\S]*dev\.reddb\.EmbeddedTest/);
+  assert.match(ci, /Kotlin embedded single-file journey[\s\S]*dev\.reddb\.EmbeddedTest/);
+  assert.match(ci, /Dart embedded single-file journey[\s\S]*embedded_test\.dart/);
+  assert.match(ci, /PHP embedded single-file journey[\s\S]*EmbeddedTest/);
   assert.match(ci, /C\+\+ embedded single-file journey[\s\S]*embedded_test/);
   assert.match(ci, /Zig connection routing contract[\s\S]*connect-contract/);
   assert.match(ci, /Zig embedded single-file journey[\s\S]*embedded-test/);

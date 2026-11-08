@@ -29,39 +29,39 @@
     },
     {
       "id": "go",
-      "mode": "serverless",
-      "evidence": "drivers/go/internal/redserver/server_test.go",
-      "command": "cd drivers/go && RED_SMOKE=1 RED_BIN=/path/to/red go test ./internal/redserver -run TestSmoke_AgainstRealServer -v"
+      "mode": "embedded",
+      "evidence": "drivers/go/embedded_test.go",
+      "command": "cd drivers/go && REDDB_EMBEDDED_SMOKE=1 REDDB_FFI_LIBRARY=/path/to/libreddb_ffi.so go test -run TestEmbeddedNativeABI -v ."
     },
     {
       "id": "dotnet",
-      "mode": "serverless",
-      "evidence": "drivers/dotnet/tests/Reddb.Tests/SmokeTests.cs",
-      "command": "cd drivers/dotnet && RED_SMOKE=1 RED_BIN=/path/to/red dotnet test tests/Reddb.Tests --filter FullyQualifiedName~SmokeTests"
+      "mode": "embedded",
+      "evidence": "drivers/dotnet/tests/Reddb.Tests/EmbeddedTests.cs",
+      "command": "cd drivers/dotnet && REDDB_EMBEDDED_SMOKE=1 REDDB_FFI_LIBRARY=/path/to/libreddb_ffi.so dotnet test tests/Reddb.Tests --filter FullyQualifiedName~EmbeddedTests"
     },
     {
       "id": "java",
-      "mode": "serverless",
-      "evidence": "drivers/java/src/test/java/dev/reddb/SmokeTest.java",
-      "command": "cd drivers/java && RED_SMOKE=1 RED_BIN=/path/to/red ./gradlew test --tests dev.reddb.SmokeTest"
+      "mode": "embedded",
+      "evidence": "drivers/java/src/test/java/dev/reddb/EmbeddedTest.java",
+      "command": "cd drivers/java && REDDB_EMBEDDED_SMOKE=1 REDDB_FFI_LIBRARY=/path/to/libreddb_ffi.so ./gradlew test --tests dev.reddb.EmbeddedTest"
     },
     {
       "id": "kotlin",
-      "mode": "serverless",
-      "evidence": "drivers/kotlin/src/test/kotlin/dev/reddb/SmokeTest.kt",
-      "command": "cd drivers/kotlin && RED_SMOKE=1 RED_BIN=/path/to/red ./gradlew test --tests dev.reddb.SmokeTest"
+      "mode": "embedded",
+      "evidence": "drivers/kotlin/src/test/kotlin/dev/reddb/EmbeddedTest.kt",
+      "command": "cd drivers/kotlin && REDDB_EMBEDDED_SMOKE=1 REDDB_FFI_LIBRARY=/path/to/libreddb_ffi.so ./gradlew test --tests dev.reddb.EmbeddedTest"
     },
     {
       "id": "php",
-      "mode": "serverless",
-      "evidence": "drivers/php/tests/SmokeTest.php",
-      "command": "cd drivers/php && RED_SMOKE=1 RED_BIN=/path/to/red vendor/bin/phpunit --filter SmokeTest"
+      "mode": "embedded",
+      "evidence": "drivers/php/tests/EmbeddedTest.php",
+      "command": "cd drivers/php && REDDB_EMBEDDED_SMOKE=1 REDDB_FFI_LIBRARY=/path/to/libreddb_ffi.so php -d ffi.enable=true vendor/bin/phpunit --filter EmbeddedTest"
     },
     {
       "id": "dart",
-      "mode": "serverless",
-      "evidence": "drivers/dart/test/smoke_test.dart",
-      "command": "cd drivers/dart && RED_SMOKE=1 RED_BIN=/path/to/red dart test test/smoke_test.dart"
+      "mode": "embedded",
+      "evidence": "drivers/dart/test/embedded_test.dart",
+      "command": "cd drivers/dart && REDDB_EMBEDDED_SMOKE=1 REDDB_FFI_LIBRARY=/path/to/libreddb_ffi.so dart test test/embedded_test.dart"
     },
     {
       "id": "cpp",
