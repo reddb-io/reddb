@@ -14,10 +14,17 @@ pub(crate) struct RowPublication {
 }
 
 struct Request {
-    rows: RowPublication,
+    prepare: RowPreparation,
     bytes: u64,
-    result: Arc<parking_lot::Mutex<Option<Result<(), String>>>>,
+    result: PublicationResult,
 }
+
+type PublicationResult = Arc<parking_lot::Mutex<Option<Result<(), String>>>>;
+
+// Preparation is read-only and runs under the publication fence. Earlier plans
+// have not mutated the store yet; a planner must account for their reservations.
+type RowPreparation =
+    Box<dyn FnOnce(&UnifiedStore, &[RowPublication]) -> Result<RowPublication, StoreError> + Send>;
 
 #[derive(Default)]
 struct QueueState {
@@ -34,15 +41,44 @@ pub(super) struct RowPublicationQueue {
 impl UnifiedStore {
     pub(crate) fn publish_rows(&self, rows: RowPublication) -> Result<(), StoreError> {
         assert!(!Self::deferred_store_wal_capture_active());
-        // A reentrant caller must not wait for another thread to take its lock.
         if self.commit.is_none()
             || self.config.durability_mode != DurabilityMode::WalDurableGrouped
             || self.vault_publication_lock.is_owned_by_current_thread()
         {
             return self.publish_row_group(vec![rows]);
         }
-        let bytes = rows
-            .inserts
+        let bytes = self.row_publication_bytes(&rows);
+        self.enqueue_row_preparation(Box::new(move |_, _| Ok(rows)), bytes)
+    }
+
+    /// Prepare independent rows under the checkpoint fence and return the
+    /// associated result only after their publication is durable. The closure
+    /// may run on a different caller's thread; it must not use ambient TLS.
+    pub(crate) fn prepare_and_publish_rows<T: Send + 'static>(
+        &self,
+        prepare: impl FnOnce(&UnifiedStore, &[RowPublication]) -> Result<(RowPublication, T), StoreError>
+            + Send
+            + 'static,
+    ) -> Result<T, StoreError> {
+        let output = Arc::new(parking_lot::Mutex::new(None));
+        let prepared_output = Arc::clone(&output);
+        self.enqueue_row_preparation(
+            Box::new(move |store, previous| {
+                let (rows, value) = prepare(store, previous)?;
+                *prepared_output.lock() = Some(value);
+                Ok(rows)
+            }),
+            0,
+        )?;
+        let value = output
+            .lock()
+            .take()
+            .expect("successful preparation produces a result");
+        Ok(value)
+    }
+
+    fn row_publication_bytes(&self, rows: &RowPublication) -> u64 {
+        rows.inserts
             .iter()
             .fold(0u64, |sum, (collection, entity, metadata)| {
                 sum.saturating_add(
@@ -61,12 +97,28 @@ impl UnifiedStore {
                     .iter()
                     .map(|(name, _)| name.len() as u64 + 16)
                     .sum::<u64>(),
-            );
+            )
+    }
+
+    fn enqueue_row_preparation(
+        &self,
+        prepare: RowPreparation,
+        bytes: u64,
+    ) -> Result<(), StoreError> {
+        assert!(!Self::deferred_store_wal_capture_active());
+        // A reentrant caller must not wait for another thread to take its lock.
+        if self.commit.is_none()
+            || self.config.durability_mode != DurabilityMode::WalDurableGrouped
+            || self.vault_publication_lock.is_owned_by_current_thread()
+        {
+            let _publication = self.vault_publication_lock.lock();
+            return self.publish_row_group(vec![prepare(self, &[])?]);
+        }
         let result = Arc::new(parking_lot::Mutex::new(None));
         let queue = &self.row_publications;
         let mut state = queue.state.lock();
         state.requests.push_back(Request {
-            rows,
+            prepare,
             bytes,
             result: Arc::clone(&result),
         });
@@ -110,24 +162,66 @@ impl UnifiedStore {
                 requests.push(request);
             }
             drop(state);
-            let (rows, results): (Vec<_>, Vec<_>) = requests
-                .into_iter()
-                .map(|request| (request.rows, request.result))
-                .unzip();
-            let published = self
-                .publish_row_group(rows)
-                .map_err(|error| error.to_string());
+            self.publish_prepared_group(requests);
             state = queue.state.lock();
-            for result in results {
-                *result.lock() = Some(published.clone());
-            }
             state.active = false;
             queue.changed.notify_all();
         }
     }
 
+    fn publish_prepared_group(&self, requests: Vec<Request>) {
+        let _publication = self.vault_publication_lock.lock();
+        let mut rows = Vec::new();
+        let mut results = Vec::new();
+        let mut bytes = 0u64;
+        let flush = |rows: &mut Vec<RowPublication>, results: &mut Vec<PublicationResult>| {
+            let published = self
+                .publish_row_group(std::mem::take(rows))
+                .map_err(|error| error.to_string());
+            for result in results.drain(..) {
+                *result.lock() = Some(published.clone());
+            }
+            published
+        };
+        for request in requests {
+            match (request.prepare)(self, &rows) {
+                Ok(prepared) => {
+                    let prepared_bytes = if request.bytes == 0 {
+                        self.row_publication_bytes(&prepared)
+                    } else {
+                        request.bytes
+                    };
+                    // Enforce the same byte budget as prebuilt requests. One
+                    // oversized request is allowed only in its own publication.
+                    if !rows.is_empty()
+                        && bytes.saturating_add(prepared_bytes)
+                            > self.config.group_commit.max_wal_bytes
+                    {
+                        if let Err(error) = flush(&mut rows, &mut results) {
+                            *request.result.lock() = Some(Err(error));
+                            bytes = 0;
+                            continue;
+                        }
+                        bytes = 0;
+                    }
+                    bytes = bytes.saturating_add(prepared_bytes);
+                    rows.push(prepared);
+                    results.push(request.result);
+                }
+                Err(error) => *request.result.lock() = Some(Err(error.to_string())),
+            }
+        }
+        let _ = flush(&mut rows, &mut results);
+    }
+
     fn publish_row_group(&self, rows: Vec<RowPublication>) -> Result<(), StoreError> {
         let _publication = self.vault_publication_lock.lock();
+        if rows
+            .iter()
+            .all(|rows| rows.inserts.is_empty() && rows.deletes.is_empty())
+        {
+            return Ok(());
+        }
         let session = self
             .config
             .embedded_wal_path
@@ -258,6 +352,145 @@ mod tests {
             0,
             vec![Value::Integer(key as i64)],
         )
+    }
+
+    #[test]
+    fn prepared_publication_failure_restores_every_accepted_request() {
+        let store = UnifiedStore::new();
+        let original = store.insert_auto("keys", row(1)).expect("source");
+        let first = Arc::new(parking_lot::Mutex::new(None));
+        let second = Arc::new(parking_lot::Mutex::new(None));
+        let invalid = Arc::new(parking_lot::Mutex::new(None));
+        store
+            .test_fail_deferred_wal_append
+            .store(true, Ordering::Release);
+        store.publish_prepared_group(vec![
+            Request {
+                prepare: Box::new(move |_, previous| {
+                    assert!(previous.is_empty());
+                    Ok(RowPublication {
+                        inserts: vec![("keys".into(), row(2), None)],
+                        deletes: vec![("keys".into(), original)],
+                    })
+                }),
+                bytes: 0,
+                result: Arc::clone(&first),
+            },
+            Request {
+                prepare: Box::new(|_, previous| {
+                    assert_eq!(previous.len(), 1, "earlier reservation is visible");
+                    Err(StoreError::Io(std::io::Error::other("invalid request")))
+                }),
+                bytes: 0,
+                result: Arc::clone(&invalid),
+            },
+            Request {
+                prepare: Box::new(|_, previous| {
+                    assert_eq!(previous.len(), 1, "rejected request has no plan");
+                    Ok(RowPublication {
+                        inserts: vec![("keys".into(), row(3), None)],
+                        deletes: Vec::new(),
+                    })
+                }),
+                bytes: 0,
+                result: Arc::clone(&second),
+            },
+        ]);
+        assert!(first.lock().as_ref().expect("first result").is_err());
+        assert!(second.lock().as_ref().expect("second result").is_err());
+        assert!(invalid
+            .lock()
+            .as_ref()
+            .expect("invalid result")
+            .as_ref()
+            .expect_err("rejected")
+            .contains("invalid request"));
+        assert_eq!(store.get_collection("keys").expect("keys").count(), 1);
+        assert_eq!(
+            store
+                .get("keys", original)
+                .expect("restored source")
+                .data
+                .as_row()
+                .expect("row")
+                .columns,
+            vec![Value::Integer(1)]
+        );
+        assert!(!UnifiedStore::deferred_store_wal_capture_active());
+    }
+
+    #[test]
+    fn rejected_preparation_does_not_abort_valid_publications() {
+        let store = UnifiedStore::new();
+        let invalid = Arc::new(parking_lot::Mutex::new(None));
+        let valid = Arc::new(parking_lot::Mutex::new(None));
+        store.publish_prepared_group(vec![
+            Request {
+                prepare: Box::new(|_, _| Err(StoreError::Io(std::io::Error::other("rejected")))),
+                bytes: 0,
+                result: Arc::clone(&invalid),
+            },
+            Request {
+                prepare: Box::new(|_, previous| {
+                    assert!(previous.is_empty());
+                    Ok(RowPublication {
+                        inserts: vec![("keys".into(), row(7), None)],
+                        deletes: Vec::new(),
+                    })
+                }),
+                bytes: 0,
+                result: Arc::clone(&valid),
+            },
+        ]);
+        assert!(invalid.lock().as_ref().expect("invalid result").is_err());
+        assert!(valid.lock().as_ref().expect("valid result").is_ok());
+        assert_eq!(store.get_collection("keys").expect("keys").count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_publications_obey_byte_limit_and_recover() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("prepared.rdb");
+        let mut config =
+            UnifiedStoreConfig::default().with_durability_mode(DurabilityMode::WalDurableGrouped);
+        config.group_commit.max_wal_bytes = 1;
+        let store = UnifiedStore::open_with_config(&path, config.clone()).expect("open");
+        store.create_collection("keys").expect("collection");
+        let results: Vec<_> = (0..4)
+            .map(|_| Arc::new(parking_lot::Mutex::new(None)))
+            .collect();
+        let before = store.commit.as_ref().expect("coordinator").fsync_count();
+        store.publish_prepared_group(
+            results
+                .iter()
+                .enumerate()
+                .map(|(key, result)| Request {
+                    prepare: Box::new(move |_, _| {
+                        Ok(RowPublication {
+                            inserts: vec![("keys".into(), row(key), None)],
+                            deletes: Vec::new(),
+                        })
+                    }),
+                    bytes: 0,
+                    result: Arc::clone(result),
+                })
+                .collect(),
+        );
+        assert_eq!(
+            store.commit.as_ref().expect("coordinator").fsync_count() - before,
+            4,
+            "each oversized request must publish alone"
+        );
+        assert!(results
+            .iter()
+            .all(|result| result.lock().as_ref().expect("result").is_ok()));
+        drop(store);
+        for _ in 0..3 {
+            let store = UnifiedStore::open_with_config(&path, config.clone()).expect("cold boot");
+            assert_eq!(store.get_collection("keys").expect("keys").count(), 4);
+            store.persist().expect("checkpoint");
+        }
     }
 
     #[cfg(unix)]
