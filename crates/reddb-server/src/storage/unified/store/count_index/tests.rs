@@ -126,12 +126,8 @@ fn count_batch_limits_mixed_keys_and_groups_uniform_keys() {
         // Speculative decoding can visit the rest of a group, but only the
         // bounded prefix may be published in this ownership epoch.
         assert!(visits.load(Ordering::Relaxed) >= expected_visits);
-        let mut cursor = build.tree.cursor_first().unwrap();
-        let mut published = 0;
-        while cursor.next().unwrap().is_some() {
-            published += 1;
-        }
-        assert_eq!(published, expected_visits);
+        let published = build.writer.as_ref().unwrap().record_count();
+        assert_eq!(published, expected_visits as u64);
         while !build.step(&store).unwrap() {}
         compare(&store, None, rows);
     }
@@ -300,6 +296,37 @@ fn count_batch_does_not_hold_publication_lock_while_decoding() {
 }
 
 #[test]
+fn count_batches_do_not_publish_the_main_pager_catalog() {
+    let (_directory, store) = fixture();
+    let rows = UNIFORM_BATCH_ROWS as u64 + 1;
+    store
+        .get_collection("rows")
+        .unwrap()
+        .bulk_insert(
+            (1..=rows)
+                .map(|id| UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]))
+                .collect(),
+        )
+        .unwrap();
+    store.persist().unwrap();
+    store.register_count_index_deferred("rows").unwrap();
+    let pager = store.pager.as_ref().unwrap();
+    let header_before = pager.header().unwrap();
+    let catalog_epoch_before = store.ownership_catalog_epoch.load(Ordering::Acquire);
+    let mut build = store.start_count_build("rows").unwrap().unwrap();
+    assert!(!build.step(&store).unwrap());
+    assert_eq!(pager.header().unwrap(), header_before);
+    assert_eq!(
+        store.ownership_catalog_epoch.load(Ordering::Acquire),
+        catalog_epoch_before
+    );
+    assert_eq!(
+        build.writer.as_ref().unwrap().scanned_count(),
+        UNIFORM_BATCH_ROWS as u64
+    );
+}
+
+#[test]
 fn incremental_count_build_allows_writes_and_restarts_after_checkpoint() {
     let (directory, store) = fixture();
     let rows = UNIFORM_BATCH_ROWS as u64 * 3;
@@ -460,6 +487,117 @@ fn incremental_count_handles_out_of_order_visibility_keys_across_leaves() {
 }
 
 #[test]
+fn completed_count_component_survives_unrelated_checkpoint_and_reopen() {
+    let (directory, store) = fixture();
+    let rows = UNIFORM_BATCH_ROWS as u64 + 1;
+    store
+        .get_collection("rows")
+        .unwrap()
+        .bulk_insert(
+            (1..=rows)
+                .map(|id| UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]))
+                .collect(),
+        )
+        .unwrap();
+    store.persist().unwrap();
+    store.register_count_index_deferred("rows").unwrap();
+    let mut build = store.start_count_build("rows").unwrap().unwrap();
+    while !build.step(&store).unwrap() {}
+    compare(&store, None, rows);
+
+    store.create_collection("unrelated").unwrap();
+    store
+        .insert(
+            "unrelated",
+            UnifiedEntity::table_row(EntityId::new(rows + 1), "unrelated", 1, vec![]),
+        )
+        .unwrap();
+    store.persist().unwrap();
+    compare(&store, None, rows);
+    drop(build);
+    drop(store);
+
+    let reopened =
+        UnifiedStore::open_with_config(directory.path().join("count.rdb"), config()).unwrap();
+    compare(&reopened, None, rows);
+}
+
+#[test]
+fn corrupt_completed_count_component_falls_back_and_rebuilds() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let (_directory, store) = fixture();
+    let rows = UNIFORM_BATCH_ROWS as u64 + 1;
+    store
+        .get_collection("rows")
+        .unwrap()
+        .bulk_insert(
+            (1..=rows)
+                .map(|id| UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]))
+                .collect(),
+        )
+        .unwrap();
+    store.persist().unwrap();
+    store.register_count_index_deferred("rows").unwrap();
+    let mut build = store.start_count_build("rows").unwrap().unwrap();
+    while !build.step(&store).unwrap() {}
+    let path = store.count_projections.read()["rows"]
+        .reader
+        .path()
+        .to_path_buf();
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let mut prefix = [0; 16];
+    file.read_exact(&mut prefix).unwrap();
+    let header_len = u32::from_le_bytes(prefix[12..16].try_into().unwrap()) as u64;
+    file.seek(SeekFrom::Start(header_len + 36)).unwrap();
+    let mut byte = [0; 1];
+    file.read_exact(&mut byte).unwrap();
+    byte[0] ^= 0xff;
+    file.seek(SeekFrom::Current(-1)).unwrap();
+    file.write_all(&byte).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+
+    assert_eq!(store.try_count_from_index("rows", None).unwrap(), None);
+    assert!(
+        !path.exists(),
+        "corrupt derived component must be discarded"
+    );
+    let mut retry = store.start_count_build("rows").unwrap().unwrap();
+    while !retry.step(&store).unwrap() {}
+    compare(&store, None, rows);
+}
+
+#[test]
+fn unregister_count_index_removes_its_derived_component() {
+    let (_directory, store) = fixture();
+    store
+        .insert(
+            "rows",
+            UnifiedEntity::table_row(EntityId::new(1), "rows", 1, vec![]),
+        )
+        .unwrap();
+    store.persist().unwrap();
+    store.register_count_index_deferred("rows").unwrap();
+    let mut build = store.start_count_build("rows").unwrap().unwrap();
+    while !build.step(&store).unwrap() {}
+    let path = store.count_projections.read()["rows"]
+        .reader
+        .path()
+        .to_path_buf();
+    assert!(path.exists());
+
+    store.unregister_secondary_index("rows", NAME);
+
+    assert!(!path.exists());
+    assert!(!store.count_projections.read().contains_key("rows"));
+}
+
+#[test]
 fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
     const CHILD: &str = "REDDB_TEST_COUNT_BATCH_PATH";
     if let Some(path) = std::env::var_os(CHILD) {
@@ -493,9 +631,6 @@ fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
         } else {
             "REDDB_TEST_EXIT_AFTER_COUNT_BATCH_PUBLICATION"
         };
-        if stage == "split" {
-            std::env::set_var("REDDB_TEST_REQUIRE_COUNT_SPLIT", "1");
-        }
         std::env::set_var(failpoint, "1");
         let _ = build.step(&store);
         panic!("crash injection did not fire");
@@ -541,6 +676,12 @@ fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
             assert_eq!(projected, None);
             store.register_count_index_deferred("rows").unwrap();
             let mut build = store.start_count_build("rows").unwrap().unwrap();
+            if stage == "after" {
+                assert!(
+                    build.writer.as_ref().unwrap().scanned_count() >= UNIFORM_BATCH_ROWS as u64 * 2,
+                    "a sealed component must resume instead of rescanning"
+                );
+            }
             while !build.step(&store).unwrap() {}
         }
         compare(&store, None, expected as u64);

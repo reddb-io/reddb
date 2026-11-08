@@ -117,6 +117,23 @@ impl<P: PageStore> PagedCollection<P> {
                 .with_immutable_leaves(),
         })
     }
+
+    /// Resume an immutable physical scan strictly after a durable entity ID.
+    /// Derived builders persist this bounded position instead of rescanning an
+    /// already sealed prefix after interruption.
+    pub fn scan_after(&self, after: EntityId) -> Result<PagedCursor<P>, StoreError> {
+        let mut cursor = self
+            .tree
+            .cursor_seek(&after.raw().to_be_bytes())
+            .map_err(read_error)?
+            .with_immutable_leaves();
+        if cursor.peek_key().map_err(read_error)?.as_deref()
+            == Some(after.raw().to_be_bytes().as_slice())
+        {
+            cursor.skip_next().map_err(read_error)?;
+        }
+        Ok(PagedCursor { cursor })
+    }
 }
 
 impl<P: PageStore + 'static> CollectionRead for PagedCollection<P> {

@@ -1,8 +1,11 @@
 //! Exact visibility projection for payload-free scalar counts.
 //!
-//! Preparation shares the secondary-index source pass and publication fences.
-//! Cost: 17 visibility bytes + 8 physical-ID bytes per version (plus tree slots),
-//! O(N) compact reads per count, bounded decode scratch, no resident posting map.
+//! Preparation emits immutable, checksummed components outside the main pager.
+//! Cost: 17 visibility bytes + 8 physical-ID bytes per version, O(N) compact
+//! reads per count, bounded decode scratch, no resident posting map.
+use super::count_projection::{
+    CountProjectionBinding, CountProjectionOpen, CountProjectionReader, CountProjectionWriter,
+};
 use super::secondary_index::{
     SecondaryIndexIdentity, SecondaryIndexProjector, SECONDARY_KEY_BYTES_MAX,
 };
@@ -14,10 +17,12 @@ use reddb_engine::storage::collection_read::{
 use reddb_engine::storage::visibility::entity_moderation_hidden;
 use reddb_engine::transaction::read::{visibility_check, SnapshotContext};
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
+use std::path::PathBuf;
 
 // Separate from SQL-visible registry names; a different definition can never
 // accidentally qualify because reads also verify the full fingerprint.
-const NAME: &str = "\0reddb/visibility-count-v1";
+pub(super) const NAME: &str = "\0reddb/visibility-count-v1";
 const MIXED_BATCH_ROWS: usize = 64;
 const UNIFORM_BATCH_ROWS: usize = 384;
 const DECODE_GROUP_ROWS: usize = 64;
@@ -83,14 +88,22 @@ fn visible(snapshot: Option<&SnapshotContext>, xmin: u64, xmax: u64, hidden: boo
     !hidden && snapshot.map_or(xmax == 0, |context| visibility_check(context, xmin, xmax))
 }
 
-/// A private, retired tree is durably owned after each batch. It is never
-/// exposed as a secondary index until the complete source generation has been
-/// scanned. A crash leaves it in the ordinary retired-tree recovery ledger.
+#[derive(Clone)]
+pub(super) struct PublishedCountProjection {
+    identity: SecondaryIndexIdentity,
+    source: std::sync::Weak<BTree>,
+    reader: CountProjectionReader,
+}
+
+/// A private, derived component is sealed one bounded chunk at a time. It is
+/// never exposed until a completion footer is durable and its rename commits.
+/// No main pager page or catalog generation changes while this builder runs.
 pub(crate) struct CountBuild {
     collection: String,
     source: Arc<BTree>,
-    tree: Arc<BTree>,
     cursor: PagedCursor<Pager>,
+    writer: Option<CountProjectionWriter>,
+    binding: CountProjectionBinding,
     identity: SecondaryIndexIdentity,
     projector: Arc<dyn SecondaryIndexProjector>,
 }
@@ -101,20 +114,20 @@ impl CountBuild {
         record: &EncodedRecord,
         version: u32,
         limit: usize,
-    ) -> Result<Option<Vec<u8>>, StoreError> {
+    ) -> Result<Option<[u8; 25]>, StoreError> {
         let (entity, _) = record.decode_with_budget(version, limit)?;
         let mut key = [0; SECONDARY_KEY_BYTES_MAX];
         let Some(length) = self.projector.project(&entity, &mut key)? else {
             return Ok(None);
         };
-        if length > key.len() {
+        if length != 17 {
             return Err(StoreError::Serialization(
-                "count projection key too large".into(),
+                "COUNT visibility projection must contain 17 bytes".into(),
             ));
         }
-        let mut posting = Vec::with_capacity(length + 8);
-        posting.extend_from_slice(&key[..length]);
-        posting.extend_from_slice(&entity.id.raw().to_be_bytes());
+        let mut posting = [0; 25];
+        posting[..17].copy_from_slice(&key[..17]);
+        posting[17..].copy_from_slice(&entity.id.raw().to_be_bytes());
         Ok(Some(posting))
     }
 
@@ -129,6 +142,7 @@ impl CountBuild {
         let mut first_key = None::<Vec<u8>>;
         let mut mixed = false;
         let mut scanned = 0;
+        let mut last_source_id = None;
         let mut parallel = limit >= DECODE_WORKERS * 2;
         while scanned < UNIFORM_BATCH_ROWS {
             let mut trial = parallel.then(|| self.cursor.fork());
@@ -167,6 +181,7 @@ impl CountBuild {
                             .iter()
                             .map(|record| {
                                 self.project_record(record, store.format_version(), worker_limit)
+                                    .map(|posting| (record.id, posting))
                             })
                             .collect::<Result<Vec<_>, _>>()
                     })
@@ -195,21 +210,25 @@ impl CountBuild {
                     break;
                 };
                 trial = None;
-                vec![self.project_record(&record, store.format_version(), limit)?]
+                vec![(
+                    record.id,
+                    self.project_record(&record, store.format_version(), limit)?,
+                )]
             };
             let count = projected.len();
             let mut consumed = 0;
-            for posting in projected {
+            for (source_id, posting) in projected {
                 consumed += 1;
                 scanned += 1;
+                last_source_id = Some(source_id.raw());
                 if let Some(posting) = posting {
-                    let key = &posting[..posting.len() - 8];
+                    let key = &posting[..17];
                     match &first_key {
                         Some(first) if first.as_slice() != key => mixed = true,
                         None => first_key = Some(key.to_vec()),
                         _ => {}
                     }
-                    postings.push((posting, Vec::new()));
+                    postings.push(posting);
                 } else {
                     mixed = true;
                 }
@@ -240,107 +259,273 @@ impl CountBuild {
                 break;
             }
         }
-        // IDs are ordered, but visibility keys need not be. Sorting the
-        // bounded batch lets the B-tree coalesce writes to the same leaf.
-        postings.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        let _publication = store.vault_publication_lock.lock();
-        let current = store.btree_indices.read().get(&self.collection).cloned();
-        let spec_matches = store
-            .secondary_index_specs
-            .read()
-            .get(&self.collection)
-            .and_then(|specs| specs.get(NAME))
-            .is_some_and(|spec| spec.deferred && spec.identity == self.identity);
-        if !current
-            .as_ref()
-            .is_some_and(|source| Arc::ptr_eq(source, &self.source))
-            || !spec_matches
-        {
+        if !store.count_build_matches(self)? {
+            if let Some(writer) = self.writer.take() {
+                writer.discard();
+            }
             return Ok(true);
         }
-        let Some(commit) = &store.commit else {
-            return Ok(true);
-        };
-        let pager = store.pager.as_ref().expect("paged source");
-        let _ownership = pager.lock_ownership_mutations();
-        commit.force_sync().map_err(StoreError::Io)?;
-        let epoch = commit
-            .next_page_ownership_epoch(store)
-            .map_err(StoreError::Io)?;
-        commit
-            .begin_page_ownership_epoch(store, epoch)
-            .map_err(StoreError::Io)?;
-        struct Fence<'a> {
-            pager: &'a Pager,
-            active: bool,
-        }
-        impl Drop for Fence<'_> {
-            fn drop(&mut self) {
-                if self.active {
-                    self.pager.fence_interrupted_ownership();
-                }
-            }
-        }
-        let mut fence = Fence {
-            pager,
-            active: true,
-        };
-        #[cfg(test)]
-        let root_before = self.tree.root_page_id();
-        self.tree
-            .bulk_insert_sorted(&postings)
-            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
-        #[cfg(test)]
-        if std::env::var_os("REDDB_TEST_EXIT_DURING_COUNT_BATCH").is_some() {
-            if std::env::var_os("REDDB_TEST_REQUIRE_COUNT_SPLIT").is_some() {
-                assert_ne!(
-                    root_before,
-                    self.tree.root_page_id(),
-                    "fixture must split the root"
-                );
-            }
-            std::process::exit(183);
+        if scanned != 0 {
+            self.writer
+                .as_mut()
+                .expect("active COUNT projection writer")
+                .append(
+                    scanned,
+                    last_source_id.expect("scanned COUNT source identity"),
+                    &postings,
+                )
+                .map_err(StoreError::Io)?;
         }
         if finished {
-            let mut keys = store.key_indices.write();
-            let Some(generation) = keys.get_mut(&self.collection) else {
-                return Err(StoreError::Serialization(
-                    "count source generation disappeared".into(),
-                ));
-            };
-            if !generation.source.ptr_eq(&Arc::downgrade(&self.source)) {
-                return Err(StoreError::Serialization(
-                    "count source generation changed".into(),
-                ));
+            let reader = self
+                .writer
+                .take()
+                .expect("active COUNT projection writer")
+                .finish()
+                .map_err(StoreError::Io)?;
+            let _publication = store.vault_publication_lock.lock();
+            let publish = store.count_build_matches_locked(self)?;
+            if publish {
+                let published_path = reader.path().to_path_buf();
+                let replaced = store.count_projections.write().insert(
+                    self.collection.clone(),
+                    PublishedCountProjection {
+                        identity: self.identity.clone(),
+                        source: Arc::downgrade(&self.source),
+                        reader,
+                    },
+                );
+                if let Some(replaced) = replaced {
+                    if replaced.reader.path() != published_path {
+                        let _ = std::fs::remove_file(replaced.reader.path());
+                    }
+                }
+                let previous = store
+                    .key_indices
+                    .write()
+                    .get_mut(&self.collection)
+                    .and_then(|generation| generation.secondary.remove(NAME));
+                if let Some(previous) = previous {
+                    store.retire_btree(previous.tree);
+                    store.mark_paged_registry_dirty();
+                }
+            } else {
+                let _ = std::fs::remove_file(reader.path());
             }
-            let previous = generation.secondary.insert(
-                NAME.to_string(),
-                super::secondary_index::PublishedSecondaryIndex {
-                    identity: self.identity.clone(),
-                    tree: Arc::clone(&self.tree),
-                },
-            );
-            drop(keys);
-            if let Some(previous) = previous {
-                store.retire_btree(previous.tree);
-            }
-        } else {
-            store.retire_btree(Arc::clone(&self.tree));
         }
-        store.flush_paged_registry()?;
         #[cfg(test)]
         if std::env::var_os("REDDB_TEST_EXIT_AFTER_COUNT_BATCH_PUBLICATION").is_some() {
             std::process::exit(184);
         }
-        commit
-            .finish_count_batch_ownership_epoch(store, epoch)
-            .map_err(StoreError::Io)?;
-        fence.active = false;
         Ok(finished)
     }
 }
 
 impl UnifiedStore {
+    fn count_projection_binding(
+        &self,
+        collection: &str,
+        source: &Arc<BTree>,
+        identity: &SecondaryIndexIdentity,
+    ) -> Result<CountProjectionBinding, StoreError> {
+        let path = self.db_path.as_ref().ok_or_else(|| {
+            StoreError::Serialization("COUNT projection requires a database path".into())
+        })?;
+        let pager = self
+            .pager
+            .as_ref()
+            .ok_or_else(|| StoreError::Serialization("COUNT projection requires a pager".into()))?;
+        let header = pager
+            .header()
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        let catalog_page = pager
+            .read_page(1)
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        let metadata = std::fs::metadata(path).map_err(StoreError::Io)?;
+        let mut digest = Sha256::new();
+        digest.update(b"reddb:derived-count-component:v1");
+        digest.update(path.to_string_lossy().as_bytes());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            digest.update(metadata.dev().to_le_bytes());
+            digest.update(metadata.ino().to_le_bytes());
+            digest.update(metadata.mtime().to_le_bytes());
+            digest.update(metadata.mtime_nsec().to_le_bytes());
+            digest.update(metadata.ctime().to_le_bytes());
+            digest.update(metadata.ctime_nsec().to_le_bytes());
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            digest.update(metadata.creation_time().to_le_bytes());
+            digest.update(metadata.last_write_time().to_le_bytes());
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            digest.update(metadata.len().to_le_bytes());
+        }
+        digest.update(header.version.to_le_bytes());
+        digest.update(header.page_size.to_le_bytes());
+        digest.update(header.schema_version.to_le_bytes());
+        digest.update(header.checkpoint_lsn.to_le_bytes());
+        digest.update(header.physical.sequence.to_le_bytes());
+        digest.update(header.physical.manifest_checksum.to_le_bytes());
+        digest.update(header.physical.collection_roots_checksum.to_le_bytes());
+        digest.update(header.physical.catalog_checksum.to_le_bytes());
+        digest.update(catalog_page.content());
+        digest.update(source.root_page_id().to_le_bytes());
+        digest.update(identity.codec_version.to_le_bytes());
+        digest.update(identity.definition);
+        digest.update((collection.len() as u64).to_le_bytes());
+        digest.update(collection.as_bytes());
+        Ok(CountProjectionBinding {
+            generation: digest.finalize().into(),
+            source_root: source.root_page_id(),
+            identity: identity.clone(),
+            collection: collection.to_owned(),
+        })
+    }
+
+    fn count_projection_paths(
+        &self,
+        binding: &CountProjectionBinding,
+    ) -> Result<(PathBuf, PathBuf), StoreError> {
+        let path = self.db_path.as_ref().ok_or_else(|| {
+            StoreError::Serialization("COUNT projection requires a database path".into())
+        })?;
+        let mut collection_digest = Sha256::new();
+        collection_digest.update(binding.collection.as_bytes());
+        let collection_digest = collection_digest.finalize();
+        let mut collection_tag = String::with_capacity(16);
+        for byte in &collection_digest[..8] {
+            write!(&mut collection_tag, "{byte:02x}").expect("write collection tag");
+        }
+        let mut generation_tag = String::with_capacity(32);
+        for byte in &binding.generation[..16] {
+            write!(&mut generation_tag, "{byte:02x}").expect("write generation tag");
+        }
+        let mut final_name = path.as_os_str().to_os_string();
+        final_name.push(format!(".count-{collection_tag}-{generation_tag}.rdci"));
+        let final_path = PathBuf::from(final_name);
+        let mut building_name = final_path.as_os_str().to_os_string();
+        building_name.push(".building");
+        Ok((PathBuf::from(building_name), final_path))
+    }
+
+    fn count_build_matches(&self, build: &CountBuild) -> Result<bool, StoreError> {
+        let _publication = self.vault_publication_lock.lock();
+        self.count_build_matches_locked(build)
+    }
+
+    fn count_build_matches_locked(&self, build: &CountBuild) -> Result<bool, StoreError> {
+        let current = self.btree_indices.read().get(&build.collection).cloned();
+        let spec_matches = self
+            .secondary_index_specs
+            .read()
+            .get(&build.collection)
+            .and_then(|specs| specs.get(NAME))
+            .is_some_and(|spec| spec.deferred && spec.identity == build.identity);
+        if !current
+            .as_ref()
+            .is_some_and(|source| Arc::ptr_eq(source, &build.source))
+            || !spec_matches
+        {
+            return Ok(false);
+        }
+        let current_binding =
+            self.count_projection_binding(&build.collection, &build.source, &build.identity)?;
+        Ok(current_binding == build.binding)
+    }
+
+    fn load_count_projection_locked(
+        &self,
+        collection: &str,
+        source: &Arc<BTree>,
+        identity: &SecondaryIndexIdentity,
+    ) -> Result<bool, StoreError> {
+        let binding = self.count_projection_binding(collection, source, identity)?;
+        let (_, final_path) = self.count_projection_paths(&binding)?;
+        let reader = match CountProjectionReader::open(&final_path, &binding) {
+            Ok(reader) => reader,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => {
+                let _ = std::fs::remove_file(final_path);
+                return Ok(false);
+            }
+        };
+        let installed_path = reader.path().to_path_buf();
+        let replaced = self.count_projections.write().insert(
+            collection.to_owned(),
+            PublishedCountProjection {
+                identity: identity.clone(),
+                source: Arc::downgrade(source),
+                reader,
+            },
+        );
+        if let Some(replaced) = replaced {
+            if replaced.reader.path() != installed_path {
+                let _ = std::fs::remove_file(replaced.reader.path());
+            }
+        }
+        Ok(true)
+    }
+
+    pub(super) fn remove_count_projection(&self, collection: &str) {
+        if let Some(projection) = self.count_projections.write().remove(collection) {
+            let _ = std::fs::remove_file(projection.reader.path());
+        }
+    }
+
+    pub(super) fn reconcile_count_projections_after_checkpoint(
+        &self,
+        unchanged: &std::collections::HashSet<String>,
+    ) {
+        let previous = std::mem::take(&mut *self.count_projections.write());
+        let trees = self.btree_indices.read();
+        let mut next = HashMap::with_capacity(previous.len());
+        for (collection, mut projection) in previous {
+            let Some(source) = trees.get(&collection) else {
+                let _ = std::fs::remove_file(projection.reader.path());
+                continue;
+            };
+            if !unchanged.contains(&collection)
+                || !projection.source.ptr_eq(&Arc::downgrade(source))
+            {
+                let _ = std::fs::remove_file(projection.reader.path());
+                continue;
+            }
+            let binding =
+                match self.count_projection_binding(&collection, source, &projection.identity) {
+                    Ok(binding) => binding,
+                    Err(error) => {
+                        tracing::warn!(%error, %collection, "COUNT projection rebind failed");
+                        continue;
+                    }
+                };
+            let (_, final_path) = match self.count_projection_paths(&binding) {
+                Ok(paths) => paths,
+                Err(error) => {
+                    tracing::warn!(%error, %collection, "COUNT projection path rebind failed");
+                    continue;
+                }
+            };
+            let previous_path = projection.reader.path().to_path_buf();
+            projection.reader = match projection.reader.rebind(binding, final_path) {
+                Ok(reader) => reader,
+                Err(error) => {
+                    tracing::warn!(%error, %collection, "COUNT projection component rebind failed");
+                    let _ = std::fs::remove_file(previous_path);
+                    continue;
+                }
+            };
+            projection.source = Arc::downgrade(source);
+            next.insert(collection, projection);
+        }
+        drop(trees);
+        *self.count_projections.write() = next;
+    }
+
     pub(crate) fn start_count_build(
         &self,
         collection: &str,
@@ -377,15 +562,51 @@ impl UnifiedStore {
         {
             return Ok(None);
         }
+        let binding = self.count_projection_binding(collection, &source, &spec.identity)?;
+        if self
+            .count_projections
+            .read()
+            .get(collection)
+            .is_some_and(|projection| {
+                projection.identity == spec.identity
+                    && projection.source.ptr_eq(&Arc::downgrade(&source))
+                    && projection.reader.binding() == &binding
+            })
+        {
+            return Ok(None);
+        }
+        if self.load_count_projection_locked(collection, &source, &spec.identity)? {
+            return Ok(None);
+        }
+        let (building_path, final_path) = self.count_projection_paths(&binding)?;
+        let writer =
+            match CountProjectionWriter::open_or_create(building_path, final_path, binding.clone())
+                .map_err(StoreError::Io)?
+            {
+                CountProjectionOpen::Ready(reader) => {
+                    self.count_projections.write().insert(
+                        collection.to_owned(),
+                        PublishedCountProjection {
+                            identity: spec.identity,
+                            source: Arc::downgrade(&source),
+                            reader,
+                        },
+                    );
+                    return Ok(None);
+                }
+                CountProjectionOpen::Building(writer) => writer,
+            };
         let source_view = PagedCollection::new(Arc::clone(&source));
-        let cursor = source_view.scan()?;
+        let cursor = match writer.last_source_id() {
+            Some(id) => source_view.scan_after(EntityId::new(id))?,
+            None => source_view.scan()?,
+        };
         Ok(Some(CountBuild {
             collection: collection.to_owned(),
             source,
-            tree: Arc::new(BTree::new(Arc::clone(
-                self.pager.as_ref().expect("paged source"),
-            ))),
             cursor,
+            writer: Some(writer),
+            binding,
             identity: spec.identity,
             projector: spec.projector,
         }))
@@ -452,6 +673,23 @@ impl UnifiedStore {
             .and_then(|specs| specs.get_mut(NAME))
             .expect("registered count projection")
             .deferred = historical;
+        if historical {
+            let source = self.btree_indices.read().get(collection).cloned();
+            if let Some(source) = source {
+                let schema = manager.column_schema();
+                let projection_identity = identity(schema.as_deref().map(Vec::as_slice));
+                if self
+                    .secondary_index(collection, NAME, &projection_identity)
+                    .is_none()
+                {
+                    let _ = self.load_count_projection_locked(
+                        collection,
+                        &source,
+                        &projection_identity,
+                    )?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -477,27 +715,87 @@ impl UnifiedStore {
             return Ok(None);
         }
         let schema = manager.column_schema();
-        let Some(index) = self.secondary_index(
-            collection,
-            NAME,
-            &identity(schema.as_deref().map(Vec::as_slice)),
-        ) else {
-            return Ok(None);
-        };
+        let projection_identity = identity(schema.as_deref().map(Vec::as_slice));
+        let current_source = self.btree_indices.read().get(collection).cloned();
+        let current_binding = current_source
+            .as_ref()
+            .map(|source| self.count_projection_binding(collection, source, &projection_identity))
+            .transpose()?;
         let mut count = 0u64;
-        index.try_for_each(|key, id| {
-            if key.len() != 17 || key[16] > 1 {
-                return Err(StoreError::Serialization(
-                    "invalid COUNT visibility projection".into(),
+        let mut component = current_source.as_ref().and_then(|source| {
+            self.count_projections
+                .read()
+                .get(collection)
+                .filter(|projection| {
+                    projection.identity == projection_identity
+                        && projection.source.ptr_eq(&Arc::downgrade(source))
+                        && current_binding.as_ref() == Some(projection.reader.binding())
+                })
+                .cloned()
+        });
+        if component.is_none() {
+            self.remove_count_projection(collection);
+            if let Some(source) = current_source.as_ref() {
+                let _ =
+                    self.load_count_projection_locked(collection, source, &projection_identity)?;
+                component = self
+                    .count_projections
+                    .read()
+                    .get(collection)
+                    .filter(|projection| {
+                        projection.identity == projection_identity
+                            && projection.source.ptr_eq(&Arc::downgrade(source))
+                            && current_binding.as_ref() == Some(projection.reader.binding())
+                    })
+                    .cloned();
+            }
+        }
+        if let Some(component) = component {
+            if let Err(error) = component.reader.try_for_each(|record| {
+                if record[16] > 1 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid COUNT visibility projection",
+                    ));
+                }
+                let id = EntityId::new(u64::from_be_bytes(
+                    record[17..25].try_into().expect("eight-byte identity"),
                 ));
+                if !manager.backing_row_is_shadowed(id) {
+                    let xmin = u64::from_be_bytes(record[..8].try_into().expect("eight-byte xmin"));
+                    let xmax =
+                        u64::from_be_bytes(record[8..16].try_into().expect("eight-byte xmax"));
+                    count += u64::from(visible(snapshot, xmin, xmax, record[16] != 0));
+                }
+                Ok(())
+            }) {
+                tracing::warn!(
+                    %error,
+                    path = %component.reader.path().display(),
+                    "discarding invalid derived COUNT projection"
+                );
+                let _ = std::fs::remove_file(component.reader.path());
+                self.count_projections.write().remove(collection);
+                return Ok(None);
             }
-            if !manager.backing_row_is_shadowed(id) {
-                let xmin = u64::from_be_bytes(key[..8].try_into().expect("eight-byte xmin"));
-                let xmax = u64::from_be_bytes(key[8..16].try_into().expect("eight-byte xmax"));
-                count += u64::from(visible(snapshot, xmin, xmax, key[16] != 0));
-            }
-            Ok(())
-        })?;
+        } else {
+            let Some(index) = self.secondary_index(collection, NAME, &projection_identity) else {
+                return Ok(None);
+            };
+            index.try_for_each(|key, id| {
+                if key.len() != 17 || key[16] > 1 {
+                    return Err(StoreError::Serialization(
+                        "invalid COUNT visibility projection".into(),
+                    ));
+                }
+                if !manager.backing_row_is_shadowed(id) {
+                    let xmin = u64::from_be_bytes(key[..8].try_into().expect("eight-byte xmin"));
+                    let xmax = u64::from_be_bytes(key[8..16].try_into().expect("eight-byte xmax"));
+                    count += u64::from(visible(snapshot, xmin, xmax, key[16] != 0));
+                }
+                Ok(())
+            })?;
+        }
         // Resident iteration contains only WAL changes. Replacements were
         // excluded above, so no dedup set or payload clone is necessary.
         manager.for_each_entity(|entity| {
