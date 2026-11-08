@@ -23,6 +23,9 @@ std::string take_ffi_string(char* value) {
 class EmbeddedConn final : public Conn {
 public:
     explicit EmbeddedConn(const ParsedUri& uri) {
+        if (reddb_abi_version() != REDDB_ABI_VERSION) {
+            throw RedDBError(ErrorCode::Engine, "incompatible embedded RedDB ABI");
+        }
         char* error = nullptr;
         const char* path = uri.path.empty() ? nullptr : uri.path.c_str();
         const reddb_status status = reddb_open(path, &handle_, &error);

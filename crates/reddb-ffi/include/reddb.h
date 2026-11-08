@@ -19,6 +19,8 @@ extern "C" {
 
 typedef struct reddb_handle reddb_handle;
 
+#define REDDB_ABI_VERSION 1u
+
 typedef enum reddb_status {
     REDDB_OK = 0,
     REDDB_INVALID_ARGUMENT = 1,
@@ -27,7 +29,7 @@ typedef enum reddb_status {
     REDDB_INTERNAL_ERROR = 4
 } reddb_status;
 
-/* ABI version of this header/library pair. */
+/* Returns REDDB_ABI_VERSION for a compatible library. */
 REDDB_API uint32_t reddb_abi_version(void);
 
 /*

@@ -248,8 +248,8 @@
           "gap": "HTTP connectivity is covered, but no managed attach/warm/cold journey exists."
         },
         "embedded": {
-          "status": "missing",
-          "gap": "The package has no native-ABI embedded implementation."
+          "status": "qualified",
+          "tests": ["drivers/zig/tests/embedded_test.zig"]
         },
         "server_replica": {
           "status": "missing",

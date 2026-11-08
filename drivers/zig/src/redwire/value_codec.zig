@@ -2,7 +2,7 @@ const std = @import("std");
 
 const frame = @import("frame.zig");
 
-const ByteList = std.array_list.Managed(u8);
+const ByteList = std.ArrayList(u8);
 
 pub const MAX_PARAM_COUNT: usize = 65_536;
 pub const MAX_VALUE_PAYLOAD_LEN: usize = @intCast(frame.MAX_FRAME_SIZE);
@@ -100,6 +100,25 @@ pub fn toHttpQueryBody(
     return out.toOwnedSlice();
 }
 
+pub fn toRpcQueryParams(
+    allocator: std.mem.Allocator,
+    sql: []const u8,
+    params: []const Value,
+) ![]u8 {
+    var out = ByteList.init(allocator);
+    errdefer out.deinit();
+    try out.appendSlice("{\"sql\":");
+    try appendJsonString(&out, sql);
+    if (params.len > 0) {
+        try out.appendSlice(",\"params\":");
+        const encoded = try toHttpParamsJson(allocator, params);
+        defer allocator.free(encoded);
+        try out.appendSlice(encoded);
+    }
+    try out.append('}');
+    return out.toOwnedSlice();
+}
+
 fn appendValue(out: *ByteList, value: Value) !void {
     switch (value) {
         .null => try out.append(@intFromEnum(ValueTag.null)),
@@ -151,8 +170,8 @@ fn appendHttpParamJson(out: *ByteList, value: Value) !void {
     switch (value) {
         .null => try out.appendSlice("null"),
         .bool => |v| try out.appendSlice(if (v) "true" else "false"),
-        .int => |v| try out.print("{d}", .{v}),
-        .float => |v| try out.print("{d}", .{v}),
+        .int => |v| try out.writer().print("{d}", .{v}),
+        .float => |v| try out.writer().print("{d}", .{v}),
         .text => |v| try appendJsonString(out, v),
         .bytes => |v| {
             const encoded_len = std.base64.standard.Encoder.calcSize(v.len);
@@ -167,12 +186,12 @@ fn appendHttpParamJson(out: *ByteList, value: Value) !void {
             try out.append('[');
             for (v, 0..) |f, i| {
                 if (i > 0) try out.append(',');
-                try out.print("{d}", .{f});
+                try out.writer().print("{d}", .{f});
             }
             try out.append(']');
         },
         .json => |v| try out.appendSlice(v),
-        .timestamp => |v| try out.print("{{\"$ts\":{d}}}", .{v}),
+        .timestamp => |v| try out.writer().print("{{\"$ts\":{d}}}", .{v}),
         .uuid => |v| {
             try out.appendSlice("{\"$uuid\":");
             var buf: [36]u8 = undefined;

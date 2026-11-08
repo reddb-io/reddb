@@ -6,12 +6,12 @@ mirrors the JS driver's REST surface.
 
 ## Status
 
-- Targets **Zig 0.13.x** (0.14-dev compatible should compile with minor tweaks).
+- Targets **Zig 0.14.1**.
 - Wire protocol parity with the Rust / JS / Go / .NET / Java drivers — same
   framing, same handshake, same SCRAM-SHA-256 flow.
 - Sync API; one connection = one socket; SCRAM, anonymous, and bearer auth.
 - Optional **zstd** compression, auto-detected via `pkg-config` at build time.
-- TLS via `std.crypto.tls.Client`. *ALPN advertisement is **not** wired in 0.13.*
+- TLS via `std.crypto.tls.Client`. *ALPN advertisement is **not** wired in 0.14.1.*
   The server side accepts redwire connections without ALPN, so this works in
   practice; if your operator stack requires ALPN you'll need a newer Zig.
 
@@ -150,8 +150,9 @@ duration of the call. The driver does not retain them.
 | `red://host:5050`                              | RedWire (TCP)     |
 | `reds://host:5050`                             | RedWire + TLS     |
 | `red://host?proto=https`                       | HTTPS REST        |
-| `red:///abs/path/data.rdb`                     | embedded (n/a)    |
-| `memory://`, `file:///path`, `grpc(s)://host`  | legacy aliases    |
+| `red:///abs/path/data.rdb`, `file:///path`     | embedded single-file |
+| `memory://`                                    | embedded in-memory |
+| `grpc(s)://host`                               | legacy aliases    |
 
 Default port for `red://` / `reds://` is **5050** (the redwire listener
 documented in `.red/adr/0001`). Other transports keep the port defaults from the
@@ -166,17 +167,28 @@ zig build test         # all suites
 zig build -Dzstd=true  # force-enable zstd (default: auto-detect via pkg-config)
 zig build -Dzstd=false # disable zstd; compressed frames will surface
                        # error.CompressedButNoZstd on receive
+
+# Enable embedded mode with an extracted RedDB shared-ABI release bundle.
+# The bundle root contains include/reddb.h and the platform library under lib/.
+zig build -Dreddb-ffi-dir=/path/to/reddb-ffi
+LD_LIBRARY_PATH=/path/to/reddb-ffi/lib \
+  zig build embedded-test -Dreddb-ffi-dir=/path/to/reddb-ffi
 ```
+
+With the ABI enabled, the same `reddb.connect` facade accepts `memory://`,
+`file:///absolute/path/data.rdb`, and `red:///absolute/path/data.rdb`. A durable
+embedded database owns exactly the requested `.rdb` file; WAL and metadata stay
+inside it. A second writer is rejected. Without `-Dreddb-ffi-dir`, embedded URIs
+fail closed with `error.EmbeddedUnavailable` instead of starting a server or
+silently choosing another transport. Ensure the ABI library directory is on the
+platform runtime loader path when starting the application.
 
 ## Limitations
 
-- **TLS / ALPN.** `std.crypto.tls.Client` in 0.13 doesn't expose ALPN
+- **TLS / ALPN.** `std.crypto.tls.Client` in 0.14.1 doesn't expose ALPN
   configuration. The driver still wraps the socket in TLS but doesn't advertise
   `redwire/1`. If your reverse proxy is strict about ALPN, use the Rust driver
   (which uses rustls) until Zig's stdlib catches up.
-- **Embedded mode.** No FFI to the engine — `red:///path` returns
-  `error.UnsupportedScheme`. Spawn the server binary the way `drivers/js/src/spawn.js`
-  does if you need that.
 - **gRPC / Postgres wire.** Not implemented; use HTTPS or RedWire instead.
 - **Allocator lifetimes.** Every operation that returns `[]const u8` allocates
   through the supplied allocator. Free with the same allocator after you're

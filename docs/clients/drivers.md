@@ -19,7 +19,7 @@ For the wire-level details every driver implements, see
 | PHP | Composer: [`reddb-io/reddb`](https://packagist.org/packages/reddb-io/reddb) | ❌ | ✅ | ✅ | — | Preview | [php](./drivers/php.md) |
 | Dart / Flutter | pub.dev: [`reddb`](https://pub.dev/packages/reddb) | ❌ | ✅ (VM only) | ✅ | — | Preview | [dart](./drivers/dart.md) |
 | C++ (17+) | source: `drivers/cpp/` (CMake) | ✅ (shared ABI) | ✅ | ✅ | — | Preview | [cpp](./drivers/cpp.md) |
-| Zig (0.13+) | source: `drivers/zig/` | ❌ | ✅ | ✅ | — | Preview | [zig](./drivers/zig.md) |
+| Zig (0.14.1+) | source: `drivers/zig/` | ✅ (shared ABI) | ✅ | ✅ | — | Preview | [zig](./drivers/zig.md) |
 | .NET (C# / F#) | NuGet: `Reddb` | ❌ | ✅ | ✅ | — | Preview | [dotnet](../../drivers/dotnet/README.md) |
 | Java | Maven: `dev.reddb:reddb-jvm` | ❌ | ✅ | ✅ | — | Preview | [java](../../drivers/java/README.md) |
 | Kotlin | Maven: `dev.reddb:reddb-kotlin` | ❌ | ✅ | ✅ | — | Preview | [kotlin](../../drivers/kotlin/README.md) |

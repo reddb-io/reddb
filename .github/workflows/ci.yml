@@ -391,6 +391,9 @@ jobs:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
           save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: '0.14.1'
       - name: Build workflow contracts
         run: node --test scripts/build_workflow_contract.test.mjs
       - run: cargo fmt --all -- --check
@@ -409,6 +412,20 @@ jobs:
           cmake --build /tmp/reddb-cpp-embedded --target embedded_test -j2
           LD_LIBRARY_PATH="$(dirname "$ffi_library")" \
             ctest --test-dir /tmp/reddb-cpp-embedded -R '^embedded_test$' --output-on-failure
+      - name: Zig connection routing contract
+        working-directory: drivers/zig
+        run: zig build connect-contract --summary all
+      - name: Zig embedded single-file journey
+        working-directory: drivers/zig
+        run: |
+          ffi_library="$(find "$GITHUB_WORKSPACE/target/debug" -name 'libreddb_ffi.so' -print -quit)"
+          test -n "$ffi_library"
+          ffi_root=/tmp/reddb-zig-ffi
+          mkdir -p "$ffi_root/include" "$ffi_root/lib"
+          cp "$GITHUB_WORKSPACE/crates/reddb-ffi/include/reddb.h" "$ffi_root/include/reddb.h"
+          cp "$ffi_library" "$ffi_root/lib/libreddb_ffi.so"
+          LD_LIBRARY_PATH="$ffi_root/lib" \
+            zig build embedded-test -Dreddb-ffi-dir="$ffi_root" --summary all
       - name: Scoped S3 credential rotation contracts
         run: |
           cargo check --locked --all --features backend-s3
@@ -806,7 +823,7 @@ jobs:
           extensions: curl, hash, json, openssl
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
-          version: '0.16.0'
+          version: '0.14.1'
       - name: JS RedWire parameter fixtures
         working-directory: drivers/js
         run: node --test test/redwire.params.test.mjs
