@@ -140,4 +140,10 @@ and cold boots. The process-exit test also verifies that only allowed database
 state files exist after recovery.
 
 Standard CI: [run 42440163312](https://github.com/reddb-io/reddb/actions/runs/42440163312)
-validates runtime revision `b4d4562e0`; completion is recorded before merge.
+passed for runtime revision `b4d4562e0`: 7,923 unit tests passed (18 skipped),
+along with all four integration shards, doctests, persistent multimodel tests,
+quality and driver/RQL checks. Shard 3's first job reached its 20-minute limit
+during finalization, after its 955 integration and six persistence tests had
+passed. The unchanged failed-job rerun completed successfully. Subsequent
+commits only update the harness, process-exit test and evidence; the final
+process-exit variant and harness were also validated locally as listed above.
