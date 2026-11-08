@@ -18,6 +18,86 @@ fn fixture() -> (tempfile::TempDir, UnifiedStore) {
 }
 
 #[test]
+fn legacy_identity_scan_seeds_count_projection_for_its_resume_checkpoint() {
+    let directory = tempfile::tempdir().expect("legacy COUNT fixture");
+    let path = directory.path().join("legacy-count.rdb");
+    {
+        let store = UnifiedStore::open(&path).expect("resident store");
+        store.create_collection("rows").expect("collection");
+        let schema = Arc::new(vec!["__moderation_status".to_owned()]);
+        for (id, marker, xmax) in [(1, "", 0), (2, "", 7), (3, "pending", 0)] {
+            let mut entity =
+                UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![Value::text(marker)]);
+            entity.xmin = 3;
+            entity.xmax = xmax;
+            if let EntityData::Row(row) = &mut entity.data {
+                row.schema = Some(Arc::clone(&schema));
+            }
+            store.insert("rows", entity).expect("legacy row");
+        }
+        store
+            .persist()
+            .expect("legacy catalog without resume state");
+    }
+
+    let store = UnifiedStore::open_with_config(&path, config()).expect("bounded migration");
+    store
+        .register_count_index_deferred("rows")
+        .expect("register migrated projection");
+    assert_eq!(store.try_count_from_index("rows", None).unwrap(), Some(1));
+    assert!(store.start_count_build("rows").unwrap().is_none());
+    assert!(store.count_projection_seeds.lock().is_empty());
+    drop(store);
+
+    let reopened = UnifiedStore::open_with_config(&path, config()).expect("prepared reopen");
+    reopened
+        .register_count_index_deferred("rows")
+        .expect("register persisted projection");
+    assert_eq!(
+        reopened.try_count_from_index("rows", None).unwrap(),
+        Some(1)
+    );
+}
+
+#[test]
+fn legacy_count_seed_over_budget_falls_back_without_partial_publication() {
+    let directory = tempfile::tempdir().expect("bounded legacy COUNT fixture");
+    let path = directory.path().join("bounded-legacy-count.rdb");
+    {
+        let store = UnifiedStore::open(&path).expect("resident store");
+        store.create_collection("rows").expect("collection");
+        store
+            .get_collection("rows")
+            .unwrap()
+            .bulk_insert(
+                (1..=100)
+                    .map(|id| UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]))
+                    .collect(),
+            )
+            .expect("legacy rows");
+        store
+            .persist()
+            .expect("legacy catalog without resume state");
+    }
+    let tiny = UnifiedStoreConfig {
+        page_cache_slots: Some(8),
+        resident_memory_bytes_max: Some(4096),
+        ..UnifiedStoreConfig::default()
+    };
+    let store = UnifiedStore::open_with_config(&path, tiny).expect("bounded migration");
+    store
+        .register_count_index_deferred("rows")
+        .expect("register fallback projection");
+    assert_eq!(store.try_count_from_index("rows", None).unwrap(), None);
+    let mut build = store
+        .start_count_build("rows")
+        .unwrap()
+        .expect("complete seed was discarded");
+    while !build.step(&store).unwrap() {}
+    assert_eq!(store.try_count_from_index("rows", None).unwrap(), Some(100));
+}
+
+#[test]
 fn first_count_publication_is_available_and_reused_after_cold_boot() {
     for empty_checkpoint in [false, true] {
         let (directory, store) = fixture();

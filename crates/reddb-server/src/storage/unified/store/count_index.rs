@@ -17,13 +17,13 @@ use sha2::{Digest, Sha256};
 
 // Separate from SQL-visible registry names; a different definition can never
 // accidentally qualify because reads also verify the full fingerprint.
-const NAME: &str = "\0reddb/visibility-count-v1";
+pub(super) const NAME: &str = "\0reddb/visibility-count-v1";
 const MIXED_BATCH_ROWS: usize = 4096;
 const UNIFORM_BATCH_ROWS: usize = 8192;
 const DECODE_GROUP_ROWS: usize = 64;
 const DECODE_WORKERS: usize = 2;
 
-fn identity(schema: Option<&[String]>) -> SecondaryIndexIdentity {
+pub(super) fn identity(schema: Option<&[String]>) -> SecondaryIndexIdentity {
     let mut digest = Sha256::new();
     digest.update(b"reddb:count:xmin-be64:xmax-be64:moderation-u8:v1");
     digest.update([u8::from(schema.is_some())]);
@@ -37,8 +37,73 @@ fn identity(schema: Option<&[String]>) -> SecondaryIndexIdentity {
     }
 }
 
-struct VisibilityProjection {
-    schema: Option<Arc<Vec<String>>>,
+pub(super) struct VisibilityProjection {
+    pub(super) schema: Option<Arc<Vec<String>>>,
+}
+
+pub(super) struct CountProjectionSeed {
+    pub(super) source_root: u32,
+    pub(super) identity: SecondaryIndexIdentity,
+    pub(super) postings: Vec<[u8; 25]>,
+}
+
+pub(super) struct CountProjectionSeedCollector {
+    identity: SecondaryIndexIdentity,
+    projector: Arc<dyn SecondaryIndexProjector>,
+    postings: Vec<[u8; 25]>,
+    max_rows: usize,
+}
+
+impl CountProjectionSeedCollector {
+    pub(super) fn new(schema: Option<Arc<Vec<String>>>, max_bytes: usize) -> Option<Self> {
+        let max_rows = max_bytes / 25;
+        (max_rows != 0).then(|| Self {
+            identity: identity(schema.as_deref().map(Vec::as_slice)),
+            projector: Arc::new(VisibilityProjection { schema }),
+            postings: Vec::new(),
+            max_rows,
+        })
+    }
+
+    /// False discards the entire seed; a partial visibility inventory is never
+    /// eligible for publication.
+    pub(super) fn push(&mut self, entity: &UnifiedEntity) -> Result<bool, StoreError> {
+        if self.postings.len() >= self.max_rows {
+            return Ok(false);
+        }
+        if self.postings.len() == self.postings.capacity() {
+            let capacity = self.postings.capacity();
+            let next = capacity.max(1024).saturating_mul(2).min(self.max_rows);
+            if self
+                .postings
+                .try_reserve_exact(next.saturating_sub(capacity))
+                .is_err()
+            {
+                return Ok(false);
+            }
+        }
+        let mut projected = [0u8; SECONDARY_KEY_BYTES_MAX];
+        let length = self
+            .projector
+            .project(entity, &mut projected)?
+            .ok_or_else(|| {
+                StoreError::Serialization("COUNT visibility projection omitted a row".into())
+            })?;
+        if length != 17 {
+            return Err(StoreError::Serialization(
+                "COUNT visibility projection has an invalid key".into(),
+            ));
+        }
+        let mut posting = [0u8; 25];
+        posting[..17].copy_from_slice(&projected[..17]);
+        posting[17..].copy_from_slice(&entity.id.raw().to_be_bytes());
+        self.postings.push(posting);
+        Ok(true)
+    }
+
+    pub(super) fn bytes(&self) -> usize {
+        self.postings.len().saturating_mul(25)
+    }
 }
 
 fn moderation_hidden(entity: &UnifiedEntity, schema: Option<&[String]>) -> bool {
@@ -338,6 +403,71 @@ impl CountBuild {
 }
 
 impl UnifiedStore {
+    pub(super) fn remember_count_projection_seed(
+        &self,
+        collection: &str,
+        source_root: u32,
+        mut seed: CountProjectionSeedCollector,
+    ) {
+        seed.postings.shrink_to_fit();
+        self.secondary_index_specs
+            .write()
+            .entry(collection.to_owned())
+            .or_default()
+            .insert(
+                NAME.to_owned(),
+                super::secondary_index::SecondaryIndexSpec {
+                    identity: seed.identity.clone(),
+                    projector: seed.projector,
+                    deferred: false,
+                },
+            );
+        self.count_projection_seeds.lock().insert(
+            collection.to_owned(),
+            CountProjectionSeed {
+                source_root,
+                identity: seed.identity,
+                postings: seed.postings,
+            },
+        );
+    }
+
+    pub(super) fn take_count_projection_seed(
+        &self,
+        collection: &str,
+        source_root: u32,
+        identity: &SecondaryIndexIdentity,
+    ) -> Option<CountProjectionSeed> {
+        self.count_projection_seeds
+            .lock()
+            .remove(collection)
+            .filter(|seed| seed.source_root == source_root && seed.identity == *identity)
+    }
+
+    pub(super) fn checkpoint_count_projection_seed(
+        &self,
+        collection: &str,
+        source_root: u32,
+        identity: &SecondaryIndexIdentity,
+        pager: &Arc<Pager>,
+    ) -> Result<Option<Arc<BTree>>, StoreError> {
+        let Some(mut seed) = self.take_count_projection_seed(collection, source_root, identity)
+        else {
+            return Ok(None);
+        };
+        seed.postings.sort_unstable();
+        let tree = Arc::new(BTree::new(Arc::clone(pager)));
+        for postings in seed.postings.chunks(UNIFORM_BATCH_ROWS) {
+            let records: Vec<_> = postings
+                .iter()
+                .map(|posting| (posting.to_vec(), Vec::new()))
+                .collect();
+            tree.bulk_insert_sorted(&records)
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        }
+        Ok(Some(tree))
+    }
+
     pub(crate) fn start_count_build(
         &self,
         collection: &str,

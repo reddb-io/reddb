@@ -335,6 +335,9 @@ pub struct UnifiedStore {
     /// Ephemeral guards for COUNT projections being built by this process.
     /// Queries use them only to avoid waiting on that build's publication.
     count_builds: RwLock<HashMap<String, std::sync::Weak<()>>>,
+    /// Bounded visibility postings recovered while a legacy catalog already
+    /// requires a complete identity scan. The next checkpoint consumes them.
+    count_projection_seeds: parking_lot::Mutex<HashMap<String, count_index::CountProjectionSeed>>,
     /// Disposable, bounded expiration cursors; never authoritative metadata.
     pub(crate) queue_dedup_cursors: parking_lot::Mutex<HashMap<[u8; 32], (u32, [u8; 49])>>,
     recovery_xid_summary: RwLock<Option<recovery_xid::RecoveryXidSummary>>,
