@@ -20,6 +20,14 @@ persist an auxiliary tag file, or claim indexed cold tag invalidation.
 
 ## Matrix and limits
 
+`--red-read-concurrency 8` splits a RedDB window into up to eight concurrent READ
+requests. With `--red-ack-batch`, each READ result gets its own atomic ACK BATCH,
+and those ACK requests run concurrently. The matrix applies the READ setting to
+both RedDB versions; use `--baseline-red-ack-batch` as well when comparing versions
+that both support batch ACK. RabbitMQ/Kafka adapters retain their native consume
+paths. The [concurrent-publication capture](../../docs/perf/queue-cross-request-batching-2026-11-08.md)
+records this request pattern separately from the earlier single-READ window.
+
 - Servers: four CPUs pinned to IDs 0–3, 2 GiB process memory, isolated Docker
   network and persistent local Docker volumes. RedDB engine budget: 1 GiB;
   four HTTP execution workers, admission cap 64, result cache disabled.
