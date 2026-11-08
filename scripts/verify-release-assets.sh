@@ -11,7 +11,7 @@
 # the operator gets a clear list of what to upload (or which build
 # matrix entry to re-run).
 #
-# Required assets are the cross-product of:
+# Required binary assets are the cross-product of:
 #   - bins:      red, red_client
 #   - suffixes:  linux-x86_64, linux-aarch64,
 #                linux-x86_64-static, linux-aarch64-static,
@@ -21,6 +21,8 @@
 # packages from these assets. macOS assets are temporarily optional because
 # the hosted macOS runners have been the least stable part of the release
 # path. The `-static` (musl) assets back the `-musl` npm packages.
+# Native glibc/Windows/macOS legs also publish `reddb-ffi-<suffix>.tar.gz`
+# for language drivers that embed the engine through the shared C ABI.
 #
 # Usage:
 #   GH_TOKEN=...  scripts/verify-release-assets.sh v1.0.8
@@ -45,6 +47,12 @@ SUFFIXES=()
 [[ "${ENABLE_WINDOWS_X64:-true}" != false ]] && SUFFIXES+=(windows-x86_64.exe)
 [[ "${ENABLE_MACOS_ARM64:-false}" == true ]] && SUFFIXES+=(macos-aarch64)
 
+FFI_SUFFIXES=()
+[[ "${ENABLE_LINUX_X64:-true}" != false ]] && FFI_SUFFIXES+=(linux-x86_64)
+[[ "${ENABLE_LINUX_ARM64:-true}" != false ]] && FFI_SUFFIXES+=(linux-aarch64)
+[[ "${ENABLE_WINDOWS_X64:-true}" != false ]] && FFI_SUFFIXES+=(windows-x86_64)
+[[ "${ENABLE_MACOS_ARM64:-false}" == true ]] && FFI_SUFFIXES+=(macos-aarch64)
+
 EXTRA_ASSETS=(
   checksums.txt
   SHA256SUMS
@@ -65,6 +73,12 @@ for bin in "${BINS[@]}"; do
     fi
   done
 done
+for suffix in "${FFI_SUFFIXES[@]}"; do
+  name="reddb-ffi-${suffix}.tar.gz"
+  if ! jq -e --arg n "$name" 'index($n)' <<<"$ASSETS_JSON" >/dev/null; then
+    MISSING+=("$name")
+  fi
+done
 for name in "${EXTRA_ASSETS[@]}"; do
   if ! jq -e --arg n "$name" 'index($n)' <<<"$ASSETS_JSON" >/dev/null; then
     MISSING+=("$name")
@@ -77,11 +91,11 @@ if (( ${#MISSING[@]} > 0 )); then
     echo "ERROR: release ${TAG} is missing ${#MISSING[@]} required asset(s):"
     for m in "${MISSING[@]}"; do echo "  - $m"; done
     echo
-    echo "These assets back the npm platform packages, checksum verification, artifact attestations, and curl-based installer."
+    echo "These assets back the npm platform packages, native embedded drivers, checksum verification, artifact attestations, and curl-based installer."
     echo "Do NOT publish to npm without them — see docs/release-runbook.md"
     echo "(\"Release asset contract\")."
   } >&2
   exit 1
 fi
 
-echo "verify-release-assets: all $((${#BINS[@]} * ${#SUFFIXES[@]})) required assets present."
+echo "verify-release-assets: all $((${#BINS[@]} * ${#SUFFIXES[@]} + ${#FFI_SUFFIXES[@]})) required platform assets present."

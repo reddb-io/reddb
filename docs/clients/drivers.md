@@ -18,7 +18,7 @@ For the wire-level details every driver implements, see
 | Go | `github.com/reddb-io/reddb-go` | ❌ | ✅ | ✅ | — | Preview | [go](./drivers/go.md) |
 | PHP | Composer: [`reddb-io/reddb`](https://packagist.org/packages/reddb-io/reddb) | ❌ | ✅ | ✅ | — | Preview | [php](./drivers/php.md) |
 | Dart / Flutter | pub.dev: [`reddb`](https://pub.dev/packages/reddb) | ❌ | ✅ (VM only) | ✅ | — | Preview | [dart](./drivers/dart.md) |
-| C++ (17+) | source: `drivers/cpp/` (CMake) | ⚠️ (link `reddb-ffi`) | ✅ | ✅ | — | Preview | [cpp](./drivers/cpp.md) |
+| C++ (17+) | source: `drivers/cpp/` (CMake) | ✅ (shared ABI) | ✅ | ✅ | — | Preview | [cpp](./drivers/cpp.md) |
 | Zig (0.13+) | source: `drivers/zig/` | ❌ | ✅ | ✅ | — | Preview | [zig](./drivers/zig.md) |
 | .NET (C# / F#) | NuGet: `Reddb` | ❌ | ✅ | ✅ | — | Preview | [dotnet](../../drivers/dotnet/README.md) |
 | Java | Maven: `dev.reddb:reddb-jvm` | ❌ | ✅ | ✅ | — | Preview | [java](../../drivers/java/README.md) |
@@ -42,9 +42,9 @@ It accounts for **serverless**, **embedded single-file**, **server with read
 replicas**, and **cluster** for every official language facade. At the time of
 this matrix, no facade is four-mode ready; Rust, JavaScript and Python have
 qualified embedded journeys, while the other cells remain partial or missing
-with an explicit gap. C++ now has an executable embedded journey but remains
-partial until release packaging bundles the native library. A mode becomes
-qualified only through its executable integration journey.
+with an explicit gap. C++ also has a qualified embedded journey backed by the
+version-matched shared ABI in stable release assets. A mode becomes qualified
+only through its executable integration journey.
 
 ## Common connection strings
 

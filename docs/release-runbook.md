@@ -347,6 +347,13 @@ The static musl variants (`linux-x86_64-static`, `linux-aarch64-static`)
 are also required: they back the `-musl` npm platform packages and the thin
 `Dockerfile.client` image.
 
+Native language drivers use the version-matched shared embedded ABI archive,
+`reddb-ffi-<platform>.tar.gz`. It contains `include/reddb.h` plus the dynamic
+library (and the Windows import library) under `lib/`. The build must load the
+library and observe ABI version 1 before publishing it. Release verification
+requires this archive for every enabled native glibc, Windows, or macOS leg;
+the static musl legs do not publish a shared ABI.
+
 The in-process Node addon is a separate, **optional** asset per platform,
 `reddb-node-<suffix>.node` (e.g. `reddb-node-linux-x86_64.node`). It is built
 only on legs that run on their own architecture and is uploaded only after the

@@ -22,6 +22,7 @@ test("CI and release both enforce the four-mode contract", () => {
   assert.match(ci, /tests\/test_smoke\.py/);
   assert.match(ci, /cargo test --locked -p reddb-io-ffi/);
   assert.match(ci, /C\+\+ embedded single-file journey[\s\S]*embedded_test/);
+  assert.match(release, /Package shared embedded ABI[\s\S]*reddb_abi_version/);
 });
 
 test("the contract points at the shared native ABI", () => {

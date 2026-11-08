@@ -27,6 +27,11 @@ The equivalent names are `libreddb_ffi.dylib` on macOS and
 runtime loader path. Builds without it keep remote support and reject
 embedded URIs with `EmbeddedUnsupported`.
 
+Stable releases also publish a version-matched
+`reddb-ffi-<platform>.tar.gz` with the header in `include/` and shared/import
+libraries in `lib/`, so users of a released C++ tag do not need a Rust
+toolchain.
+
 ### Dependencies
 
 | Dependency  | Required? | Notes                                                                                       |

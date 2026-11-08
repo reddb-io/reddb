@@ -26,6 +26,11 @@ dynamic library must be available to the operating-system loader at runtime.
 Without `REDDB_FFI_LIBRARY`, embedded URIs fail closed with
 `EmbeddedUnsupported`; remote transports are unchanged.
 
+Stable RedDB releases publish a version-matched
+`reddb-ffi-<platform>.tar.gz` containing `include/reddb.h` and the shared
+library under `lib/`. Download that archive instead of compiling Rust when
+consuming a released driver tag.
+
 ### Dependencies
 
 | Dependency | Required? | Notes |
