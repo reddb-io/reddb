@@ -1062,6 +1062,7 @@ impl UnifiedStore {
             btree_indices: RwLock::new(HashMap::new()),
             key_indices: RwLock::new(HashMap::new()),
             secondary_index_specs: RwLock::new(HashMap::new()),
+            count_projections: RwLock::new(HashMap::new()),
             queue_dedup_cursors: parking_lot::Mutex::new(HashMap::new()),
             recovery_xid_summary: RwLock::new(None),
             checkpoint_versions: RwLock::new(HashMap::new()),
@@ -1229,6 +1230,7 @@ impl UnifiedStore {
             btree_indices: RwLock::new(HashMap::new()),
             key_indices: RwLock::new(HashMap::new()),
             secondary_index_specs: RwLock::new(HashMap::new()),
+            count_projections: RwLock::new(HashMap::new()),
             queue_dedup_cursors: parking_lot::Mutex::new(HashMap::new()),
             recovery_xid_summary: RwLock::new(None),
             checkpoint_versions: RwLock::new(HashMap::new()),
@@ -2348,6 +2350,7 @@ impl UnifiedStore {
         let previous_versions = self.checkpoint_versions.read();
         let mut checkpoint_versions = HashMap::with_capacity(collections.len());
         let pending_vault = Arc::new(pending_vault_versions.clone());
+        let mut unchanged_count_sources = std::collections::HashSet::new();
         let (visibility_revision, excluded, untracked_visibility_revision) =
             self.snapshot_manager.get().map_or_else(
                 || (0, Default::default(), 0),
@@ -2379,6 +2382,7 @@ impl UnifiedStore {
                     collection_roots.push((name.clone(), tree.root_page_id()));
                     rebuilt_indices.insert(name.clone(), Arc::clone(tree));
                     checkpoint_versions.insert(name.clone(), version);
+                    unchanged_count_sources.insert(name.clone());
                     continue;
                 }
             }
@@ -2559,6 +2563,10 @@ impl UnifiedStore {
                 }
             }
         }
+
+        drop(btree_indices);
+        drop(collections);
+        self.reconcile_count_projections_after_checkpoint(&unchanged_count_sources);
 
         Ok(())
     }

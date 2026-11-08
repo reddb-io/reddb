@@ -332,6 +332,9 @@ pub struct UnifiedStore {
     btree_indices: RwLock<HashMap<String, Arc<BTree>>>,
     key_indices: RwLock<HashMap<String, PublishedKeyIndex>>,
     secondary_index_specs: RwLock<secondary_index::SecondaryIndexSpecs>,
+    /// Completed derived COUNT components, pinned to an exact data-tree and
+    /// catalog generation. They are caches: a miss always falls back to rows.
+    count_projections: RwLock<HashMap<String, count_index::PublishedCountProjection>>,
     /// Disposable, bounded expiration cursors; never authoritative metadata.
     pub(crate) queue_dedup_cursors: parking_lot::Mutex<HashMap<[u8; 32], (u32, [u8; 49])>>,
     recovery_xid_summary: RwLock<Option<recovery_xid::RecoveryXidSummary>>,
@@ -397,6 +400,7 @@ mod checkpoint_cold_append;
 mod checkpoint_delta;
 mod checkpoint_wal;
 mod commit;
+mod count_projection;
 mod impl_entities;
 mod impl_file;
 mod impl_native_a;
