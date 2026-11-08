@@ -123,10 +123,96 @@ fn count_batch_limits_mixed_keys_and_groups_uniform_keys() {
         let visits = Arc::new(AtomicUsize::new(0));
         build.projector = Arc::new(CountVisits(Arc::clone(&visits)));
         assert!(!build.step(&store).unwrap());
-        assert_eq!(visits.load(Ordering::Relaxed), expected_visits);
+        // Speculative decoding can visit the rest of a group, but only the
+        // bounded prefix may be published in this ownership epoch.
+        assert!(visits.load(Ordering::Relaxed) >= expected_visits);
+        let mut cursor = build.tree.cursor_first().unwrap();
+        let mut published = 0;
+        while cursor.next().unwrap().is_some() {
+            published += 1;
+        }
+        assert_eq!(published, expected_visits);
         while !build.step(&store).unwrap() {}
         compare(&store, None, rows);
     }
+}
+
+#[test]
+fn count_parallel_decode_falls_back_for_large_records() {
+    let (_directory, store) = fixture();
+    let large = "x".repeat(512 * 1024);
+    store
+        .get_collection("rows")
+        .unwrap()
+        .bulk_insert(
+            (1..=70)
+                .map(|id| {
+                    UnifiedEntity::table_row(
+                        EntityId::new(id),
+                        "rows",
+                        id,
+                        vec![Value::text(if id == 32 { large.as_str() } else { "small" })],
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+    store.persist().unwrap();
+    store.register_count_index_deferred("rows").unwrap();
+    let mut build = store.start_count_build("rows").unwrap().unwrap();
+    let mut probe = build.cursor.fork();
+    for _ in 1..32 {
+        assert!(probe.skip_record().unwrap());
+    }
+    let record = probe.next_record(2 * 1024 * 1024).unwrap().unwrap();
+    assert!(matches!(
+        record.decode_with_budget(store.format_version(), 2 * 1024 * 1024 / 8),
+        Err(StoreError::ReadLimitExceeded { .. })
+    ));
+    record
+        .decode_with_budget(store.format_version(), 2 * 1024 * 1024)
+        .unwrap();
+    while !build.step(&store).unwrap() {}
+    compare(&store, None, 70);
+}
+
+#[test]
+fn count_parallel_decode_does_not_publish_failed_records() {
+    struct FailingProjection;
+    impl SecondaryIndexProjector for FailingProjection {
+        fn project(
+            &self,
+            entity: &UnifiedEntity,
+            key: &mut [u8; SECONDARY_KEY_BYTES_MAX],
+        ) -> Result<Option<usize>, StoreError> {
+            if entity.id.raw() == 32 {
+                return Err(StoreError::Serialization(
+                    "injected projection failure".into(),
+                ));
+            }
+            VisibilityProjection { schema: None }.project(entity, key)
+        }
+    }
+    let (_directory, store) = fixture();
+    store
+        .get_collection("rows")
+        .unwrap()
+        .bulk_insert(
+            (1..=70)
+                .map(|id| UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]))
+                .collect(),
+        )
+        .unwrap();
+    store.persist().unwrap();
+    store.register_count_index_deferred("rows").unwrap();
+    let mut build = store.start_count_build("rows").unwrap().unwrap();
+    build.projector = Arc::new(FailingProjection);
+    assert!(build.step(&store).is_err());
+    assert_eq!(store.try_count_from_index("rows", None).unwrap(), None);
+    drop(build);
+    let mut retry = store.start_count_build("rows").unwrap().unwrap();
+    while !retry.step(&store).unwrap() {}
+    compare(&store, None, 70);
 }
 
 #[test]

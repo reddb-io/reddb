@@ -200,6 +200,20 @@ pub struct BTreeCursor<P: PageStore> {
 }
 
 impl<P: PageStore> BTreeCursor<P> {
+    /// Copy the position of an immutable cursor without advancing the original.
+    pub(crate) fn fork_immutable(&self) -> Self {
+        assert!(self.immutable, "only immutable cursors may be forked");
+        Self {
+            _retirement_pin: Arc::clone(&self._retirement_pin),
+            leaf_page_id: self.leaf_page_id,
+            position: self.position,
+            pager: Arc::clone(&self.pager),
+            prefetched_next: self.prefetched_next,
+            immutable: true,
+            immutable_leaf: self.immutable_leaf.clone(),
+        }
+    }
+
     /// Only collection readers whose host pins an immutable published root
     /// may retain a leaf across calls. This is not a mutable-tree snapshot.
     pub(crate) fn with_immutable_leaves(mut self) -> Self {
