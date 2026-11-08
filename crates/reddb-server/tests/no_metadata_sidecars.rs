@@ -170,17 +170,58 @@ fn queue_delivery_batches_and_ack_recover_after_process_exit() {
         })
     };
     if let Some(path) = std::env::var_os(CHILD) {
-        let rt = RedDBRuntime::with_options(settings(
-            Path::new(&path),
-            std::env::var("REDDB_PUBLICATION_BOUNDED").expect("bounded") == "true",
-            std::env::var("REDDB_PUBLICATION_GROUPED").expect("grouped") == "true",
-        ))
-        .expect("child");
+        let bounded = std::env::var("REDDB_PUBLICATION_BOUNDED").expect("bounded") == "true";
+        let grouped = std::env::var("REDDB_PUBLICATION_GROUPED").expect("grouped") == "true";
+        let rt = RedDBRuntime::with_options(settings(Path::new(&path), bounded, grouped))
+            .expect("child");
+        let requests = if bounded && grouped { 4 } else { 1 };
+        let execute = |queries: Vec<String>| {
+            let start = std::sync::Barrier::new(queries.len());
+            std::thread::scope(|scope| {
+                let workers: Vec<_> = queries
+                    .into_iter()
+                    .enumerate()
+                    .map(|(worker, query)| {
+                        let rt = &rt;
+                        let start = &start;
+                        scope.spawn(move || {
+                            reddb_server::runtime::mvcc::set_current_connection_id(
+                                82_000 + worker as u64,
+                            );
+                            start.wait();
+                            rt.execute_query(&query)
+                                .expect("durable concurrent operation")
+                        })
+                    })
+                    .collect();
+                workers
+                    .into_iter()
+                    .map(|worker| worker.join().expect("worker"))
+                    .collect::<Vec<_>>()
+            })
+        };
         if std::env::var("REDDB_PUBLICATION_STAGE").expect("stage") == "deliver" {
-            let result = rt
-                .execute_query("QUEUE READ batches GROUP workers CONSUMER c COUNT 16")
-                .expect("delivery");
-            assert_eq!(result.result.records.len(), 16);
+            let results = execute(
+                (0..requests)
+                    .map(|worker| {
+                        format!(
+                            "QUEUE READ batches GROUP workers CONSUMER c{worker} COUNT {}",
+                            16 / requests,
+                        )
+                    })
+                    .collect(),
+            );
+            let mut delivered = std::collections::HashSet::new();
+            for result in results {
+                assert_eq!(result.result.records.len(), 16 / requests);
+                for row in result.result.records {
+                    let Some(reddb_types::Value::Text(id)) = row.get("message_id") else {
+                        panic!("message id")
+                    };
+                    assert!(delivered.insert(id.to_string()), "exclusive reservation");
+                }
+            }
+            assert_eq!(delivered.len(), 16);
         } else {
             let result = rt
                 .execute_query("QUEUE PENDING batches GROUP workers")
@@ -196,10 +237,14 @@ fn queue_delivery_batches_and_ack_recover_after_process_exit() {
                     };
                     format!("'{id}'")
                 })
-                .collect::<Vec<_>>()
-                .join(",");
-            rt.execute_query(&format!("QUEUE ACK batches BATCH GROUP workers ({ids})"))
-                .expect("durable batch ACK");
+                .collect::<Vec<_>>();
+            execute(
+                ids.chunks(16 / requests)
+                    .map(
+                        |ids| format!("QUEUE ACK batches BATCH GROUP workers ({})", ids.join(","),),
+                    )
+                    .collect(),
+            );
         }
         std::process::exit(0);
     }
