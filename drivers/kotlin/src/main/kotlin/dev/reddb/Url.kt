@@ -16,8 +16,8 @@ import java.util.Locale
  *   reds://[user[:pass]@]host[:port][?...]     RedWire over TLS
  *   http://host[:port]/                        HTTP (REST)
  *   https://host[:port]/                       HTTPS
- *   red:///abs/path/file.rdb                   embedded file (out of scope here)
- *   red://memory  red://:memory  red://:memory: embedded in-memory (out of scope)
+ *   file:///abs/path/file.rdb  red:///abs/path  embedded single-file
+ *   memory://  red://memory                    embedded in-memory
  * ```
  *
  * Default ports follow the RedDB listener contract: RedWire 5050,
@@ -43,7 +43,7 @@ public class Url private constructor(
     /** True for `reds://` or `https://`. */
     public fun isTls(): Boolean = kind == Kind.REDWIRE_TLS || kind == Kind.HTTPS
 
-    /** True for either embedded variant — the Kotlin driver doesn't ship an embedded engine. */
+    /** True for either embedded variant. */
     public fun isEmbedded(): Boolean = kind == Kind.EMBEDDED_FILE || kind == Kind.EMBEDDED_MEMORY
 
     public companion object {
@@ -51,6 +51,7 @@ public class Url private constructor(
         public const val DEFAULT_PORT: Int = 5050
 
         private val EMBEDDED_MEMORY_ALIASES: Set<String> = setOf(
+            "memory:", "memory://",
             "red:", "red:/", "red://",
             "red://memory", "red://memory/",
             "red://:memory", "red://:memory:",
@@ -74,6 +75,16 @@ public class Url private constructor(
             if (uri.startsWith("red:///")) {
                 val path = uri.substring("red://".length) // keeps leading '/'
                 return Url(uri, Kind.EMBEDDED_FILE, path = path)
+            }
+            if (uri.lowercase(Locale.ROOT).startsWith("file://")) {
+                val parsed = parseAsJavaUri(uri)
+                if (!parsed.host.isNullOrEmpty() && parsed.host != "localhost") {
+                    throw IllegalArgumentException("embedded file URI must not name a remote host")
+                }
+                if (parsed.path.isNullOrEmpty()) {
+                    throw IllegalArgumentException("embedded file URI is missing a path")
+                }
+                return Url(uri, Kind.EMBEDDED_FILE, path = parsed.path)
             }
 
             val scheme = schemeOf(uri)

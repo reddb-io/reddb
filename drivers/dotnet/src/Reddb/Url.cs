@@ -39,7 +39,7 @@ public sealed class RedUrl
     /// <summary>True for <c>reds://</c> or <c>https://</c>.</summary>
     public bool IsTls => Scheme is Kind.RedwireTls or Kind.Https;
 
-    /// <summary>True for either embedded variant — the .NET driver doesn't ship the embedded engine.</summary>
+    /// <summary>True for either embedded variant.</summary>
     public bool IsEmbedded => Scheme is Kind.EmbeddedFile or Kind.EmbeddedMemory;
 
     private RedUrl(
@@ -80,7 +80,8 @@ public sealed class RedUrl
         }
 
         // Embedded shortcuts.
-        if (uri == "red:" || uri == "red:/" || uri == "red://"
+        if (uri == "memory:" || uri == "memory://"
+            || uri == "red:" || uri == "red:/" || uri == "red://"
             || uri == "red://memory" || uri == "red://memory/"
             || uri == "red://:memory" || uri == "red://:memory:")
         {
@@ -90,6 +91,33 @@ public sealed class RedUrl
                 host: null,
                 port: DefaultPort,
                 path: null,
+                username: null,
+                password: null,
+                token: null,
+                apiKey: null,
+                queryParams: EmptyParams);
+        }
+        if (uri.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
+        {
+            Uri file;
+            try
+            {
+                file = new Uri(uri, UriKind.Absolute);
+            }
+            catch (UriFormatException ex)
+            {
+                throw new ArgumentException($"failed to parse embedded file URI '{uri}'", nameof(uri), ex);
+            }
+            if (!file.IsFile || string.IsNullOrEmpty(file.LocalPath))
+            {
+                throw new ArgumentException($"embedded file URI is missing a path: '{uri}'", nameof(uri));
+            }
+            return new RedUrl(
+                uri,
+                Kind.EmbeddedFile,
+                host: null,
+                port: DefaultPort,
+                path: file.LocalPath,
                 username: null,
                 password: null,
                 token: null,

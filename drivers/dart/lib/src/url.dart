@@ -72,6 +72,8 @@ ParsedUri parseUri(String uri) {
 
   // Embedded shortcuts that `Uri.parse` does not represent cleanly.
   const embeddedShortcuts = {
+    'memory:',
+    'memory://',
     'red:',
     'red:/',
     'red://',
@@ -96,6 +98,17 @@ ParsedUri parseUri(String uri) {
     parsed = Uri.parse(uri);
   } on FormatException catch (e) {
     throw InvalidUri("failed to parse '$uri': ${e.message}");
+  }
+
+  if (parsed.scheme.toLowerCase() == 'file') {
+    if (parsed.path.isEmpty) {
+      throw InvalidUri("embedded file URI is missing a path: '$uri'");
+    }
+    return ParsedUri(
+      kind: 'embedded',
+      path: parsed.toFilePath(),
+      originalUri: uri,
+    );
   }
 
   final scheme = parsed.scheme.toLowerCase();
@@ -140,9 +153,8 @@ ParsedUri parseUri(String uri) {
     }
   }
 
-  final port = parsed.hasPort
-      ? parsed.port
-      : defaultPortFor(_schemeForDefault(kind));
+  final port =
+      parsed.hasPort ? parsed.port : defaultPortFor(_schemeForDefault(kind));
 
   String? username;
   String? password;

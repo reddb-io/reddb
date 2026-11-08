@@ -145,8 +145,8 @@ public class UrlTests
     {
         Assert.Equal(5050, RedUrl.Parse("red://h").Port);
         Assert.Equal(5050, RedUrl.Parse("reds://h").Port);
-        Assert.Equal(5050, RedUrl.Parse("http://h").Port);
-        Assert.Equal(5050, RedUrl.Parse("https://h").Port);
+        Assert.Equal(5000, RedUrl.Parse("http://h").Port);
+        Assert.Equal(55555, RedUrl.Parse("https://h").Port);
     }
 
     [Fact]

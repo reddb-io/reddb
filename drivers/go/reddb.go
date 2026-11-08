@@ -160,8 +160,8 @@ func WithTLSConfig(rootCAs *x509.CertPool, certs []tls.Certificate, serverName s
 //	http://host:5000             HTTP
 //	https://host:55555            HTTPS
 //
-// Embedded URIs (`red:///path` or `red://memory`) are not supported by the
-// pure-Go driver; ParseURI returns CodeEmbeddedUnsupported for those.
+// Embedded URIs load the shared RedDB native ABI dynamically, so remote-only
+// applications do not need a C compiler or a native library at build time.
 func Connect(ctx context.Context, uri string, opts ...Option) (Conn, error) {
 	o := Options{}
 	for _, fn := range opts {
@@ -194,8 +194,7 @@ func Connect(ctx context.Context, uri string, opts ...Option) (Conn, error) {
 	case KindHTTP, KindHTTPS:
 		return connectHTTP(ctx, parsed, &o)
 	case KindEmbedded:
-		return nil, NewError(CodeEmbeddedUnsupported,
-			"embedded mode requires a future cgo build")
+		return connectEmbedded(parsed.Path)
 	}
 	return nil, NewError(CodeUnsupportedScheme,
 		fmt.Sprintf("kind %q has no transport", parsed.Kind))

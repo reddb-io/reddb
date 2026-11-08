@@ -85,7 +85,7 @@ final class UrlTest extends TestCase
      */
     public static function memoryAliases(): iterable
     {
-        foreach (['red:', 'red:/', 'red://', 'red://memory', 'red://memory/', 'red://:memory', 'red://:memory:'] as $s) {
+        foreach (['memory://', 'red:', 'red:/', 'red://', 'red://memory', 'red://memory/', 'red://:memory', 'red://:memory:'] as $s) {
             yield $s => [$s];
         }
     }
@@ -103,6 +103,13 @@ final class UrlTest extends TestCase
         $u = Url::parse('red:///var/lib/reddb/data.rdb');
         $this->assertSame(Url::KIND_EMBEDDED_FILE, $u->kind);
         $this->assertSame('/var/lib/reddb/data.rdb', $u->path);
+    }
+
+    public function test_recognises_canonical_embedded_file(): void
+    {
+        $u = Url::parse('file:///var/lib/reddb/data.rdb');
+        self::assertSame(Url::KIND_EMBEDDED_FILE, $u->kind);
+        self::assertSame('/var/lib/reddb/data.rdb', $u->path);
     }
 
     /**
@@ -159,8 +166,8 @@ final class UrlTest extends TestCase
     {
         $this->assertSame(5050, Url::parse('red://h')->port);
         $this->assertSame(5050, Url::parse('reds://h')->port);
-        $this->assertSame(5050, Url::parse('http://h')->port);
-        $this->assertSame(5050, Url::parse('https://h')->port);
+        $this->assertSame(5000, Url::parse('http://h')->port);
+        $this->assertSame(55555, Url::parse('https://h')->port);
     }
 
     public function test_preserves_original_uri(): void
