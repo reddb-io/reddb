@@ -263,6 +263,22 @@ impl RedDBRuntime {
     ) -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
         let do_read =
             |runtime: &RedDBRuntime| -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
+                // WAIT is an autocommit live subscription: each retry must see
+                // commits since the previous probe. Keep identity/tenant fixed
+                // and restore the enclosing statement snapshot after the read.
+                let _snapshot_guard = wait_ms
+                    .and_then(|_| crate::runtime::impl_core::capture_current_snapshot())
+                    .map(|mut context| {
+                        context.snapshot = context.manager.fresh_read_snapshot();
+                        crate::runtime::execution_context::CurrentSnapshotGuard::install(context)
+                    });
+                let adapter = PrimaryQueueStore::new(runtime.clone());
+                if let Some(delivered) = adapter
+                    .try_group_read_batched(queue, group, consumer, count)
+                    .map_err(map_qse)?
+                {
+                    return Ok(delivered);
+                }
                 // #1371 — serialize concurrent group consumers on this queue so
                 // a single available message is claimed (mark_pending) and
                 // returned by exactly one consumer. Without this, woken
@@ -273,15 +289,10 @@ impl RedDBRuntime {
                     .rmw_locks
                     .lock_for(queue, "__queue_group_read__");
                 let _read_guard = read_lock.lock();
-                // WAIT is an autocommit live subscription: each retry must see
-                // commits since the previous probe. Keep identity/tenant fixed
-                // and restore the enclosing statement snapshot after the read.
-                let _snapshot_guard = wait_ms
-                    .and_then(|_| crate::runtime::impl_core::capture_current_snapshot())
-                    .map(|mut context| {
-                        context.snapshot = context.manager.fresh_read_snapshot();
-                        crate::runtime::execution_context::CurrentSnapshotGuard::install(context)
-                    });
+                // The fallback must also exclude prepared concurrent READs
+                // between candidate selection and reservation.
+                let store = runtime.inner.db.store();
+                let _publication = store.vault_publication_lock.lock();
                 let (lifecycle, _ps, txn) = runtime_lifecycle(runtime, queue);
                 lifecycle
                     .group_read(&txn, queue, group, consumer, count)
@@ -1565,6 +1576,7 @@ impl RedDBRuntime {
                 }
                 let fanout =
                     ps.lifecycle_config(queue).mode == crate::storage::queue::QueueMode::Fanout;
+                drop(_publication);
                 ps.ack_many(&txn, &deliveries, fanout).map_err(map_qse)?;
                 self.invalidate_result_cache();
                 Ok(RuntimeQueryResult::ok_message(

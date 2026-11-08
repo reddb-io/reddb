@@ -98,7 +98,49 @@ impl PrimaryQueueStore {
         fanout: bool,
     ) -> Result<()> {
         let store = self.store();
-        let _publication = store.vault_publication_lock.lock();
+        if UnifiedStore::deferred_store_wal_capture_active() || self.runtime.current_xid().is_some()
+        {
+            let _publication = store.vault_publication_lock.lock();
+            self.prepare_ack_rows(delivery_ids, fanout, &[])?;
+            for delivery in delivery_ids {
+                if fanout {
+                    self.retire_for_group(txn, delivery)?;
+                } else {
+                    self.ack_pending(txn, delivery)?;
+                }
+            }
+            return Ok(());
+        }
+        let adapter = Self::new(self.runtime.clone());
+        let delivery_ids = delivery_ids.to_vec();
+        let pending = store
+            .prepare_and_publish_rows(move |_, previous| {
+                match adapter.prepare_ack_rows(&delivery_ids, fanout, previous) {
+                    Ok((rows, pending)) => Ok((rows, Ok(pending))),
+                    Err(error) => Ok((
+                        crate::storage::unified::store::RowPublication::default(),
+                        Err(error),
+                    )),
+                }
+            })
+            .map_err(|error| QueueStoreError::UnknownQueue(error.to_string()))??;
+        if !fanout {
+            for (_, row) in pending {
+                self.retire_message_mvcc(txn, &row.queue, row.message_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_ack_rows(
+        &self,
+        delivery_ids: &[String],
+        fanout: bool,
+        previous: &[crate::storage::unified::store::RowPublication],
+    ) -> Result<(
+        crate::storage::unified::store::RowPublication,
+        Vec<(EntityId, PendingRow)>,
+    )> {
         let mut seen = std::collections::HashSet::new();
         let pending = delivery_ids
             .iter()
@@ -112,17 +154,6 @@ impl PrimaryQueueStore {
                     .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery.clone()))
             })
             .collect::<Result<Vec<_>>>()?;
-        if UnifiedStore::deferred_store_wal_capture_active() || self.runtime.current_xid().is_some()
-        {
-            for delivery in delivery_ids {
-                if fanout {
-                    self.retire_for_group(txn, delivery)?;
-                } else {
-                    self.ack_pending(txn, delivery)?;
-                }
-            }
-            return Ok(());
-        }
         let mut rows = crate::storage::unified::store::RowPublication::default();
         for (pending_id, row) in &pending {
             if fanout {
@@ -166,15 +197,264 @@ impl PrimaryQueueStore {
                 }
             }
         }
-        store
-            .publish_rows(rows)
+        // Earlier accepted ACKs still exist in the store until the shared
+        // publication. Reject overlap per request, before submitting any rows.
+        if rows
+            .deletes
+            .iter()
+            .any(|deleted| previous.iter().any(|plan| plan.deletes.contains(deleted)))
+        {
+            return Err(QueueStoreError::UnknownDelivery(
+                "delivery already acknowledged in this publication".into(),
+            ));
+        }
+        Ok((rows, pending))
+    }
+
+    // New READ reservations have already excluded legacy pending rows.
+    // Call under the publication fence so validation and planning share a view.
+    fn prepare_pending_read_rows(
+        &self,
+        queue: &str,
+        message_ids: &[MessageId],
+        group: &str,
+        consumer: &str,
+        deadline: Instant,
+        count_attempt: bool,
+    ) -> (
+        crate::storage::unified::store::RowPublication,
+        Vec<(DeliveryId, u32)>,
+    ) {
+        let mut rows = crate::storage::unified::store::RowPublication::default();
+        let mut deliveries = Vec::with_capacity(message_ids.len());
+        for &message_id in message_ids {
+            let existing = self.find_pending_entry_by_key(queue, message_id, group);
+            let delivery = existing
+                .as_ref()
+                .map(|(_, row)| row.delivery_id.clone())
+                .unwrap_or_else(new_delivery_id);
+            if let Some((id, _)) = existing {
+                rows.deletes.push((QUEUE_META_COLLECTION.to_string(), id));
+            }
+            let fields = HashMap::from([
+                ("kind".into(), Value::text(KIND_PENDING_LC)),
+                ("queue".into(), Value::text(queue)),
+                ("group".into(), Value::text(group)),
+                ("message_id".into(), Value::UnsignedInteger(message_id)),
+                ("delivery_id".into(), Value::text(delivery.clone())),
+                ("consumer".into(), Value::text(consumer)),
+                (
+                    "lock_deadline_ns".into(),
+                    Value::UnsignedInteger(instant_to_unix_ns(deadline)),
+                ),
+            ]);
+            rows.inserts.push((
+                QUEUE_META_COLLECTION.to_string(),
+                queue_meta_entity(fields),
+                None,
+            ));
+            let attempts = if count_attempt {
+                let attempts = self
+                    .read_attempts(queue, message_id, group)
+                    .saturating_add(1);
+                for (id, _) in
+                    self.subject_rows(KIND_ATTEMPTS_LC, queue, Some(group), Some(message_id))
+                {
+                    rows.deletes.push((QUEUE_META_COLLECTION.to_string(), id));
+                }
+                let fields = HashMap::from([
+                    ("kind".into(), Value::text(KIND_ATTEMPTS_LC)),
+                    ("queue".into(), Value::text(queue)),
+                    ("group".into(), Value::text(group)),
+                    ("message_id".into(), Value::UnsignedInteger(message_id)),
+                    ("attempts".into(), Value::UnsignedInteger(attempts as u64)),
+                ]);
+                rows.inserts.push((
+                    QUEUE_META_COLLECTION.to_string(),
+                    queue_meta_entity(fields),
+                    None,
+                ));
+                attempts
+            } else {
+                1
+            };
+            deliveries.push((delivery, attempts));
+        }
+        (rows, deliveries)
+    }
+
+    /// Batch ordinary autocommit READs before taking the publication fence.
+    /// Expiry, ordered keys, exhausted attempts and explicit transactions keep
+    /// their existing lifecycle path. No provisional reservation escapes RAM.
+    pub(crate) fn try_group_read_batched(
+        &self,
+        queue: &str,
+        group: &str,
+        consumer: &str,
+        count: usize,
+    ) -> Result<Option<Vec<super::queue_lifecycle::DeliveredMessage>>> {
+        if count == 0
+            || count > 256
+            || self.runtime.current_xid().is_some()
+            || UnifiedStore::deferred_store_wal_capture_active()
+            || self.runtime.is_rls_enabled(queue)
+        {
+            return Ok(None);
+        }
+        let store = self.store();
+        let adapter = Self::new(self.runtime.clone());
+        let snapshot = super::execution_context::snapshot_bundle();
+        let queue_owned = queue.to_string();
+        let group_owned = group.to_string();
+        let consumer_owned = consumer.to_string();
+        let delivered = store
+            .prepare_and_publish_rows(move |_, previous| {
+                super::execution_context::with_snapshot_bundle(&snapshot, || {
+                    adapter.prepare_group_read(
+                        &queue_owned,
+                        &group_owned,
+                        &consumer_owned,
+                        count,
+                        previous,
+                    )
+                })
+                .map_err(|error| {
+                    crate::storage::StoreError::Io(std::io::Error::other(error.to_string()))
+                })
+            })
             .map_err(|error| QueueStoreError::UnknownQueue(error.to_string()))?;
-        if !fanout {
-            for (_, row) in pending {
-                self.retire_message_mvcc(txn, &row.queue, row.message_id);
+        if let Some((mode, messages)) = delivered {
+            // This cache is not authoritative. Another durable operation may
+            // have advanced attempts since publication; copy the current value.
+            let _publication = store.vault_publication_lock.lock();
+            if mode == crate::storage::queue::QueueMode::Work {
+                if let Some(manager) = store.get_collection(queue) {
+                    for message in &messages {
+                        if let Some(mut entity) = manager.get(EntityId::new(message.message_id)) {
+                            if let EntityData::QueueMessage(data) = &mut entity.data {
+                                data.attempts =
+                                    self.read_attempts(queue, message.message_id, group);
+                                let _ = manager.update(entity);
+                            }
+                        }
+                    }
+                }
+            }
+            if !messages.is_empty() {
+                self.runtime.queue_telemetry().record_delivered(
+                    queue,
+                    group,
+                    mode.as_str(),
+                    messages.len() as u64,
+                );
+            }
+            return Ok(Some(messages));
+        }
+        Ok(None)
+    }
+
+    fn prepare_group_read(
+        &self,
+        queue: &str,
+        group: &str,
+        consumer: &str,
+        count: usize,
+        previous: &[crate::storage::unified::store::RowPublication],
+    ) -> Result<(
+        crate::storage::unified::store::RowPublication,
+        Option<(
+            crate::storage::queue::QueueMode,
+            Vec<super::queue_lifecycle::DeliveredMessage>,
+        )>,
+    )> {
+        use crate::storage::queue::QueueMode;
+        use crate::storage::unified::store::RowPublication;
+        let now = Instant::now();
+        let expired = super::queue_storage_index::deadline_rows(
+            &self.runtime,
+            queue,
+            instant_to_unix_ns(now),
+        )
+        .map_err(|error| QueueStoreError::UnknownQueue(error.to_string()))?;
+        if expired.is_none_or(|rows| !rows.is_empty()) {
+            return Ok((RowPublication::default(), None));
+        }
+        let config = self.lifecycle_config(queue);
+        let available = match config.mode {
+            QueueMode::Work => self.available_messages(queue, QueueSide::Left),
+            QueueMode::Fanout => self.available_messages_for_group(queue, group, QueueSide::Left),
+        };
+        let mut reserved = std::collections::HashSet::new();
+        for plan in previous {
+            for (collection, id) in &plan.deletes {
+                if collection == queue {
+                    reserved.insert(id.raw());
+                }
+            }
+            for (collection, entity, _) in &plan.inserts {
+                if collection != QUEUE_META_COLLECTION {
+                    continue;
+                }
+                let Some(row) = entity.data.as_row() else {
+                    continue;
+                };
+                if row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC)
+                    && row_text(row, "queue").as_deref() == Some(queue)
+                    && (config.mode == QueueMode::Work
+                        || row_text(row, "group").as_deref() == Some(group))
+                {
+                    if let Some(id) = row_u64(row, "message_id") {
+                        reserved.insert(id);
+                    }
+                }
             }
         }
-        Ok(())
+        let selected: Vec<_> = available
+            .into_iter()
+            .filter(|id| !reserved.contains(id))
+            .take(count)
+            .collect();
+        let mut payloads = Vec::with_capacity(selected.len());
+        for &message_id in &selected {
+            let attempts = if config.mode == QueueMode::Work {
+                self.read_attempts(queue, message_id, group)
+                    .saturating_add(1)
+            } else {
+                1
+            };
+            if self.read_ordering_key(queue, message_id).is_some()
+                || attempts > self.read_max_attempts(queue, message_id)
+            {
+                return Ok((RowPublication::default(), None));
+            }
+            payloads.push(
+                self.read_message(queue, message_id)
+                    .ok_or_else(|| QueueStoreError::UnknownQueue(queue.to_string()))?,
+            );
+        }
+        let (rows, deliveries) = self.prepare_pending_read_rows(
+            queue,
+            &selected,
+            group,
+            consumer,
+            now + config.lock_duration,
+            config.mode == QueueMode::Work,
+        );
+        let messages = selected
+            .into_iter()
+            .zip(deliveries)
+            .zip(payloads)
+            .map(|((message_id, (delivery_id, delivery_count)), payload)| {
+                super::queue_lifecycle::DeliveredMessage {
+                    delivery_id,
+                    message_id,
+                    payload,
+                    consumer: consumer.to_string(),
+                    delivery_count,
+                }
+            })
+            .collect();
+        Ok((rows, Some((config.mode, messages))))
     }
 
     /// Read only this queue's indexed configuration, including its cold base.
@@ -850,61 +1130,14 @@ impl QueueStore for PrimaryQueueStore {
         if !self.queue_exists(queue) {
             return Err(QueueStoreError::UnknownQueue(queue.to_string()));
         }
-        let mut rows = crate::storage::unified::store::RowPublication::default();
-        let mut deliveries = Vec::with_capacity(message_ids.len());
-        for &message_id in message_ids {
-            let existing = self.find_pending_entry_by_key(queue, message_id, group);
-            let delivery = existing
-                .as_ref()
-                .map(|(_, row)| row.delivery_id.clone())
-                .unwrap_or_else(new_delivery_id);
-            if let Some((id, _)) = existing {
-                rows.deletes.push((QUEUE_META_COLLECTION.to_string(), id));
-            }
-            let fields = HashMap::from([
-                ("kind".into(), Value::text(KIND_PENDING_LC)),
-                ("queue".into(), Value::text(queue)),
-                ("group".into(), Value::text(group)),
-                ("message_id".into(), Value::UnsignedInteger(message_id)),
-                ("delivery_id".into(), Value::text(delivery.clone())),
-                ("consumer".into(), Value::text(consumer)),
-                (
-                    "lock_deadline_ns".into(),
-                    Value::UnsignedInteger(instant_to_unix_ns(deadline)),
-                ),
-            ]);
-            rows.inserts.push((
-                QUEUE_META_COLLECTION.to_string(),
-                queue_meta_entity(fields),
-                None,
-            ));
-            let attempts = if count_attempt {
-                let attempts = self
-                    .read_attempts(queue, message_id, group)
-                    .saturating_add(1);
-                for (id, _) in
-                    self.subject_rows(KIND_ATTEMPTS_LC, queue, Some(group), Some(message_id))
-                {
-                    rows.deletes.push((QUEUE_META_COLLECTION.to_string(), id));
-                }
-                let fields = HashMap::from([
-                    ("kind".into(), Value::text(KIND_ATTEMPTS_LC)),
-                    ("queue".into(), Value::text(queue)),
-                    ("group".into(), Value::text(group)),
-                    ("message_id".into(), Value::UnsignedInteger(message_id)),
-                    ("attempts".into(), Value::UnsignedInteger(attempts as u64)),
-                ]);
-                rows.inserts.push((
-                    QUEUE_META_COLLECTION.to_string(),
-                    queue_meta_entity(fields),
-                    None,
-                ));
-                attempts
-            } else {
-                1
-            };
-            deliveries.push((delivery, attempts));
-        }
+        let (rows, deliveries) = self.prepare_pending_read_rows(
+            queue,
+            message_ids,
+            group,
+            consumer,
+            deadline,
+            count_attempt,
+        );
         store
             .publish_rows(rows)
             .map_err(|error| QueueStoreError::UnknownQueue(error.to_string()))?;
@@ -1455,6 +1688,161 @@ mod tests {
             format!("'{id}'")
         })
         .collect()
+    }
+
+    #[cfg(unix)]
+    fn committed_queue_batches(path: &std::path::Path) -> usize {
+        crate::storage::wal::WalReader::open(reddb_file::unified_wal_path(path))
+            .expect("WAL")
+            .iter()
+            .collect::<std::io::Result<Vec<_>>>()
+            .expect("records")
+            .into_iter()
+            .filter(|(_, record)| {
+                matches!(record, crate::storage::wal::WalRecord::TxCommitBatch { .. })
+            })
+            .count()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_queue_delivery_and_ack_preserve_ownership_after_cold_boot() {
+        const CONSUMERS: usize = 8;
+        const PER_CONSUMER: usize = 4;
+        for bounded in [false, true] {
+            let directory = tempfile::tempdir().expect("directory");
+            let path = directory.path().join("concurrent.rdb");
+            let options = || {
+                RedDBOptions::persistent(&path)
+                    .with_memory_budget(64 * 1024 * 1024)
+                    .with_bounded_disk_residency(bounded)
+                    .with_durability_mode(crate::api::DurabilityMode::WalDurableGrouped)
+                    .with_group_commit_window_ms(20)
+                    .with_group_commit_max_statements(CONSUMERS)
+            };
+            let runtime = RedDBRuntime::with_options(options()).expect("runtime");
+            runtime
+                .execute_query("CREATE QUEUE competing")
+                .expect("queue");
+            runtime
+                .execute_query("QUEUE GROUP CREATE competing workers")
+                .expect("group");
+            for message in 0..CONSUMERS * PER_CONSUMER {
+                push(&runtime, "competing", &format!("message-{message}"));
+            }
+            runtime.checkpoint().expect("cold source rows");
+            let before_delivery = bounded.then(|| committed_queue_batches(&path));
+            let start = Arc::new(std::sync::Barrier::new(CONSUMERS));
+            let deliveries = std::thread::scope(|scope| {
+                let readers: Vec<_> = (0..CONSUMERS)
+                    .map(|consumer| {
+                        let runtime = &runtime;
+                        let start = Arc::clone(&start);
+                        scope.spawn(move || {
+                            super::super::impl_core::set_current_connection_id(
+                                80_000 + consumer as u64,
+                            );
+                            start.wait();
+                            let result = runtime
+                                .execute_query(&format!(
+                                    "QUEUE READ competing GROUP workers CONSUMER c{consumer} COUNT {PER_CONSUMER}"
+                                ))
+                                .expect("concurrent read");
+                            assert_eq!(result.result.records.len(), PER_CONSUMER);
+                            result.result.records.into_iter().map(|row| {
+                                let Some(Value::Text(id)) = row.get("message_id") else {
+                                    panic!("message id")
+                                };
+                                id.to_string()
+                            }).collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                readers
+                    .into_iter()
+                    .map(|reader| reader.join().expect("reader"))
+                    .collect::<Vec<_>>()
+            });
+            let unique: std::collections::HashSet<_> = deliveries.iter().flatten().collect();
+            assert_eq!(
+                unique.len(),
+                CONSUMERS * PER_CONSUMER,
+                "exclusive ownership"
+            );
+            if let Some(before) = before_delivery {
+                let delivery_batches = committed_queue_batches(&path) - before;
+                assert!(
+                    delivery_batches > 0 && delivery_batches < CONSUMERS,
+                    "concurrent READs must share durable publications: {delivery_batches}"
+                );
+            }
+            assert!(batch_ids(&runtime, "competing", "workers", 1).is_empty());
+
+            // Race the same ACK set twice. Exactly one caller may retire it;
+            // unrelated ACKs must still commit successfully.
+            let start = Arc::new(std::sync::Barrier::new(CONSUMERS + 1));
+            let before_ack = bounded.then(|| committed_queue_batches(&path));
+            std::thread::scope(|scope| {
+                let writers: Vec<_> = (0..=CONSUMERS)
+                    .map(|writer| {
+                        let runtime = &runtime;
+                        let start = Arc::clone(&start);
+                        let ids = &deliveries[writer % CONSUMERS];
+                        scope.spawn(move || {
+                            super::super::impl_core::set_current_connection_id(
+                                81_000 + writer as u64,
+                            );
+                            let ids = ids
+                                .iter()
+                                .map(|id| format!("'{id}'"))
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            start.wait();
+                            runtime
+                                .execute_query(&format!(
+                                    "QUEUE ACK competing BATCH GROUP workers ({ids})"
+                                ))
+                                .is_ok()
+                        })
+                    })
+                    .collect();
+                let successes: Vec<_> = writers
+                    .into_iter()
+                    .map(|writer| writer.join().expect("writer"))
+                    .collect();
+                assert_ne!(successes[0], successes[CONSUMERS], "one ACK wins");
+                assert!(successes[1..CONSUMERS].iter().all(|success| *success));
+            });
+            if let Some(before) = before_ack {
+                let ack_batches = committed_queue_batches(&path) - before;
+                assert!(
+                    ack_batches > 0 && ack_batches < CONSUMERS,
+                    "concurrent ACKs must share durable publications: {ack_batches}"
+                );
+            }
+            drop(runtime);
+            // First boot replays WAL; later boots read checkpointed state.
+            for _ in 0..3 {
+                let runtime = RedDBRuntime::with_options(options()).expect("cold boot");
+                assert!(
+                    batch_ids(&runtime, "competing", "workers", CONSUMERS * PER_CONSUMER)
+                        .is_empty()
+                );
+                assert!(runtime
+                    .execute_query("QUEUE PENDING competing GROUP workers")
+                    .expect("pending")
+                    .result
+                    .records
+                    .is_empty());
+                assert!(runtime
+                    .execute_query("QUEUE PEEK competing 100")
+                    .expect("retired payloads")
+                    .result
+                    .records
+                    .is_empty());
+                runtime.checkpoint().expect("checkpoint");
+            }
+        }
     }
 
     #[test]

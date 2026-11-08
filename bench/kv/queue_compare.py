@@ -51,7 +51,11 @@ class RedQueue:
 
     async def consume(self, count, empty=False):
         started = time.perf_counter()
-        rows = await self.query(f"QUEUE READ {self.args.name} GROUP workers CONSUMER bench COUNT {count}")
+        requests = min(count, getattr(self.args, "red_read_concurrency", 1))
+        counts = [count // requests + (index < count % requests) for index in range(requests)]
+        batches = await asyncio.gather(*(self.query(
+            f"QUEUE READ {self.args.name} GROUP workers CONSUMER bench COUNT {size}") for size in counts))
+        rows = [row for batch in batches for row in batch]
         delivered = time.perf_counter()
         values = [row["payload"] for row in rows]
         if self.args.red_ack_batch and rows:
@@ -212,6 +216,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--engine", choices=["reddb", "rabbitmq", "kafka"], required=True)
     parser.add_argument("--red-ack-batch", action="store_true", help="use RedDB atomic multi-message ACK")
+    parser.add_argument("--red-read-concurrency", type=int, choices=[1, 8, 16], default=1,
+                        help="split the RedDB READ window across concurrent requests")
     parser.add_argument("--host", required=True)
     parser.add_argument("--name", required=True)
     parser.add_argument("--batch", type=int, choices=[1, 16], default=1)

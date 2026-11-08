@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -6,6 +7,32 @@ from queue_compare import RedQueue
 
 
 class QueueAckBatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_read_requests_overlap_and_preserve_uneven_window(self):
+        adapter = RedQueue()
+        adapter.args = SimpleNamespace(name="jobs", red_ack_batch=False, red_read_concurrency=3)
+        all_reading = asyncio.Event()
+        counts = []
+        acknowledgements = []
+
+        async def query(sql):
+            if sql.startswith("QUEUE ACK"):
+                acknowledgements.append(sql)
+                return []
+            first = sum(counts)
+            count = int(sql.rsplit(" ", 1)[1])
+            counts.append(count)
+            if len(counts) == 3:
+                all_reading.set()
+            await all_reading.wait()
+            return [{"message_id": str(index), "payload": str(index)}
+                    for index in range(first, first + count)]
+
+        adapter.query = query
+        values = await asyncio.wait_for(adapter.consume(5), timeout=1)
+        self.assertEqual(counts, [2, 2, 1])
+        self.assertEqual(sorted(values), ["0", "1", "2", "3", "4"])
+        self.assertEqual(len(set(acknowledgements)), 5)
+
     async def test_batch_uses_one_ack_and_preserves_payloads(self):
         adapter = RedQueue()
         adapter.args = SimpleNamespace(name="jobs", red_ack_batch=True)
