@@ -200,6 +200,23 @@ impl UnifiedStore {
             if spec.deferred {
                 continue;
             }
+            if name == super::count_index::NAME {
+                if let Some(tree) = self.checkpoint_count_projection_seed(
+                    collection,
+                    data.root_page_id(),
+                    &spec.identity,
+                    pager,
+                )? {
+                    next.insert(
+                        name.clone(),
+                        PublishedSecondaryIndex {
+                            identity: spec.identity.clone(),
+                            tree,
+                        },
+                    );
+                    continue;
+                }
+            }
             builds.push((name, spec, Arc::new(BTree::new(Arc::clone(pager)))));
         }
         if builds.is_empty() {

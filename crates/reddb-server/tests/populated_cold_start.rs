@@ -222,11 +222,9 @@ fn populated_startup_child() {
                 .expect("collection during projection");
             if rows >= 1024 {
                 std::thread::sleep(std::time::Duration::from_millis(200));
-                assert!(
-                    store.try_count_from_index("rows", None).unwrap().is_none(),
-                    "fixture must exercise an unfinished projection"
-                );
             }
+            let projection_prepared_during_migration =
+                store.try_count_from_index("rows", None).unwrap() == Some(rows);
             let mut samples = 0u64;
             let mut max_write = std::time::Duration::ZERO;
             let mut max_read = std::time::Duration::ZERO;
@@ -281,7 +279,7 @@ fn populated_startup_child() {
                 Some(rows)
             );
             eprintln!(
-                "projection_elapsed={:?} concurrent_samples={samples} max_write={max_write:?} max_read={max_read:?} max_projection_probe={max_projection_probe:?}", build_started.elapsed()
+                "projection_elapsed={:?} projection_prepared_during_migration={projection_prepared_during_migration} concurrent_samples={samples} max_write={max_write:?} max_read={max_read:?} max_projection_probe={max_projection_probe:?}", build_started.elapsed()
             );
             let checkpoint = Instant::now();
             runtime

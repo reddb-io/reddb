@@ -1063,6 +1063,7 @@ impl UnifiedStore {
             key_indices: RwLock::new(HashMap::new()),
             secondary_index_specs: RwLock::new(HashMap::new()),
             count_builds: RwLock::new(HashMap::new()),
+            count_projection_seeds: parking_lot::Mutex::new(HashMap::new()),
             queue_dedup_cursors: parking_lot::Mutex::new(HashMap::new()),
             recovery_xid_summary: RwLock::new(None),
             checkpoint_versions: RwLock::new(HashMap::new()),
@@ -1231,6 +1232,7 @@ impl UnifiedStore {
             key_indices: RwLock::new(HashMap::new()),
             secondary_index_specs: RwLock::new(HashMap::new()),
             count_builds: RwLock::new(HashMap::new()),
+            count_projection_seeds: parking_lot::Mutex::new(HashMap::new()),
             queue_dedup_cursors: parking_lot::Mutex::new(HashMap::new()),
             recovery_xid_summary: RwLock::new(None),
             checkpoint_versions: RwLock::new(HashMap::new()),
@@ -1781,6 +1783,12 @@ impl UnifiedStore {
                 // must already decode every physical entity to restore IDs.
                 // Reuse that complete pass for the transaction floor too.
                 let mut scanned_xid_high_water_mark = 0u64;
+                let mut count_seed_bytes_remaining = self
+                    .config
+                    .resident_memory_bytes_max
+                    .and_then(|limit| usize::try_from(limit).ok())
+                    .unwrap_or(0)
+                    / 2;
 
                 // Read collection names and their B-tree root pages
                 for _ in 0..collection_count {
@@ -1873,6 +1881,18 @@ impl UnifiedStore {
                                 .as_ref()
                                 .and_then(|resume| resume.collections.get(&stored_name))
                         });
+                    let manager = self.get_collection(&name);
+                    let mut count_seed =
+                        if counters.is_none() && self.commit.is_some() && !self.is_read_only() {
+                            let schema =
+                                manager.as_ref().and_then(|manager| manager.column_schema());
+                            super::count_index::CountProjectionSeedCollector::new(
+                                schema,
+                                count_seed_bytes_remaining,
+                            )
+                        } else {
+                            None
+                        };
                     if let (Some(counters), Some(manager)) = (counters, self.get_collection(&name))
                     {
                         manager.restore_identity_counters(
@@ -1889,7 +1909,6 @@ impl UnifiedStore {
                         let mut cursor = btree.cursor_first().map_err(|err| {
                             page_integrity(root_page, Some(name.clone()), err.to_string())
                         })?;
-                        let manager = self.get_collection(&name);
                         let hydrate_read_only =
                             self.is_read_only() && self.config.resident_memory_bytes_max.is_none();
                         let mut persisted_entities = if hydrate_read_only {
@@ -1939,6 +1958,23 @@ impl UnifiedStore {
                             scanned_xid_high_water_mark = scanned_xid_high_water_mark
                                 .max(entity.xmin)
                                 .max(entity.xmax);
+                            let discard_count_seed = if let Some(seed) = count_seed.as_mut() {
+                                match seed.push(&entity) {
+                                    Ok(complete) => !complete,
+                                    Err(error) => {
+                                        return Err(page_integrity(
+                                            root_page,
+                                            Some(name.clone()),
+                                            error.to_string(),
+                                        ));
+                                    }
+                                }
+                            } else {
+                                false
+                            };
+                            if discard_count_seed {
+                                count_seed = None;
+                            }
                             if let Some(m) = &manager {
                                 let id = entity.id;
                                 if let EntityKind::TableRow { row_id, .. } = &entity.kind {
@@ -1965,6 +2001,12 @@ impl UnifiedStore {
                                     self.index_cross_refs(&entity, &name)?;
                                 }
                             }
+                        }
+
+                        if let Some(seed) = count_seed.take() {
+                            count_seed_bytes_remaining =
+                                count_seed_bytes_remaining.saturating_sub(seed.bytes());
+                            self.remember_count_projection_seed(&name, root_page, seed);
                         }
 
                         // Store the B-tree for future lookups
