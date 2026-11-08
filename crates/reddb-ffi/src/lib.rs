@@ -7,7 +7,9 @@
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
+use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 
 use reddb_server::api::RedDBOptions;
 use reddb_server::json::{self, Map as JsonMap, Value as JsonValue};
@@ -15,6 +17,7 @@ use reddb_server::rpc_stdio::EmbeddedRpcSession;
 use reddb_server::RedDBRuntime;
 
 const ABI_VERSION: u32 = 1;
+const EMBEDDED_WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,27 +34,152 @@ struct SessionState {
     runtime: Arc<RedDBRuntime>,
 }
 
+enum WorkerCommand {
+    Call {
+        request: String,
+        reply: SyncSender<CallReply>,
+    },
+    Shutdown {
+        reply: SyncSender<Result<(), String>>,
+    },
+}
+
+struct CallReply {
+    response: Result<String, String>,
+    closed: bool,
+}
+
+struct Worker {
+    sender: SyncSender<WorkerCommand>,
+    join: Option<JoinHandle<()>>,
+}
+
 #[repr(C)]
 pub struct ReddbHandle {
-    state: Mutex<Option<SessionState>>,
+    worker: Mutex<Option<Worker>>,
 }
 
 impl ReddbHandle {
     fn shutdown(&self) -> Result<(), String> {
-        let mut state = self
-            .state
+        let mut slot = self
+            .worker
             .lock()
             .map_err(|_| "embedded session lock is poisoned".to_string())?;
-        shutdown_locked(&mut state)
+        let Some(mut worker) = slot.take() else {
+            return Ok(());
+        };
+        drop(slot);
+
+        let (reply_tx, reply_rx) = sync_channel(0);
+        if worker
+            .sender
+            .send(WorkerCommand::Shutdown { reply: reply_tx })
+            .is_err()
+        {
+            join_worker(&mut worker)?;
+            return Err("embedded worker stopped before shutdown".to_string());
+        }
+        let result = reply_rx
+            .recv()
+            .map_err(|_| "embedded worker stopped during shutdown".to_string())?;
+        join_worker(&mut worker)?;
+        result
     }
 }
 
 impl Drop for ReddbHandle {
     fn drop(&mut self) {
-        if let Ok(state) = self.state.get_mut() {
-            let _ = shutdown_locked(state);
+        let _ = self.shutdown();
+    }
+}
+
+fn open_session(path: Option<&str>) -> Result<SessionState, String> {
+    let runtime = match path {
+        Some(path) => RedDBRuntime::with_options(RedDBOptions::persistent(path))
+            .map_err(|error| format!("open {path}: {error}"))?,
+        None => RedDBRuntime::in_memory().map_err(|error| error.to_string())?,
+    };
+    let runtime = Arc::new(runtime);
+    Ok(SessionState {
+        session: EmbeddedRpcSession::new(Arc::clone(&runtime)),
+        runtime,
+    })
+}
+
+fn spawn_worker(path: Option<String>) -> Result<Worker, String> {
+    let (sender, receiver) = sync_channel(0);
+    let (ready_tx, ready_rx) = sync_channel(0);
+    let join = thread::Builder::new()
+        .name("reddb-ffi".to_string())
+        .stack_size(EMBEDDED_WORKER_STACK_BYTES)
+        .spawn(move || {
+            let mut state = match open_session(path.as_deref()) {
+                Ok(state) => {
+                    if ready_tx.send(Ok(())).is_err() {
+                        return;
+                    }
+                    Some(state)
+                }
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                    return;
+                }
+            };
+
+            while let Ok(command) = receiver.recv() {
+                match command {
+                    WorkerCommand::Call { request, reply } => {
+                        let Some(current) = state.as_mut() else {
+                            let _ = reply.send(CallReply {
+                                response: Err("embedded database is closed".to_string()),
+                                closed: true,
+                            });
+                            break;
+                        };
+                        let (response, closed) = current.session.handle(&request);
+                        let response = if closed {
+                            shutdown_locked(&mut state).map(|_| response)
+                        } else {
+                            Ok(response)
+                        };
+                        let _ = reply.send(CallReply { response, closed });
+                        if closed {
+                            break;
+                        }
+                    }
+                    WorkerCommand::Shutdown { reply } => {
+                        let result = shutdown_locked(&mut state);
+                        let _ = reply.send(result);
+                        break;
+                    }
+                }
+            }
+            let _ = shutdown_locked(&mut state);
+        })
+        .map_err(|error| format!("start embedded worker: {error}"))?;
+
+    match ready_rx.recv() {
+        Ok(Ok(())) => Ok(Worker {
+            sender,
+            join: Some(join),
+        }),
+        Ok(Err(error)) => {
+            let _ = join.join();
+            Err(error)
+        }
+        Err(_) => {
+            let _ = join.join();
+            Err("embedded worker stopped during startup".to_string())
         }
     }
+}
+
+fn join_worker(worker: &mut Worker) -> Result<(), String> {
+    let Some(join) = worker.join.take() else {
+        return Ok(());
+    };
+    join.join()
+        .map_err(|_| "panic inside the embedded RedDB worker".to_string())
 }
 
 fn shutdown_locked(state: &mut Option<SessionState>) -> Result<(), String> {
@@ -103,23 +231,45 @@ fn ffi_status(
 }
 
 fn call_session(handle: &ReddbHandle, request: &str) -> Result<String, (ReddbStatus, String)> {
-    let mut state = handle.state.lock().map_err(|_| {
+    let mut slot = handle.worker.lock().map_err(|_| {
         (
             ReddbStatus::InternalError,
             "embedded session lock is poisoned".to_string(),
         )
     })?;
-    let current = state.as_mut().ok_or_else(|| {
+    let worker = slot.as_mut().ok_or_else(|| {
         (
             ReddbStatus::CallError,
             "embedded database is closed".to_string(),
         )
     })?;
-    let (response, closed) = current.session.handle(request);
-    if closed {
-        shutdown_locked(&mut state).map_err(|error| (ReddbStatus::CallError, error))?;
+    let (reply_tx, reply_rx) = sync_channel(0);
+    worker
+        .sender
+        .send(WorkerCommand::Call {
+            request: request.to_string(),
+            reply: reply_tx,
+        })
+        .map_err(|_| {
+            (
+                ReddbStatus::InternalError,
+                "embedded worker stopped before the call".to_string(),
+            )
+        })?;
+    let reply = reply_rx.recv().map_err(|_| {
+        (
+            ReddbStatus::InternalError,
+            "embedded worker stopped during the call".to_string(),
+        )
+    })?;
+    if reply.closed {
+        let mut worker = slot.take().expect("worker exists while handling a call");
+        drop(slot);
+        join_worker(&mut worker).map_err(|error| (ReddbStatus::InternalError, error))?;
     }
-    Ok(response)
+    reply
+        .response
+        .map_err(|error| (ReddbStatus::CallError, error))
 }
 
 fn write_string_output(
@@ -177,18 +327,10 @@ pub unsafe extern "C" fn reddb_open(
             (!value.is_empty()).then_some(value)
         };
 
-        let runtime = match path {
-            Some(path) => RedDBRuntime::with_options(RedDBOptions::persistent(path))
-                .map_err(|error| (ReddbStatus::OpenError, format!("open {path}: {error}")))?,
-            None => RedDBRuntime::in_memory()
-                .map_err(|error| (ReddbStatus::OpenError, error.to_string()))?,
-        };
-        let runtime = Arc::new(runtime);
+        let worker = spawn_worker(path.map(str::to_string))
+            .map_err(|error| (ReddbStatus::OpenError, error))?;
         let handle = Box::new(ReddbHandle {
-            state: Mutex::new(Some(SessionState {
-                session: EmbeddedRpcSession::new(Arc::clone(&runtime)),
-                runtime,
-            })),
+            worker: Mutex::new(Some(worker)),
         });
         // SAFETY: `out_handle` was checked above. Ownership transfers to the
         // caller until exactly one `reddb_close`.
@@ -445,6 +587,24 @@ mod tests {
             assert!(selected.contains("shared"));
             close(handle);
         }
+    }
+
+    #[test]
+    fn small_stack_foreign_caller_dispatches_to_the_rust_worker() {
+        let caller = thread::Builder::new()
+            .name("foreign-runtime".to_string())
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                // SAFETY: this caller observes every ownership rule of the C ABI.
+                unsafe {
+                    let handle = open(None);
+                    let result = invoke(handle, "query", r#"{"sql":"SELECT 1 AS one"}"#);
+                    assert!(result.contains(r#""one":1"#), "{result}");
+                    close(handle);
+                }
+            })
+            .expect("spawn small-stack caller");
+        caller.join().expect("small-stack caller completes");
     }
 
     #[test]
