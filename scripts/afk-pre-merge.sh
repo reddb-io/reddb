@@ -130,7 +130,7 @@ fi
 #    wants to MODIFY it, a human must. New files (added ADRs, new
 #    conformance fixtures) are legitimate flow — don't blanket-block
 #    those. `--diff-filter=M` keeps just the Modified paths.
-PROTECTED_RE='^(docs/conformance/|testdata/conformance/|\.red/adr/|scripts/check-contract-authorities\.mjs|scripts/verify-contract-matrix\.mjs|scripts/contract_matrix_contract\.test\.mjs)'
+PROTECTED_RE='^(docs/conformance/|testdata/conformance/|\.red/adr/|scripts/check-contract-authorities\.mjs|scripts/verify-contract-matrix\.mjs|scripts/contract_matrix_contract\.test\.mjs|scripts/verify-deployment-mode-matrix\.mjs|scripts/deployment_mode_matrix_contract\.test\.mjs)'
 if [ "$NUM_CHANGED" -gt 0 ]; then
     bad_paths=$(git diff --name-only --diff-filter=M "$BASE"..."$HEAD" \
         | grep -E "$PROTECTED_RE" || true)

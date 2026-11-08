@@ -1,0 +1,317 @@
+{
+  "$schema": "./deployment-mode-matrix.schema.json",
+  "version": "1.0",
+  "contract": ".red/adr/0081-four-deployment-mode-driver-contract.md",
+  "modes": {
+    "serverless": "Managed attach/warm/cold endpoint through the language's official facade.",
+    "embedded": "In-process memory or one persistent .rdb file, with no child process.",
+    "server_replica": "Primary plus read replicas with explicit consistency and promotion handling.",
+    "cluster": "Topology and ownership-aware multi-node routing, redirects, retries and recovery."
+  },
+  "statuses": {
+    "qualified": "The public facade passes the mode-specific executable journey.",
+    "partial": "Some implementation exists and is pinned by tests, but the required journey has a named gap.",
+    "missing": "The official facade does not currently implement or test this mode."
+  },
+  "drivers": [
+    {
+      "id": "rust",
+      "language": "Rust",
+      "facade": "reddb-io-client",
+      "package_roots": ["crates/reddb-client"],
+      "four_mode_ready": false,
+      "modes": {
+        "serverless": {
+          "status": "partial",
+          "tests": [
+            "crates/reddb-client/tests/conformance.rs",
+            "crates/reddb-server/tests/serverless_file_runtime.rs"
+          ],
+          "gap": "Client and serverless runtime are tested separately; no managed attach/warm/cold journey crosses the public client."
+        },
+        "embedded": {
+          "status": "qualified",
+          "tests": ["crates/reddb-client/tests/embedded_consistency_contract.rs"]
+        },
+        "server_replica": {
+          "status": "partial",
+          "tests": [
+            "crates/reddb-client/tests/grpc_pool_concurrency.rs",
+            "crates/reddb-client/tests/topology_e2e.rs"
+          ],
+          "gap": "Promotion and consistency routing use mock endpoints; the public client is not yet in the real primary/replica CLI journey."
+        },
+        "cluster": {
+          "status": "partial",
+          "tests": [
+            "crates/reddb-client/tests/topology_e2e.rs",
+            "crates/reddb-server/tests/multi_writer_cluster_drill_e2e.rs"
+          ],
+          "gap": "Topology and server drill tests are separate; range-owner redirects and idempotent client retry are not exercised end to end."
+        }
+      }
+    },
+    {
+      "id": "javascript",
+      "language": "JavaScript / TypeScript",
+      "facade": "@reddb-io/sdk",
+      "package_roots": ["drivers/js", "drivers/node"],
+      "four_mode_ready": false,
+      "modes": {
+        "serverless": {
+          "status": "missing",
+          "gap": "The official facade rejects remote URIs; remote transports live in a separate @reddb-io/client package."
+        },
+        "embedded": {
+          "status": "qualified",
+          "tests": ["drivers/js/test/native-engine.e2e.test.mjs"]
+        },
+        "server_replica": {
+          "status": "missing",
+          "gap": "The facade has no remote topology or consistency API."
+        },
+        "cluster": {
+          "status": "missing",
+          "gap": "The facade has no ownership-aware routing or retry path."
+        }
+      }
+    },
+    {
+      "id": "python",
+      "language": "Python",
+      "facade": "reddb",
+      "package_roots": ["drivers/python"],
+      "four_mode_ready": false,
+      "modes": {
+        "serverless": {
+          "status": "partial",
+          "tests": ["drivers/python/tests/test_smoke.py"],
+          "gap": "grpc:// is accepted, but there is no successful serverless lifecycle journey and remote helpers are explicitly unavailable."
+        },
+        "embedded": {
+          "status": "qualified",
+          "tests": [
+            "drivers/python/tests/test_smoke.py",
+            "drivers/python/tests/test_conformance.py"
+          ]
+        },
+        "server_replica": {
+          "status": "missing",
+          "gap": "The Python facade dials one gRPC endpoint and does not consume topology or consistency options."
+        },
+        "cluster": {
+          "status": "missing",
+          "gap": "The Python facade has no range-owner redirect or retry implementation."
+        }
+      }
+    },
+    {
+      "id": "go",
+      "language": "Go",
+      "facade": "github.com/reddb-io/reddb-go",
+      "package_roots": ["drivers/go"],
+      "four_mode_ready": false,
+      "modes": {
+        "serverless": {
+          "status": "partial",
+          "tests": ["drivers/go/reddb_exec_test.go"],
+          "gap": "Remote execution is covered, but no managed attach/warm/cold journey exists."
+        },
+        "embedded": {
+          "status": "missing",
+          "gap": "Embedded URIs explicitly return the future-cgo-build error."
+        },
+        "server_replica": {
+          "status": "missing",
+          "gap": "The driver dials one endpoint and has no topology or consistency API."
+        },
+        "cluster": {
+          "status": "missing",
+          "gap": "The driver has no ownership-aware routing or retry path."
+        }
+      }
+    },
+    {
+      "id": "dotnet",
+      "language": ".NET",
+      "facade": "Reddb",
+      "package_roots": ["drivers/dotnet"],
+      "four_mode_ready": false,
+      "modes": {
+        "serverless": {
+          "status": "partial",
+          "tests": ["drivers/dotnet/tests/Reddb.Tests/HttpConnTests.cs"],
+          "gap": "HTTP connectivity is covered, but no managed attach/warm/cold journey exists."
+        },
+        "embedded": {
+          "status": "missing",
+          "gap": "Embedded URIs are parsed but the native library is not shipped or loaded."
+        },
+        "server_replica": {
+          "status": "missing",
+          "gap": "The driver dials one endpoint and has no topology or consistency API."
+        },
+        "cluster": {
+          "status": "missing",
+          "gap": "The driver has no ownership-aware routing or retry path."
+        }
+      }
+    },
+    {
+      "id": "java",
+      "language": "Java",
+      "facade": "dev.reddb:reddb-jvm",
+      "package_roots": ["drivers/java"],
+      "four_mode_ready": false,
+      "modes": {
+        "serverless": {
+          "status": "partial",
+          "tests": ["drivers/java/src/test/java/dev/reddb/SmokeTest.java"],
+          "gap": "Remote connectivity is covered, but no managed attach/warm/cold journey exists."
+        },
+        "embedded": {
+          "status": "missing",
+          "gap": "Embedded URIs explicitly throw until a native binding is packaged."
+        },
+        "server_replica": {
+          "status": "missing",
+          "gap": "The driver dials one endpoint and has no topology or consistency API."
+        },
+        "cluster": {
+          "status": "missing",
+          "gap": "The driver has no ownership-aware routing or retry path."
+        }
+      }
+    },
+    {
+      "id": "kotlin",
+      "language": "Kotlin",
+      "facade": "dev.reddb:reddb-kotlin",
+      "package_roots": ["drivers/kotlin"],
+      "four_mode_ready": false,
+      "modes": {
+        "serverless": {
+          "status": "partial",
+          "tests": ["drivers/kotlin/src/test/kotlin/dev/reddb/SmokeTest.kt"],
+          "gap": "Remote connectivity is covered, but no managed attach/warm/cold journey exists."
+        },
+        "embedded": {
+          "status": "missing",
+          "gap": "Embedded URIs explicitly throw until a native binding is packaged."
+        },
+        "server_replica": {
+          "status": "missing",
+          "gap": "The driver dials one endpoint and has no topology or consistency API."
+        },
+        "cluster": {
+          "status": "missing",
+          "gap": "The driver has no ownership-aware routing or retry path."
+        }
+      }
+    },
+    {
+      "id": "php",
+      "language": "PHP",
+      "facade": "reddb-io/reddb",
+      "package_roots": ["drivers/php"],
+      "four_mode_ready": false,
+      "modes": {
+        "serverless": {
+          "status": "partial",
+          "tests": ["drivers/php/tests/SmokeTest.php"],
+          "gap": "Remote connectivity is covered, but no managed attach/warm/cold journey exists."
+        },
+        "embedded": {
+          "status": "missing",
+          "gap": "Embedded URIs explicitly throw because the native library is not shipped."
+        },
+        "server_replica": {
+          "status": "missing",
+          "gap": "The driver dials one endpoint and has no topology or consistency API."
+        },
+        "cluster": {
+          "status": "missing",
+          "gap": "The driver has no ownership-aware routing or retry path."
+        }
+      }
+    },
+    {
+      "id": "dart",
+      "language": "Dart / Flutter",
+      "facade": "reddb",
+      "package_roots": ["drivers/dart"],
+      "four_mode_ready": false,
+      "modes": {
+        "serverless": {
+          "status": "partial",
+          "tests": ["drivers/dart/test/http_client_test.dart"],
+          "gap": "HTTP connectivity is covered, but no managed attach/warm/cold journey exists."
+        },
+        "embedded": {
+          "status": "missing",
+          "gap": "The package has no native-ABI embedded implementation."
+        },
+        "server_replica": {
+          "status": "missing",
+          "gap": "The driver dials one endpoint and has no topology or consistency API."
+        },
+        "cluster": {
+          "status": "missing",
+          "gap": "The driver has no ownership-aware routing or retry path."
+        }
+      }
+    },
+    {
+      "id": "cpp",
+      "language": "C++",
+      "facade": "reddb::connect",
+      "package_roots": ["drivers/cpp"],
+      "four_mode_ready": false,
+      "modes": {
+        "serverless": {
+          "status": "partial",
+          "tests": ["drivers/cpp/tests/smoke_test.cpp"],
+          "gap": "Remote connectivity is covered, but no managed attach/warm/cold journey exists."
+        },
+        "embedded": {
+          "status": "missing",
+          "gap": "The driver still rejects embedded URIs and is not linked to reddb-ffi."
+        },
+        "server_replica": {
+          "status": "missing",
+          "gap": "The driver dials one endpoint and has no topology or consistency API."
+        },
+        "cluster": {
+          "status": "missing",
+          "gap": "The driver has no ownership-aware routing or retry path."
+        }
+      }
+    },
+    {
+      "id": "zig",
+      "language": "Zig",
+      "facade": "reddb.connect",
+      "package_roots": ["drivers/zig"],
+      "four_mode_ready": false,
+      "modes": {
+        "serverless": {
+          "status": "partial",
+          "tests": ["drivers/zig/tests/smoke_test.zig"],
+          "gap": "Remote connectivity is covered, but no managed attach/warm/cold journey exists."
+        },
+        "embedded": {
+          "status": "missing",
+          "gap": "The package has no native-ABI embedded implementation."
+        },
+        "server_replica": {
+          "status": "missing",
+          "gap": "The driver dials one endpoint and has no topology or consistency API."
+        },
+        "cluster": {
+          "status": "missing",
+          "gap": "The driver has no ownership-aware routing or retry path."
+        }
+      }
+    }
+  ]
+}

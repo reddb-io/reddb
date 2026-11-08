@@ -10,3 +10,5 @@
 /scripts/check-contract-authorities.mjs  @filipeforattini
 /scripts/verify-contract-matrix.mjs      @filipeforattini
 /scripts/contract_matrix_contract.test.mjs @filipeforattini
+/scripts/verify-deployment-mode-matrix.mjs @filipeforattini
+/scripts/deployment_mode_matrix_contract.test.mjs @filipeforattini

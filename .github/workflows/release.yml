@@ -316,6 +316,13 @@ jobs:
         if: steps.plan.outputs.should_skip != 'true'
         run: node scripts/verify-contract-matrix.mjs
 
+      - name: Four deployment modes matrix gate (release-blocking)
+        # ADR 0081 — every official language facade must account for
+        # serverless, embedded, server+replicas and cluster. Readiness may only
+        # become true once all four executable journeys are qualified.
+        if: steps.plan.outputs.should_skip != 'true'
+        run: node scripts/verify-deployment-mode-matrix.mjs
+
       - name: Public docs match the contract matrix (release-blocking)
         # Issue #568 — refuse to cut a release when README/docs/driver READMEs
         # drift from the contract matrix (i.e. a doc could promise a feature the
