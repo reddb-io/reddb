@@ -20,7 +20,8 @@ test('memory:// round-trips through the addon, no subprocess', opts, async () =>
   const db = await connect('memory://')
   try {
     await db.query('CREATE TABLE t (id INTEGER, name TEXT)')
-    await db.query("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b')")
+    await db.query('INSERT INTO t (id, name) VALUES ($1, $2)', 1, 'a')
+    await db.query('INSERT INTO t (id, name) VALUES ($1, $2)', [2, 'b'])
     const r = await db.query('SELECT id, name FROM t ORDER BY id')
     assert.deepEqual(rows(r).map((x) => [x.id, x.name]), [[1, 'a'], [2, 'b']])
   } finally {

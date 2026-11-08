@@ -1,0 +1,79 @@
+{
+  "version": "1.0",
+  "matrix": "docs/conformance/deployment-mode-matrix.json",
+  "journey": [
+    "connect through the public facade",
+    "create a table",
+    "insert values with parameters",
+    "select and validate the inserted row",
+    "close the connection"
+  ],
+  "drivers": [
+    {
+      "id": "rust",
+      "mode": "serverless",
+      "evidence": "crates/reddb-client/tests/redwire_query_with_live.rs",
+      "command": "RED_SMOKE=1 RED_BIN=/path/to/red cargo test --locked -p reddb-io-client --features redwire --test redwire_query_with_live"
+    },
+    {
+      "id": "javascript",
+      "mode": "embedded",
+      "evidence": "drivers/js/test/native-engine.e2e.test.mjs",
+      "command": "REDDB_NATIVE_ADDON=/path/to/reddb.node node --test drivers/js/test/native-engine.e2e.test.mjs"
+    },
+    {
+      "id": "python",
+      "mode": "embedded",
+      "evidence": "drivers/python/tests/test_smoke.py",
+      "command": "python -m pytest drivers/python/tests/test_smoke.py"
+    },
+    {
+      "id": "go",
+      "mode": "serverless",
+      "evidence": "drivers/go/internal/redserver/server_test.go",
+      "command": "cd drivers/go && RED_SMOKE=1 RED_BIN=/path/to/red go test ./internal/redserver -run TestSmoke_AgainstRealServer -v"
+    },
+    {
+      "id": "dotnet",
+      "mode": "serverless",
+      "evidence": "drivers/dotnet/tests/Reddb.Tests/SmokeTests.cs",
+      "command": "cd drivers/dotnet && RED_SMOKE=1 RED_BIN=/path/to/red dotnet test tests/Reddb.Tests --filter FullyQualifiedName~SmokeTests"
+    },
+    {
+      "id": "java",
+      "mode": "serverless",
+      "evidence": "drivers/java/src/test/java/dev/reddb/SmokeTest.java",
+      "command": "cd drivers/java && RED_SMOKE=1 RED_BIN=/path/to/red ./gradlew test --tests dev.reddb.SmokeTest"
+    },
+    {
+      "id": "kotlin",
+      "mode": "serverless",
+      "evidence": "drivers/kotlin/src/test/kotlin/dev/reddb/SmokeTest.kt",
+      "command": "cd drivers/kotlin && RED_SMOKE=1 RED_BIN=/path/to/red ./gradlew test --tests dev.reddb.SmokeTest"
+    },
+    {
+      "id": "php",
+      "mode": "serverless",
+      "evidence": "drivers/php/tests/SmokeTest.php",
+      "command": "cd drivers/php && RED_SMOKE=1 RED_BIN=/path/to/red vendor/bin/phpunit --filter SmokeTest"
+    },
+    {
+      "id": "dart",
+      "mode": "serverless",
+      "evidence": "drivers/dart/test/smoke_test.dart",
+      "command": "cd drivers/dart && RED_SMOKE=1 RED_BIN=/path/to/red dart test test/smoke_test.dart"
+    },
+    {
+      "id": "cpp",
+      "mode": "embedded",
+      "evidence": "drivers/cpp/tests/embedded_test.cpp",
+      "command": "cmake --build build/cpp --target embedded_test && ctest --test-dir build/cpp -R embedded_test --output-on-failure"
+    },
+    {
+      "id": "zig",
+      "mode": "embedded",
+      "evidence": "drivers/zig/tests/embedded_test.zig",
+      "command": "cd drivers/zig && zig build embedded-test -Dreddb-ffi-dir=/path/to/reddb-ffi"
+    }
+  ]
+}

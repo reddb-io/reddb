@@ -13,6 +13,23 @@ test("deployment-mode matrix is structurally valid and evidence-backed", () => {
   assert.match(result.stdout, /every official facade accounts for all four modes/);
 });
 
+test("every official language facade has an executable PoC", () => {
+  const result = spawnSync(process.execPath, ["scripts/verify-driver-pocs.mjs"], {
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /11 official language facades/);
+});
+
+test("embedded evidence belongs to the correct facade", () => {
+  const matrix = JSON.parse(read("docs/conformance/deployment-mode-matrix.json"));
+  const dart = matrix.drivers.find((driver) => driver.id === "dart");
+  const zig = matrix.drivers.find((driver) => driver.id === "zig");
+  assert.equal(dart.modes.embedded.status, "missing");
+  assert.equal(zig.modes.embedded.status, "qualified");
+  assert.deepEqual(zig.modes.embedded.tests, ["drivers/zig/tests/embedded_test.zig"]);
+});
+
 test("CI and release both enforce the four-mode contract", () => {
   const ci = read(".github/workflows/ci.yml");
   const release = read(".github/workflows/release.yml");
