@@ -414,7 +414,9 @@ jobs:
             ctest --test-dir /tmp/reddb-cpp-embedded -R '^embedded_test$' --output-on-failure
       - name: Zig connection routing contract
         working-directory: drivers/zig
-        run: zig build connect-contract --summary all
+        run: |
+          zig build test --summary all
+          zig build connect-contract --summary all
       - name: Zig embedded single-file journey
         working-directory: drivers/zig
         run: |
