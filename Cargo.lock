@@ -2757,6 +2757,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "reddb-io-ffi"
+version = "1.28.28"
+dependencies = [
+ "reddb-io-server",
+ "tempfile",
+]
+
+[[package]]
 name = "reddb-io-file"
 version = "1.28.28"
 dependencies = [

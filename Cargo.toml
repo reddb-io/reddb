@@ -5,6 +5,7 @@ members = [
     "crates/reddb-crypto",
     "crates/reddb-file",
     "crates/reddb-engine",
+    "crates/reddb-ffi",
     "crates/reddb-grpc-proto",
     "crates/reddb-tonic",
     "crates/reddb-tonic-prost",

@@ -1,0 +1,23 @@
+[package]
+name = "reddb-io-ffi"
+version = "1.28.28"
+edition.workspace = true
+authors.workspace = true
+description = "Stable C ABI for embedding the RedDB single-file engine"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "reddb_ffi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+reddb-server = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
