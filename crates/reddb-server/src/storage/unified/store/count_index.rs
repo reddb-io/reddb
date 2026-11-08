@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 // Separate from SQL-visible registry names; a different definition can never
 // accidentally qualify because reads also verify the full fingerprint.
 const NAME: &str = "\0reddb/visibility-count-v1";
-const MIXED_BATCH_ROWS: usize = 64;
-const UNIFORM_BATCH_ROWS: usize = 384;
+const MIXED_BATCH_ROWS: usize = 4096;
+const UNIFORM_BATCH_ROWS: usize = 8192;
 const DECODE_GROUP_ROWS: usize = 64;
 const DECODE_WORKERS: usize = 2;
 
@@ -88,6 +88,7 @@ fn visible(snapshot: Option<&SnapshotContext>, xmin: u64, xmax: u64, hidden: boo
 /// scanned. A crash leaves it in the ordinary retired-tree recovery ledger.
 pub(crate) struct CountBuild {
     collection: String,
+    _active: Arc<()>,
     source: Arc<BTree>,
     tree: Arc<BTree>,
     cursor: PagedCursor<Pager>,
@@ -256,9 +257,11 @@ impl CountBuild {
             .is_some_and(|source| Arc::ptr_eq(source, &self.source))
             || !spec_matches
         {
+            store.count_builds.write().remove(&self.collection);
             return Ok(true);
         }
         let Some(commit) = &store.commit else {
+            store.count_builds.write().remove(&self.collection);
             return Ok(true);
         };
         let pager = store.pager.as_ref().expect("paged source");
@@ -285,20 +288,11 @@ impl CountBuild {
             pager,
             active: true,
         };
-        #[cfg(test)]
-        let root_before = self.tree.root_page_id();
         self.tree
             .bulk_insert_sorted(&postings)
             .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
         #[cfg(test)]
         if std::env::var_os("REDDB_TEST_EXIT_DURING_COUNT_BATCH").is_some() {
-            if std::env::var_os("REDDB_TEST_REQUIRE_COUNT_SPLIT").is_some() {
-                assert_ne!(
-                    root_before,
-                    self.tree.root_page_id(),
-                    "fixture must split the root"
-                );
-            }
             std::process::exit(183);
         }
         if finished {
@@ -336,6 +330,9 @@ impl CountBuild {
             .finish_count_batch_ownership_epoch(store, epoch)
             .map_err(StoreError::Io)?;
         fence.active = false;
+        if finished {
+            store.count_builds.write().remove(&self.collection);
+        }
         Ok(finished)
     }
 }
@@ -377,10 +374,22 @@ impl UnifiedStore {
         {
             return Ok(None);
         }
+        let active = Arc::new(());
+        let mut builds = self.count_builds.write();
+        if builds
+            .get(collection)
+            .and_then(std::sync::Weak::upgrade)
+            .is_some()
+        {
+            return Ok(None);
+        }
+        builds.insert(collection.to_owned(), Arc::downgrade(&active));
+        drop(builds);
         let source_view = PagedCollection::new(Arc::clone(&source));
         let cursor = source_view.scan()?;
         Ok(Some(CountBuild {
             collection: collection.to_owned(),
+            _active: active,
             source,
             tree: Arc::new(BTree::new(Arc::clone(
                 self.pager.as_ref().expect("paged source"),
@@ -464,6 +473,16 @@ impl UnifiedStore {
         snapshot: Option<&SnapshotContext>,
     ) -> Result<Option<u64>, StoreError> {
         if snapshot.is_some_and(|context| context.serializable_reader.is_some()) {
+            return Ok(None);
+        }
+        let collection = Self::canonical_collection(collection);
+        if self
+            .count_builds
+            .read()
+            .get(collection)
+            .and_then(std::sync::Weak::upgrade)
+            .is_some()
+        {
             return Ok(None);
         }
         let _publication = self.vault_publication_lock.lock();

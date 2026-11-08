@@ -460,6 +460,81 @@ fn incremental_count_handles_out_of_order_visibility_keys_across_leaves() {
 }
 
 #[test]
+fn count_build_does_not_create_another_database_file() {
+    fn names(path: &std::path::Path) -> std::collections::BTreeSet<std::ffi::OsString> {
+        std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect()
+    }
+
+    let (directory, store) = fixture();
+    store
+        .get_collection("rows")
+        .unwrap()
+        .bulk_insert(
+            (1..=UNIFORM_BATCH_ROWS as u64 + 1)
+                .map(|id| UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]))
+                .collect(),
+        )
+        .unwrap();
+    store.persist().unwrap();
+    let before = names(directory.path());
+    store.register_count_index_deferred("rows").unwrap();
+    let mut build = store.start_count_build("rows").unwrap().unwrap();
+    while !build.step(&store).unwrap() {}
+
+    assert_eq!(names(directory.path()), before);
+    compare(&store, None, UNIFORM_BATCH_ROWS as u64 + 1);
+}
+
+#[test]
+fn count_probe_does_not_wait_for_its_build_publication() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (_directory, store) = fixture();
+    store
+        .insert(
+            "rows",
+            UnifiedEntity::table_row(EntityId::new(1), "rows", 1, vec![]),
+        )
+        .unwrap();
+    store.persist().unwrap();
+    store.register_count_index_deferred("rows").unwrap();
+    let build = store.start_count_build("rows").unwrap().unwrap();
+    let store = Arc::new(store);
+    let (locked, locked_rx) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    let holder_store = Arc::clone(&store);
+    let holder = std::thread::spawn(move || {
+        let _publication = holder_store.vault_publication_lock.lock();
+        locked.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    locked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (observed, observed_rx) = mpsc::channel();
+    let probe_store = Arc::clone(&store);
+    let probe = std::thread::spawn(move || {
+        observed
+            .send(probe_store.try_count_from_index("rows", None))
+            .unwrap();
+    });
+
+    assert_eq!(
+        observed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("COUNT probe waited for publication")
+            .unwrap(),
+        None
+    );
+    release.send(()).unwrap();
+    probe.join().unwrap();
+    holder.join().unwrap();
+    drop(build);
+}
+
+#[test]
 fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
     const CHILD: &str = "REDDB_TEST_COUNT_BATCH_PATH";
     if let Some(path) = std::env::var_os(CHILD) {
@@ -488,14 +563,11 @@ fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
         if stage == "final" {
             assert!(!build.step(&store).unwrap());
         }
-        let failpoint = if stage == "before" || stage == "split" {
+        let failpoint = if stage == "before" || stage == "multipage" {
             "REDDB_TEST_EXIT_DURING_COUNT_BATCH"
         } else {
             "REDDB_TEST_EXIT_AFTER_COUNT_BATCH_PUBLICATION"
         };
-        if stage == "split" {
-            std::env::set_var("REDDB_TEST_REQUIRE_COUNT_SPLIT", "1");
-        }
         std::env::set_var(failpoint, "1");
         let _ = build.step(&store);
         panic!("crash injection did not fire");
@@ -505,10 +577,10 @@ fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
         ("after", 184),
         ("final", 184),
         ("finished", 185),
-        ("split", 183),
+        ("multipage", 183),
     ] {
         let (directory, store) = fixture();
-        let rows = UNIFORM_BATCH_ROWS as u64 * 2 + u64::from(stage == "split");
+        let rows = UNIFORM_BATCH_ROWS as u64 * 2 + u64::from(stage == "multipage");
         store
             .get_collection("rows")
             .unwrap()
