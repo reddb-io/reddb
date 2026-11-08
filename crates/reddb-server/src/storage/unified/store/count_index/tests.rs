@@ -166,7 +166,10 @@ fn count_parallel_decode_falls_back_for_large_records() {
     }
     let record = probe.next_record(2 * 1024 * 1024).unwrap().unwrap();
     assert!(matches!(
-        record.decode_with_budget(store.format_version(), 2 * 1024 * 1024 / 8),
+        record.decode_with_budget(
+            store.format_version(),
+            2 * 1024 * 1024 / (DECODE_WORKERS * 2)
+        ),
         Err(StoreError::ReadLimitExceeded { .. })
     ));
     record

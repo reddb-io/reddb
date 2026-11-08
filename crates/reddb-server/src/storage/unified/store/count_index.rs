@@ -2,7 +2,7 @@
 //!
 //! Preparation shares the secondary-index source pass and publication fences.
 //! Cost: 17 visibility bytes + 8 physical-ID bytes per version (plus tree slots),
-//! O(N) compact reads per count, O(one leaf) scratch, no resident posting map.
+//! O(N) compact reads per count, bounded decode scratch, no resident posting map.
 use super::secondary_index::{
     SecondaryIndexIdentity, SecondaryIndexProjector, SECONDARY_KEY_BYTES_MAX,
 };
@@ -21,7 +21,7 @@ const NAME: &str = "\0reddb/visibility-count-v1";
 const MIXED_BATCH_ROWS: usize = 64;
 const UNIFORM_BATCH_ROWS: usize = 384;
 const DECODE_GROUP_ROWS: usize = 64;
-const DECODE_WORKERS: usize = 4;
+const DECODE_WORKERS: usize = 2;
 
 fn identity(schema: Option<&[String]>) -> SecondaryIndexIdentity {
     let mut digest = Sha256::new();
@@ -131,14 +131,20 @@ impl CountBuild {
         let mut scanned = 0;
         let mut parallel = limit >= DECODE_WORKERS * 2;
         while scanned < UNIFORM_BATCH_ROWS {
-            let mut trial = self.cursor.fork();
+            let mut trial = parallel.then(|| self.cursor.fork());
             let mut records = Vec::new();
             let mut source_bytes = 0usize;
             let mut end = false;
+            // Bound retained encoded records to half the read allowance and
+            // divide the other half between the concurrent decoders.
             let input_limit = (limit / 2).min(4 * 1024 * 1024);
             if parallel {
                 while records.len() < DECODE_GROUP_ROWS.min(UNIFORM_BATCH_ROWS - scanned) {
-                    match trial.next_record(input_limit.saturating_sub(source_bytes)) {
+                    match trial
+                        .as_mut()
+                        .expect("parallel cursor")
+                        .next_record(input_limit.saturating_sub(source_bytes))
+                    {
                         Ok(Some(record)) => {
                             source_bytes += record.bytes.len();
                             records.push(record);
@@ -188,7 +194,7 @@ impl CountBuild {
                     finished = true;
                     break;
                 };
-                trial = self.cursor.fork();
+                trial = None;
                 vec![self.project_record(&record, store.format_version(), limit)?]
             };
             let count = projected.len();
@@ -212,14 +218,22 @@ impl CountBuild {
                 }
             }
             if consumed == count {
-                self.cursor = trial;
+                if let Some(trial) = trial {
+                    self.cursor = trial;
+                }
                 if end {
                     finished = true;
                     break;
                 }
             } else {
+                // A mixed-key boundary can fall inside the speculative group.
+                // Advance the original cursor only through the published rows.
                 for _ in 0..consumed {
-                    assert!(self.cursor.skip_record()?);
+                    if !self.cursor.skip_record()? {
+                        return Err(StoreError::Serialization(
+                            "count source cursor changed during decoding".into(),
+                        ));
+                    }
                 }
             }
             if scanned >= MIXED_BATCH_ROWS && mixed {
