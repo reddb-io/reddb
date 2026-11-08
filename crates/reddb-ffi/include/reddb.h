@@ -58,6 +58,21 @@ REDDB_API reddb_status reddb_call(
 );
 
 /*
+ * Invoke one RPC method without making the language binding unwrap JSON-RPC.
+ * params_json must be one valid JSON value (normally an object). On success,
+ * out_result contains the compact JSON value from the response's `result`.
+ * A JSON-RPC application error returns REDDB_CALL_ERROR and places the compact
+ * error object (including its stable code) in out_error.
+ */
+REDDB_API reddb_status reddb_invoke(
+    reddb_handle *handle,
+    const char *method,
+    const char *params_json,
+    char **out_result,
+    char **out_error
+);
+
+/*
  * Checkpoint, close, and release a handle. The handle is invalid after this
  * call even when checkpointing reports an error. Callers must ensure no other
  * thread is using the handle concurrently.

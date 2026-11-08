@@ -10,6 +10,7 @@ use std::ptr;
 use std::sync::{Arc, Mutex};
 
 use reddb_server::api::RedDBOptions;
+use reddb_server::json::{self, Map as JsonMap, Value as JsonValue};
 use reddb_server::rpc_stdio::EmbeddedRpcSession;
 use reddb_server::RedDBRuntime;
 
@@ -99,6 +100,41 @@ fn ffi_status(
             ReddbStatus::InternalError
         }
     }
+}
+
+fn call_session(handle: &ReddbHandle, request: &str) -> Result<String, (ReddbStatus, String)> {
+    let mut state = handle.state.lock().map_err(|_| {
+        (
+            ReddbStatus::InternalError,
+            "embedded session lock is poisoned".to_string(),
+        )
+    })?;
+    let current = state.as_mut().ok_or_else(|| {
+        (
+            ReddbStatus::CallError,
+            "embedded database is closed".to_string(),
+        )
+    })?;
+    let (response, closed) = current.session.handle(request);
+    if closed {
+        shutdown_locked(&mut state).map_err(|error| (ReddbStatus::CallError, error))?;
+    }
+    Ok(response)
+}
+
+fn write_string_output(
+    output: *mut *mut c_char,
+    value: String,
+) -> Result<(), (ReddbStatus, String)> {
+    let value = CString::new(value).map_err(|_| {
+        (
+            ReddbStatus::InternalError,
+            "engine returned a string containing a NUL byte".to_string(),
+        )
+    })?;
+    // SAFETY: callers validate output slots before reaching this helper.
+    unsafe { ptr::write(output, value.into_raw()) };
+    Ok(())
 }
 
 /// Return the version of the C ABI implemented by this library.
@@ -191,32 +227,89 @@ pub unsafe extern "C" fn reddb_call(
                 "request must be valid UTF-8".to_string(),
             )
         })?;
-        let mut state = handle.state.lock().map_err(|_| {
-            (
-                ReddbStatus::InternalError,
-                "embedded session lock is poisoned".to_string(),
-            )
-        })?;
-        let current = state.as_mut().ok_or_else(|| {
-            (
-                ReddbStatus::CallError,
-                "embedded database is closed".to_string(),
-            )
-        })?;
-        let (response, closed) = current.session.handle(request);
-        if closed {
-            shutdown_locked(&mut state).map_err(|error| (ReddbStatus::CallError, error))?;
+        let response = call_session(handle, request)?;
+        write_string_output(out_response, response)
+    }) as c_int
+}
+
+/// Invoke one method and return the unwrapped JSON-RPC result value.
+///
+/// # Safety
+///
+/// `handle` must be live; `method` and `params_json` must be NUL-terminated
+/// UTF-8 strings; `out_result` must be writable. `out_error`, when non-null,
+/// must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn reddb_invoke(
+    handle: *mut ReddbHandle,
+    method: *const c_char,
+    params_json: *const c_char,
+    out_result: *mut *mut c_char,
+    out_error: *mut *mut c_char,
+) -> c_int {
+    clear_output(out_result);
+    ffi_status(out_error, || {
+        if handle.is_null() || method.is_null() || params_json.is_null() || out_result.is_null() {
+            return Err((
+                ReddbStatus::InvalidArgument,
+                "handle, method, params_json, and out_result must not be NULL".to_string(),
+            ));
         }
-        let response = CString::new(response).map_err(|_| {
+        // SAFETY: guaranteed by this function's C contract.
+        let handle = unsafe { &*handle };
+        // SAFETY: guaranteed by this function's C contract.
+        let method = unsafe { CStr::from_ptr(method) }.to_str().map_err(|_| {
             (
-                ReddbStatus::InternalError,
-                "engine returned a response containing a NUL byte".to_string(),
+                ReddbStatus::InvalidArgument,
+                "method must be valid UTF-8".to_string(),
             )
         })?;
-        // SAFETY: `out_response` was checked above. Ownership transfers to the
-        // caller until `reddb_string_free`.
-        unsafe { ptr::write(out_response, response.into_raw()) };
-        Ok(())
+        if method.is_empty() {
+            return Err((
+                ReddbStatus::InvalidArgument,
+                "method must not be empty".to_string(),
+            ));
+        }
+        // SAFETY: guaranteed by this function's C contract.
+        let params_json = unsafe { CStr::from_ptr(params_json) }
+            .to_str()
+            .map_err(|_| {
+                (
+                    ReddbStatus::InvalidArgument,
+                    "params_json must be valid UTF-8".to_string(),
+                )
+            })?;
+        let params = json::from_str::<JsonValue>(params_json).map_err(|error| {
+            (
+                ReddbStatus::InvalidArgument,
+                format!("params_json is not valid JSON: {error}"),
+            )
+        })?;
+
+        let mut request = JsonMap::new();
+        request.insert("jsonrpc".to_string(), JsonValue::String("2.0".to_string()));
+        request.insert("id".to_string(), JsonValue::Integer(1));
+        request.insert("method".to_string(), JsonValue::String(method.to_string()));
+        request.insert("params".to_string(), params);
+        let response = call_session(handle, &JsonValue::Object(request).to_string_compact())?;
+        let envelope = json::from_str::<JsonValue>(&response).map_err(|error| {
+            (
+                ReddbStatus::InternalError,
+                format!("engine returned invalid JSON-RPC: {error}"),
+            )
+        })?;
+        if let Some(error) = envelope.get("error") {
+            if !matches!(error, JsonValue::Null) {
+                return Err((ReddbStatus::CallError, error.to_string_compact()));
+            }
+        }
+        let result = envelope.get("result").ok_or_else(|| {
+            (
+                ReddbStatus::InternalError,
+                "engine JSON-RPC response has no result or error".to_string(),
+            )
+        })?;
+        write_string_output(out_result, result.to_string_compact())
     }) as c_int
 }
 
@@ -275,6 +368,25 @@ mod tests {
         take(response)
     }
 
+    unsafe fn invoke(handle: *mut ReddbHandle, method: &str, params: &str) -> String {
+        let method = CString::new(method).expect("method has no NUL byte");
+        let params = CString::new(params).expect("params have no NUL byte");
+        let mut result = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        // SAFETY: test owns a live handle and valid input/output pointers.
+        let status = unsafe {
+            reddb_invoke(
+                handle,
+                method.as_ptr(),
+                params.as_ptr(),
+                &mut result,
+                &mut error,
+            )
+        };
+        assert_eq!(status, ReddbStatus::Ok as c_int, "{}", take(error));
+        take(result)
+    }
+
     fn take(value: *mut c_char) -> String {
         if value.is_null() {
             return String::new();
@@ -331,6 +443,34 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":3,"method":"query","params":{"sql":"SELECT id, name FROM ffi_items"}}"#,
             );
             assert!(selected.contains("shared"));
+            close(handle);
+        }
+    }
+
+    #[test]
+    fn invoke_returns_the_unwrapped_result_and_structured_error() {
+        // SAFETY: this test observes every ownership rule of the C ABI.
+        unsafe {
+            let handle = open(None);
+            let result = invoke(handle, "query", r#"{"sql":"SELECT 1 AS one"}"#);
+            assert!(result.contains(r#""one":1"#), "{result}");
+
+            let method = CString::new("query").expect("method has no NUL byte");
+            let params =
+                CString::new(r#"{"sql":"SELEKT invalid"}"#).expect("params have no NUL byte");
+            let mut result = ptr::null_mut();
+            let mut error = ptr::null_mut();
+            let status = reddb_invoke(
+                handle,
+                method.as_ptr(),
+                params.as_ptr(),
+                &mut result,
+                &mut error,
+            );
+            assert_eq!(status, ReddbStatus::CallError as c_int);
+            assert!(result.is_null());
+            let error = take(error);
+            assert!(error.contains("QUERY_ERROR"), "{error}");
             close(handle);
         }
     }

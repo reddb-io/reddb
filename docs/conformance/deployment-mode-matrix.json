@@ -274,8 +274,9 @@
           "gap": "Remote connectivity is covered, but no managed attach/warm/cold journey exists."
         },
         "embedded": {
-          "status": "missing",
-          "gap": "The driver still rejects embedded URIs and is not linked to reddb-ffi."
+          "status": "partial",
+          "tests": ["drivers/cpp/tests/embedded_test.cpp"],
+          "gap": "The public facade passes the native single-file journey when linked to reddb-ffi, but release packaging does not yet bundle the platform library."
         },
         "server_replica": {
           "status": "missing",

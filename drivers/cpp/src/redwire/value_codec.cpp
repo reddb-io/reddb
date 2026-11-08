@@ -251,4 +251,19 @@ std::string to_http_query_body(std::string_view sql, std::span<const Value> para
     return body;
 }
 
+std::string to_json_string(std::string_view value) {
+    return json_escape(value);
+}
+
+std::string to_rpc_query_params(std::string_view sql, std::span<const Value> params) {
+    std::string body = "{\"sql\":";
+    body += json_escape(sql);
+    if (!params.empty()) {
+        body += ",\"params\":";
+        body += to_http_params_json(params);
+    }
+    body.push_back('}');
+    return body;
+}
+
 } // namespace reddb::redwire

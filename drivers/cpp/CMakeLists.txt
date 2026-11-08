@@ -50,6 +50,25 @@ if(CURL_FOUND)
 endif()
 
 # ----------------------------------------------------------------------------
+# Optional: in-process engine through the stable RedDB C ABI.
+# Build `reddb-io-ffi` first and point this at its shared/import library.
+# ----------------------------------------------------------------------------
+set(REDDB_FFI_LIBRARY "" CACHE FILEPATH "Path to the reddb-ffi shared or import library")
+set(REDDB_FFI_INCLUDE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../crates/reddb-ffi/include"
+    CACHE PATH "Directory containing reddb.h")
+set(REDDB_HAS_EMBEDDED 0)
+if(REDDB_FFI_LIBRARY)
+    if(NOT EXISTS "${REDDB_FFI_LIBRARY}")
+        message(FATAL_ERROR "REDDB_FFI_LIBRARY does not exist: ${REDDB_FFI_LIBRARY}")
+    endif()
+    if(NOT EXISTS "${REDDB_FFI_INCLUDE_DIR}/reddb.h")
+        message(FATAL_ERROR "reddb.h not found in REDDB_FFI_INCLUDE_DIR: ${REDDB_FFI_INCLUDE_DIR}")
+    endif()
+    set(REDDB_HAS_EMBEDDED 1)
+endif()
+
+# ----------------------------------------------------------------------------
 # Library
 # ----------------------------------------------------------------------------
 set(REDDB_SOURCES
@@ -67,12 +86,23 @@ set(REDDB_SOURCES
 if(REDDB_HAS_CURL)
     list(APPEND REDDB_SOURCES src/http/client.cpp)
 endif()
+if(REDDB_HAS_EMBEDDED)
+    list(APPEND REDDB_SOURCES src/embedded/conn.cpp)
+endif()
 
 add_library(reddb STATIC ${REDDB_SOURCES})
 target_include_directories(reddb PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 target_link_libraries(reddb PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+
+if(REDDB_HAS_EMBEDDED)
+    target_compile_definitions(reddb PUBLIC REDDB_HAS_EMBEDDED=1)
+    target_include_directories(reddb PRIVATE ${REDDB_FFI_INCLUDE_DIR})
+    target_link_libraries(reddb PUBLIC ${REDDB_FFI_LIBRARY})
+else()
+    target_compile_definitions(reddb PUBLIC REDDB_HAS_EMBEDDED=0)
+endif()
 
 if(REDDB_HAS_ZSTD)
     target_compile_definitions(reddb PUBLIC REDDB_HAS_ZSTD=1)
@@ -117,3 +147,6 @@ reddb_add_test(value_codec_test)
 reddb_add_test(redwire_conn_test)
 reddb_add_test(smoke_test)
 reddb_add_test(helpers_test)
+if(REDDB_HAS_EMBEDDED)
+    reddb_add_test(embedded_test)
+endif()

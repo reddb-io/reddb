@@ -1,6 +1,6 @@
 # C++ driver
 
-C++20 client for RedDB. Speaks the RedWire binary protocol over TCP (plain or TLS) and the HTTP/HTTPS REST surface. Remote-only — embedded URIs throw `EmbeddedUnsupported`.
+C++20 client for RedDB. Speaks the RedWire binary protocol over TCP (plain or TLS), the HTTP/HTTPS REST surface, and optionally embeds the engine in-process through `reddb-ffi`.
 
 - **Source:** [`drivers/cpp/`](https://github.com/reddb-io/reddb/tree/main/drivers/cpp) (CMake; not yet packaged on a registry)
 - **Status:** Preview
@@ -13,6 +13,20 @@ cmake --build drivers/cpp/build -j
 ctest --test-dir drivers/cpp/build --output-on-failure
 ```
 
+For the embedded modes, first build the shared C ABI and give CMake its
+platform library:
+
+```sh
+cargo build --release -p reddb-io-ffi
+cmake -S drivers/cpp -B drivers/cpp/build \
+  -DREDDB_FFI_LIBRARY=/absolute/path/to/target/release/deps/libreddb_ffi.so
+```
+
+The equivalent names are `libreddb_ffi.dylib` on macOS and
+`reddb_ffi.dll.lib` on Windows. The dynamic library must also be on the
+runtime loader path. Builds without it keep remote support and reject
+embedded URIs with `EmbeddedUnsupported`.
+
 ### Dependencies
 
 | Dependency  | Required? | Notes                                                                                       |
@@ -20,6 +34,7 @@ ctest --test-dir drivers/cpp/build --output-on-failure
 | OpenSSL     | Required  | TLS + SCRAM-SHA-256 (HMAC, PBKDF2, RAND).                                                   |
 | zstd        | Optional  | Frame compression. When absent, `COMPRESSED` frames cannot be encoded; receiving one throws `CompressedButNoZstd`. |
 | libcurl     | Optional  | HTTP transport. Without it, only `red://` / `reds://` URIs work.                            |
+| reddb-ffi   | Optional  | In-process engine for memory and one-file persistent databases.                            |
 | GoogleTest  | Fetched   | Vendored via `FetchContent` (v1.14.0).                                                      |
 
 ## Quickstart
@@ -122,8 +137,13 @@ auto conn = reddb::connect("reds://db.example.com:5050", o);
 | `red://host?proto=https`             | HTTPS via libcurl          |
 | `http://host[:port]`                 | HTTP via libcurl           |
 | `https://host[:port]`                | HTTPS via libcurl          |
+| `memory://` / `red://`               | Embedded in-memory engine  |
+| `file:///path/data.rdb`              | Embedded single-file engine |
+| `red:///path/data.rdb`               | Embedded single-file engine |
 
-Embedded URIs (`red:///path`, `memory://`, `file://`) throw `EmbeddedUnsupported`.
+The persistent embedded journey creates schema, writes, closes, reopens and
+asserts that the database directory contains exactly the requested `.rdb`
+file. Concurrent writers to the same file are rejected.
 
 ## Production checklist
 
