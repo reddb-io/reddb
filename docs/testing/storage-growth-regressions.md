@@ -132,7 +132,10 @@ remote-storage measurement. In writable disk-resident runtimes, a missing
 visibility-count projection is built in background batches against a pinned
 immutable generation. Batches contain up to 65 rows when visibility keys vary;
 uniform keys can be grouped up to 384 rows because their postings share an
-ordered range. Each batch publishes
+ordered range. Source records are decoded outside the publication lock in
+groups of up to 64, with two concurrent workers and a bounded input budget.
+Records that do not fit a worker's decode allowance are retried sequentially
+using the full read allowance. Each batch publishes
 its private pages in an ownership epoch; only the finished projection becomes
 visible to COUNT. A crash discards the unfinished tree through the retirement
 ledger and a later worker retries from the beginning. If a checkpoint replaces
@@ -140,7 +143,8 @@ the source generation, the build restarts; frequent checkpoints can delay
 completion. COUNT falls back to the ordinary scan until publication. Batch size
 does not bound a slow fsync, WAL verification, or an individual large value's
 decode time. The
-harness samples concurrent reads and writes during the build, reports the
+harness samples concurrent reads, writes, and the incomplete-projection probe
+during the build, reports the
 subsequent checkpoint separately, and verifies the writes after reopen. Its
 timings do not establish a production SLO.
 The serverless generation crash matrix separately

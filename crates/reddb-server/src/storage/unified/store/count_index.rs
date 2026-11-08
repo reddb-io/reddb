@@ -2,12 +2,15 @@
 //!
 //! Preparation shares the secondary-index source pass and publication fences.
 //! Cost: 17 visibility bytes + 8 physical-ID bytes per version (plus tree slots),
-//! O(N) compact reads per count, O(one leaf) scratch, no resident posting map.
+//! O(N) compact reads per count, bounded decode scratch, no resident posting map.
 use super::secondary_index::{
     SecondaryIndexIdentity, SecondaryIndexProjector, SECONDARY_KEY_BYTES_MAX,
 };
 use super::*;
-use reddb_engine::storage::collection_read::{CollectionCursor, PagedCollection, PagedCursor};
+use rayon::prelude::*;
+use reddb_engine::storage::collection_read::{
+    CollectionCursor, EncodedRecord, PagedCollection, PagedCursor,
+};
 use reddb_engine::storage::visibility::entity_moderation_hidden;
 use reddb_engine::transaction::read::{visibility_check, SnapshotContext};
 use sha2::{Digest, Sha256};
@@ -17,6 +20,8 @@ use sha2::{Digest, Sha256};
 const NAME: &str = "\0reddb/visibility-count-v1";
 const MIXED_BATCH_ROWS: usize = 64;
 const UNIFORM_BATCH_ROWS: usize = 384;
+const DECODE_GROUP_ROWS: usize = 64;
+const DECODE_WORKERS: usize = 2;
 
 fn identity(schema: Option<&[String]>) -> SecondaryIndexIdentity {
     let mut digest = Sha256::new();
@@ -91,6 +96,28 @@ pub(crate) struct CountBuild {
 }
 
 impl CountBuild {
+    fn project_record(
+        &self,
+        record: &EncodedRecord,
+        version: u32,
+        limit: usize,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let (entity, _) = record.decode_with_budget(version, limit)?;
+        let mut key = [0; SECONDARY_KEY_BYTES_MAX];
+        let Some(length) = self.projector.project(&entity, &mut key)? else {
+            return Ok(None);
+        };
+        if length > key.len() {
+            return Err(StoreError::Serialization(
+                "count projection key too large".into(),
+            ));
+        }
+        let mut posting = Vec::with_capacity(length + 8);
+        posting.extend_from_slice(&key[..length]);
+        posting.extend_from_slice(&entity.id.raw().to_be_bytes());
+        Ok(Some(posting))
+    }
+
     /// Decode outside the publication fence. Uniform visibility keys can be
     /// appended together with bounded leaf work; mixed keys retain the smaller
     /// batch to limit the number of distinct leaves touched under the fence.
@@ -101,32 +128,115 @@ impl CountBuild {
         let mut finished = false;
         let mut first_key = None::<Vec<u8>>;
         let mut mixed = false;
-        for position in 0..UNIFORM_BATCH_ROWS {
-            let Some(record) = self.cursor.next_record(limit)? else {
+        let mut scanned = 0;
+        let mut parallel = limit >= DECODE_WORKERS * 2;
+        while scanned < UNIFORM_BATCH_ROWS {
+            let mut trial = parallel.then(|| self.cursor.fork());
+            let mut records = Vec::new();
+            let mut source_bytes = 0usize;
+            let mut end = false;
+            // Bound retained encoded records to half the read allowance and
+            // divide the other half between the concurrent decoders.
+            let input_limit = (limit / 2).min(4 * 1024 * 1024);
+            if parallel {
+                while records.len() < DECODE_GROUP_ROWS.min(UNIFORM_BATCH_ROWS - scanned) {
+                    match trial
+                        .as_mut()
+                        .expect("parallel cursor")
+                        .next_record(input_limit.saturating_sub(source_bytes))
+                    {
+                        Ok(Some(record)) => {
+                            source_bytes += record.bytes.len();
+                            records.push(record);
+                        }
+                        Ok(None) => {
+                            end = true;
+                            break;
+                        }
+                        Err(StoreError::ReadLimitExceeded { .. }) => break,
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            let projected = if !records.is_empty() {
+                let worker_limit = limit / (DECODE_WORKERS * 2);
+                let chunks: Vec<_> = records
+                    .par_chunks(DECODE_GROUP_ROWS / DECODE_WORKERS)
+                    .map(|chunk| {
+                        chunk
+                            .iter()
+                            .map(|record| {
+                                self.project_record(record, store.format_version(), worker_limit)
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .collect();
+                chunks
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()
+                    .map(|chunks| chunks.into_iter().flatten().collect::<Vec<_>>())
+            } else {
+                None
+            };
+            let projected = if let Some(projected) = projected {
+                projected
+            } else if end && records.is_empty() {
                 finished = true;
                 break;
-            };
-            let (entity, _) = record.decode_with_budget(store.format_version(), limit)?;
-            let mut key = [0; SECONDARY_KEY_BYTES_MAX];
-            if let Some(length) = self.projector.project(&entity, &mut key)? {
-                if length > key.len() {
-                    return Err(StoreError::Serialization(
-                        "count projection key too large".into(),
-                    ));
-                }
-                match &first_key {
-                    Some(first) if first.as_slice() != &key[..length] => mixed = true,
-                    None => first_key = Some(key[..length].to_vec()),
-                    _ => {}
-                }
-                let mut posting = Vec::with_capacity(length + 8);
-                posting.extend_from_slice(&key[..length]);
-                posting.extend_from_slice(&entity.id.raw().to_be_bytes());
-                postings.push((posting, Vec::new()));
             } else {
-                mixed = true;
+                // Retry without speculative input when a record exceeds the
+                // per-worker allowance or a decoder reports an error.
+                parallel = false;
+                drop(records);
+                end = false;
+                let Some(record) = self.cursor.next_record(limit)? else {
+                    finished = true;
+                    break;
+                };
+                trial = None;
+                vec![self.project_record(&record, store.format_version(), limit)?]
+            };
+            let count = projected.len();
+            let mut consumed = 0;
+            for posting in projected {
+                consumed += 1;
+                scanned += 1;
+                if let Some(posting) = posting {
+                    let key = &posting[..posting.len() - 8];
+                    match &first_key {
+                        Some(first) if first.as_slice() != key => mixed = true,
+                        None => first_key = Some(key.to_vec()),
+                        _ => {}
+                    }
+                    postings.push((posting, Vec::new()));
+                } else {
+                    mixed = true;
+                }
+                if scanned >= MIXED_BATCH_ROWS && mixed {
+                    break;
+                }
             }
-            if position + 1 >= MIXED_BATCH_ROWS && mixed {
+            if consumed == count {
+                if let Some(trial) = trial {
+                    self.cursor = trial;
+                }
+                if end {
+                    finished = true;
+                    break;
+                }
+            } else {
+                // A mixed-key boundary can fall inside the speculative group.
+                // Advance the original cursor only through the published rows.
+                for _ in 0..consumed {
+                    if !self.cursor.skip_record()? {
+                        return Err(StoreError::Serialization(
+                            "count source cursor changed during decoding".into(),
+                        ));
+                    }
+                }
+            }
+            if scanned >= MIXED_BATCH_ROWS && mixed {
                 break;
             }
         }

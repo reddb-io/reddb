@@ -230,8 +230,13 @@ fn populated_startup_child() {
             let mut samples = 0u64;
             let mut max_write = std::time::Duration::ZERO;
             let mut max_read = std::time::Duration::ZERO;
+            let mut max_projection_probe = std::time::Duration::ZERO;
             loop {
+                let probe_started = Instant::now();
                 let ready = store.try_count_from_index("rows", None).unwrap();
+                if ready.is_none() {
+                    max_projection_probe = max_projection_probe.max(probe_started.elapsed());
+                }
                 if ready.is_some() && samples > 0 {
                     assert_eq!(ready, Some(rows));
                     break;
@@ -276,7 +281,7 @@ fn populated_startup_child() {
                 Some(rows)
             );
             eprintln!(
-                "projection_elapsed={:?} concurrent_samples={samples} max_write={max_write:?} max_read={max_read:?}", build_started.elapsed()
+                "projection_elapsed={:?} concurrent_samples={samples} max_write={max_write:?} max_read={max_read:?} max_projection_probe={max_projection_probe:?}", build_started.elapsed()
             );
             let checkpoint = Instant::now();
             runtime
