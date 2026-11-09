@@ -452,7 +452,7 @@ red mcp [--uri memory://]
 
 ## red acp
 
-Start the local ACP v1 session adapter backed by the native ASK harness.
+Start the local ACP v1/v2 session adapter backed by the native ASK harness.
 
 ```bash
 red acp [--path ./data/reddb.rdb]
@@ -462,8 +462,9 @@ red acp [--path ./data/reddb.rdb]
 |:-----|:------|:--------|:------------|
 | `--path` | `-d` | (in-memory) | Path to a single-file embedded database |
 
-The adapter uses newline-delimited JSON-RPC over stdio. It is embedded-only in
-this release; it does not advertise remote authentication or external MCP
+The adapter uses newline-delimited JSON-RPC over stdio and negotiates v1 or v2
+during `initialize`. ACP v2 remains draft. The adapter is embedded-only in this
+release; it does not advertise remote authentication or external MCP
 attachment. See [ACP (ASK sessions)](/api/acp.md).
 
 ## red auth
