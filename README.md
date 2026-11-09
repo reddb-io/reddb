@@ -350,6 +350,7 @@ SHOW CONFIG red.ai
 | **Embedded** | SQLite | Rust API (`RedDB::open("data.rdb")`) | In-process, single machine |
 | **Server** | Postgres | RedWire + gRPC + HTTP | Multi-client, networked |
 | **Agent** | MCP Server | `red mcp` | Claude Code / AI agents |
+| **Agent session** | ACP v1 over stdio | `red acp` | ACP-compatible clients using ASK |
 
 Same storage format. Start embedded, scale to server, expose to agents — zero migration.
 
