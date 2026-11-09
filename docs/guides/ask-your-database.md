@@ -437,6 +437,11 @@ The response contains:
 | `completion_tokens` | Tokens in the generated answer |
 | `cost_usd` | Estimated provider cost |
 
+Planner-first factual responses additionally include `intent`,
+`exploratory_queries`, `final_query`, `final_query_params`, `reasoning`, and
+`plan_summary`. `executed_query` remains as a compatibility alias for
+`final_query`.
+
 ### Grounding and citations
 
 ASK returns inline, server-validated citations by default. The contract is
@@ -581,9 +586,11 @@ ASK 'question'
   └─ Audit + optional cache             ← red_ask_audit, CACHE TTL / NOCACHE
 ```
 
-Plain `ASK` does not translate English into RQL. It retrieves allowed context
-first, sends those sources to the model, and returns a single answer row. If
-you need deterministic cross-collection retrieval by field, use SQL/RQL
+With `red.config.ai.ask.planner = false` (the current rollout default), plain
+`ASK` follows the retrieval-RAG path above. With the planner enabled, factual
+questions enter a bounded tool loop: visible catalog discovery, optional
+parameterized exploratory reads, then one final parameterized RQL query. If
+you need deterministic cross-collection retrieval without an LLM, use SQL/RQL
 directly:
 
 ```sql
@@ -593,8 +600,12 @@ SELECT * WHERE host = $1
 That form is parsed as the universal source `any`, equivalent in intent to
 `FROM ANY` plus a `WHERE` filter.
 
-A **factual** `ASK` generates that query shape for you, auto-executes the
-read-only candidate under your RLS scope, and answers from the executed rows.
+A **factual** planner-first `ASK` generates that query shape for you,
+auto-executes every tool under the tenant, structured principal, role,
+snapshot, IAM, RLS, and collection policies captured from the caller, and
+answers only from the final-query rows. Its result separates
+`exploratory_queries` from `final_query`/`final_query_params` and includes an
+auditable `reasoning` action trace (not private model chain-of-thought).
 To inspect the generated query without running it, add `PLAN`:
 
 ```sql
@@ -647,7 +658,7 @@ paths. The provider boundary is enforced as follows:
 |:--------|:----------------|:----|
 | `SELECT … COUNT/SUM/AVG/MIN/MAX(…)` | SQL planner + executor | Exact, reproducible, no network call. |
 | `SEARCH CONTEXT 'term'` | Multi-tier index (field → token → scan) | Returns table rows, documents, KV entries, graph nodes/edges, and vectors when each backing collection exists. Empty result set when nothing matches &mdash; the contract is "ground or fall silent". |
-| `ASK '…'` | Planner-first funnel + planner LLM + synthesis | Pipeline grounds first, the planner routes intent and (for factual) generates a read-only RQL candidate that auto-executes, then the LLM rewrites the executed/grounded rows into a citation-bearing sentence. |
+| `ASK '…'` | Retrieval-RAG by default; planner-first funnel + bounded tools + synthesis when enabled | For factual planner-first questions, catalog/exploratory calls guide the plan, one final read-only RQL query supplies all answer evidence, and the LLM rewrites only those final rows into a citation-bearing sentence. |
 | `ASK '…' PLAN` | Planner-first funnel + planner LLM | Returns the routed intent + parser-validated candidate query without executing the candidate and without the synthesis call. |
 | `EXPLAIN ASK '…'` | Planner-first funnel + planner LLM (at most) | Returns the retrieval/provider/determinism/cost plan plus the routed intent and candidate query — never executes or synthesizes. |
 | Missing or unsupported analytics inside an `ASK` question | Pipeline short-circuits with a structured error OR returns an answer that openly cites "no matching sources" | The LLM never invents a number; it can only quote what `sources_flat` contains. |

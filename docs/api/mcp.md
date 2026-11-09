@@ -223,6 +223,16 @@ interpolating identifiers:
 Both tools use bound parameters. Their results contain only metadata visible
 to the connected identity.
 
+When planner-first ASK is enabled, its bounded reasoning loop reuses this same
+tool vocabulary internally. Metadata calls, parameterized exploratory
+`reddb_query` calls, and one final `reddb_query` share the `ASK ... STEPS n`
+budget. The last step is reserved for the final query. Every call runs with the
+ASK caller's captured principal, tenant, snapshot, IAM, RLS, and collection
+policies; the database does not give the model a separate catalog or
+authorization path. Only final-query rows ground the answer. The result exposes
+an auditable action trace and both exploratory and final SQL without exposing
+private model chain-of-thought.
+
 ### Insert a Row
 
 ```json

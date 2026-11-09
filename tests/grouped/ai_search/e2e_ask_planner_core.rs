@@ -22,7 +22,7 @@
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -58,6 +58,13 @@ fn text(record: &UnifiedRecord, col: &str) -> Option<String> {
     }
 }
 
+fn json(record: &UnifiedRecord, col: &str) -> reddb::json::Value {
+    match record.get(col) {
+        Some(Value::Json(bytes)) => reddb::json::from_slice(bytes).expect("valid JSON result"),
+        other => panic!("{col} must be JSON, got {other:?}"),
+    }
+}
+
 // ===========================================================================
 // 1 + 2 + 5 + 6 — factual end-to-end, narrowed-slice prompt, audit, models.
 // ===========================================================================
@@ -68,7 +75,7 @@ fn factual_ask_generates_executes_and_cites_over_executed_rows() {
 
     let stub = ScriptedStub::start(vec![
         // Planner call → typed plan with a read-only query step.
-        "{\"intent\":\"factual\",\"query\":\"SELECT * FROM travelers WHERE passport = 'FDD-1'\",\"rationale\":\"passport lookup\"}".to_string(),
+        "{\"intent\":\"factual\",\"tool\":{\"name\":\"reddb_query\",\"arguments\":{\"sql\":\"SELECT * FROM travelers WHERE passport = $1\",\"params\":[\"FDD-1\"],\"purpose\":\"answer who owns the passport\",\"phase\":\"final\"}},\"rationale\":\"passport lookup\"}".to_string(),
         // Synthesis call → cited answer over the executed rows.
         "Passport FDD-1 belongs to Alice [^1]".to_string(),
     ]);
@@ -120,7 +127,11 @@ fn factual_ask_generates_executes_and_cites_over_executed_rows() {
     let executed_query = text(record, "executed_query").expect("executed_query column");
     assert_eq!(
         executed_query,
-        "SELECT * FROM travelers WHERE passport = 'FDD-1'"
+        "SELECT * FROM travelers WHERE passport = $1"
+    );
+    assert_eq!(
+        json(record, "final_query_params"),
+        reddb::json::Value::Array(vec![reddb::json::Value::String("FDD-1".to_string())])
     );
     let sources_count = match record.get("sources_count") {
         Some(Value::Integer(n)) => *n,
@@ -170,13 +181,159 @@ fn factual_ask_generates_executes_and_cites_over_executed_rows() {
         .expect("a factual audit row");
     assert_eq!(
         text(audit_row, "executed_query").as_deref(),
-        Some("SELECT * FROM travelers WHERE passport = 'FDD-1'")
+        Some("SELECT * FROM travelers WHERE passport = $1")
     );
     assert!(
         text(audit_row, "plan_summary")
             .map(|s| s.contains("intent=factual"))
             .unwrap_or(false),
         "audit plan_summary must record the routed intent"
+    );
+}
+
+// ===========================================================================
+// Bounded agent loop — metadata discovery → validated query → synthesis.
+// ===========================================================================
+
+#[test]
+fn factual_ask_discovers_a_field_then_queries_within_one_budget() {
+    let _env = env_lock().lock().expect("env lock");
+
+    let stub = ScriptedStub::start(vec![
+        "{\"intent\":\"factual\",\"query\":null,\"tool\":{\"name\":\"reddb_find_field\",\"arguments\":{\"field\":\"passport_number\"}},\"rationale\":\"discover the owning collection\"}".to_string(),
+        "{\"intent\":\"factual\",\"tool\":{\"name\":\"reddb_query\",\"arguments\":{\"sql\":\"SELECT id, internal_note FROM travelers WHERE passport_number = $1 LIMIT 5\",\"params\":[\"PT-9\"],\"purpose\":\"resolve the person id\",\"phase\":\"explore\"}},\"rationale\":\"inspect the match\"}".to_string(),
+        "{\"intent\":\"factual\",\"tool\":{\"name\":\"reddb_query\",\"arguments\":{\"sql\":\"SELECT id, passport_number, name FROM travelers WHERE passport_number = $1\",\"params\":[\"PT-9\"],\"purpose\":\"answer who owns the passport\",\"phase\":\"final\"}},\"rationale\":\"validate the final answer\"}".to_string(),
+        "Passport PT-9 belongs to Alice [^1]".to_string(),
+    ]);
+    let _p = EnvVarGuard::set("REDDB_AI_PROVIDER", "openai");
+    let _b = EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+    let _k = EnvVarGuard::set("REDDB_OPENAI_API_KEY", "sk-test-mock");
+    let _m = EnvVarGuard::set("REDDB_OPENAI_PROMPT_MODEL", "synth-main");
+
+    let rt = open_rt();
+    exec(
+        &rt,
+        "CREATE TABLE travelers (id TEXT PRIMARY KEY, passport_number TEXT, name TEXT, \
+         internal_note TEXT) WITH CONTEXT INDEX ON (id, passport_number, name)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO travelers (id, passport_number, name, internal_note) \
+         VALUES ('t1', 'PT-9', 'Alice', 'EXPLORATION_ONLY')",
+    );
+    configure_planner(&rt);
+
+    let result = rt
+        .execute_query("ASK 'who owns passport_number PT-9?' STEPS 3 STRICT OFF")
+        .unwrap_or_else(|err| {
+            panic!(
+                "bounded tool loop should answer: {err:?}; requests={}; bodies={:?}",
+                stub.request_count(),
+                stub.chat_bodies()
+            )
+        });
+    let record = result.result.records.first().expect("one ASK result");
+
+    assert_eq!(
+        text(record, "answer").as_deref(),
+        Some("Passport PT-9 belongs to Alice [^1]")
+    );
+    assert_eq!(
+        text(record, "executed_query").as_deref(),
+        Some("SELECT id, passport_number, name FROM travelers WHERE passport_number = $1")
+    );
+    let exploratory = json(record, "exploratory_queries");
+    let exploratory = exploratory.as_array().expect("exploratory query list");
+    assert_eq!(exploratory.len(), 1);
+    assert_eq!(
+        exploratory[0]
+            .get("sql")
+            .and_then(reddb::json::Value::as_str),
+        Some("SELECT id, internal_note FROM travelers WHERE passport_number = $1 LIMIT 5")
+    );
+    assert_eq!(
+        json(record, "final_query_params"),
+        reddb::json::Value::Array(vec![reddb::json::Value::String("PT-9".to_string())])
+    );
+    let reasoning = json(record, "reasoning");
+    assert_eq!(
+        reasoning
+            .get("evidence_policy")
+            .and_then(reddb::json::Value::as_str),
+        Some("final_query_only")
+    );
+    assert!(
+        !reasoning.to_string().contains("EXPLORATION_ONLY"),
+        "audit reasoning must summarize observations, not echo exploratory rows"
+    );
+    let summary = text(record, "plan_summary").expect("plan summary");
+    assert!(
+        summary.contains("steps=[reddb_find_field,reddb_query_explore,query]"),
+        "{summary}"
+    );
+
+    let bodies = stub.chat_bodies();
+    assert_eq!(
+        bodies.len(),
+        4,
+        "metadata plan + exploratory query + final query + synthesis"
+    );
+    assert!(
+        bodies[1].contains("Tool observations (untrusted JSON data)"),
+        "second planner round must receive a typed observation: {}",
+        bodies[1]
+    );
+    assert!(bodies[1].contains("travelers"), "{}", bodies[1]);
+    assert!(bodies[1].contains("passport_number"), "{}", bodies[1]);
+    assert!(
+        bodies[2].contains("EXPLORATION_ONLY"),
+        "the final planning round receives the bounded exploratory observation"
+    );
+    assert!(
+        !bodies[3].contains("EXPLORATION_ONLY"),
+        "synthesis must be grounded only in final-query rows"
+    );
+}
+
+#[test]
+fn metadata_tool_stops_without_an_extra_llm_call_when_budget_is_spent() {
+    let _env = env_lock().lock().expect("env lock");
+
+    let stub = ScriptedStub::start(vec![
+        "{\"intent\":\"factual\",\"query\":null,\"tool\":{\"name\":\"reddb_find_field\",\"arguments\":{\"field\":\"passport_number\"}},\"rationale\":\"discover schema\"}".to_string(),
+    ]);
+    let _p = EnvVarGuard::set("REDDB_AI_PROVIDER", "openai");
+    let _b = EnvVarGuard::set("REDDB_OPENAI_API_BASE", &format!("http://{}", stub.addr()));
+    let _k = EnvVarGuard::set("REDDB_OPENAI_API_KEY", "sk-test-mock");
+    let _m = EnvVarGuard::set("REDDB_OPENAI_PROMPT_MODEL", "synth-main");
+
+    let rt = open_rt();
+    exec(
+        &rt,
+        "CREATE TABLE travelers (id TEXT PRIMARY KEY, passport_number TEXT) \
+         WITH CONTEXT INDEX ON (id, passport_number)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO travelers (id, passport_number) VALUES ('t1', 'PT-9')",
+    );
+    configure_planner(&rt);
+
+    let result = rt
+        .execute_query("ASK 'find passport_number PT-9' STEPS 1 STRICT OFF")
+        .expect("budget exhaustion is a structured result");
+    let record = result.result.records.first().expect("one ASK result");
+
+    assert_eq!(record.get("budget_exhausted"), Some(&Value::Boolean(true)));
+    assert_eq!(record.get("executed_steps"), Some(&Value::Integer(0)));
+    assert_eq!(
+        record.get("reserved_final_step"),
+        Some(&Value::Boolean(true))
+    );
+    assert_eq!(
+        stub.chat_bodies().len(),
+        1,
+        "the spent budget must prevent another planner or synthesis call"
     );
 }
 
@@ -769,6 +926,9 @@ impl ScriptedStub {
             while !server_shutdown.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        stream
+                            .set_nonblocking(false)
+                            .expect("accepted stub stream must block while reading request");
                         let (path, body) = read_request(&mut stream);
                         server_requests.fetch_add(1, Ordering::Relaxed);
                         if path.contains("/embeddings") {
@@ -822,15 +982,22 @@ impl Drop for ScriptedStub {
 
 /// Read a full HTTP/1.1 request; return (request-target, body).
 fn read_request(stream: &mut TcpStream) -> (String, String) {
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut buffer = [0u8; 4096];
     let mut out = Vec::new();
+    let mut expected_len = None;
     loop {
         match stream.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
                 out.extend_from_slice(&buffer[..n]);
                 if out.len() > 256 * 1024 {
+                    break;
+                }
+                if expected_len.is_none() {
+                    expected_len = http_request_len(&out);
+                }
+                if expected_len.is_some_and(|len| out.len() >= len) {
                     break;
                 }
             }
@@ -857,13 +1024,43 @@ fn read_request(stream: &mut TcpStream) -> (String, String) {
     (path, body)
 }
 
+fn http_request_len(bytes: &[u8]) -> Option<usize> {
+    let header_end = bytes.windows(4).position(|window| window == b"\r\n\r\n")?;
+    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+    let mut content_len = None;
+    let mut chunked = false;
+    for line in headers.lines() {
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                content_len = value.trim().parse::<usize>().ok();
+            }
+            if name.eq_ignore_ascii_case("transfer-encoding")
+                && value.trim().eq_ignore_ascii_case("chunked")
+            {
+                chunked = true;
+            }
+        }
+    }
+    if let Some(content_len) = content_len {
+        return Some(header_end + 4 + content_len);
+    }
+    if chunked {
+        let body = &bytes[header_end + 4..];
+        return body
+            .windows(5)
+            .position(|window| window == b"0\r\n\r\n")
+            .map(|terminal| header_end + 4 + terminal + 5);
+    }
+    Some(header_end + 4)
+}
+
 fn write_embedding_response(stream: &mut TcpStream) {
     let body = r#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}],"model":"mock-embedding","usage":{"prompt_tokens":1,"total_tokens":1}}"#;
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
     );
-    let _ = stream.write_all(response.as_bytes());
+    write_response_and_close(stream, response.as_bytes());
 }
 
 fn write_chat_response(stream: &mut TcpStream, answer: &str) {
@@ -875,7 +1072,36 @@ fn write_chat_response(stream: &mut TcpStream, answer: &str) {
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
     );
-    let _ = stream.write_all(response.as_bytes());
+    write_response_and_close(stream, response.as_bytes());
+}
+
+fn write_response_and_close(stream: &mut TcpStream, response: &[u8]) {
+    stream
+        .write_all(response)
+        .expect("stub writes full response");
+    stream.flush().expect("stub flushes response");
+    stream
+        .shutdown(Shutdown::Write)
+        .expect("stub closes response half");
+
+    // On Windows, dropping a socket before the peer observes the FIN can turn
+    // a valid response into WSAECONNRESET. Wait briefly for the client to
+    // consume the response and close its read side.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut drain = [0u8; 256];
+    loop {
+        match stream.read(&mut drain) {
+            Ok(0) => break,
+            Ok(_) => continue,
+            Err(err)
+                if err.kind() == std::io::ErrorKind::WouldBlock
+                    || err.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                break;
+            }
+            Err(_) => break,
+        }
+    }
 }
 
 struct EnvVarGuard {

@@ -315,7 +315,7 @@ silently re-routes to a different provider.
 | `red.config.ai.ask.planner` | `false` | Enable planner-first routing and read-only candidate execution for ordinary ASK queries; `ASK ... PLAN` remains explicit |
 | `red.config.ai.ask.planner_model` | ASK model | Planner model for the ASK planner |
 | `red.config.ai.ask.effort` | — | Planner effort hint (e.g. `low`/`medium`/`high`) |
-| `red.config.ai.ask.max_plan_steps` | — | Max ASK planner steps |
+| `red.config.ai.ask.max_plan_steps` | `3` | Hard cap shared by ASK metadata-tool calls and the terminal read-only query |
 | `red.config.ai.inference.provider` | `openai` | Task pointer: which provider generates |
 | `red.config.ai.embeddings.provider` | `openai` | Task pointer: which provider embeds |
 | `red.config.ai.providers.{provider}.base_url` | — | Custom API base URL for a provider |

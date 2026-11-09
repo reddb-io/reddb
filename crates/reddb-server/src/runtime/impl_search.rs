@@ -2218,18 +2218,58 @@ impl RedDBRuntime {
             )?;
             Ok(response.output_text)
         };
-        let route = ask_planner::plan_and_route(&ask.question, &slice, &planner_closure)?;
-
-        // #1751: `ASK ... PLAN` stops here — the typed plan (intent + candidate
-        // query) is returned without executing the candidate or synthesizing.
-        // The `Query` plan step is never charged because nothing runs.
+        // `ASK ... PLAN` shows the first typed action but executes no metadata
+        // tool, query, or synthesis call.
         if plan_only {
+            if budget.remaining() == 0 {
+                let exhausted = ask_planner::BudgetExhausted {
+                    attempted: ask_planner::PlanStep::Query,
+                    executed_steps: budget.executed_count(),
+                    max_steps: budget.max_steps(),
+                };
+                return Ok(PlannerPrepass::Handled(Box::new(
+                    self.build_budget_exhausted_result(
+                        raw_query, &scope, ask, &budget, &exhausted,
+                    )?,
+                )));
+            }
+            let route = ask_planner::plan_and_route(&ask.question, &slice, &planner_closure)?;
             return Ok(PlannerPrepass::Handled(Box::new(
                 self.build_plan_only_result(raw_query, &scope, &route)?,
             )));
         }
 
+        // Production and unit tests share this state machine. The executor is
+        // deliberately narrow: only fixed parameterized metadata queries can
+        // run between planner rounds.
+        let tool_executor =
+            |call: &ask_planner::PlannerToolCall| self.execute_ask_planner_tool(&scope, call);
+        let (route, observations) = match ask_planner::run_bounded_agent_loop(
+            &ask.question,
+            &slice,
+            &mut budget,
+            &planner_closure,
+            &tool_executor,
+        )? {
+            ask_planner::AgentLoopOutcome::Routed {
+                route,
+                observations,
+            } => (route, observations),
+            ask_planner::AgentLoopOutcome::BudgetExhausted(exhausted) => {
+                return Ok(PlannerPrepass::Handled(Box::new(
+                    self.build_budget_exhausted_result(
+                        raw_query, &scope, ask, &budget, &exhausted,
+                    )?,
+                )));
+            }
+        };
+
         match route.routing {
+            // The state machine consumes every metadata action before it
+            // returns, so this branch would mean its contract was broken.
+            ask_planner::PlanRouting::UseTool { .. } => Err(RedDBError::Internal(
+                "ASK planner returned an unexecuted metadata tool".to_string(),
+            )),
             // #1749: synthesis / how-to route to the ADR 0013 RAG path
             // unchanged; the routed intent rides along for the audit row.
             ask_planner::PlanRouting::Unsupported { intent } => {
@@ -2256,22 +2296,21 @@ impl RedDBRuntime {
                     &rql,
                 )?,
             ))),
-            ask_planner::PlanRouting::Execute { candidate } => {
-                // The query step is budgeted too; exhausting the budget
-                // mid-plan surfaces a structured partial-with-warning.
-                if let Err(exhausted) = budget.charge(ask_planner::PlanStep::Query) {
-                    return Ok(PlannerPrepass::Handled(Box::new(
-                        self.build_budget_exhausted_result(
-                            raw_query, &scope, ask, &budget, &exhausted,
-                        )?,
-                    )));
-                }
+            ask_planner::PlanRouting::Execute {
+                candidate,
+                params,
+                purpose,
+            } => {
                 let executed = self.execute_planner_candidate_and_synthesize(
                     raw_query,
                     ask,
                     &scope,
                     &route.plan,
                     &candidate.rql,
+                    &params,
+                    &purpose,
+                    &observations,
+                    budget.executed_steps(),
                     &provider_names,
                     &synth_model,
                     &settings,
@@ -2292,12 +2331,16 @@ impl RedDBRuntime {
         scope: &crate::runtime::statement_frame::EffectiveScope,
         plan: &crate::runtime::ai::ask_planner::AskPlan,
         candidate_rql: &str,
+        candidate_params: &[crate::json::Value],
+        final_purpose: &str,
+        observations: &[crate::runtime::ai::ask_planner::PlannerObservation],
+        executed_steps: &[crate::runtime::ai::ask_planner::PlanStep],
         provider_names: &[String],
         synth_model: &str,
         settings: &crate::runtime::ai::cost_guard::Settings,
         transport: crate::runtime::ai::transport::AiTransport,
     ) -> RedDBResult<RuntimeQueryResult> {
-        let executed = self.execute_planner_candidate(scope, candidate_rql)?;
+        let executed = self.execute_planner_candidate(scope, candidate_rql, candidate_params)?;
         let (sources_flat_json, source_urns, source_payloads) =
             planner_sources_from_result(&executed.result);
         let sources_flat_bytes =
@@ -2383,10 +2426,26 @@ impl RedDBRuntime {
             crate::json::to_vec(&citations_json).unwrap_or_else(|_| b"[]".to_vec());
         let validation_bytes =
             crate::json::to_vec(&validation_json).unwrap_or_else(|_| b"{}".to_vec());
+        let reasoning_json = planner_reasoning_json(
+            plan,
+            observations,
+            candidate_rql,
+            candidate_params,
+            final_purpose,
+        );
+        let exploratory_queries_json = planner_exploratory_queries_json(observations);
+        let reasoning_bytes =
+            crate::json::to_vec(&reasoning_json).unwrap_or_else(|_| b"{}".to_vec());
+        let exploratory_queries_bytes =
+            crate::json::to_vec(&exploratory_queries_json).unwrap_or_else(|_| b"[]".to_vec());
+        let final_query_params_bytes =
+            crate::json::to_vec(&crate::json::Value::Array(candidate_params.to_vec()))
+                .unwrap_or_else(|_| b"[]".to_vec());
 
         let citation_markers = citation_markers(&synthesized.citation_result.citations);
         let intent_label = plan.intent.as_str();
-        let plan_summary = plan.summary();
+        let step_labels: Vec<&str> = executed_steps.iter().map(|step| step.as_str()).collect();
+        let plan_summary = format!("{}; steps=[{}]", plan.summary(), step_labels.join(","));
         self.record_ask_audit(AskAuditInput {
             scope,
             question: &ask.question,
@@ -2417,6 +2476,10 @@ impl RedDBRuntime {
             "mode".into(),
             "intent".into(),
             "executed_query".into(),
+            "final_query".into(),
+            "final_query_params".into(),
+            "exploratory_queries".into(),
+            "reasoning".into(),
             "plan_summary".into(),
             "retry_count".into(),
             "prompt_tokens".into(),
@@ -2441,6 +2504,13 @@ impl RedDBRuntime {
         );
         record.set("intent", Value::text(intent_label.to_string()));
         record.set("executed_query", Value::text(candidate_rql.to_string()));
+        record.set("final_query", Value::text(candidate_rql.to_string()));
+        record.set("final_query_params", Value::Json(final_query_params_bytes));
+        record.set(
+            "exploratory_queries",
+            Value::Json(exploratory_queries_bytes),
+        );
+        record.set("reasoning", Value::Json(reasoning_bytes));
         record.set("plan_summary", Value::text(plan_summary));
         record.set(
             "retry_count",
@@ -2482,9 +2552,74 @@ impl RedDBRuntime {
         &self,
         scope: &crate::runtime::statement_frame::EffectiveScope,
         candidate_rql: &str,
+        candidate_params: &[crate::json::Value],
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let params = planner_params_to_values(candidate_params)?;
+        self.execute_planner_query(scope, candidate_rql, &params)
+    }
+
+    /// Execute one fixed metadata tool under the same captured scope used by
+    /// the terminal query. User/model values are bind parameters; the model
+    /// never supplies catalog SQL for these calls.
+    fn execute_ask_planner_tool(
+        &self,
+        scope: &crate::runtime::statement_frame::EffectiveScope,
+        call: &crate::runtime::ai::ask_planner::PlannerToolCall,
+    ) -> RedDBResult<String> {
+        use crate::runtime::ai::ask_planner::PlannerToolCall;
+
+        let result = match call {
+            PlannerToolCall::Catalog => self.execute_planner_query(
+                scope,
+                "SELECT name, model, schema_mode, entities, indices \
+                 FROM red.collections WHERE internal = false ORDER BY name LIMIT 128",
+                &[],
+            )?,
+            PlannerToolCall::DescribeCollection { collection } => self.execute_planner_query(
+                scope,
+                "SELECT collection, name, type, nullable, default_value, is_primary_key, \
+                 is_unique FROM red.columns WHERE collection = $1 ORDER BY name LIMIT 128",
+                &[Value::text(collection.clone())],
+            )?,
+            PlannerToolCall::FindField { field } => self.execute_planner_query(
+                scope,
+                "SELECT collection, name, type, nullable FROM red.columns \
+                 WHERE name = $1 ORDER BY collection, name LIMIT 128",
+                &[Value::text(field.clone())],
+            )?,
+            PlannerToolCall::Query {
+                rql,
+                params,
+                phase: crate::runtime::ai::ask_planner::QueryPhase::Explore,
+                ..
+            } => {
+                let params = planner_params_to_values(params)?;
+                self.execute_planner_query(scope, rql, &params)?
+            }
+            PlannerToolCall::Query {
+                phase: crate::runtime::ai::ask_planner::QueryPhase::Final,
+                ..
+            } => {
+                return Err(RedDBError::Internal(
+                    "ASK final query reached the exploratory tool executor".to_string(),
+                ));
+            }
+        };
+        Ok(planner_tool_observation(&result.result))
+    }
+
+    fn execute_planner_query(
+        &self,
+        scope: &crate::runtime::statement_frame::EffectiveScope,
+        rql: &str,
+        params: &[Value],
     ) -> RedDBResult<RuntimeQueryResult> {
         let _scope_guard = crate::runtime::ask_pipeline::AskScopeGuard::install(self, scope);
-        self.execute_query(candidate_rql)
+        if params.is_empty() {
+            self.execute_query(rql)
+        } else {
+            self.execute_query_with_params(rql, params)
+        }
     }
 
     /// One synthesis attempt against a single provider: cost-metered LLM
@@ -2628,11 +2763,12 @@ impl RedDBRuntime {
         let plan = &route.plan;
         // Resolve the candidate query + disposition from the routing decision.
         // A non-factual intent (synthesis / how-to) carries no candidate.
-        let (candidate_query, candidate_type, mutating) = match &route.routing {
-            PlanRouting::Execute { candidate } => (
+        let (candidate_query, candidate_type, mutating, tool_call) = match &route.routing {
+            PlanRouting::Execute { candidate, .. } => (
                 Some(candidate.rql.clone()),
                 Some(candidate.statement_type.to_string()),
                 Some(false),
+                plan.tool.as_ref(),
             ),
             PlanRouting::RefuseMutating {
                 statement_type,
@@ -2641,11 +2777,13 @@ impl RedDBRuntime {
                 Some(rql.clone()),
                 Some(statement_type.to_string()),
                 Some(true),
+                plan.tool.as_ref(),
             ),
-            PlanRouting::Unsupported { .. } => (None, None, None),
+            PlanRouting::UseTool { call } => (None, None, None, Some(call)),
+            PlanRouting::Unsupported { .. } => (None, None, None, None),
             // A how-to suggestion envelope carries no single executable
             // candidate — plan-only reports no candidate columns for it.
-            PlanRouting::Suggest { .. } => (None, None, None),
+            PlanRouting::Suggest { .. } => (None, None, None, None),
         };
 
         let plan_summary = plan.summary();
@@ -2678,6 +2816,8 @@ impl RedDBRuntime {
             "candidate_query".into(),
             "candidate_type".into(),
             "mutating".into(),
+            "tool".into(),
+            "tool_arguments".into(),
             "rationale".into(),
         ]);
         let mut record = UnifiedRecord::new();
@@ -2694,6 +2834,22 @@ impl RedDBRuntime {
         match mutating {
             Some(flag) => record.set("mutating", Value::Boolean(flag)),
             None => record.set("mutating", Value::Null),
+        }
+        match tool_call {
+            Some(call) => {
+                record.set("tool", Value::text(call.name().to_string()));
+                record.set(
+                    "tool_arguments",
+                    Value::Json(
+                        crate::json::to_vec(&call.arguments_json())
+                            .unwrap_or_else(|_| b"{}".to_vec()),
+                    ),
+                );
+            }
+            None => {
+                record.set("tool", Value::Null);
+                record.set("tool_arguments", Value::Null);
+            }
         }
         record.set("rationale", Value::text(plan.rationale.clone()));
         result.push(record);
@@ -2961,9 +3117,8 @@ impl RedDBRuntime {
     }
 
     /// Structured partial-with-warning when the plan budget is exhausted
-    /// mid-plan (ADR 0068 §4, #1748). A step was attempted after the clamped
-    /// `max_plan_steps` cap was reached — the plan stops here rather than
-    /// looping unbounded, and the truncation is audited.
+    /// mid-plan (ADR 0068 §4, #1748). The plan stops when the cap is reached
+    /// or when an exploratory action would consume the final reserved step.
     fn build_budget_exhausted_result(
         &self,
         raw_query: &str,
@@ -2972,13 +3127,24 @@ impl RedDBRuntime {
         budget: &crate::runtime::ai::ask_planner::PlanBudget,
         exhausted: &crate::runtime::ai::ask_planner::BudgetExhausted,
     ) -> RedDBResult<RuntimeQueryResult> {
-        let warning = format!(
-            "plan budget exhausted: {} step(s) executed (max_plan_steps = {}); the `{}` step \
-             was not run",
-            exhausted.executed_steps,
-            exhausted.max_steps,
-            exhausted.attempted.as_str()
-        );
+        let reserved_final_step = exhausted.executed_steps < exhausted.max_steps;
+        let warning = if reserved_final_step {
+            format!(
+                "plan budget cannot run `{}` without consuming the step reserved for the final \
+                 query: {} step(s) executed (max_plan_steps = {})",
+                exhausted.attempted.as_str(),
+                exhausted.executed_steps,
+                exhausted.max_steps
+            )
+        } else {
+            format!(
+                "plan budget exhausted: {} step(s) executed (max_plan_steps = {}); the `{}` step \
+                 was not run",
+                exhausted.executed_steps,
+                exhausted.max_steps,
+                exhausted.attempted.as_str()
+            )
+        };
         let answer = format!(
             "This question needed more plan steps than the budget allows, so it stopped early. {warning}."
         );
@@ -3018,6 +3184,7 @@ impl RedDBRuntime {
             "warning".into(),
             "max_plan_steps".into(),
             "executed_steps".into(),
+            "reserved_final_step".into(),
         ]);
         let mut record = UnifiedRecord::new();
         record.set("answer", Value::text(answer));
@@ -3028,6 +3195,7 @@ impl RedDBRuntime {
             "executed_steps",
             Value::Integer(exhausted.executed_steps as i64),
         );
+        record.set("reserved_final_step", Value::Boolean(reserved_final_step));
         result.push(record);
 
         Ok(RuntimeQueryResult {
@@ -3187,12 +3355,13 @@ impl RedDBRuntime {
             } else {
                 let route = self.plan_route_over_slice(ask, &slice)?;
                 let candidate = match &route.routing {
-                    crate::runtime::ai::ask_planner::PlanRouting::Execute { candidate } => {
+                    crate::runtime::ai::ask_planner::PlanRouting::Execute { candidate, .. } => {
                         Some(candidate.rql.clone())
                     }
                     crate::runtime::ai::ask_planner::PlanRouting::RefuseMutating {
                         rql, ..
                     } => Some(rql.clone()),
+                    crate::runtime::ai::ask_planner::PlanRouting::UseTool { .. } => None,
                     crate::runtime::ai::ask_planner::PlanRouting::Unsupported { .. } => None,
                     // A how-to suggestion envelope has no single candidate query.
                     crate::runtime::ai::ask_planner::PlanRouting::Suggest { .. } => None,
@@ -4687,6 +4856,203 @@ fn planner_value_to_json(value: &Value) -> crate::json::Value {
     }
 }
 
+const PLANNER_TOOL_OBSERVATION_BYTES_MAX: usize = 32 * 1024;
+
+/// Serialize metadata tool rows into a valid, bounded JSON observation. The
+/// bound covers database-controlled names as well as row count, so a planner
+/// round cannot grow without limit even when the visible catalog is large.
+fn planner_tool_observation(result: &UnifiedResult) -> String {
+    const PREFIX: &str = "{\"rows\":[";
+    const COMPLETE_SUFFIX: &str = "],\"truncated\":false}";
+    const TRUNCATED_SUFFIX: &str = "],\"truncated\":true}";
+
+    let mut observation = String::with_capacity(PLANNER_TOOL_OBSERVATION_BYTES_MAX);
+    observation.push_str(PREFIX);
+    let mut truncated = false;
+    for record in &result.records {
+        let mut row = crate::json::Map::new();
+        for (key, value) in record.iter_fields() {
+            row.insert(key.to_string(), planner_value_to_json(value));
+        }
+        let row = crate::json::to_string(&crate::json::Value::Object(row))
+            .expect("invariant: a JSON value must serialize");
+        let separator_bytes = usize::from(observation.len() > PREFIX.len());
+        if observation.len() + separator_bytes + row.len() + COMPLETE_SUFFIX.len()
+            > PLANNER_TOOL_OBSERVATION_BYTES_MAX
+        {
+            truncated = true;
+            break;
+        }
+        if separator_bytes == 1 {
+            observation.push(',');
+        }
+        observation.push_str(&row);
+    }
+
+    observation.push_str(if truncated {
+        TRUNCATED_SUFFIX
+    } else {
+        COMPLETE_SUFFIX
+    });
+    assert!(observation.len() <= PLANNER_TOOL_OBSERVATION_BYTES_MAX);
+    observation
+}
+
+fn planner_params_to_values(params: &[crate::json::Value]) -> RedDBResult<Vec<Value>> {
+    params
+        .iter()
+        .map(|param| {
+            crate::runtime::query_request::ParamValue::decode_json(param)
+                .map(Value::from)
+                .map_err(|err| {
+                    RedDBError::Query(format!(
+                        "ASK planner query contains an invalid bind parameter: {err}"
+                    ))
+                })
+        })
+        .collect()
+}
+
+fn planner_exploratory_queries_json(
+    observations: &[crate::runtime::ai::ask_planner::PlannerObservation],
+) -> crate::json::Value {
+    use crate::runtime::ai::ask_planner::{PlannerToolCall, QueryPhase};
+
+    let queries = observations
+        .iter()
+        .filter_map(|observation| match &observation.call {
+            PlannerToolCall::Query {
+                rql,
+                params,
+                purpose,
+                phase: QueryPhase::Explore,
+            } => {
+                let mut query = crate::json::Map::new();
+                query.insert("sql".to_string(), crate::json::Value::String(rql.clone()));
+                query.insert(
+                    "params".to_string(),
+                    crate::json::Value::Array(params.clone()),
+                );
+                query.insert(
+                    "purpose".to_string(),
+                    crate::json::Value::String(purpose.clone()),
+                );
+                Some(crate::json::Value::Object(query))
+            }
+            _ => None,
+        })
+        .collect();
+    crate::json::Value::Array(queries)
+}
+
+fn planner_reasoning_json(
+    plan: &crate::runtime::ai::ask_planner::AskPlan,
+    observations: &[crate::runtime::ai::ask_planner::PlannerObservation],
+    final_query: &str,
+    final_params: &[crate::json::Value],
+    final_purpose: &str,
+) -> crate::json::Value {
+    use crate::runtime::ai::ask_planner::{PlannerToolCall, QueryPhase};
+
+    let mut steps = Vec::with_capacity(observations.len() + 1);
+    for (index, observation) in observations.iter().enumerate() {
+        let mut step = crate::json::Map::new();
+        step.insert(
+            "sequence".to_string(),
+            crate::json::Value::Integer((index + 1) as i64),
+        );
+        step.insert(
+            "tool".to_string(),
+            crate::json::Value::String(observation.call.name().to_string()),
+        );
+        step.insert("arguments".to_string(), observation.call.arguments_json());
+        let purpose = match &observation.call {
+            PlannerToolCall::Catalog => "List collections visible to the caller",
+            PlannerToolCall::DescribeCollection { .. } => {
+                "Inspect the visible schema of one collection"
+            }
+            PlannerToolCall::FindField { .. } => {
+                "Find visible collections containing an exact field"
+            }
+            PlannerToolCall::Query { purpose, .. } => purpose.as_str(),
+        };
+        step.insert(
+            "purpose".to_string(),
+            crate::json::Value::String(purpose.to_string()),
+        );
+        step.insert(
+            "observation".to_string(),
+            planner_observation_summary_json(&observation.output),
+        );
+        steps.push(crate::json::Value::Object(step));
+    }
+
+    let mut final_step = crate::json::Map::new();
+    final_step.insert(
+        "sequence".to_string(),
+        crate::json::Value::Integer((observations.len() + 1) as i64),
+    );
+    final_step.insert(
+        "tool".to_string(),
+        crate::json::Value::String("reddb_query".to_string()),
+    );
+    final_step.insert(
+        "phase".to_string(),
+        crate::json::Value::String(QueryPhase::Final.as_str().to_string()),
+    );
+    final_step.insert(
+        "purpose".to_string(),
+        crate::json::Value::String(final_purpose.to_string()),
+    );
+    final_step.insert(
+        "sql".to_string(),
+        crate::json::Value::String(final_query.to_string()),
+    );
+    final_step.insert(
+        "params".to_string(),
+        crate::json::Value::Array(final_params.to_vec()),
+    );
+    final_step.insert(
+        "evidence".to_string(),
+        crate::json::Value::String("answer_and_citations".to_string()),
+    );
+    steps.push(crate::json::Value::Object(final_step));
+
+    let mut reasoning = crate::json::Map::new();
+    reasoning.insert(
+        "summary".to_string(),
+        crate::json::Value::String(plan.rationale.clone()),
+    );
+    reasoning.insert(
+        "evidence_policy".to_string(),
+        crate::json::Value::String("final_query_only".to_string()),
+    );
+    reasoning.insert("steps".to_string(), crate::json::Value::Array(steps));
+    crate::json::Value::Object(reasoning)
+}
+
+fn planner_observation_summary_json(output: &str) -> crate::json::Value {
+    let parsed: Option<crate::json::Value> = crate::json::from_str(output).ok();
+    let object = parsed.as_ref().and_then(crate::json::Value::as_object);
+    let row_count = object
+        .and_then(|object| object.get("rows"))
+        .and_then(crate::json::Value::as_array)
+        .map(|rows| rows.len())
+        .unwrap_or(0);
+    let truncated = object
+        .and_then(|object| object.get("truncated"))
+        .and_then(crate::json::Value::as_bool)
+        .unwrap_or(false);
+
+    let mut summary = crate::json::Map::new();
+    summary.insert(
+        "rows".to_string(),
+        crate::json::Value::Integer(row_count as i64),
+    );
+    summary.insert("truncated".to_string(), crate::json::Value::Bool(truncated));
+    crate::json::Value::Object(summary)
+}
+
 /// Turn the auto-executed result rows into `sources_flat` (JSON array),
 /// their parallel URNs (aligned by index for citation resolution), and
 /// per-row payload strings for the synthesis prompt.
@@ -5295,38 +5661,147 @@ fn validation_to_json_with_mode_warning(
 #[cfg(test)]
 mod planner_scope_tests {
     use super::*;
-    use crate::runtime::impl_core::{clear_current_tenant, set_current_tenant};
+    use crate::auth::Role;
+    use crate::runtime::ai::ask_planner::{PlannerToolCall, QueryPhase};
+    use crate::runtime::impl_core::{
+        clear_current_auth_identity, clear_current_tenant, current_auth_identity, current_tenant,
+        set_current_auth_identity, set_current_tenant,
+    };
 
     #[test]
-    fn generated_candidate_reinstalls_the_captured_tenant_scope() {
+    fn exploratory_and_final_queries_reinstall_the_ask_callers_scope() {
         let runtime = RedDBRuntime::in_memory().expect("runtime");
         runtime
             .execute_query(
-                "CREATE TABLE travelers (id TEXT PRIMARY KEY, name TEXT, tenant_id TEXT) \
-                 TENANT BY (tenant_id)",
+                "CREATE TABLE travelers (id TEXT PRIMARY KEY, name TEXT, owner TEXT, \
+                 tenant_id TEXT)",
             )
             .expect("create tenant table");
         runtime
             .execute_query(
-                "INSERT INTO travelers (id, name, tenant_id) VALUES \
-                 ('a1', 'Alice', 'acme'), ('g1', 'Mallory', 'globex')",
+                "INSERT INTO travelers (id, name, owner, tenant_id) VALUES \
+                 ('a1', 'Alice', 'alice', 'acme'), \
+                 ('a2', 'Eve', 'bob', 'acme'), \
+                 ('g1', 'Mallory', 'alice', 'globex')",
             )
             .expect("seed tenants");
+        runtime
+            .execute_query(
+                "CREATE POLICY own_travelers ON travelers FOR SELECT \
+                 USING (tenant_id = CURRENT_TENANT() AND owner = CURRENT_USER())",
+            )
+            .expect("create user policy");
+        runtime
+            .execute_query("ALTER TABLE travelers ENABLE ROW LEVEL SECURITY")
+            .expect("enable RLS");
 
         set_current_tenant("acme".to_string());
+        set_current_auth_identity("alice".to_string(), Role::Read);
         let scope = runtime.ai_scope();
-        clear_current_tenant();
+
+        // Simulate ambient state changing between planner rounds. Every tool
+        // must use the immutable scope captured at ASK entry, then restore the
+        // surrounding thread state.
+        set_current_tenant("globex".to_string());
+        set_current_auth_identity("bob".to_string(), Role::Read);
+
+        let exploration = runtime
+            .execute_ask_planner_tool(
+                &scope,
+                &PlannerToolCall::Query {
+                    rql: "SELECT id, name FROM travelers WHERE id <> $1".to_string(),
+                    params: vec![crate::json::Value::String("none".to_string())],
+                    purpose: "resolve the visible traveler".to_string(),
+                    phase: QueryPhase::Explore,
+                },
+            )
+            .expect("execute exploratory query");
+        assert!(exploration.contains("Alice"), "{exploration}");
+        assert!(!exploration.contains("Eve"), "{exploration}");
+        assert!(!exploration.contains("Mallory"), "{exploration}");
 
         let result = runtime
-            .execute_planner_candidate(&scope, "SELECT * FROM travelers")
-            .expect("execute generated candidate");
+            .execute_planner_candidate(&scope, "SELECT * FROM travelers", &[])
+            .expect("execute final query");
 
         assert_eq!(result.result.records.len(), 1);
         assert_eq!(
             result.result.records[0].get("name"),
             Some(&Value::text("Alice"))
         );
+        assert_eq!(current_tenant().as_deref(), Some("globex"));
+        assert_eq!(
+            current_auth_identity(),
+            Some(("bob".to_string(), Role::Read))
+        );
+
+        clear_current_tenant();
+        clear_current_auth_identity();
+    }
+
+    #[test]
+    fn planner_metadata_tool_keeps_model_input_in_a_bind_parameter() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query(
+                "CREATE TABLE people (id INTEGER PRIMARY KEY, passport_number TEXT, \
+                 tenant_id TEXT) TENANT BY (tenant_id)",
+            )
+            .expect("create people table");
+        runtime
+            .execute_query("CREATE TABLE visits (id INTEGER PRIMARY KEY, arrived_at TIMESTAMP)")
+            .expect("create visits table");
+
+        set_current_tenant("acme".to_string());
+        let scope = runtime.ai_scope();
+        clear_current_tenant();
+
+        let output = runtime
+            .execute_ask_planner_tool(
+                &scope,
+                &PlannerToolCall::FindField {
+                    field: "passport_number' OR name = 'arrived_at".to_string(),
+                },
+            )
+            .expect("metadata tool result");
+
+        assert!(output.contains("\"rows\":[]"), "{output}");
+        assert!(!output.contains("people"), "{output}");
+        assert!(!output.contains("visits"), "{output}");
         assert!(crate::runtime::impl_core::current_tenant().is_none());
+    }
+
+    #[test]
+    fn planner_tool_observation_is_valid_json_with_a_hard_size_bound() {
+        let mut result = UnifiedResult::with_columns(vec!["name".to_string()]);
+        let mut first = UnifiedRecord::new();
+        first.set("name", Value::text("visible".to_string()));
+        result.push(first);
+        let mut oversized = UnifiedRecord::new();
+        oversized.set(
+            "name",
+            Value::text("x".repeat(PLANNER_TOOL_OBSERVATION_BYTES_MAX)),
+        );
+        result.push(oversized);
+
+        let observation = planner_tool_observation(&result);
+        assert!(observation.len() <= PLANNER_TOOL_OBSERVATION_BYTES_MAX);
+        let parsed: crate::json::Value =
+            crate::json::from_str(&observation).expect("bounded observation must be valid JSON");
+        let object = parsed
+            .as_object()
+            .expect("observation root must be an object");
+        assert_eq!(
+            object.get("truncated"),
+            Some(&crate::json::Value::Bool(true))
+        );
+        let rows = object
+            .get("rows")
+            .and_then(crate::json::Value::as_array)
+            .expect("observation rows must be an array");
+        assert_eq!(rows.len(), 1);
+        assert!(observation.contains("visible"));
+        assert!(!observation.contains(&"x".repeat(1024)));
     }
 }
 
