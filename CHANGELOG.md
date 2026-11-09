@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.29.0
+
+### Minor Changes
+
+- [#2740](https://github.com/reddb-io/reddb/pull/2740) [`2b79ed5`](https://github.com/reddb-io/reddb/commit/2b79ed5087119e20875b3f3082d50868019fdd97) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Qualify RedDB's four deployment-mode contract across the official language
+  facades. Add the versioned shared ABI for embedded single-file databases,
+  explicit primary/replica read routing, and term-fenced manual promotion with
+  post-promotion writes and stale-primary rejection. The promotion response adds
+  the backward-compatible `term` field; storage and WAL formats are unchanged.
+
+### Patch Changes
+
+- [#2734](https://github.com/reddb-io/reddb/pull/2734) [`fe2856d`](https://github.com/reddb-io/reddb/commit/fe2856d247b446e98cf344f5b270b614cd510a7b) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Group concurrent queue READ reservations and ACKs into durable WAL publications on the native paginated store. Validate ownership under the publication fence, preserve per-request ACK errors, and retain the lifecycle path for explicit transactions, ordered keys, expiry and exhausted attempts. Existing `.rdb` and WAL formats are unchanged.
+
+- [#2731](https://github.com/reddb-io/reddb/pull/2731) [`cfc3445`](https://github.com/reddb-io/reddb/commit/cfc34458df09b32176c68fcd37229d63fcd6c5b4) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Batch unkeyed queue delivery reservations and attempt counters, and add bounded multi-message ACK with one durable autocommit publication. Preserve ordered-key, retry, FANOUT and explicit-transaction behavior, with failure rollback, recovery and cold-boot coverage. Verify queue/table relevance joins without consuming messages.
+
+- [#2732](https://github.com/reddb-io/reddb/pull/2732) [`dcf7510`](https://github.com/reddb-io/reddb/commit/dcf7510babf5cd9b33e0aeaa1864d26e315b9348) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Read queue lifecycle policy through its existing metadata index instead of scanning the full catalog on delivery and ACK. Avoid duplicate configuration reads in batch ACK. Keep ALTER changes visible and fix disk-backed FANOUT, delivery deadline and DLQ policy falling back to defaults after reopen.
+
 ## 1.28.28
 
 ### Patch Changes
