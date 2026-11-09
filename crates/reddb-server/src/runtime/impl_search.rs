@@ -2297,10 +2297,7 @@ impl RedDBRuntime {
         settings: &crate::runtime::ai::cost_guard::Settings,
         transport: crate::runtime::ai::transport::AiTransport,
     ) -> RedDBResult<RuntimeQueryResult> {
-        // Auto-execute under the ambient execution context — the same RLS /
-        // EffectiveScope the funnel ran under. An out-of-scope collection is
-        // filtered here, so it can appear in neither plan nor answer.
-        let executed = self.execute_query(candidate_rql)?;
+        let executed = self.execute_planner_candidate(scope, candidate_rql)?;
         let (sources_flat_json, source_urns, source_payloads) =
             planner_sources_from_result(&executed.result);
         let sources_flat_bytes =
@@ -2476,6 +2473,18 @@ impl RedDBRuntime {
             bookmark: None,
             notice: None,
         })
+    }
+
+    /// Execute model-generated read-only RQL under the captured caller scope.
+    /// Reinstalling it here prevents a planner query from inheriting a cleared
+    /// or unrelated ambient tenant/identity if orchestration changes later.
+    fn execute_planner_candidate(
+        &self,
+        scope: &crate::runtime::statement_frame::EffectiveScope,
+        candidate_rql: &str,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let _scope_guard = crate::runtime::ask_pipeline::AskScopeGuard::install(self, scope);
+        self.execute_query(candidate_rql)
     }
 
     /// One synthesis attempt against a single provider: cost-metered LLM
@@ -5281,6 +5290,44 @@ fn validation_to_json_with_mode_warning(
     );
     root.insert("errors".to_string(), crate::json::Value::Array(errors_json));
     crate::json::Value::Object(root)
+}
+
+#[cfg(test)]
+mod planner_scope_tests {
+    use super::*;
+    use crate::runtime::impl_core::{clear_current_tenant, set_current_tenant};
+
+    #[test]
+    fn generated_candidate_reinstalls_the_captured_tenant_scope() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query(
+                "CREATE TABLE travelers (id TEXT PRIMARY KEY, name TEXT, tenant_id TEXT) \
+                 TENANT BY (tenant_id)",
+            )
+            .expect("create tenant table");
+        runtime
+            .execute_query(
+                "INSERT INTO travelers (id, name, tenant_id) VALUES \
+                 ('a1', 'Alice', 'acme'), ('g1', 'Mallory', 'globex')",
+            )
+            .expect("seed tenants");
+
+        set_current_tenant("acme".to_string());
+        let scope = runtime.ai_scope();
+        clear_current_tenant();
+
+        let result = runtime
+            .execute_planner_candidate(&scope, "SELECT * FROM travelers")
+            .expect("execute generated candidate");
+
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("name"),
+            Some(&Value::text("Alice"))
+        );
+        assert!(crate::runtime::impl_core::current_tenant().is_none());
+    }
 }
 
 #[cfg(test)]

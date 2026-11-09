@@ -732,28 +732,7 @@ fn parse_scalar(value: &serde_json::Value) -> ValueOut {
 }
 
 fn params_to_grpc_values(params: &[ParamValue]) -> Vec<reddb_grpc_proto::QueryValue> {
-    use reddb_grpc_proto::query_value::Kind;
-    use reddb_grpc_proto::{QueryNull, QueryValue, QueryVector};
-
-    params
-        .iter()
-        .cloned()
-        .map(|value| {
-            let kind = match value {
-                ParamValue::Null => Kind::NullValue(QueryNull {}),
-                ParamValue::Bool(value) => Kind::BoolValue(value),
-                ParamValue::Int(value) => Kind::IntValue(value),
-                ParamValue::Float(value) => Kind::FloatValue(value),
-                ParamValue::Text(value) => Kind::TextValue(value),
-                ParamValue::Bytes(value) => Kind::BytesValue(value),
-                ParamValue::Vector(values) => Kind::VectorValue(QueryVector { values }),
-                ParamValue::Json(value) => Kind::JsonValue(value.to_json_string()),
-                ParamValue::Timestamp(value) => Kind::TimestampValue(value),
-                ParamValue::Uuid(value) => Kind::UuidValue(value.to_vec()),
-            };
-            QueryValue { kind: Some(kind) }
-        })
-        .collect()
+    crate::connector::params_to_grpc_values(params)
 }
 
 #[cfg(test)]

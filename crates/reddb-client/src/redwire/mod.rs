@@ -278,6 +278,26 @@ impl RedWireClient {
         self.query_envelope(sql, params).await
     }
 
+    /// Execute a query and preserve the server's canonical JSON envelope.
+    ///
+    /// This is useful for result types such as `ASK`, whose nested evidence
+    /// and validation objects cannot be represented losslessly by the generic
+    /// row-oriented [`QueryResult`].
+    pub async fn query_envelope_json(
+        &mut self,
+        sql: &str,
+        params: &[crate::params::Value],
+    ) -> Result<serde_json::Value> {
+        if self.server_features & FEATURE_PARAMS == 0 {
+            return Err(ClientError::new(
+                ErrorCode::ParamsUnsupported,
+                "server did not advertise RedWire query-envelope support",
+            ));
+        }
+
+        self.query_envelope_value(sql, params).await
+    }
+
     /// Send `sql` on the `QueryWithParams` frame — the one whose reply is
     /// the full result envelope with records — and decode it. Shared by
     /// [`Self::query`] (empty `params`) and [`Self::query_with`].
@@ -286,6 +306,16 @@ impl RedWireClient {
         sql: &str,
         params: &[crate::params::Value],
     ) -> Result<QueryResult> {
+        Ok(QueryResult::from_envelope(
+            self.query_envelope_value(sql, params).await?,
+        ))
+    }
+
+    async fn query_envelope_value(
+        &mut self,
+        sql: &str,
+        params: &[crate::params::Value],
+    ) -> Result<serde_json::Value> {
         let wire_params = params.iter().map(param_to_redwire).collect::<Vec<_>>();
         let payload = encode_query_with_params(sql, &wire_params)
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("encode params: {e}")))?;
@@ -293,9 +323,8 @@ impl RedWireClient {
         let req = build_query_with_params_frame(corr, payload).map_err(frame_build_err)?;
         let resp = self.exchange(&req).await?;
         let payload = expect_result_or_error(resp.kind, &resp.payload).map_err(reply_err)?;
-        let value = decode_query_result_payload(payload)
-            .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode result: {e}")))?;
-        Ok(QueryResult::from_envelope(value))
+        decode_query_result_payload(payload)
+            .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode result: {e}")))
     }
 
     /// Insert a single row. `payload` is a JSON object with column
@@ -547,6 +576,49 @@ mod tests {
             .close()
             .await
             .expect("close without appending a Bye frame");
+    }
+
+    #[tokio::test]
+    async fn query_envelope_json_preserves_nested_ask_fields() {
+        use super::*;
+
+        let (client, server) = tokio::io::duplex(4096);
+        let mut client = RedWireClient {
+            stream: Box::pin(client),
+            next_correlation_id: 1,
+            usable: true,
+            session_id: String::new(),
+            server_features: FEATURE_PARAMS,
+        };
+        let mut server: Stream = Box::pin(server);
+        let expected = serde_json::json!({
+            "ok": true,
+            "statement": "ask",
+            "result": {
+                "records": [{
+                    "answer": "Only permitted rows",
+                    "sources_flat": [{"urn": "urn:row:1", "payload": "allowed"}],
+                    "validation": {"ok": true, "warnings": [], "errors": []}
+                }]
+            }
+        });
+        let response = serde_json::to_vec(&expected).expect("response JSON");
+        let peer = tokio::spawn(async move {
+            let request = io::read_frame(&mut server).await.expect("query request");
+            assert_eq!(request.kind, MessageKind::QueryWithParams);
+            let reply = Frame::new(MessageKind::Result, request.correlation_id, response);
+            io::write_frame(&mut server, &reply)
+                .await
+                .expect("query reply");
+        });
+
+        let actual = client
+            .query_envelope_json("ASK 'who is allowed?'", &[])
+            .await
+            .expect("canonical query envelope");
+
+        assert_eq!(actual, expected);
+        peer.await.expect("peer task");
     }
 
     #[test]

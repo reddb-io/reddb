@@ -1147,7 +1147,7 @@ fn ask_scanned_entity_allowed(
     runtime.search_entity_rls_allowed(collection, entity, rls_cache)
 }
 
-struct AskScopeGuard {
+pub(crate) struct AskScopeGuard {
     _snapshot: super::execution_context::CurrentSnapshotGuard,
     prev_tenant: Option<String>,
     prev_auth: Option<(String, crate::auth::Role)>,
@@ -1155,7 +1155,7 @@ struct AskScopeGuard {
 }
 
 impl AskScopeGuard {
-    fn install(runtime: &RedDBRuntime, scope: &EffectiveScope) -> Self {
+    pub(crate) fn install(runtime: &RedDBRuntime, scope: &EffectiveScope) -> Self {
         let prev_tenant = crate::runtime::impl_core::current_tenant();
         let prev_auth = crate::runtime::impl_core::current_auth_identity();
         let prev_principal = super::execution_context::current_auth_principal();

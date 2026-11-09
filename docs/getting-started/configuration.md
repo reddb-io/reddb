@@ -312,6 +312,7 @@ silently re-routes to a different provider.
 |:----|:--------|:------------|
 | `red.config.ai.ask.provider` | — | ASK planner provider (wins over the inference pointer) |
 | `red.config.ai.ask.model` | inference model | ASK model (wins over the provider models block) |
+| `red.config.ai.ask.planner` | `false` | Enable planner-first routing and read-only candidate execution for ordinary ASK queries; `ASK ... PLAN` remains explicit |
 | `red.config.ai.ask.planner_model` | ASK model | Planner model for the ASK planner |
 | `red.config.ai.ask.effort` | — | Planner effort hint (e.g. `low`/`medium`/`high`) |
 | `red.config.ai.ask.max_plan_steps` | — | Max ASK planner steps |

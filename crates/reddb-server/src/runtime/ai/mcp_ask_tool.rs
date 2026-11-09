@@ -93,6 +93,53 @@ pub struct AskInvocation {
     pub nocache: Option<bool>,
 }
 
+impl AskInvocation {
+    /// Render this validated MCP invocation as canonical RQL for a remote
+    /// RedDB endpoint. The remote server parses and executes the statement
+    /// under the credential carried by the connector, so MCP never creates a
+    /// second authorization path for ASK.
+    pub fn to_rql(&self) -> String {
+        let mut rql = format!("ASK {}", quote_rql_string(&self.question));
+        if let Some(provider) = self.using.as_deref() {
+            rql.push_str(" USING ");
+            rql.push_str(&quote_rql_string(provider));
+        }
+        if let Some(model) = self.model.as_deref() {
+            rql.push_str(" MODEL ");
+            rql.push_str(&quote_rql_string(model));
+        }
+        if let Some(limit) = self.limit {
+            rql.push_str(&format!(" LIMIT {limit}"));
+        }
+        if let Some(min_score) = self.min_score {
+            rql.push_str(&format!(" MIN_SCORE {min_score}"));
+        }
+        if let Some(depth) = self.depth {
+            rql.push_str(&format!(" DEPTH {depth}"));
+        }
+        if let Some(temperature) = self.temperature {
+            rql.push_str(&format!(" TEMPERATURE {temperature}"));
+        }
+        if let Some(seed) = self.seed {
+            rql.push_str(&format!(" SEED {seed}"));
+        }
+        if let Some(strict) = self.strict {
+            rql.push_str(if strict { " STRICT ON" } else { " STRICT OFF" });
+        }
+        if let Some(ttl) = self.cache_ttl.as_deref() {
+            rql.push_str(" CACHE TTL ");
+            rql.push_str(&quote_rql_string(ttl));
+        } else if matches!(self.nocache, Some(true)) {
+            rql.push_str(" NOCACHE");
+        }
+        rql
+    }
+}
+
+fn quote_rql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
 /// Typed parse failures. Each variant names the offending JSON path
 /// (e.g. `options.limit`) so the wiring layer can echo it back in
 /// the MCP error frame without rebuilding the string.
@@ -945,5 +992,48 @@ mod tests {
     fn parse_is_deterministic() {
         let v = json(r#"{"question":"q","options":{"strict":true,"limit":10,"seed":7}}"#);
         assert_eq!(parse(&v).unwrap(), parse(&v).unwrap());
+    }
+
+    #[test]
+    fn remote_rql_rendering_escapes_question_and_option_literals() {
+        let invocation = parse(&json(
+            r#"{
+              "question": "who owns passport O'Reilly?",
+              "options": {
+                "using": "openrouter,openai",
+                "model": "vendor's-model",
+                "limit": 7,
+                "min_score": 0.75,
+                "depth": 2,
+                "temperature": 0,
+                "seed": 42,
+                "strict": true,
+                "cache": {"ttl": "5m"}
+              }
+            }"#,
+        ))
+        .expect("valid MCP ASK invocation");
+
+        let rql = invocation.to_rql();
+        assert_eq!(
+            rql,
+            "ASK 'who owns passport O''Reilly?' USING 'openrouter,openai' MODEL \
+             'vendor''s-model' LIMIT 7 MIN_SCORE 0.75 DEPTH 2 TEMPERATURE 0 SEED 42 \
+             STRICT ON CACHE TTL '5m'"
+        );
+        reddb_rql::modes::parse_multi(&rql).expect("rendered ASK must parse as production RQL");
+    }
+
+    #[test]
+    fn remote_rql_rendering_preserves_nocache_and_lenient_mode() {
+        let invocation = parse(&json(
+            r#"{"question":"summarize incidents","options":{"strict":false,"nocache":true}}"#,
+        ))
+        .expect("valid MCP ASK invocation");
+
+        assert_eq!(
+            invocation.to_rql(),
+            "ASK 'summarize incidents' STRICT OFF NOCACHE"
+        );
     }
 }

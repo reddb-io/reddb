@@ -317,6 +317,9 @@ impl McpServer {
             .and_then(|_| match name {
                 "reddb_query" => self.tool_query(args),
                 "reddb_collections" => self.tool_collections(),
+                "reddb_catalog" => self.tool_catalog(),
+                "reddb_describe_collection" => self.tool_describe_collection(args),
+                "reddb_find_field" => self.tool_find_field(args),
                 "reddb_insert_row" => self.tool_insert_row(args),
                 "reddb_insert_node" => self.tool_insert_node(args),
                 "reddb_insert_edge" => self.tool_insert_edge(args),
@@ -479,10 +482,42 @@ impl McpServer {
     }
 
     fn tool_collections(&self) -> Result<String, String> {
-        let uc = &self.runtime;
-        let collections = uc.db().collections();
+        let collections = self.runtime.db().collections();
         let json = JsonValue::Array(collections.into_iter().map(JsonValue::String).collect());
-        json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
+        json_to_string(&json).map_err(|error| format!("serialization error: {error}"))
+    }
+
+    fn tool_catalog(&self) -> Result<String, String> {
+        self.tool_catalog_query("SHOW COLLECTIONS", &[])
+    }
+
+    fn tool_describe_collection(&self, args: &JsonValue) -> Result<String, String> {
+        let collection = get_str_field(args, "collection")?;
+        self.tool_catalog_query(
+            "SELECT collection, name, type, nullable, default_value, is_primary_key, is_unique \
+             FROM red.columns WHERE collection = $1 ORDER BY name",
+            &[Value::text(collection)],
+        )
+    }
+
+    fn tool_find_field(&self, args: &JsonValue) -> Result<String, String> {
+        let field = get_str_field(args, "field")?;
+        self.tool_catalog_query(
+            "SELECT collection, name, type, nullable FROM red.columns \
+             WHERE name = $1 ORDER BY collection, name",
+            &[Value::text(field)],
+        )
+    }
+
+    fn tool_catalog_query(&self, sql: &str, params: &[Value]) -> Result<String, String> {
+        let result = if params.is_empty() {
+            self.runtime.execute_query(sql)
+        } else {
+            self.runtime.execute_query_with_params(sql, params)
+        }
+        .map_err(|error| error.to_string())?;
+        let json = runtime_query_json(&result, &None, &None);
+        json_to_string(&json).map_err(|error| format!("serialization error: {error}"))
     }
 
     fn tool_insert_row(&self, args: &JsonValue) -> Result<String, String> {
@@ -1957,6 +1992,55 @@ mod tests {
             .expect("reads stay available");
         srv.check_tool_capability("reddb_collections")
             .expect("introspection stays available");
+        srv.check_tool_capability("reddb_catalog")
+            .expect("catalog inspection stays available");
+        srv.check_tool_capability("reddb_describe_collection")
+            .expect("collection descriptions stay available");
+        srv.check_tool_capability("reddb_find_field")
+            .expect("field discovery stays available");
+        srv.check_tool_capability(crate::runtime::ai::mcp_ask_tool::TOOL_NAME)
+            .expect("grounded ASK stays available");
+    }
+
+    #[test]
+    fn metadata_tools_use_parameterized_catalog_queries() {
+        let srv = make_server();
+        srv.tool_query(&parse_json(
+            r#"{"sql":"CREATE TABLE people (id INTEGER PRIMARY KEY, passport_number TEXT)"}"#,
+        ))
+        .expect("create people table");
+        srv.tool_query(&parse_json(
+            r#"{"sql":"CREATE TABLE visits (id INTEGER PRIMARY KEY, arrived_at TIMESTAMP)"}"#,
+        ))
+        .expect("create visits table");
+
+        let collections = srv.tool_collections().expect("list collection names");
+        assert!(collections.contains("people"), "{collections}");
+        assert!(!collections.contains("table"), "{collections}");
+
+        let catalog = srv.tool_catalog().expect("list collection metadata");
+        assert!(catalog.contains("people"), "{catalog}");
+        assert!(catalog.contains("table"), "{catalog}");
+
+        let description = srv
+            .tool_describe_collection(&parse_json(r#"{"collection":"people"}"#))
+            .expect("describe people");
+        assert!(description.contains("passport_number"), "{description}");
+        assert!(description.contains("is_primary_key"), "{description}");
+
+        let matches = srv
+            .tool_find_field(&parse_json(r#"{"field":"passport_number"}"#))
+            .expect("find passport field");
+        assert!(matches.contains("people"), "{matches}");
+        assert!(!matches.contains("visits"), "{matches}");
+
+        let injected = srv
+            .tool_describe_collection(&parse_json(
+                r#"{"collection":"people' OR collection = 'visits"}"#,
+            ))
+            .expect("crafted collection remains a bind value");
+        assert!(!injected.contains("passport_number"), "{injected}");
+        assert!(!injected.contains("arrived_at"), "{injected}");
     }
 
     #[test]
