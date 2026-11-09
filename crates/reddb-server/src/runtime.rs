@@ -1579,6 +1579,7 @@ fn is_select_query_text(query: &str) -> bool {
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("select"))
 }
 
+pub(crate) mod agent_tools;
 pub mod ai;
 mod allocator_pressure;
 pub mod analytics_schema_registry;

@@ -1164,11 +1164,19 @@ impl AskScopeGuard {
             Some(tenant) => crate::runtime::impl_core::set_current_tenant(tenant.to_string()),
             None => crate::runtime::impl_core::clear_current_tenant(),
         }
-        match scope.identity() {
-            Some((user, role)) => {
+        // Install the immutable credential principal as well as its SQL/RLS
+        // projection. Restoring only username + role could make a later ASK
+        // tool inherit an unrelated ambient principal at the deep IAM gate.
+        crate::runtime::impl_core::clear_current_auth_identity();
+        match (scope.auth_principal.as_ref(), scope.identity()) {
+            (Some(principal), Some((user, role))) => {
+                super::execution_context::set_current_auth_principal(principal.clone(), role);
+                super::execution_context::set_current_auth_projection(user.to_string(), role);
+            }
+            (None, Some((user, role))) => {
                 super::execution_context::set_current_auth_projection(user.to_string(), role)
             }
-            None => crate::runtime::impl_core::clear_current_auth_identity(),
+            _ => {}
         }
 
         Self {
@@ -1336,6 +1344,7 @@ mod tests {
             captured_snapshot: None,
             tenant: Some("acme".to_string()),
             identity: Some(("alice".to_string(), Role::Read)),
+            auth_principal: Some(crate::auth::UserId::platform("alice".to_string())),
             snapshot: rt.current_snapshot(),
             visible_collections: Some(visible),
         }

@@ -21,6 +21,7 @@
     clippy::cast_possible_truncation
 )]
 
+pub mod acp;
 pub mod ai;
 pub mod api;
 pub mod application;

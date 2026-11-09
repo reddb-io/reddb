@@ -908,7 +908,8 @@ impl ReadFrame for StatementExecutionFrame {
 /// (`SEARCH SIMILAR`, `SEARCH CONTEXT`, `ASK`).
 ///
 /// Issue #119 calls this struct `EffectiveScope`. It bundles the
-/// `(tenant, identity, role, visible_collections, snapshot)` tuple so
+/// `(tenant, structured principal, identity projection, role,
+/// visible_collections, snapshot)` tuple so
 /// every AI runtime entry can pass *one* value to `AuthorizedSearch`
 /// instead of re-reading thread-locals at every call site.
 ///
@@ -920,6 +921,7 @@ pub struct EffectiveScope {
     pub(crate) captured_snapshot: Option<SnapshotContext>,
     pub(crate) tenant: Option<String>,
     pub(crate) identity: Option<(String, Role)>,
+    pub(crate) auth_principal: Option<crate::auth::UserId>,
     pub(crate) snapshot: Snapshot,
     pub(crate) visible_collections: Option<HashSet<String>>,
 }
@@ -1006,6 +1008,7 @@ impl RedDBRuntime {
     pub(crate) fn ai_scope(&self) -> EffectiveScope {
         let tenant = super::impl_core::current_tenant();
         let identity = super::impl_core::current_auth_identity();
+        let auth_principal = super::execution_context::current_auth_principal();
         let captured_snapshot = super::execution_context::capture_current_snapshot();
         let snapshot = captured_snapshot.as_ref().map_or_else(
             || self.current_snapshot(),
@@ -1027,6 +1030,7 @@ impl RedDBRuntime {
             captured_snapshot,
             tenant,
             identity,
+            auth_principal,
             snapshot,
             visible_collections,
         }

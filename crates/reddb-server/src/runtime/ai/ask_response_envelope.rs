@@ -28,11 +28,15 @@
 //! - `citations` — `[{marker, urn}]`, sorted by marker ascending.
 //! - `completion_tokens` — number.
 //! - `cost_usd` — number.
+//! - `exploratory_queries` — bounded SQL queries used during investigation.
+//! - `final_query` / `final_query_params` — terminal validation query.
 //! - `mode` — `"strict"` or `"lenient"`, the *effective* mode after
 //!   provider-capability fallback (#396) — mirrors the audit row #402.
 //! - `model` — string.
 //! - `prompt_tokens` — number.
 //! - `provider` — string.
+//! - `reasoning` — bounded planner summary and auditable tool steps; never raw
+//!   hidden chain-of-thought.
 //! - `retry_count` — number (0 or 1 per #395's one-retry budget).
 //! - `sources_flat` — `[{payload, urn}]`, post-RRF (#398) order
 //!   preserved verbatim so the client can map `[^N]` → `sources_flat[N-1]`.
@@ -113,6 +117,12 @@ impl Mode {
 #[derive(Debug, Clone)]
 pub struct AskResult {
     pub answer: String,
+    /// Bounded planner trace intended for callers. This is a structured
+    /// summary, not hidden model chain-of-thought.
+    pub reasoning: Value,
+    pub exploratory_queries: Value,
+    pub final_query: Option<String>,
+    pub final_query_params: Value,
     pub sources_flat: Vec<SourceRow>,
     pub citations: Vec<Citation>,
     pub validation: Validation,
@@ -130,6 +140,10 @@ impl Default for AskResult {
     fn default() -> Self {
         Self {
             answer: String::new(),
+            reasoning: Value::Null,
+            exploratory_queries: Value::Array(Vec::new()),
+            final_query: None,
+            final_query_params: Value::Array(Vec::new()),
             sources_flat: Vec::new(),
             citations: Vec::new(),
             validation: Validation {
@@ -167,6 +181,21 @@ pub fn build(result: &AskResult) -> Value {
     );
     m.insert("cost_usd".into(), Value::Number(result.cost_usd));
     m.insert(
+        "exploratory_queries".into(),
+        result.exploratory_queries.clone(),
+    );
+    m.insert(
+        "final_query".into(),
+        result
+            .final_query
+            .as_ref()
+            .map_or(Value::Null, |query| Value::String(query.clone())),
+    );
+    m.insert(
+        "final_query_params".into(),
+        result.final_query_params.clone(),
+    );
+    m.insert(
         "mode".into(),
         Value::String(result.effective_mode.as_str().into()),
     );
@@ -176,6 +205,7 @@ pub fn build(result: &AskResult) -> Value {
         Value::Number(result.prompt_tokens as f64),
     );
     m.insert("provider".into(), Value::String(result.provider.clone()));
+    m.insert("reasoning".into(), result.reasoning.clone());
     m.insert(
         "retry_count".into(),
         Value::Number(result.retry_count as f64),
@@ -252,6 +282,10 @@ mod tests {
     fn fixture() -> AskResult {
         AskResult {
             answer: "X is 42 [^1].".into(),
+            reasoning: Value::Null,
+            exploratory_queries: Value::Array(Vec::new()),
+            final_query: None,
+            final_query_params: Value::Array(Vec::new()),
             sources_flat: vec![SourceRow {
                 urn: "urn:reddb:row:1".into(),
                 payload: "{\"k\":\"v\"}".into(),
@@ -290,10 +324,14 @@ mod tests {
                 "citations",
                 "completion_tokens",
                 "cost_usd",
+                "exploratory_queries",
+                "final_query",
+                "final_query_params",
                 "mode",
                 "model",
                 "prompt_tokens",
                 "provider",
+                "reasoning",
                 "retry_count",
                 "sources_flat",
                 "validation",
@@ -307,6 +345,39 @@ mod tests {
         assert_eq!(
             v.get("answer").and_then(|x| x.as_str()),
             Some("X is 42 [^1].")
+        );
+    }
+
+    #[test]
+    fn planner_trace_is_preserved_without_reformatting() {
+        let mut result = fixture();
+        result.reasoning = Value::Object(
+            [("summary".into(), Value::String("Checked events".into()))]
+                .into_iter()
+                .collect(),
+        );
+        result.exploratory_queries = Value::Array(vec![Value::Object(
+            [(
+                "sql".into(),
+                Value::String("SELECT id FROM events LIMIT 1".into()),
+            )]
+            .into_iter()
+            .collect(),
+        )]);
+        result.final_query = Some("SELECT id FROM events ORDER BY id DESC LIMIT 1".into());
+        result.final_query_params = Value::Array(vec![Value::Integer(7)]);
+
+        let value = build(&result);
+        assert_eq!(
+            value
+                .get("reasoning")
+                .and_then(|reasoning| reasoning.get("summary"))
+                .and_then(Value::as_str),
+            Some("Checked events")
+        );
+        assert_eq!(
+            value.get("final_query").and_then(Value::as_str),
+            Some("SELECT id FROM events ORDER BY id DESC LIMIT 1")
         );
     }
 

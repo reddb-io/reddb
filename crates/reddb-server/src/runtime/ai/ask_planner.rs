@@ -17,8 +17,12 @@
 use std::collections::BTreeSet;
 
 use crate::api::{RedDBError, RedDBResult};
+/// Typed calls and phases from the protocol-neutral RedDB tool registry.
+pub use crate::runtime::agent_tools::{QueryPhase, RedToolCall as PlannerToolCall};
 
 use super::ask_rql_planner::{validate_candidate, CandidateDisposition, ValidatedCandidate};
+
+pub const ASK_PLANNER_SYSTEM_PROMPT: &str = include_str!("prompts/ask_planner.txt");
 
 /// The intent the planner routes a question to (ADR 0068 §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +88,15 @@ impl NarrowedSlice {
     }
 }
 
+/// One bounded metadata result returned to the next planner round. Tool
+/// output is untrusted database content and is rendered as JSON data in the
+/// prompt, never as instructions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannerObservation {
+    pub call: PlannerToolCall,
+    pub output: String,
+}
+
 /// A raw suggested statement the planner emitted for a how-to question,
 /// before parser validation. `rql` is the candidate statement text exactly as
 /// the model produced it; it is never trusted until it passes the parser.
@@ -111,11 +124,14 @@ pub struct SuggestedStatement {
 }
 
 /// The typed plan the planner LLM emits, before candidate validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AskPlan {
     pub intent: AskIntent,
     /// The `query` step's read-only RQL candidate (factual intent).
     pub query: Option<String>,
+    /// Optional typed tool call. Factual plans must carry exactly one of
+    /// `query` (legacy-compatible) or `tool`.
+    pub tool: Option<PlannerToolCall>,
     /// The natural-language answer explaining the approach (how-to intent).
     /// Empty for the factual/synthesis paths, which synthesize their answer.
     pub answer: String,
@@ -133,6 +149,10 @@ impl AskPlan {
         if let Some(query) = &self.query {
             out.push_str("; query=");
             out.push_str(query.trim());
+        }
+        if let Some(tool) = &self.tool {
+            out.push_str("; tool=");
+            out.push_str(tool.name());
         }
         out
     }
@@ -179,12 +199,58 @@ where
     }
 }
 
+/// Structured model seam used by production providers and deterministic
+/// harnesses. It mirrors RedCode's model boundary: the runner owns the
+/// transcript and tools, while the adapter only performs one model turn.
+pub trait PlannerChatModel {
+    fn chat(
+        &self,
+        messages: &[crate::ai::AiChatMessage],
+        tools: &[crate::ai::AiToolDefinition],
+    ) -> RedDBResult<crate::ai::AiChatResponse>;
+}
+
+impl<F> PlannerChatModel for F
+where
+    F: Fn(
+        &[crate::ai::AiChatMessage],
+        &[crate::ai::AiToolDefinition],
+    ) -> RedDBResult<crate::ai::AiChatResponse>,
+{
+    fn chat(
+        &self,
+        messages: &[crate::ai::AiChatMessage],
+        tools: &[crate::ai::AiToolDefinition],
+    ) -> RedDBResult<crate::ai::AiChatResponse> {
+        self(messages, tools)
+    }
+}
+
+/// Typed registry shared by every ASK provider adapter.
+pub fn ask_tool_definitions() -> Vec<crate::ai::AiToolDefinition> {
+    crate::runtime::agent_tools::definitions(crate::runtime::agent_tools::ToolSurface::Ask)
+        .into_iter()
+        .map(|definition| crate::ai::AiToolDefinition {
+            name: definition.name.to_string(),
+            description: definition.description.to_string(),
+            input_schema: definition.input_schema,
+        })
+        .collect()
+}
+
 /// How the planner routed a plan after candidate validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PlanRouting {
     /// Factual intent with a validated **read-only** candidate ready to
     /// auto-execute under the caller's EffectiveScope.
-    Execute { candidate: ValidatedCandidate },
+    Execute {
+        candidate: ValidatedCandidate,
+        params: Vec<crate::json::Value>,
+        purpose: String,
+    },
+    /// A bounded metadata call whose result is fed into a later planner
+    /// round. The orchestrator charges the step before executing it.
+    UseTool { call: PlannerToolCall },
     /// Factual intent whose candidate is **mutating** — a structured
     /// refusal. Mutating candidates are never executed under any flag; the
     /// suggestion envelope arrives in a later slice.
@@ -207,7 +273,7 @@ pub enum PlanRouting {
 }
 
 /// A planner pass: the prompt sent, the parsed plan, and the routing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlannedRoute {
     pub prompt: String,
     pub plan: AskPlan,
@@ -218,18 +284,43 @@ pub struct PlannedRoute {
 /// with many collections never reaches the model raw: the slice is the
 /// anti-drowning gate (ADR 0068 §1).
 pub fn build_planner_prompt(question: &str, slice: &NarrowedSlice) -> String {
+    build_planner_prompt_with_observations(question, slice, &[])
+}
+
+/// Build a planner prompt for one bounded agent round. Previous metadata
+/// observations are included as JSON data so the model can discover schema
+/// before producing the terminal read-only query.
+pub fn build_planner_prompt_with_observations(
+    question: &str,
+    slice: &NarrowedSlice,
+    observations: &[PlannerObservation],
+) -> String {
+    build_planner_prompt_for_round(question, slice, observations, None)
+}
+
+fn build_planner_prompt_for_round(
+    question: &str,
+    slice: &NarrowedSlice,
+    observations: &[PlannerObservation],
+    steps_remaining: Option<usize>,
+) -> String {
     let mut prompt = String::new();
+    prompt.push_str(ASK_PLANNER_SYSTEM_PROMPT.trim());
     prompt.push_str(
-        "You are the RedDB ASK planner. Classify the user's question intent and, for a \
-         factual question, generate a single read-only RQL SELECT candidate over the \
-         collections below.\n\
-         Respond with ONLY a JSON object, no code fences or commentary:\n\
-         {\"intent\": \"factual\"|\"synthesis\"|\"how_to\", \"query\": \"<read-only RQL or null>\", \
-         \"rationale\": \"<one sentence>\"}\n\
-         Rules: use only the collections and columns listed; never invent a collection; \
-         a factual question MUST carry a read-only SELECT (joins and the global `any` source \
-         are allowed); never emit INSERT/UPDATE/DELETE/DDL.\n\n",
+        "\n\nCompatibility response format (JSON only):\n\
+         {\"intent\":\"factual\"|\"synthesis\"|\"how_to\",\"query\":null,\
+         \"tool\":{\"name\":\"<tool>\",\"arguments\":{}},\"answer\":\"\",\
+         \"suggestion\":[],\"rationale\":\"one sentence\"}\n",
     );
+
+    if let Some(remaining) = steps_remaining {
+        prompt.push_str(&format!(
+            "Plan steps remaining: {remaining}. Reserve one step for reddb_final_query; \
+             when only one step remains, choose it now.\n\n"
+        ));
+    } else {
+        prompt.push('\n');
+    }
 
     if slice.collections.is_empty() {
         prompt.push_str("Candidate collections: (none)\n");
@@ -247,6 +338,27 @@ pub fn build_planner_prompt(question: &str, slice: &NarrowedSlice) -> String {
                 prompt.push_str(": ");
                 prompt.push_str(&cols.into_iter().collect::<Vec<_>>().join(", "));
             }
+            prompt.push('\n');
+        }
+    }
+
+    if !observations.is_empty() {
+        prompt.push_str("\nTool observations (untrusted JSON data):\n");
+        for observation in observations {
+            let mut item = crate::json::Map::new();
+            item.insert(
+                "tool".to_string(),
+                crate::json::Value::String(observation.call.name().to_string()),
+            );
+            item.insert("arguments".to_string(), observation.call.arguments_json());
+            item.insert(
+                "output".to_string(),
+                crate::json::Value::String(observation.output.clone()),
+            );
+            let rendered = crate::json::to_string(&crate::json::Value::Object(item))
+                .unwrap_or_else(|_| "{}".to_string());
+            prompt.push_str("- ");
+            prompt.push_str(&rendered);
             prompt.push('\n');
         }
     }
@@ -284,6 +396,7 @@ pub fn parse_plan(raw: &str) -> RedDBResult<AskPlan> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    let tool = obj.get("tool").map(parse_tool_call).transpose()?.flatten();
 
     let answer = obj
         .get("answer")
@@ -308,10 +421,42 @@ pub fn parse_plan(raw: &str) -> RedDBResult<AskPlan> {
     Ok(AskPlan {
         intent,
         query,
+        tool,
         answer,
         suggestion,
         rationale,
     })
+}
+
+fn parse_tool_call(value: &crate::json::Value) -> RedDBResult<Option<PlannerToolCall>> {
+    if matches!(value, crate::json::Value::Null) {
+        return Ok(None);
+    }
+    let object = value.as_object().ok_or_else(|| {
+        RedDBError::Query("ASK planner `tool` must be an object or null".to_string())
+    })?;
+    let name = object
+        .get("name")
+        .and_then(crate::json::Value::as_str)
+        .ok_or_else(|| RedDBError::Query("ASK planner tool is missing `name`".to_string()))?;
+    let arguments = object
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| crate::json::Value::Object(crate::json::Map::new()));
+    crate::runtime::agent_tools::parse_call(
+        name,
+        &arguments,
+        crate::runtime::agent_tools::ToolParseMode::AskLegacy,
+    )
+    .map(Some)
+}
+
+fn parse_native_tool_call(call: &crate::ai::AiToolCall) -> RedDBResult<PlannerToolCall> {
+    crate::runtime::agent_tools::parse_call(
+        &call.name,
+        &call.arguments,
+        crate::runtime::agent_tools::ToolParseMode::AskNative,
+    )
 }
 
 /// Read the `suggestion` array of a how-to plan into raw statements. Each item
@@ -357,25 +502,29 @@ fn parse_suggestions(items: &[crate::json::Value]) -> Vec<RawSuggestion> {
 /// intents unsupported for this slice.
 pub fn route_plan(plan: &AskPlan) -> RedDBResult<PlanRouting> {
     match plan.intent {
-        AskIntent::Factual => {
-            let rql = plan.query.as_deref().ok_or_else(|| {
-                RedDBError::Query(
-                    "ASK planner classified the question as factual but produced no query \
-                     candidate"
-                        .to_string(),
-                )
-            })?;
-            // Re-validate through the production parser; malformed candidates
-            // are rejected here and never execute.
-            let candidate = validate_candidate(rql)?;
-            match candidate.disposition {
-                CandidateDisposition::ReadOnly => Ok(PlanRouting::Execute { candidate }),
-                CandidateDisposition::Mutating => Ok(PlanRouting::RefuseMutating {
-                    statement_type: candidate.statement_type,
-                    rql: candidate.rql,
-                }),
+        AskIntent::Factual => match (&plan.query, &plan.tool) {
+            (Some(_), Some(_)) => Err(RedDBError::Query(
+                "ASK planner factual plan must choose exactly one of `query` or `tool`".to_string(),
+            )),
+            (Some(rql), None) => {
+                route_query_candidate(rql, &[], &plan.rationale, QueryPhase::Final)
             }
-        }
+            (
+                None,
+                Some(PlannerToolCall::Query {
+                    rql,
+                    params,
+                    purpose,
+                    phase,
+                }),
+            ) => route_query_candidate(rql, params, purpose, *phase),
+            (None, Some(call)) => Ok(PlanRouting::UseTool { call: call.clone() }),
+            (None, None) => Err(RedDBError::Query(
+                "ASK planner classified the question as factual but produced no query or \
+                     tool call"
+                    .to_string(),
+            )),
+        },
         AskIntent::HowTo => {
             // Parser-validate every suggested statement; unparseable ones are
             // dropped. Mutating/DDL statements survive in the envelope but are
@@ -390,6 +539,38 @@ pub fn route_plan(plan: &AskPlan) -> RedDBResult<PlanRouting> {
     }
 }
 
+fn route_query_candidate(
+    rql: &str,
+    params: &[crate::json::Value],
+    purpose: &str,
+    phase: QueryPhase,
+) -> RedDBResult<PlanRouting> {
+    // Re-validate through the production parser; malformed candidates are
+    // rejected here and never execute.
+    let candidate = validate_candidate(rql)?;
+    match candidate.disposition {
+        CandidateDisposition::ReadOnly if phase == QueryPhase::Explore => {
+            Ok(PlanRouting::UseTool {
+                call: PlannerToolCall::Query {
+                    rql: candidate.rql,
+                    params: params.to_vec(),
+                    purpose: purpose.to_string(),
+                    phase,
+                },
+            })
+        }
+        CandidateDisposition::ReadOnly => Ok(PlanRouting::Execute {
+            candidate,
+            params: params.to_vec(),
+            purpose: purpose.to_string(),
+        }),
+        CandidateDisposition::Mutating => Ok(PlanRouting::RefuseMutating {
+            statement_type: candidate.statement_type,
+            rql: candidate.rql,
+        }),
+    }
+}
+
 /// Full planner pass: build the narrowed-slice prompt, call the model,
 /// parse the plan, and route it. The model is the closure-model seam.
 pub fn plan_and_route<M: PlannerModel>(
@@ -397,7 +578,18 @@ pub fn plan_and_route<M: PlannerModel>(
     slice: &NarrowedSlice,
     model: &M,
 ) -> RedDBResult<PlannedRoute> {
-    let prompt = build_planner_prompt(question, slice);
+    plan_and_route_with_observations(question, slice, &[], model)
+}
+
+/// One agent-loop planner round over the narrowed schema plus prior bounded
+/// metadata observations.
+pub fn plan_and_route_with_observations<M: PlannerModel>(
+    question: &str,
+    slice: &NarrowedSlice,
+    observations: &[PlannerObservation],
+    model: &M,
+) -> RedDBResult<PlannedRoute> {
+    let prompt = build_planner_prompt_with_observations(question, slice, observations);
     let raw = model.plan(&prompt)?;
     let plan = parse_plan(&raw)?;
     let routing = route_plan(&plan)?;
@@ -408,6 +600,296 @@ pub fn plan_and_route<M: PlannerModel>(
     })
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentLoopOutcome {
+    Routed {
+        route: PlannedRoute,
+        observations: Vec<PlannerObservation>,
+    },
+    BudgetExhausted(BudgetExhausted),
+}
+
+/// Run the bounded metadata-tool loop until the planner returns a terminal
+/// route or the shared step budget is exhausted. A terminal query is charged
+/// here too, which keeps planner rounds and executable steps linear.
+pub fn run_bounded_agent_loop<M, E>(
+    question: &str,
+    slice: &NarrowedSlice,
+    budget: &mut PlanBudget,
+    model: &M,
+    executor: &E,
+) -> RedDBResult<AgentLoopOutcome>
+where
+    M: PlannerModel,
+    E: Fn(&PlannerToolCall) -> RedDBResult<String>,
+{
+    let mut observations = Vec::new();
+    loop {
+        if budget.remaining() == 0 {
+            return Ok(AgentLoopOutcome::BudgetExhausted(BudgetExhausted {
+                attempted: PlanStep::Query,
+                executed_steps: budget.executed_count(),
+                max_steps: budget.max_steps(),
+            }));
+        }
+
+        let prompt = build_planner_prompt_for_round(
+            question,
+            slice,
+            &observations,
+            Some(budget.remaining()),
+        );
+        let raw = model.plan(&prompt)?;
+        let plan = parse_plan(&raw)?;
+        let route = PlannedRoute {
+            prompt,
+            routing: route_plan(&plan)?,
+            plan,
+        };
+        match &route.routing {
+            PlanRouting::UseTool { call } => {
+                // Metadata and exploratory reads must not consume the final
+                // reserved step. This guarantees that exploration can never
+                // leave ASK without an evidence-producing final query.
+                if budget.remaining() <= 1 {
+                    return Ok(AgentLoopOutcome::BudgetExhausted(BudgetExhausted {
+                        attempted: planner_tool_step(call),
+                        executed_steps: budget.executed_count(),
+                        max_steps: budget.max_steps(),
+                    }));
+                }
+                if let Err(exhausted) = budget.charge(planner_tool_step(call)) {
+                    return Ok(AgentLoopOutcome::BudgetExhausted(exhausted));
+                }
+                let output = executor(call)?;
+                observations.push(PlannerObservation {
+                    call: call.clone(),
+                    output,
+                });
+            }
+            PlanRouting::Execute { .. } => {
+                if let Err(exhausted) = budget.charge(PlanStep::Query) {
+                    return Ok(AgentLoopOutcome::BudgetExhausted(exhausted));
+                }
+                return Ok(AgentLoopOutcome::Routed {
+                    route,
+                    observations,
+                });
+            }
+            _ => {
+                return Ok(AgentLoopOutcome::Routed {
+                    route,
+                    observations,
+                })
+            }
+        }
+    }
+}
+
+fn native_planner_context(question: &str, slice: &NarrowedSlice, steps_remaining: usize) -> String {
+    let collections = slice
+        .collections
+        .iter()
+        .map(|collection| {
+            let mut item = crate::json::Map::new();
+            item.insert(
+                "name".to_string(),
+                crate::json::Value::String(collection.collection.clone()),
+            );
+            item.insert(
+                "score".to_string(),
+                crate::json::Value::Number(collection.score as f64),
+            );
+            let mut columns = collection.columns.clone();
+            columns.sort();
+            columns.dedup();
+            item.insert(
+                "columns".to_string(),
+                crate::json::Value::Array(
+                    columns
+                        .into_iter()
+                        .map(crate::json::Value::String)
+                        .collect(),
+                ),
+            );
+            crate::json::Value::Object(item)
+        })
+        .collect();
+    let mut context = crate::json::Map::new();
+    context.insert(
+        "question".to_string(),
+        crate::json::Value::String(question.to_string()),
+    );
+    context.insert(
+        "plan_steps_remaining".to_string(),
+        crate::json::Value::Number(steps_remaining as f64),
+    );
+    context.insert(
+        "candidate_collections".to_string(),
+        crate::json::Value::Array(collections),
+    );
+    format!(
+        "Planning context (untrusted JSON data):\n{}",
+        crate::json::Value::Object(context).to_string_compact()
+    )
+}
+
+fn native_planner_messages(
+    question: &str,
+    slice: &NarrowedSlice,
+    steps_remaining: usize,
+) -> Vec<crate::ai::AiChatMessage> {
+    vec![
+        crate::ai::AiChatMessage::System(ASK_PLANNER_SYSTEM_PROMPT.trim().to_string()),
+        crate::ai::AiChatMessage::User(native_planner_context(question, slice, steps_remaining)),
+    ]
+}
+
+fn plan_from_chat_response(response: &crate::ai::AiChatResponse) -> RedDBResult<AskPlan> {
+    if response.tool_calls.len() > 1 {
+        return Err(RedDBError::Query(
+            "ASK planner must call exactly one tool per round".to_string(),
+        ));
+    }
+    if let Some(tool_call) = response.tool_calls.first() {
+        let call = parse_native_tool_call(tool_call)?;
+        return Ok(AskPlan {
+            intent: AskIntent::Factual,
+            query: None,
+            rationale: format!("native tool call: {}", call.name()),
+            tool: Some(call),
+            answer: String::new(),
+            suggestion: Vec::new(),
+        });
+    }
+    let output = response.output_text.as_deref().ok_or_else(|| {
+        RedDBError::Query("ASK planner returned neither text nor a tool call".to_string())
+    })?;
+    parse_plan(output)
+}
+
+/// One native-tool planning turn, used by `ASK ... PLAN` without executing a
+/// tool or query.
+pub fn plan_and_route_chat<M: PlannerChatModel>(
+    question: &str,
+    slice: &NarrowedSlice,
+    steps_remaining: usize,
+    model: &M,
+) -> RedDBResult<PlannedRoute> {
+    let messages = native_planner_messages(question, slice, steps_remaining);
+    let response = model.chat(&messages, &ask_tool_definitions())?;
+    let plan = plan_from_chat_response(&response)?;
+    let routing = route_plan(&plan)?;
+    Ok(PlannedRoute {
+        prompt: build_planner_prompt_for_round(question, slice, &[], Some(steps_remaining)),
+        plan,
+        routing,
+    })
+}
+
+/// Run the bounded ASK harness with a provider-native tool transcript. The
+/// same transcript/request boundary is reusable by deterministic test models.
+pub fn run_bounded_chat_agent_loop<M, E>(
+    question: &str,
+    slice: &NarrowedSlice,
+    budget: &mut PlanBudget,
+    model: &M,
+    executor: &E,
+) -> RedDBResult<AgentLoopOutcome>
+where
+    M: PlannerChatModel,
+    E: Fn(&PlannerToolCall) -> RedDBResult<String>,
+{
+    let tools = ask_tool_definitions();
+    let mut messages = native_planner_messages(question, slice, budget.remaining());
+    let mut observations = Vec::new();
+    loop {
+        if budget.remaining() == 0 {
+            return Ok(AgentLoopOutcome::BudgetExhausted(BudgetExhausted {
+                attempted: PlanStep::Query,
+                executed_steps: budget.executed_count(),
+                max_steps: budget.max_steps(),
+            }));
+        }
+
+        let prompt = build_planner_prompt_for_round(
+            question,
+            slice,
+            &observations,
+            Some(budget.remaining()),
+        );
+        let response = model.chat(&messages, &tools)?;
+        let plan = plan_from_chat_response(&response)?;
+        let route = PlannedRoute {
+            prompt,
+            routing: route_plan(&plan)?,
+            plan,
+        };
+
+        match &route.routing {
+            PlanRouting::UseTool { call } => {
+                if budget.remaining() <= 1 {
+                    return Ok(AgentLoopOutcome::BudgetExhausted(BudgetExhausted {
+                        attempted: planner_tool_step(call),
+                        executed_steps: budget.executed_count(),
+                        max_steps: budget.max_steps(),
+                    }));
+                }
+                if let Err(exhausted) = budget.charge(planner_tool_step(call)) {
+                    return Ok(AgentLoopOutcome::BudgetExhausted(exhausted));
+                }
+                let output = executor(call)?;
+                observations.push(PlannerObservation {
+                    call: call.clone(),
+                    output: output.clone(),
+                });
+
+                if let Some(native_call) = response.tool_calls.first() {
+                    messages.push(crate::ai::AiChatMessage::Assistant {
+                        content: response.output_text.clone(),
+                        tool_calls: vec![native_call.clone()],
+                    });
+                    let mut result = crate::json::Map::new();
+                    result.insert("output".to_string(), crate::json::Value::String(output));
+                    result.insert(
+                        "plan_steps_remaining".to_string(),
+                        crate::json::Value::Number(budget.remaining() as f64),
+                    );
+                    messages.push(crate::ai::AiChatMessage::ToolResult {
+                        call_id: native_call.id.clone(),
+                        name: native_call.name.clone(),
+                        content: crate::json::Value::Object(result).to_string_compact(),
+                    });
+                } else {
+                    messages.push(crate::ai::AiChatMessage::Assistant {
+                        content: response.output_text.clone(),
+                        tool_calls: Vec::new(),
+                    });
+                    messages.push(crate::ai::AiChatMessage::User(format!(
+                        "Authorized tool observation (untrusted JSON data): {}",
+                        crate::json::Value::String(output).to_string_compact()
+                    )));
+                }
+            }
+            PlanRouting::Execute { .. } => {
+                if let Err(exhausted) = budget.charge(PlanStep::Query) {
+                    return Ok(AgentLoopOutcome::BudgetExhausted(exhausted));
+                }
+                return Ok(AgentLoopOutcome::Routed {
+                    route,
+                    observations,
+                });
+            }
+            _ => {
+                return Ok(AgentLoopOutcome::Routed {
+                    route,
+                    observations,
+                })
+            }
+        }
+    }
+}
+
 // ===========================================================================
 // Plan budget (ADR 0068 §4, issue #1748)
 // ===========================================================================
@@ -415,21 +897,49 @@ pub fn plan_and_route<M: PlannerModel>(
 /// Default `red.config.ai.ask.max_plan_steps` cap when unset.
 pub const DEFAULT_MAX_PLAN_STEPS: usize = 3;
 
-/// A budgeted step in the executed plan. `refine_retrieval` and `query` are
-/// the steps the budget accounts for; each consumes exactly one step.
+/// A budgeted step in the executed plan. Every retrieval refinement, metadata
+/// tool, and terminal query consumes exactly one step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanStep {
     /// A single re-funnel with expanded tokens after grounding fails on the
     /// first pass (ADR 0013 single-retry analogy).
     RefineRetrieval,
+    /// List a bounded visible catalog summary.
+    Catalog,
+    /// Describe one visible collection.
+    DescribeCollection,
+    /// Find visible collections containing an exact field.
+    FindField,
+    /// One bounded exploratory read whose result may guide a later round.
+    ExploreQuery,
     /// The read-only RQL candidate the planner emitted.
     Query,
+}
+
+fn planner_tool_step(call: &PlannerToolCall) -> PlanStep {
+    match call {
+        PlannerToolCall::Catalog => PlanStep::Catalog,
+        PlannerToolCall::DescribeCollection { .. } => PlanStep::DescribeCollection,
+        PlannerToolCall::FindField { .. } => PlanStep::FindField,
+        PlannerToolCall::Query {
+            phase: QueryPhase::Explore,
+            ..
+        } => PlanStep::ExploreQuery,
+        PlannerToolCall::Query {
+            phase: QueryPhase::Final,
+            ..
+        } => PlanStep::Query,
+    }
 }
 
 impl PlanStep {
     pub fn as_str(&self) -> &'static str {
         match self {
             PlanStep::RefineRetrieval => "refine_retrieval",
+            PlanStep::Catalog => "reddb_catalog",
+            PlanStep::DescribeCollection => "reddb_describe_collection",
+            PlanStep::FindField => "reddb_find_field",
+            PlanStep::ExploreQuery => "reddb_query_explore",
             PlanStep::Query => "query",
         }
     }
@@ -578,6 +1088,9 @@ fn extract_json_object(raw: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
     use super::*;
 
     fn slice() -> NarrowedSlice {
@@ -603,6 +1116,62 @@ mod tests {
         move |_prompt: &str| Ok(plan_json.to_string())
     }
 
+    struct TestChatModel {
+        responses: RefCell<VecDeque<crate::ai::AiChatResponse>>,
+        requests: RefCell<Vec<(Vec<crate::ai::AiChatMessage>, Vec<String>)>>,
+    }
+
+    impl TestChatModel {
+        fn new(responses: Vec<crate::ai::AiChatResponse>) -> Self {
+            Self {
+                responses: RefCell::new(responses.into()),
+                requests: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl PlannerChatModel for TestChatModel {
+        fn chat(
+            &self,
+            messages: &[crate::ai::AiChatMessage],
+            tools: &[crate::ai::AiToolDefinition],
+        ) -> RedDBResult<crate::ai::AiChatResponse> {
+            self.requests.borrow_mut().push((
+                messages.to_vec(),
+                tools.iter().map(|tool| tool.name.clone()).collect(),
+            ));
+            self.responses
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| RedDBError::Internal("test model script exhausted".to_string()))
+        }
+    }
+
+    fn tool_response(
+        id: &str,
+        name: &str,
+        arguments: Vec<(&str, crate::json::Value)>,
+    ) -> crate::ai::AiChatResponse {
+        let mut object = crate::json::Map::new();
+        for (key, value) in arguments {
+            object.insert(key.to_string(), value);
+        }
+        crate::ai::AiChatResponse {
+            provider: "test",
+            model: "test-model".to_string(),
+            output_text: None,
+            tool_calls: vec![crate::ai::AiToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: crate::json::Value::Object(object),
+            }],
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            stop_reason: Some("tool_use".to_string()),
+        }
+    }
+
     #[test]
     fn prompt_contains_only_narrowed_slice() {
         let prompt = build_planner_prompt("who owns passport FDD-1?", &slice());
@@ -611,6 +1180,107 @@ mod tests {
         assert!(prompt.contains("passport"));
         // A collection outside the narrowed slice must never appear.
         assert!(!prompt.contains("secret_ledger"));
+    }
+
+    #[test]
+    fn native_harness_keeps_tool_transcript_and_requires_final_query() {
+        let model = TestChatModel::new(vec![
+            tool_response(
+                "call_1",
+                "reddb_find_field",
+                vec![("field", crate::json::Value::String("passport".to_string()))],
+            ),
+            tool_response(
+                "call_2",
+                "reddb_final_query",
+                vec![
+                    (
+                        "sql",
+                        crate::json::Value::String(
+                            "SELECT name FROM travelers WHERE passport = $1".to_string(),
+                        ),
+                    ),
+                    (
+                        "params",
+                        crate::json::Value::Array(vec![crate::json::Value::String(
+                            "FDD-1".to_string(),
+                        )]),
+                    ),
+                    (
+                        "purpose",
+                        crate::json::Value::String("answer the passport lookup".to_string()),
+                    ),
+                ],
+            ),
+        ]);
+        let mut budget = PlanBudget::new(Some(3), 3);
+        let executor = |call: &PlannerToolCall| {
+            assert!(matches!(call, PlannerToolCall::FindField { .. }));
+            Ok("[{\"collection\":\"travelers\",\"name\":\"passport\"}]".to_string())
+        };
+
+        let outcome = run_bounded_chat_agent_loop(
+            "who owns passport FDD-1?",
+            &slice(),
+            &mut budget,
+            &model,
+            &executor,
+        )
+        .expect("native harness");
+        let AgentLoopOutcome::Routed {
+            route,
+            observations,
+        } = outcome
+        else {
+            panic!("expected routed outcome")
+        };
+        assert_eq!(observations.len(), 1);
+        assert_eq!(
+            budget.executed_steps(),
+            &[PlanStep::FindField, PlanStep::Query]
+        );
+        assert!(matches!(route.routing, PlanRouting::Execute { .. }));
+
+        let requests = model.requests.borrow();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].1.iter().any(|name| name == "reddb_final_query"));
+        assert!(requests[1]
+            .0
+            .iter()
+            .any(|message| matches!(message, crate::ai::AiChatMessage::ToolResult { call_id, .. } if call_id == "call_1")));
+    }
+
+    #[test]
+    fn native_query_tool_cannot_smuggle_a_final_phase() {
+        let call = crate::ai::AiToolCall {
+            id: "call_1".to_string(),
+            name: "reddb_query".to_string(),
+            arguments: {
+                let mut arguments = crate::json::Map::new();
+                arguments.insert(
+                    "sql".to_string(),
+                    crate::json::Value::String("SELECT 1".to_string()),
+                );
+                arguments.insert("params".to_string(), crate::json::Value::Array(Vec::new()));
+                arguments.insert(
+                    "purpose".to_string(),
+                    crate::json::Value::String("inspect".to_string()),
+                );
+                arguments.insert(
+                    "phase".to_string(),
+                    crate::json::Value::String("final".to_string()),
+                );
+                crate::json::Value::Object(arguments)
+            },
+        };
+
+        assert!(matches!(
+            parse_native_tool_call(&call).expect("native call"),
+            PlannerToolCall::Query {
+                phase: QueryPhase::Explore,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -625,6 +1295,179 @@ mod tests {
             Some("SELECT * FROM travelers WHERE passport = 'FDD-1'")
         );
         assert_eq!(plan.rationale, "lookup");
+    }
+
+    #[test]
+    fn metadata_tool_call_routes_to_a_bounded_agent_step() {
+        let route = plan_and_route(
+            "which collections contain passport_number?",
+            &slice(),
+            &mock_model(
+                "{\"intent\":\"factual\",\"query\":null,\"tool\":{\"name\":\"reddb_find_field\",\"arguments\":{\"field\":\"passport_number\"}},\"rationale\":\"discover schema\"}",
+            ),
+        )
+        .expect("metadata tool plan must route");
+
+        assert_eq!(
+            route.routing,
+            PlanRouting::UseTool {
+                call: PlannerToolCall::FindField {
+                    field: "passport_number".to_string()
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn query_tool_call_uses_the_same_read_only_validator() {
+        let route = plan_and_route(
+            "who owns passport FDD-1?",
+            &slice(),
+            &mock_model(
+                "{\"intent\":\"factual\",\"query\":null,\"tool\":{\"name\":\"reddb_query\",\"arguments\":{\"sql\":\"SELECT * FROM travelers WHERE passport = $1\",\"params\":[\"FDD-1\"],\"purpose\":\"find the traveler\",\"phase\":\"final\"}}}",
+            ),
+        )
+        .expect("read-only query tool must route");
+
+        match route.routing {
+            PlanRouting::Execute {
+                params, purpose, ..
+            } => {
+                assert_eq!(
+                    params,
+                    vec![crate::json::Value::String("FDD-1".to_string())]
+                );
+                assert_eq!(purpose, "find the traveler");
+            }
+            other => panic!("expected final query, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exploratory_query_cannot_bypass_the_mutation_refusal() {
+        let route = plan_and_route(
+            "remove FDD-1",
+            &slice(),
+            &mock_model(
+                "{\"intent\":\"factual\",\"tool\":{\"name\":\"reddb_query\",\"arguments\":{\"sql\":\"DELETE FROM travelers WHERE passport = $1\",\"params\":[\"FDD-1\"],\"purpose\":\"remove a row\",\"phase\":\"explore\"}}}",
+            ),
+        )
+        .expect("mutating tool calls become structured refusals");
+
+        assert!(matches!(
+            route.routing,
+            PlanRouting::RefuseMutating {
+                statement_type: "delete",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn query_tool_rejects_unbounded_or_invalid_params() {
+        let not_an_array = parse_plan(
+            "{\"intent\":\"factual\",\"tool\":{\"name\":\"reddb_query\",\"arguments\":{\"sql\":\"SELECT 1\",\"params\":\"secret\",\"phase\":\"final\"}}}",
+        )
+        .expect_err("params must be an array");
+        assert!(not_an_array.to_string().contains("must be an array"));
+
+        let params = vec![
+            crate::json::Value::Null;
+            crate::runtime::agent_tools::ASK_QUERY_PARAMETER_COUNT_MAX + 1
+        ];
+        let mut arguments = crate::json::Map::new();
+        arguments.insert(
+            "sql".to_string(),
+            crate::json::Value::String("SELECT 1".to_string()),
+        );
+        arguments.insert("params".to_string(), crate::json::Value::Array(params));
+        let mut tool = crate::json::Map::new();
+        tool.insert(
+            "name".to_string(),
+            crate::json::Value::String("reddb_query".to_string()),
+        );
+        tool.insert(
+            "arguments".to_string(),
+            crate::json::Value::Object(arguments),
+        );
+        let mut root = crate::json::Map::new();
+        root.insert(
+            "intent".to_string(),
+            crate::json::Value::String("factual".to_string()),
+        );
+        root.insert("tool".to_string(), crate::json::Value::Object(tool));
+        let raw = crate::json::to_string(&crate::json::Value::Object(root)).unwrap();
+        let oversized = parse_plan(&raw).expect_err("parameter count must be bounded");
+        assert!(oversized.to_string().contains("exceeds 64 values"));
+    }
+
+    #[test]
+    fn planner_rejects_unknown_tools_and_ambiguous_actions() {
+        let unknown = parse_plan(
+            "{\"intent\":\"factual\",\"tool\":{\"name\":\"reddb_vault_reveal\",\"arguments\":{}}}",
+        )
+        .expect_err("unknown tool must be rejected");
+        assert!(
+            unknown.to_string().contains("unsupported tool"),
+            "{unknown}"
+        );
+
+        let ambiguous = plan_and_route(
+            "who owns passport FDD-1?",
+            &slice(),
+            &mock_model(
+                "{\"intent\":\"factual\",\"query\":\"SELECT * FROM travelers\",\"tool\":{\"name\":\"reddb_catalog\",\"arguments\":{}}}",
+            ),
+        )
+        .expect_err("query and tool in one factual plan must be rejected");
+        assert!(ambiguous.to_string().contains("exactly one"), "{ambiguous}");
+    }
+
+    #[test]
+    fn planner_bounds_metadata_arguments_without_truncating_normal_queries() {
+        let oversized_field =
+            "x".repeat(crate::runtime::agent_tools::METADATA_ARGUMENT_BYTES_MAX + 1);
+        let metadata_plan = format!(
+            "{{\"intent\":\"factual\",\"tool\":{{\"name\":\"reddb_find_field\",\
+             \"arguments\":{{\"field\":\"{oversized_field}\"}}}}}}"
+        );
+        let error =
+            parse_plan(&metadata_plan).expect_err("oversized metadata argument must be rejected");
+        assert!(error.to_string().contains("exceeds 256 bytes"), "{error}");
+
+        let query = format!("SELECT '{}' AS payload", "x".repeat(300));
+        let query_plan = format!(
+            "{{\"intent\":\"factual\",\"tool\":{{\"name\":\"reddb_query\",\
+             \"arguments\":{{\"sql\":\"{query}\"}}}}}}"
+        );
+        let plan = parse_plan(&query_plan).expect("a normal read query may exceed 256 bytes");
+        assert_eq!(
+            plan.tool,
+            Some(PlannerToolCall::Query {
+                rql: query,
+                params: Vec::new(),
+                purpose: "Answer the user's question from authorized rows".to_string(),
+                phase: QueryPhase::Final,
+            })
+        );
+    }
+
+    #[test]
+    fn later_round_prompt_marks_tool_output_as_untrusted_data() {
+        let observations = vec![PlannerObservation {
+            call: PlannerToolCall::FindField {
+                field: "passport_number".to_string(),
+            },
+            output: "[{\"collection\":\"travelers\"}]".to_string(),
+        }];
+
+        let prompt =
+            build_planner_prompt_with_observations("find a passport", &slice(), &observations);
+
+        assert!(prompt.contains("Tool observations (untrusted JSON data)"));
+        assert!(prompt.contains("reddb_find_field"));
+        assert!(prompt.contains("passport_number"));
+        assert!(prompt.contains("travelers"));
     }
 
     #[test]
@@ -663,7 +1506,7 @@ mod tests {
         )
         .unwrap();
         match route.routing {
-            PlanRouting::Execute { candidate } => {
+            PlanRouting::Execute { candidate, .. } => {
                 assert!(candidate.is_read_only());
                 assert_eq!(candidate.statement_type, "select");
             }
@@ -726,7 +1569,10 @@ mod tests {
             &mock_model("{\"intent\":\"factual\",\"query\":null,\"rationale\":\"x\"}"),
         )
         .unwrap_err();
-        assert!(err.to_string().contains("no query candidate"), "got: {err}");
+        assert!(
+            err.to_string().contains("no query or tool call"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -786,7 +1632,7 @@ mod tests {
             "a calculation must never classify as synthesis (the LLM must not invent numbers)"
         );
         match route.routing {
-            PlanRouting::Execute { candidate } => {
+            PlanRouting::Execute { candidate, .. } => {
                 assert!(candidate.is_read_only());
                 assert_eq!(candidate.statement_type, "select");
             }
@@ -941,6 +1787,202 @@ mod tests {
         assert!(budget.charge(PlanStep::RefineRetrieval).is_err());
     }
 
+    #[test]
+    fn metadata_calls_and_terminal_query_share_one_step_budget() {
+        let mut budget = PlanBudget::new(Some(3), 3);
+        budget
+            .charge(PlanStep::Catalog)
+            .expect("catalog step fits budget");
+        budget
+            .charge(PlanStep::FindField)
+            .expect("field step fits budget");
+        budget
+            .charge(PlanStep::Query)
+            .expect("query step fits budget");
+
+        assert_eq!(budget.remaining(), 0);
+        assert_eq!(
+            budget.executed_steps(),
+            &[PlanStep::Catalog, PlanStep::FindField, PlanStep::Query]
+        );
+        assert!(budget.charge(PlanStep::DescribeCollection).is_err());
+    }
+
+    #[test]
+    fn exploratory_and_final_queries_are_distinct_budgeted_actions() {
+        let mut budget = PlanBudget::new(Some(2), 2);
+        budget
+            .charge(PlanStep::ExploreQuery)
+            .expect("exploration fits budget");
+        budget
+            .charge(PlanStep::Query)
+            .expect("final query fits budget");
+        assert_eq!(
+            budget.executed_steps(),
+            &[PlanStep::ExploreQuery, PlanStep::Query]
+        );
+    }
+
+    #[test]
+    fn bounded_agent_loop_feeds_metadata_to_the_next_round_then_routes_query() {
+        let responses = std::rc::Rc::new(std::cell::RefCell::new(
+            std::collections::VecDeque::from([
+                "{\"intent\":\"factual\",\"query\":null,\"tool\":{\"name\":\"reddb_find_field\",\"arguments\":{\"field\":\"passport_number\"}}}"
+                    .to_string(),
+                "{\"intent\":\"factual\",\"query\":\"SELECT name FROM travelers WHERE passport_number = 'FDD-1'\",\"tool\":null}"
+                    .to_string(),
+            ]),
+        ));
+        let prompts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let responses_inner = responses.clone();
+        let prompts_inner = prompts.clone();
+        let model = move |prompt: &str| {
+            prompts_inner.borrow_mut().push(prompt.to_string());
+            Ok(responses_inner
+                .borrow_mut()
+                .pop_front()
+                .expect("scripted planner response"))
+        };
+
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let calls_inner = calls.clone();
+        let executor = move |call: &PlannerToolCall| {
+            calls_inner.borrow_mut().push(call.clone());
+            Ok("{\"rows\":[{\"collection\":\"travelers\"}],\"truncated\":false}".to_string())
+        };
+        let mut budget = PlanBudget::new(Some(2), 3);
+
+        let outcome =
+            run_bounded_agent_loop("who owns FDD-1?", &slice(), &mut budget, &model, &executor)
+                .expect("bounded loop must reach the terminal query");
+
+        assert!(matches!(
+            outcome,
+            AgentLoopOutcome::Routed {
+                route: PlannedRoute {
+                    routing: PlanRouting::Execute { .. },
+                    ..
+                },
+                ..
+            }
+        ));
+        assert_eq!(
+            budget.executed_steps(),
+            &[PlanStep::FindField, PlanStep::Query]
+        );
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[PlannerToolCall::FindField {
+                field: "passport_number".to_string()
+            }]
+        );
+        let prompts = prompts.borrow();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[1].contains("Tool observations (untrusted JSON data)"));
+        assert!(prompts[1].contains("travelers"));
+    }
+
+    #[test]
+    fn bounded_agent_loop_executes_parameterized_exploration_before_final_query() {
+        let responses = std::rc::Rc::new(std::cell::RefCell::new(
+            std::collections::VecDeque::from([
+                "{\"intent\":\"factual\",\"tool\":{\"name\":\"reddb_query\",\"arguments\":{\"sql\":\"SELECT id FROM travelers WHERE passport = $1 LIMIT 5\",\"params\":[\"FDD-1\"],\"purpose\":\"resolve person id\",\"phase\":\"explore\"}}}"
+                    .to_string(),
+                "{\"intent\":\"factual\",\"tool\":{\"name\":\"reddb_query\",\"arguments\":{\"sql\":\"SELECT name FROM travelers WHERE passport = $1\",\"params\":[\"FDD-1\"],\"purpose\":\"answer who owns the passport\",\"phase\":\"final\"}}}"
+                    .to_string(),
+            ]),
+        ));
+        let responses_inner = responses.clone();
+        let model = move |_prompt: &str| {
+            Ok(responses_inner
+                .borrow_mut()
+                .pop_front()
+                .expect("scripted planner response"))
+        };
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let calls_inner = calls.clone();
+        let executor = move |call: &PlannerToolCall| {
+            calls_inner.borrow_mut().push(call.clone());
+            Ok("{\"rows\":[{\"id\":\"t1\"}],\"truncated\":false}".to_string())
+        };
+        let mut budget = PlanBudget::new(Some(2), 2);
+
+        let outcome =
+            run_bounded_agent_loop("who owns FDD-1?", &slice(), &mut budget, &model, &executor)
+                .expect("exploration must lead to a final query");
+
+        let AgentLoopOutcome::Routed {
+            route,
+            observations,
+        } = outcome
+        else {
+            panic!("expected routed outcome");
+        };
+        assert_eq!(observations.len(), 1);
+        assert_eq!(calls.borrow().len(), 1);
+        assert_eq!(
+            budget.executed_steps(),
+            &[PlanStep::ExploreQuery, PlanStep::Query]
+        );
+        match route.routing {
+            PlanRouting::Execute {
+                candidate,
+                params,
+                purpose,
+            } => {
+                assert_eq!(
+                    candidate.rql,
+                    "SELECT name FROM travelers WHERE passport = $1"
+                );
+                assert_eq!(
+                    params,
+                    vec![crate::json::Value::String("FDD-1".to_string())]
+                );
+                assert_eq!(purpose, "answer who owns the passport");
+            }
+            other => panic!("expected final query, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bounded_agent_loop_does_not_call_the_model_after_the_last_tool_step() {
+        let planner_calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let planner_calls_inner = planner_calls.clone();
+        let model = move |_prompt: &str| {
+            planner_calls_inner.set(planner_calls_inner.get() + 1);
+            Ok("{\"intent\":\"factual\",\"query\":null,\"tool\":{\"name\":\"reddb_catalog\",\"arguments\":{}}}"
+                .to_string())
+        };
+        let tool_calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let tool_calls_inner = tool_calls.clone();
+        let executor = move |_call: &PlannerToolCall| {
+            tool_calls_inner.set(tool_calls_inner.get() + 1);
+            Ok("{\"rows\":[],\"truncated\":false}".to_string())
+        };
+        let mut budget = PlanBudget::new(Some(1), 3);
+
+        let outcome = run_bounded_agent_loop(
+            "what data is available?",
+            &slice(),
+            &mut budget,
+            &model,
+            &executor,
+        )
+        .expect("bounded loop must return structured exhaustion");
+
+        assert_eq!(
+            outcome,
+            AgentLoopOutcome::BudgetExhausted(BudgetExhausted {
+                attempted: PlanStep::Catalog,
+                executed_steps: 0,
+                max_steps: 1,
+            })
+        );
+        assert_eq!(planner_calls.get(), 1, "no extra planner round");
+        assert_eq!(tool_calls.get(), 0, "the final step stays reserved");
+        assert!(budget.executed_steps().is_empty());
+    }
+
     // -----------------------------------------------------------------------
     // Grounding critique + single refine_retrieval retry (#1748).
     // -----------------------------------------------------------------------
@@ -1003,6 +2045,7 @@ mod tests {
         let plan = AskPlan {
             intent: AskIntent::Factual,
             query: Some("SELECT * FROM travelers WHERE passport = 'FDD-1'".to_string()),
+            tool: None,
             answer: String::new(),
             suggestion: Vec::new(),
             rationale: "lookup".to_string(),

@@ -2178,6 +2178,23 @@ fn run_cli() {
             server.run_stdio();
         }
 
+        "acp" => {
+            let path = result
+                .flags
+                .get("path")
+                .map(|value| value.as_str_value())
+                .unwrap_or_default();
+            let runtime = if path.is_empty() {
+                reddb::runtime::RedDBRuntime::in_memory().unwrap()
+            } else {
+                reddb::runtime::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(
+                    &path,
+                ))
+                .unwrap()
+            };
+            reddb::acp::server::AcpServer::new(runtime).run_stdio();
+        }
+
         "auth" => {
             let json_mode = wants_json(&result.flags);
             let subcommand = result
@@ -4491,6 +4508,7 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ),
         ("status".to_string(), vec![]),
         ("mcp".to_string(), vec![]),
+        ("acp".to_string(), vec![]),
         ("connect".to_string(), vec![]),
         ("version".to_string(), vec![]),
     ]

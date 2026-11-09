@@ -80,6 +80,7 @@
   - [Ingest API (JSON / NDJSON / WS)](/api/ingest.md)
   - [PostgreSQL Wire](/api/postgres-wire.md)
   - [MCP (AI Agents)](/api/mcp.md)
+  - [ACP (ASK Sessions)](/api/acp.md)
   - [RedDB Browser (JS/TS)](/clients/browser.md)
   - [Browser Playground](https://reddb-io.github.io/reddb/browser/)
   - [Embedded (Rust)](/api/embedded.md)

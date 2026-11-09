@@ -72,17 +72,49 @@ export interface AskValidation {
   errors: AskValidationItem[]
 }
 
+export interface AskExploratoryQuery {
+  sql: string
+  params: unknown[]
+  purpose: string
+}
+
+export interface AskReasoningStep {
+  sequence: number
+  tool: string
+  purpose: string
+  arguments?: Record<string, unknown>
+  phase?: 'explore' | 'final'
+  sql?: string
+  params?: unknown[]
+  observation?: { rows: number; truncated: boolean }
+  evidence?: 'answer_and_citations'
+}
+
+export interface AskReasoning {
+  summary: string
+  evidence_policy: 'final_query_only'
+  steps: AskReasoningStep[]
+}
+
 export interface AskQueryResult {
   answer: string
   cache_hit: boolean
   citations: AskCitation[]
   completion_tokens: number
   cost_usd: number
+  executed_query?: string
+  exploratory_queries?: AskExploratoryQuery[]
+  final_query?: string
+  final_query_params?: unknown[]
+  intent?: 'factual' | 'synthesis' | 'how_to'
   mode: 'strict' | 'lenient'
   model: string
+  plan_summary?: string
   prompt_tokens: number
   provider: string
+  reasoning?: AskReasoning
   retry_count: number
+  sources_count?: number
   sources_flat: AskSource[]
   validation: AskValidation
 }

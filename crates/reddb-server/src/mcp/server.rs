@@ -20,10 +20,11 @@ use crate::mcp::{protocol, tools};
 use crate::presentation::entity_json::created_entity_output_json;
 use crate::presentation::entity_json::storage_value_to_json;
 use crate::presentation::query_result_json::{runtime_query_json, runtime_stats_json};
+use crate::runtime::agent_tools::{self, RedToolExecutor, ToolExecutionProfile, ToolParseMode};
 use crate::runtime::{
-    query_request::ParamValue, RedDBRuntime, RuntimeGraphCentralityAlgorithm,
-    RuntimeGraphCommunityAlgorithm, RuntimeGraphComponentsMode, RuntimeGraphDirection,
-    RuntimeGraphPathAlgorithm, RuntimeGraphTraversalStrategy,
+    RedDBRuntime, RuntimeGraphCentralityAlgorithm, RuntimeGraphCommunityAlgorithm,
+    RuntimeGraphComponentsMode, RuntimeGraphDirection, RuntimeGraphPathAlgorithm,
+    RuntimeGraphTraversalStrategy,
 };
 use crate::storage::EntityId;
 use reddb_types::Value;
@@ -315,11 +316,11 @@ impl McpServer {
         let result = tools::authorize_tool(name, tools::McpIdentityPosture::EmbeddedImplicitAdmin)
             .and_then(|_| self.check_tool_capability(name))
             .and_then(|_| match name {
-                "reddb_query" => self.tool_query(args),
+                agent_tools::QUERY_TOOL => self.tool_query(args),
                 "reddb_collections" => self.tool_collections(),
-                "reddb_catalog" => self.tool_catalog(),
-                "reddb_describe_collection" => self.tool_describe_collection(args),
-                "reddb_find_field" => self.tool_find_field(args),
+                agent_tools::CATALOG_TOOL => self.tool_catalog(),
+                agent_tools::DESCRIBE_COLLECTION_TOOL => self.tool_describe_collection(args),
+                agent_tools::FIND_FIELD_TOOL => self.tool_find_field(args),
                 "reddb_insert_row" => self.tool_insert_row(args),
                 "reddb_insert_node" => self.tool_insert_node(args),
                 "reddb_insert_edge" => self.tool_insert_edge(args),
@@ -414,36 +415,7 @@ impl McpServer {
             ));
         }
 
-        // Optional positional `$N` bind parameters. MCP, stdio, and HTTP
-        // all decode through the Request module's transport-neutral codec.
-        if let Some(raw_params) = args.get("params") {
-            let arr = raw_params
-                .as_array()
-                .ok_or_else(|| "'params' must be an array".to_string())?;
-            let binds: Vec<Value> = arr
-                .iter()
-                .map(ParamValue::decode_json)
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .map(Value::from)
-                .collect();
-
-            // Bind inside the runtime's statement frame (#2183) so a
-            // parameterized MCP query keeps the same snapshot isolation and
-            // `AS OF` resolution as textual SQL.
-            let result = self
-                .runtime
-                .execute_query_with_params(sql, &binds)
-                .map_err(|e| format!("{}", e))?;
-            let json = runtime_query_json(&result, &None, &None);
-            return json_to_string(&json).map_err(|e| format!("serialization error: {}", e));
-        }
-
-        let uc = &self.runtime;
-        let result = uc.execute_query(sql).map_err(|e| format!("{}", e))?;
-
-        let json = runtime_query_json(&result, &None, &None);
-        json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
+        self.execute_common_tool(agent_tools::QUERY_TOOL, args)
     }
 
     fn tool_ask(&self, args: &JsonValue) -> Result<String, String> {
@@ -488,34 +460,24 @@ impl McpServer {
     }
 
     fn tool_catalog(&self) -> Result<String, String> {
-        self.tool_catalog_query("SHOW COLLECTIONS", &[])
+        self.execute_common_tool(agent_tools::CATALOG_TOOL, &JsonValue::Object(Map::new()))
     }
 
     fn tool_describe_collection(&self, args: &JsonValue) -> Result<String, String> {
-        let collection = get_str_field(args, "collection")?;
-        self.tool_catalog_query(
-            "SELECT collection, name, type, nullable, default_value, is_primary_key, is_unique \
-             FROM red.columns WHERE collection = $1 ORDER BY name",
-            &[Value::text(collection)],
-        )
+        self.execute_common_tool(agent_tools::DESCRIBE_COLLECTION_TOOL, args)
     }
 
     fn tool_find_field(&self, args: &JsonValue) -> Result<String, String> {
-        let field = get_str_field(args, "field")?;
-        self.tool_catalog_query(
-            "SELECT collection, name, type, nullable FROM red.columns \
-             WHERE name = $1 ORDER BY collection, name",
-            &[Value::text(field)],
-        )
+        self.execute_common_tool(agent_tools::FIND_FIELD_TOOL, args)
     }
 
-    fn tool_catalog_query(&self, sql: &str, params: &[Value]) -> Result<String, String> {
-        let result = if params.is_empty() {
-            self.runtime.execute_query(sql)
-        } else {
-            self.runtime.execute_query_with_params(sql, params)
-        }
-        .map_err(|error| error.to_string())?;
+    fn execute_common_tool(&self, name: &str, args: &JsonValue) -> Result<String, String> {
+        let call = agent_tools::parse_call(name, args, ToolParseMode::Direct)
+            .map_err(|error| error.to_string())?;
+        let scope = self.runtime.ai_scope();
+        let result = RedToolExecutor::new(&self.runtime, &scope, ToolExecutionProfile::Direct)
+            .execute(&call)
+            .map_err(|error| error.to_string())?;
         let json = runtime_query_json(&result, &None, &None);
         json_to_string(&json).map_err(|error| format!("serialization error: {error}"))
     }

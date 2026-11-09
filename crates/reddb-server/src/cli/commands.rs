@@ -209,6 +209,12 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: mcp_flags(),
     },
     CommandDef {
+      name: "acp",
+      summary: "Start an embedded ACP agent backed by ASK",
+      usage: "red acp [--path /data/reddb.rdb]",
+      flags: acp_flags(),
+    },
+    CommandDef {
       name: "auth",
       summary: "Manage authentication (users, tokens, roles)",
       usage: "red auth <subcommand>",
@@ -911,6 +917,13 @@ fn mcp_flags() -> Vec<FlagSchema> {
     ]
 }
 
+fn acp_flags() -> Vec<FlagSchema> {
+    vec![FlagSchema::new("path")
+        .with_short('d')
+        .with_description("Path to the embedded database file (omit for in-memory)")
+        .with_default("")]
+}
+
 fn connect_flags() -> Vec<FlagSchema> {
     vec![
         FlagSchema::new("token")
@@ -1057,6 +1070,7 @@ pub fn completion_domains() -> Vec<(String, Vec<String>)> {
         ("salvage-paged-indexes".to_string(), vec![]),
         ("salvage-paged-collections".to_string(), vec![]),
         ("mcp".to_string(), vec![]),
+        ("acp".to_string(), vec![]),
         ("auth".to_string(), vec![]),
         ("connect".to_string(), vec![]),
         ("version".to_string(), vec![]),

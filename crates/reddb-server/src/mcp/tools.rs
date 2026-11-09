@@ -328,81 +328,22 @@ fn string_array_field(description: &str) -> JsonValue {
 
 /// Return all tool definitions exposed by the RedDB MCP server.
 pub fn all_tools() -> Vec<ToolDef> {
-    vec![
-        ToolDef {
-            name: "reddb_query",
-            command_id: "query.execute",
-            description: "Execute a SQL or universal query against RedDB. Supports SELECT, INSERT, UPDATE, DELETE, and graph queries (Gremlin, Cypher, SPARQL).\n\nALWAYS pass user-provided values via the `params` array using `$1`, `$2`, ... placeholders rather than interpolating them into the SQL string. Example: `{\"sql\": \"SELECT * FROM users WHERE id = $1\", \"params\": [42]}`. Interpolating user input directly is unsafe and brittle; the parameterized form is type-checked and immune to injection.",
-            input_schema: schema_with_nested(
-                vec![
-                    ("sql", string_field("SQL or universal query to execute. Use `$1`, `$2`, ... placeholders for any value that came from the user.")),
-                    ("params", {
-                        let mut items = Map::new();
-                        items.insert("description".to_string(), JsonValue::String("Bind value for the matching $N placeholder. Accepts null, boolean, number, string, array, or object.".to_string()));
-                        items.insert(
-                            "anyOf".to_string(),
-                            JsonValue::Array(vec![
-                                type_field("null"),
-                                type_field("boolean"),
-                                type_field("number"),
-                                type_field("string"),
-                                type_field("array"),
-                                type_field("object"),
-                            ]),
-                        );
-                        let mut f = Map::new();
-                        f.insert("type".to_string(), JsonValue::String("array".to_string()));
-                        f.insert("items".to_string(), JsonValue::Object(items));
-                        f.insert(
-                            "description".to_string(),
-                            JsonValue::String(
-                                "Positional bind values for `$1`, `$2`, ... in `sql`. Index 0 binds `$1`."
-                                    .to_string(),
-                            ),
-                        );
-                        JsonValue::Object(f)
-                    }),
-                ],
-                vec!["sql"],
-            ),
-        },
+    let mut tools =
+        crate::runtime::agent_tools::definitions(crate::runtime::agent_tools::ToolSurface::Mcp)
+            .into_iter()
+            .map(|definition| ToolDef {
+                name: definition.name,
+                description: definition.description,
+                command_id: definition.command_id,
+                input_schema: definition.input_schema,
+            })
+            .collect::<Vec<_>>();
+    tools.extend(vec![
         ToolDef {
             name: "reddb_collections",
             command_id: "collections.list",
             description: "List the names of collections visible to the connected identity.",
             input_schema: schema(vec![], vec![]),
-        },
-        ToolDef {
-            name: "reddb_catalog",
-            command_id: "query.execute",
-            description: "List visible collections with model, schema, size, index, and attention metadata. Remote calls execute under the connected user's tenant and policies.",
-            input_schema: schema(vec![], vec![]),
-        },
-        ToolDef {
-            name: "reddb_describe_collection",
-            command_id: "query.execute",
-            description: "Describe the fields visible on one collection using the canonical red.columns catalog. The database applies the connected user's tenant and policies before returning metadata.",
-            input_schema: schema(
-                vec![(
-                    "collection",
-                    "string",
-                    "Exact collection name to describe",
-                )],
-                vec!["collection"],
-            ),
-        },
-        ToolDef {
-            name: "reddb_find_field",
-            command_id: "query.execute",
-            description: "Find every visible collection with an exact field name using the canonical red.columns catalog. Useful before a global SELECT when the user names an attribute such as passport_number. Tenant and policy filtering is enforced by the database.",
-            input_schema: schema(
-                vec![(
-                    "field",
-                    "string",
-                    "Exact field or column name to find across visible collections",
-                )],
-                vec!["field"],
-            ),
         },
         ToolDef {
             name: "reddb_insert_row",
@@ -947,7 +888,8 @@ pub fn all_tools() -> Vec<ToolDef> {
                 vec!["uri"],
             ),
         },
-    ]
+    ]);
+    tools
 }
 
 #[cfg(test)]
@@ -1114,6 +1056,12 @@ mod tests {
             .unwrap();
         let params = props.get("params").and_then(|v| v.as_object()).unwrap();
         assert_eq!(params.get("type").and_then(|v| v.as_str()), Some("array"));
+        let accepted_param_types = params
+            .get("items")
+            .and_then(|v| v.get("anyOf"))
+            .and_then(|v| v.as_array())
+            .expect("query params enumerate the supported JSON value types");
+        assert_eq!(accepted_param_types.len(), 6);
 
         let required = tool
             .input_schema

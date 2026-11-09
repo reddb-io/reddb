@@ -674,6 +674,7 @@ mod tests {
             captured_snapshot: None,
             tenant: None,
             identity: None,
+            auth_principal: None,
             snapshot: Snapshot {
                 xid: 0,
                 in_progress: HashSet::new(),

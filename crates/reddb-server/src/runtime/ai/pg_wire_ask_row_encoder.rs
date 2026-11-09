@@ -277,6 +277,10 @@ mod tests {
     fn fixture() -> AskResult {
         AskResult {
             answer: "X is 42 [^1].".into(),
+            reasoning: crate::json::Value::Null,
+            exploratory_queries: crate::json::Value::Array(Vec::new()),
+            final_query: None,
+            final_query_params: crate::json::Value::Array(Vec::new()),
             sources_flat: vec![SourceRow {
                 urn: "urn:reddb:row:1".into(),
                 payload: "{\"k\":\"v\"}".into(),

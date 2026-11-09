@@ -29,6 +29,19 @@ Every `ASK 'question'` runs a **planning step** before anything else:
 3. The planner emits a **typed plan** (steps: retrieve / query / synthesize) validated
    by the production parser before execution. Step budget: `red.config.ai.ask.max_plan_steps`
    (default 3); per-query `STEPS N` never exceeds the config cap.
+4. Within that hard budget, the planner may call the same bounded read-only schema tools
+   exposed by MCP: `reddb_catalog`, `reddb_describe_collection`, and
+   `reddb_find_field`. It may also call parameterized `reddb_query` in `explore` phase;
+   those bounded rows guide later planning but never ground the answer. The last step is
+   reserved for exactly one `reddb_query` in `final` phase, which consolidates the answer.
+   Both phases pass through the production parser and execute with the immutable tenant,
+   structured principal, role, visible-collection set, RLS context, and snapshot captured
+   from the caller at ASK entry. Tool observations are size-bounded untrusted data.
+5. The factual result returns the natural-language `answer`, an auditable action trace in
+   `reasoning` (purposes, tools, SQL, parameters, and bounded observation summaries),
+   `exploratory_queries`, and the separate `final_query` plus `final_query_params`.
+   `reasoning` is an execution trace, not private model chain-of-thought. Only final-query
+   rows become `sources_flat` and may support answer text or citations.
 
 ### 2. Three intents, routed by the planner
 

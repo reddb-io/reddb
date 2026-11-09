@@ -151,8 +151,9 @@ and 0-based in the array. Arity and gap errors surface as MCP tool errors.
 
 Use `reddb.ask` when an agent needs an answer grounded in RedDB data. The
 tool returns the canonical ASK envelope: `answer`, `sources_flat`,
-`citations`, `validation`, `cache_hit`, provider/model metadata, token counts,
-and `cost_usd`. Every factual claim in `answer` is expected to cite a marker
+`citations`, `validation`, `reasoning`, `exploratory_queries`, `final_query`,
+`final_query_params`, `cache_hit`, provider/model metadata, token counts, and
+`cost_usd`. Every factual claim in `answer` is expected to cite a marker
 like `[^1]`; that marker maps to `sources_flat[0].urn`. The citation contract
 is [ADR 0013](../../.red/adr/0013-ask-grounding-citations.md), tracked from
 [#392](https://github.com/reddb-io/reddb/issues/392).
@@ -222,6 +223,27 @@ interpolating identifiers:
 
 Both tools use bound parameters. Their results contain only metadata visible
 to the connected identity.
+
+`reddb_catalog`, `reddb_describe_collection`, `reddb_find_field`, and
+`reddb_query` come from one protocol-neutral RedDB tool registry. MCP exposes
+that registry directly, while ASK projects its read-only agent profile and
+executes every call under the scope captured from the asking user. The embedded
+[ACP adapter](./acp.md) invokes that same ASK harness in a session protocol.
+`reddb_final_query` is deliberately ASK-only
+because it marks the terminal validation step of that harness, not a general
+database operation.
+
+When planner-first ASK is enabled, its bounded reasoning loop reuses the
+read-only subset of this tool vocabulary internally. Metadata calls,
+parameterized exploratory `reddb_query` calls, and one terminal
+`reddb_final_query` share the `ASK ... STEPS n` budget. Providers receive these
+as native typed tools; the last step is reserved for the final query. Every
+call runs with the ASK caller's principal, tenant, current statement snapshot,
+IAM, RLS, and collection
+policies; the database does not give the model a separate catalog or
+authorization path. Only final-query rows ground the answer. The result exposes
+an auditable action trace and both exploratory and final SQL without exposing
+private model chain-of-thought.
 
 ### Insert a Row
 
