@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.29.1
+
+### Patch Changes
+
+- Automate bounded per-record TTL reclamation and compound index seeks. Paged databases checkpointed by 1.29.1 use resume trailer v6; 1.29.1 reads older trailers, but older binaries cannot reopen files after the new trailer is published.
+
 ## 1.29.0
 
 ### Minor Changes
