@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.29.2
+
+### Patch Changes
+
+- [#2750](https://github.com/reddb-io/reddb/pull/2750) [`444e9d2`](https://github.com/reddb-io/reddb/commit/444e9d2effdcafa54149f8cfcfe236898e20a962) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Hide rows past their `WITH TTL` or `WITH EXPIRES AT` deadline immediately on
+  primary reads while the bounded background sweeper reclaims them physically.
+  Apply the same visibility rule to ordinary scans, point reads, grouped
+  aggregates and paged `COUNT(*)` without slowing collections that have no TTL
+  metadata. Storage and WAL formats are unchanged.
+
 ## 1.29.1
 
 ### Patch Changes
