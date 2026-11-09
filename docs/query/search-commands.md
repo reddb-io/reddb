@@ -235,13 +235,13 @@ stable URNs for UI deep-links. See
 [ADR 0013](../../.red/adr/0013-ask-grounding-citations.md) for the grounding contract.
 
 > [!IMPORTANT]
-> `ASK` is planner-first (ADR 0068). Every question runs a planning step that
-> routes it to an intent and, for a factual question, generates a read-only
-> RQL candidate that **auto-executes by default**. A candidate that is not
-> read-only is never executed under any flag. To inspect the plan and the
-> generated query without running anything, add the `PLAN` clause; to see the
-> plan (intent, retrieval, provider, cost) without even calling the planner's
-> synthesis step, use `EXPLAIN ASK`.
+> ADR 0068 defines `ASK` as planner-first, but the automatic planner rollout is
+> currently gated by `red.config.ai.ask.planner` and that gate defaults to
+> `false`. With the gate off, ordinary `ASK` uses the grounded RAG pipeline.
+> `ASK ... PLAN` always runs the planner explicitly without executing or
+> synthesizing. With the gate on, a factual question generates a read-only RQL
+> candidate that **auto-executes by default** under the caller's scope. A
+> candidate that is not read-only is never executed under any flag.
 >
 > The `EXECUTE` and `AS RQL` clauses were **removed** (clean break, no
 > deprecation window). `EXECUTE` is gone because read-only candidates now
@@ -315,7 +315,7 @@ ASK executes a retrieval-then-synthesis pipeline:
 
 3. **LLM Synthesis** — Sends the context + your question to the configured AI provider. The LLM generates a natural-language answer with inline `[^N]` markers, and RedDB validates those markers against `sources_flat`.
 
-For a **factual** question, the planner generates a read-only RQL candidate,
+When `red.config.ai.ask.planner` is enabled, a **factual** question generates a read-only RQL candidate,
 re-validates it through the production parser, and auto-executes it under your
 RLS scope; the executed rows become the grounded sources for the cited answer.
 To inspect that candidate without running it, add `PLAN`:

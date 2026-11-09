@@ -46,6 +46,20 @@ explicit connection URI:
 npx -y @reddb-io/mcp --uri file:///var/lib/reddb/agent.rdb
 ```
 
+For a remote server, pass credentials from the host environment:
+
+```bash
+npx -y @reddb-io/mcp --uri https://db.example --token "$REDDB_TOKEN"
+```
+
+Remote MCP mode exposes authenticated query, schema discovery, and grounded
+`reddb.ask`. It is read-only by default; pass `--allow-write` only when the
+agent must submit mutations. The RedDB server remains authoritative for the
+connected user's tenant, IAM, RLS, and collection policies.
+
+Bearer tokens and API keys require a TLS URI (`https://`, `reds://`, or
+`red+wss://`). HTTP Basic authentication is not supported.
+
 ## Binary resolution
 
 Resolution reuses RedDB's internal bin-resolver / asset-fetcher and follows

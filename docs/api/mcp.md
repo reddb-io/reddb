@@ -1,6 +1,6 @@
 # MCP (AI Agent Integration)
 
-RedDB includes a built-in [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes 30 tools for AI agents. This allows LLMs and agent frameworks to interact with RedDB directly.
+RedDB includes a built-in [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes more than 40 embedded tools for AI agents. This allows LLMs and agent frameworks to interact with RedDB directly.
 
 ## Starting the MCP Server
 
@@ -10,6 +10,29 @@ red mcp --path ./data/reddb.rdb
 
 The MCP server communicates over stdio using the MCP protocol, compatible with Claude Desktop, Cursor, and other MCP clients.
 
+To connect the same stdio MCP bridge to a remote RedDB server, provide a
+connection URI and credentials:
+
+```bash
+red mcp --uri https://db.example --token "$REDDB_TOKEN"
+```
+
+Remote mode deliberately advertises only the tools implemented through the
+authenticated client connection: `reddb_query`, `reddb_collections`,
+`reddb_catalog`, `reddb_describe_collection`, `reddb_find_field`, and
+`reddb.ask`. HTTP, gRPC, and RedWire endpoints are supported. Cluster and
+WebSocket MCP client URLs are not supported yet.
+
+Bearer tokens and API keys require a TLS URI (`https://`, `reds://`, or
+`red+wss://`). HTTP Basic authentication is not supported; use a bearer token
+or API key instead.
+
+MCP sessions are read-only by default. `--allow-write` permits mutating RQL
+through `reddb_query`; `--allow-admin` additionally permits administrative
+statements. These client-side limits are defense in depth: the remote server
+still authenticates the credential and remains authoritative for tenant,
+IAM, RLS, collection policy, and query authorization.
+
 ## Available Tools
 
 ### Query & Collections
@@ -17,7 +40,10 @@ The MCP server communicates over stdio using the MCP protocol, compatible with C
 | Tool | Description |
 |:-----|:------------|
 | `reddb_query` | Execute a SQL or universal query (SELECT, INSERT, UPDATE, DELETE, graph) |
-| `reddb_collections` | List all collections in the database |
+| `reddb_collections` | List visible collection names (legacy-compatible array contract) |
+| `reddb_catalog` | List visible collections with model, schema, size, index, and attention metadata |
+| `reddb_describe_collection` | Describe the visible columns and constraints of one collection |
+| `reddb_find_field` | Find visible collections containing an exact field name |
 | `reddb_scan` | Scan entities from a collection with pagination |
 | `reddb_create_collection` | Create a new collection |
 | `reddb_drop_collection` | Drop a collection |
@@ -169,6 +195,34 @@ Provider, model, determinism, and cache controls mirror the SQL ASK clauses:
 enabled yet; `reddb.ask` returns the full non-streaming ASK response as one
 tool result.
 
+In remote mode, `reddb.ask` is rendered as the canonical `ASK` RQL statement
+and sent through the same authenticated connection as `reddb_query`. It does
+not create a second authorization identity: metadata discovery, retrieval,
+generated read-only queries, and the final answer remain subject to the
+connected user's tenant and policies.
+
+### Discover Schema
+
+Agents can inspect the catalog without constructing catalog queries or
+interpolating identifiers:
+
+```json
+{
+  "tool": "reddb_describe_collection",
+  "arguments": { "collection": "travelers" }
+}
+```
+
+```json
+{
+  "tool": "reddb_find_field",
+  "arguments": { "field": "passport_number" }
+}
+```
+
+Both tools use bound parameters. Their results contain only metadata visible
+to the connected identity.
+
 ### Insert a Row
 
 ```json
@@ -285,3 +339,5 @@ export REDDB_MCP_URI='reds://user:password@db.example:5050'
 > [!TIP]
 > Embedded `memory://` and `file://` modes run inside the `red` process. Remote
 > credentials stay in the host environment and are not written to `.mcp.json`.
+> Remote calls execute as that credential; MCP does not elevate the caller or
+> bypass server-side tenant, IAM, RLS, or collection policies.

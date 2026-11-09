@@ -92,7 +92,11 @@ pub fn tool_capability(tool_name: &str) -> McpCapability {
     match tool_name {
         // Reads, introspection, planning.
         "reddb_query"
+        | "reddb.ask"
         | "reddb_collections"
+        | "reddb_catalog"
+        | "reddb_describe_collection"
+        | "reddb_find_field"
         | "reddb_kv_get"
         | "reddb_config_get"
         | "reddb_config_resolve"

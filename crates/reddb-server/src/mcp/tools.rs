@@ -369,8 +369,40 @@ pub fn all_tools() -> Vec<ToolDef> {
         ToolDef {
             name: "reddb_collections",
             command_id: "collections.list",
-            description: "List all collections in the database.",
+            description: "List the names of collections visible to the connected identity.",
             input_schema: schema(vec![], vec![]),
+        },
+        ToolDef {
+            name: "reddb_catalog",
+            command_id: "query.execute",
+            description: "List visible collections with model, schema, size, index, and attention metadata. Remote calls execute under the connected user's tenant and policies.",
+            input_schema: schema(vec![], vec![]),
+        },
+        ToolDef {
+            name: "reddb_describe_collection",
+            command_id: "query.execute",
+            description: "Describe the fields visible on one collection using the canonical red.columns catalog. The database applies the connected user's tenant and policies before returning metadata.",
+            input_schema: schema(
+                vec![(
+                    "collection",
+                    "string",
+                    "Exact collection name to describe",
+                )],
+                vec!["collection"],
+            ),
+        },
+        ToolDef {
+            name: "reddb_find_field",
+            command_id: "query.execute",
+            description: "Find every visible collection with an exact field name using the canonical red.columns catalog. Useful before a global SELECT when the user names an attribute such as passport_number. Tenant and policy filtering is enforced by the database.",
+            input_schema: schema(
+                vec![(
+                    "field",
+                    "string",
+                    "Exact field or column name to find across visible collections",
+                )],
+                vec!["field"],
+            ),
         },
         ToolDef {
             name: "reddb_insert_row",
