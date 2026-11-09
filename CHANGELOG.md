@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.29.3
+
+### Patch Changes
+
+- [#2753](https://github.com/reddb-io/reddb/pull/2753) [`c3ce3f4`](https://github.com/reddb-io/reddb/commit/c3ce3f4ca73e01d7113b3cde0549d2e482881112) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep individual-TTL cleanup responsive after a disk-resident restart by
+  limiting each cold maintenance tick to 32 row materializations. Resident
+  workloads retain the 1,000-row batch, expired rows remain immediately hidden,
+  and later ticks continue physical reclamation without blocking foreground
+  queries behind a multi-second cold delete batch.
+
 ## 1.29.2
 
 ### Patch Changes
