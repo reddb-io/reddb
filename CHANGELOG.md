@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.30.0
+
+### Minor Changes
+
+- Add the scoped ASK tool harness and ACP v1/v2 session support.
+
 ## 1.29.3
 
 ### Patch Changes
