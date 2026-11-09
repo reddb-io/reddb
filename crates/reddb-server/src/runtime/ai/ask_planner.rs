@@ -17,6 +17,8 @@
 use std::collections::BTreeSet;
 
 use crate::api::{RedDBError, RedDBResult};
+/// Typed calls and phases from the protocol-neutral RedDB tool registry.
+pub use crate::runtime::agent_tools::{QueryPhase, RedToolCall as PlannerToolCall};
 
 use super::ask_rql_planner::{validate_candidate, CandidateDisposition, ValidatedCandidate};
 
@@ -83,122 +85,6 @@ impl NarrowedSlice {
     /// failure is answered honestly, not by inventing a query over `(none)`.
     pub fn is_empty(&self) -> bool {
         self.collections.is_empty()
-    }
-}
-
-const METADATA_TOOL_ARGUMENT_BYTES_MAX: usize = 256;
-const QUERY_TOOL_ARGUMENT_BYTES_MAX: usize = 32 * 1024;
-const QUERY_TOOL_PARAMETER_BYTES_MAX: usize = 16 * 1024;
-const QUERY_TOOL_PARAMETER_COUNT_MAX: usize = 64;
-const QUERY_TOOL_PURPOSE_BYTES_MAX: usize = 512;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueryPhase {
-    Explore,
-    Final,
-}
-
-impl QueryPhase {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Explore => "explore",
-            Self::Final => "final",
-        }
-    }
-}
-
-/// A typed call to the bounded read-only tool surface shared by ASK and MCP.
-/// Metadata and exploratory query calls may feed a later planner round. A
-/// `reddb_query` is exploratory and `reddb_final_query` is terminal. Both pass
-/// through the production RQL parser and read-only classifier before execution.
-#[derive(Debug, Clone, PartialEq)]
-pub enum PlannerToolCall {
-    Catalog,
-    DescribeCollection {
-        collection: String,
-    },
-    FindField {
-        field: String,
-    },
-    Query {
-        rql: String,
-        params: Vec<crate::json::Value>,
-        purpose: String,
-        phase: QueryPhase,
-    },
-}
-
-impl PlannerToolCall {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Catalog => "reddb_catalog",
-            Self::DescribeCollection { .. } => "reddb_describe_collection",
-            Self::FindField { .. } => "reddb_find_field",
-            Self::Query {
-                phase: QueryPhase::Explore,
-                ..
-            } => "reddb_query",
-            Self::Query {
-                phase: QueryPhase::Final,
-                ..
-            } => "reddb_final_query",
-        }
-    }
-
-    pub fn step(&self) -> PlanStep {
-        match self {
-            Self::Catalog => PlanStep::Catalog,
-            Self::DescribeCollection { .. } => PlanStep::DescribeCollection,
-            Self::FindField { .. } => PlanStep::FindField,
-            Self::Query {
-                phase: QueryPhase::Explore,
-                ..
-            } => PlanStep::ExploreQuery,
-            Self::Query {
-                phase: QueryPhase::Final,
-                ..
-            } => PlanStep::Query,
-        }
-    }
-
-    pub fn arguments_json(&self) -> crate::json::Value {
-        let mut arguments = crate::json::Map::new();
-        match self {
-            Self::Catalog => {}
-            Self::DescribeCollection { collection } => {
-                arguments.insert(
-                    "collection".to_string(),
-                    crate::json::Value::String(collection.clone()),
-                );
-            }
-            Self::FindField { field } => {
-                arguments.insert(
-                    "field".to_string(),
-                    crate::json::Value::String(field.clone()),
-                );
-            }
-            Self::Query {
-                rql,
-                params,
-                purpose,
-                phase,
-            } => {
-                arguments.insert("sql".to_string(), crate::json::Value::String(rql.clone()));
-                arguments.insert(
-                    "params".to_string(),
-                    crate::json::Value::Array(params.clone()),
-                );
-                arguments.insert(
-                    "purpose".to_string(),
-                    crate::json::Value::String(purpose.clone()),
-                );
-                arguments.insert(
-                    "phase".to_string(),
-                    crate::json::Value::String(phase.as_str().to_string()),
-                );
-            }
-        }
-        crate::json::Value::Object(arguments)
     }
 }
 
@@ -340,120 +226,16 @@ where
     }
 }
 
-fn string_schema(description: &str) -> crate::json::Value {
-    let mut schema = crate::json::Map::new();
-    schema.insert(
-        "type".to_string(),
-        crate::json::Value::String("string".to_string()),
-    );
-    schema.insert(
-        "description".to_string(),
-        crate::json::Value::String(description.to_string()),
-    );
-    crate::json::Value::Object(schema)
-}
-
-fn tool_schema(
-    properties: Vec<(&str, crate::json::Value)>,
-    required: &[&str],
-) -> crate::json::Value {
-    let mut property_map = crate::json::Map::new();
-    for (name, schema) in properties {
-        property_map.insert(name.to_string(), schema);
-    }
-    let mut schema = crate::json::Map::new();
-    schema.insert(
-        "type".to_string(),
-        crate::json::Value::String("object".to_string()),
-    );
-    schema.insert(
-        "properties".to_string(),
-        crate::json::Value::Object(property_map),
-    );
-    schema.insert(
-        "required".to_string(),
-        crate::json::Value::Array(
-            required
-                .iter()
-                .map(|name| crate::json::Value::String((*name).to_string()))
-                .collect(),
-        ),
-    );
-    schema.insert(
-        "additionalProperties".to_string(),
-        crate::json::Value::Bool(false),
-    );
-    crate::json::Value::Object(schema)
-}
-
-fn query_tool_schema() -> crate::json::Value {
-    let mut params = crate::json::Map::new();
-    params.insert(
-        "type".to_string(),
-        crate::json::Value::String("array".to_string()),
-    );
-    params.insert(
-        "description".to_string(),
-        crate::json::Value::String("Values for $1, $2, ... placeholders in order".to_string()),
-    );
-    tool_schema(
-        vec![
-            (
-                "sql",
-                string_schema("Read-only RQL with $N placeholders for every data value"),
-            ),
-            ("params", crate::json::Value::Object(params)),
-            (
-                "purpose",
-                string_schema("One short auditable sentence explaining this query"),
-            ),
-        ],
-        &["sql", "params", "purpose"],
-    )
-}
-
 /// Typed registry shared by every ASK provider adapter.
 pub fn ask_tool_definitions() -> Vec<crate::ai::AiToolDefinition> {
-    vec![
-        crate::ai::AiToolDefinition {
-            name: "reddb_catalog".to_string(),
-            description: "List a bounded summary of collections visible to the asking user"
-                .to_string(),
-            input_schema: tool_schema(Vec::new(), &[]),
-        },
-        crate::ai::AiToolDefinition {
-            name: "reddb_describe_collection".to_string(),
-            description: "Describe columns of one collection visible to the asking user"
-                .to_string(),
-            input_schema: tool_schema(
-                vec![(
-                    "collection",
-                    string_schema("Exact collection name from authorized metadata"),
-                )],
-                &["collection"],
-            ),
-        },
-        crate::ai::AiToolDefinition {
-            name: "reddb_find_field".to_string(),
-            description: "Find visible collections containing an exact field name".to_string(),
-            input_schema: tool_schema(
-                vec![("field", string_schema("Exact field name to locate"))],
-                &["field"],
-            ),
-        },
-        crate::ai::AiToolDefinition {
-            name: "reddb_query".to_string(),
-            description: "Run one bounded exploratory read under the asking user's access"
-                .to_string(),
-            input_schema: query_tool_schema(),
-        },
-        crate::ai::AiToolDefinition {
-            name: "reddb_final_query".to_string(),
-            description: "Provide the terminal read-only query whose rows directly answer the user"
-                .to_string(),
-            input_schema: query_tool_schema(),
-        },
-    ]
+    crate::runtime::agent_tools::definitions(crate::runtime::agent_tools::ToolSurface::Ask)
+        .into_iter()
+        .map(|definition| crate::ai::AiToolDefinition {
+            name: definition.name.to_string(),
+            description: definition.description.to_string(),
+            input_schema: definition.input_schema,
+        })
+        .collect()
 }
 
 /// How the planner routed a plan after candidate validation.
@@ -659,175 +441,22 @@ fn parse_tool_call(value: &crate::json::Value) -> RedDBResult<Option<PlannerTool
         .ok_or_else(|| RedDBError::Query("ASK planner tool is missing `name`".to_string()))?;
     let arguments = object
         .get("arguments")
-        .and_then(crate::json::Value::as_object);
-
-    let call = match name {
-        "reddb_catalog" => PlannerToolCall::Catalog,
-        "reddb_describe_collection" => PlannerToolCall::DescribeCollection {
-            collection: bounded_tool_argument(
-                arguments,
-                "collection",
-                METADATA_TOOL_ARGUMENT_BYTES_MAX,
-            )?,
-        },
-        "reddb_find_field" => PlannerToolCall::FindField {
-            field: bounded_tool_argument(arguments, "field", METADATA_TOOL_ARGUMENT_BYTES_MAX)?,
-        },
-        "reddb_query" | "reddb_final_query" => {
-            let rql = bounded_tool_argument(arguments, "sql", QUERY_TOOL_ARGUMENT_BYTES_MAX)?;
-            let params = bounded_query_params(arguments)?;
-            let purpose =
-                bounded_optional_tool_argument(arguments, "purpose", QUERY_TOOL_PURPOSE_BYTES_MAX)?
-                    .unwrap_or_else(|| {
-                        "Answer the user's question from authorized rows".to_string()
-                    });
-            let phase = match arguments
-                .and_then(|arguments| arguments.get("phase"))
-                .and_then(crate::json::Value::as_str)
-                .unwrap_or("final")
-            {
-                "explore" => QueryPhase::Explore,
-                "final" => QueryPhase::Final,
-                other => {
-                    return Err(RedDBError::Query(format!(
-                        "ASK planner reddb_query phase must be `explore` or `final`, got `{other}`"
-                    )))
-                }
-            };
-            PlannerToolCall::Query {
-                rql,
-                params,
-                purpose,
-                phase,
-            }
-        }
-        other => {
-            return Err(RedDBError::Query(format!(
-                "ASK planner requested unsupported tool `{other}`"
-            )))
-        }
-    };
-    Ok(Some(call))
+        .cloned()
+        .unwrap_or_else(|| crate::json::Value::Object(crate::json::Map::new()));
+    crate::runtime::agent_tools::parse_call(
+        name,
+        &arguments,
+        crate::runtime::agent_tools::ToolParseMode::AskLegacy,
+    )
+    .map(Some)
 }
 
 fn parse_native_tool_call(call: &crate::ai::AiToolCall) -> RedDBResult<PlannerToolCall> {
-    let mut arguments = call.arguments.as_object().cloned().ok_or_else(|| {
-        RedDBError::Query(format!(
-            "ASK planner tool `{}` arguments must be an object",
-            call.name
-        ))
-    })?;
-    let parser_name = match call.name.as_str() {
-        "reddb_query" => {
-            arguments.insert(
-                "phase".to_string(),
-                crate::json::Value::String("explore".to_string()),
-            );
-            "reddb_query"
-        }
-        "reddb_final_query" => {
-            arguments.insert(
-                "phase".to_string(),
-                crate::json::Value::String("final".to_string()),
-            );
-            "reddb_final_query"
-        }
-        other => other,
-    };
-    let mut envelope = crate::json::Map::new();
-    envelope.insert(
-        "name".to_string(),
-        crate::json::Value::String(parser_name.to_string()),
-    );
-    envelope.insert(
-        "arguments".to_string(),
-        crate::json::Value::Object(arguments),
-    );
-    parse_tool_call(&crate::json::Value::Object(envelope))?.ok_or_else(|| {
-        RedDBError::Query("ASK planner returned an empty native tool call".to_string())
-    })
-}
-
-fn bounded_optional_tool_argument(
-    arguments: Option<&crate::json::Map<String, crate::json::Value>>,
-    name: &str,
-    bytes_max: usize,
-) -> RedDBResult<Option<String>> {
-    let Some(value) = arguments.and_then(|arguments| arguments.get(name)) else {
-        return Ok(None);
-    };
-    let value = value.as_str().ok_or_else(|| {
-        RedDBError::Query(format!(
-            "ASK planner tool argument `{name}` must be a string"
-        ))
-    })?;
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(None);
-    }
-    if value.len() > bytes_max {
-        return Err(RedDBError::Query(format!(
-            "ASK planner tool argument `{name}` exceeds {bytes_max} bytes"
-        )));
-    }
-    Ok(Some(value.to_string()))
-}
-
-fn bounded_query_params(
-    arguments: Option<&crate::json::Map<String, crate::json::Value>>,
-) -> RedDBResult<Vec<crate::json::Value>> {
-    let Some(value) = arguments.and_then(|arguments| arguments.get("params")) else {
-        return Ok(Vec::new());
-    };
-    let params = value.as_array().ok_or_else(|| {
-        RedDBError::Query("ASK planner reddb_query `params` must be an array".to_string())
-    })?;
-    if params.len() > QUERY_TOOL_PARAMETER_COUNT_MAX {
-        return Err(RedDBError::Query(format!(
-            "ASK planner reddb_query `params` exceeds {QUERY_TOOL_PARAMETER_COUNT_MAX} values"
-        )));
-    }
-    let encoded = crate::json::to_vec(value).map_err(|err| {
-        RedDBError::Query(format!(
-            "ASK planner reddb_query `params` cannot be serialized: {err}"
-        ))
-    })?;
-    if encoded.len() > QUERY_TOOL_PARAMETER_BYTES_MAX {
-        return Err(RedDBError::Query(format!(
-            "ASK planner reddb_query `params` exceeds {QUERY_TOOL_PARAMETER_BYTES_MAX} bytes"
-        )));
-    }
-    for param in params {
-        crate::runtime::query_request::ParamValue::decode_json(param).map_err(|err| {
-            RedDBError::Query(format!(
-                "ASK planner reddb_query contains an invalid parameter: {err}"
-            ))
-        })?;
-    }
-    Ok(params.to_vec())
-}
-
-fn bounded_tool_argument(
-    arguments: Option<&crate::json::Map<String, crate::json::Value>>,
-    name: &str,
-    bytes_max: usize,
-) -> RedDBResult<String> {
-    let value = arguments
-        .and_then(|arguments| arguments.get(name))
-        .and_then(crate::json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            RedDBError::Query(format!(
-                "ASK planner tool is missing string argument `{name}`"
-            ))
-        })?;
-    if value.len() > bytes_max {
-        return Err(RedDBError::Query(format!(
-            "ASK planner tool argument `{name}` exceeds {bytes_max} bytes"
-        )));
-    }
-    Ok(value.to_string())
+    crate::runtime::agent_tools::parse_call(
+        &call.name,
+        &call.arguments,
+        crate::runtime::agent_tools::ToolParseMode::AskNative,
+    )
 }
 
 /// Read the `suggestion` array of a how-to plan into raw statements. Each item
@@ -1024,12 +653,12 @@ where
                 // leave ASK without an evidence-producing final query.
                 if budget.remaining() <= 1 {
                     return Ok(AgentLoopOutcome::BudgetExhausted(BudgetExhausted {
-                        attempted: call.step(),
+                        attempted: planner_tool_step(call),
                         executed_steps: budget.executed_count(),
                         max_steps: budget.max_steps(),
                     }));
                 }
-                if let Err(exhausted) = budget.charge(call.step()) {
+                if let Err(exhausted) = budget.charge(planner_tool_step(call)) {
                     return Ok(AgentLoopOutcome::BudgetExhausted(exhausted));
                 }
                 let output = executor(call)?;
@@ -1201,12 +830,12 @@ where
             PlanRouting::UseTool { call } => {
                 if budget.remaining() <= 1 {
                     return Ok(AgentLoopOutcome::BudgetExhausted(BudgetExhausted {
-                        attempted: call.step(),
+                        attempted: planner_tool_step(call),
                         executed_steps: budget.executed_count(),
                         max_steps: budget.max_steps(),
                     }));
                 }
-                if let Err(exhausted) = budget.charge(call.step()) {
+                if let Err(exhausted) = budget.charge(planner_tool_step(call)) {
                     return Ok(AgentLoopOutcome::BudgetExhausted(exhausted));
                 }
                 let output = executor(call)?;
@@ -1285,6 +914,22 @@ pub enum PlanStep {
     ExploreQuery,
     /// The read-only RQL candidate the planner emitted.
     Query,
+}
+
+fn planner_tool_step(call: &PlannerToolCall) -> PlanStep {
+    match call {
+        PlannerToolCall::Catalog => PlanStep::Catalog,
+        PlannerToolCall::DescribeCollection { .. } => PlanStep::DescribeCollection,
+        PlannerToolCall::FindField { .. } => PlanStep::FindField,
+        PlannerToolCall::Query {
+            phase: QueryPhase::Explore,
+            ..
+        } => PlanStep::ExploreQuery,
+        PlannerToolCall::Query {
+            phase: QueryPhase::Final,
+            ..
+        } => PlanStep::Query,
+    }
 }
 
 impl PlanStep {
@@ -1726,7 +1371,10 @@ mod tests {
         .expect_err("params must be an array");
         assert!(not_an_array.to_string().contains("must be an array"));
 
-        let params = vec![crate::json::Value::Null; QUERY_TOOL_PARAMETER_COUNT_MAX + 1];
+        let params = vec![
+            crate::json::Value::Null;
+            crate::runtime::agent_tools::ASK_QUERY_PARAMETER_COUNT_MAX + 1
+        ];
         let mut arguments = crate::json::Map::new();
         arguments.insert(
             "sql".to_string(),
@@ -1777,7 +1425,8 @@ mod tests {
 
     #[test]
     fn planner_bounds_metadata_arguments_without_truncating_normal_queries() {
-        let oversized_field = "x".repeat(METADATA_TOOL_ARGUMENT_BYTES_MAX + 1);
+        let oversized_field =
+            "x".repeat(crate::runtime::agent_tools::METADATA_ARGUMENT_BYTES_MAX + 1);
         let metadata_plan = format!(
             "{{\"intent\":\"factual\",\"tool\":{{\"name\":\"reddb_find_field\",\
              \"arguments\":{{\"field\":\"{oversized_field}\"}}}}}}"

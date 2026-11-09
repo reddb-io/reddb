@@ -6,39 +6,6 @@ use reddb_rql::ast::Expr;
 const ASK_AUDIT_COLLECTION: &str = "red_ask_audit";
 const ASK_SYNTHESIS_SYSTEM_PROMPT: &str = include_str!("ai/prompts/ask_synthesis.txt");
 
-/// Immutable authorization context shared by every ASK metadata,
-/// exploratory, and final query. Every execution reinstalls this exact caller
-/// scope before entering the query engine.
-struct AskToolContext<'a> {
-    runtime: &'a RedDBRuntime,
-    scope: &'a crate::runtime::statement_frame::EffectiveScope,
-}
-
-impl<'a> AskToolContext<'a> {
-    fn new(
-        runtime: &'a RedDBRuntime,
-        scope: &'a crate::runtime::statement_frame::EffectiveScope,
-    ) -> Self {
-        Self { runtime, scope }
-    }
-
-    fn execute_tool(
-        &self,
-        call: &crate::runtime::ai::ask_planner::PlannerToolCall,
-    ) -> RedDBResult<String> {
-        self.runtime.execute_ask_planner_tool(self.scope, call)
-    }
-
-    fn execute_candidate(
-        &self,
-        rql: &str,
-        params: &[crate::json::Value],
-    ) -> RedDBResult<RuntimeQueryResult> {
-        self.runtime
-            .execute_planner_candidate(self.scope, rql, params)
-    }
-}
-
 fn mark_table_scan_as_index_seek(
     node: &mut crate::storage::query::planner::CanonicalLogicalNode,
     index_name: &str,
@@ -2278,8 +2245,8 @@ impl RedDBRuntime {
         // Production and unit tests share this state machine. The executor is
         // deliberately narrow: fixed parameterized metadata reads and
         // parser-validated exploratory reads can run between planner rounds.
-        let tool_context = AskToolContext::new(self, &scope);
-        let tool_executor = |call: &ask_planner::PlannerToolCall| tool_context.execute_tool(call);
+        let tool_executor =
+            |call: &ask_planner::PlannerToolCall| self.execute_ask_planner_tool(&scope, call);
         let (route, observations) = match ask_planner::run_bounded_chat_agent_loop(
             &ask.question,
             &slice,
@@ -2376,8 +2343,7 @@ impl RedDBRuntime {
         settings: &crate::runtime::ai::cost_guard::Settings,
         transport: crate::runtime::ai::transport::AiTransport,
     ) -> RedDBResult<RuntimeQueryResult> {
-        let executed =
-            AskToolContext::new(self, scope).execute_candidate(candidate_rql, candidate_params)?;
+        let executed = self.execute_planner_candidate(scope, candidate_rql, candidate_params)?;
         let (sources_flat_json, source_urns, source_payloads) =
             planner_sources_from_result(&executed.result);
         let sources_flat_bytes =
@@ -2591,8 +2557,18 @@ impl RedDBRuntime {
         candidate_rql: &str,
         candidate_params: &[crate::json::Value],
     ) -> RedDBResult<RuntimeQueryResult> {
-        let params = planner_params_to_values(candidate_params)?;
-        self.execute_planner_query(scope, candidate_rql, &params)
+        let call = crate::runtime::agent_tools::RedToolCall::Query {
+            rql: candidate_rql.to_string(),
+            params: candidate_params.to_vec(),
+            purpose: "Execute the ASK final validation query".to_string(),
+            phase: crate::runtime::agent_tools::QueryPhase::Final,
+        };
+        crate::runtime::agent_tools::RedToolExecutor::new(
+            self,
+            scope,
+            crate::runtime::agent_tools::ToolExecutionProfile::Ask,
+        )
+        .execute(&call)
     }
 
     /// Execute one fixed metadata tool under the same captured scope used by
@@ -2603,60 +2579,24 @@ impl RedDBRuntime {
         scope: &crate::runtime::statement_frame::EffectiveScope,
         call: &crate::runtime::ai::ask_planner::PlannerToolCall,
     ) -> RedDBResult<String> {
-        use crate::runtime::ai::ask_planner::PlannerToolCall;
-
-        let result = match call {
-            PlannerToolCall::Catalog => self.execute_planner_query(
-                scope,
-                "SELECT name, model, schema_mode, entities, indices \
-                 FROM red.collections WHERE internal = false ORDER BY name LIMIT 128",
-                &[],
-            )?,
-            PlannerToolCall::DescribeCollection { collection } => self.execute_planner_query(
-                scope,
-                "SELECT collection, name, type, nullable, default_value, is_primary_key, \
-                 is_unique FROM red.columns WHERE collection = $1 ORDER BY name LIMIT 128",
-                &[Value::text(collection.clone())],
-            )?,
-            PlannerToolCall::FindField { field } => self.execute_planner_query(
-                scope,
-                "SELECT collection, name, type, nullable FROM red.columns \
-                 WHERE name = $1 ORDER BY collection, name LIMIT 128",
-                &[Value::text(field.clone())],
-            )?,
-            PlannerToolCall::Query {
-                rql,
-                params,
-                phase: crate::runtime::ai::ask_planner::QueryPhase::Explore,
-                ..
-            } => {
-                let params = planner_params_to_values(params)?;
-                self.execute_planner_query(scope, rql, &params)?
-            }
-            PlannerToolCall::Query {
+        if matches!(
+            call,
+            crate::runtime::agent_tools::RedToolCall::Query {
                 phase: crate::runtime::ai::ask_planner::QueryPhase::Final,
                 ..
-            } => {
-                return Err(RedDBError::Internal(
-                    "ASK final query reached the exploratory tool executor".to_string(),
-                ));
             }
-        };
-        Ok(planner_tool_observation(&result.result))
-    }
-
-    fn execute_planner_query(
-        &self,
-        scope: &crate::runtime::statement_frame::EffectiveScope,
-        rql: &str,
-        params: &[Value],
-    ) -> RedDBResult<RuntimeQueryResult> {
-        let _scope_guard = crate::runtime::ask_pipeline::AskScopeGuard::install(self, scope);
-        if params.is_empty() {
-            self.execute_query(rql)
-        } else {
-            self.execute_query_with_params(rql, params)
+        ) {
+            return Err(RedDBError::Internal(
+                "ASK final query reached the exploratory tool executor".to_string(),
+            ));
         }
+        let result = crate::runtime::agent_tools::RedToolExecutor::new(
+            self,
+            scope,
+            crate::runtime::agent_tools::ToolExecutionProfile::Ask,
+        )
+        .execute(call)?;
+        Ok(planner_tool_observation(&result.result))
     }
 
     /// One synthesis attempt against a single provider: cost-metered LLM
@@ -5063,21 +5003,6 @@ fn planner_tool_observation(result: &UnifiedResult) -> String {
     observation
 }
 
-fn planner_params_to_values(params: &[crate::json::Value]) -> RedDBResult<Vec<Value>> {
-    params
-        .iter()
-        .map(|param| {
-            crate::runtime::query_request::ParamValue::decode_json(param)
-                .map(Value::from)
-                .map_err(|err| {
-                    RedDBError::Query(format!(
-                        "ASK planner query contains an invalid bind parameter: {err}"
-                    ))
-                })
-        })
-        .collect()
-}
-
 fn planner_exploratory_queries_json(
     observations: &[crate::runtime::ai::ask_planner::PlannerObservation],
 ) -> crate::json::Value {
@@ -5931,6 +5856,32 @@ mod planner_scope_tests {
         assert!(!output.contains("people"), "{output}");
         assert!(!output.contains("visits"), "{output}");
         assert!(crate::runtime::impl_core::current_tenant().is_none());
+    }
+
+    #[test]
+    fn ask_executor_rejects_a_mutation_even_after_argument_parsing() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE protected (id INTEGER PRIMARY KEY)")
+            .expect("create table");
+        let scope = runtime.ai_scope();
+
+        let error = runtime
+            .execute_ask_planner_tool(
+                &scope,
+                &PlannerToolCall::Query {
+                    rql: "DROP TABLE protected".to_string(),
+                    params: Vec::new(),
+                    purpose: "attempt a mutation".to_string(),
+                    phase: QueryPhase::Explore,
+                },
+            )
+            .expect_err("the ASK executor must enforce read-only queries itself");
+
+        assert!(error.to_string().contains("read-only"), "{error}");
+        runtime
+            .execute_query("SELECT * FROM protected")
+            .expect("rejected mutation did not drop the table");
     }
 
     #[test]

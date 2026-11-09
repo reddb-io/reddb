@@ -223,6 +223,15 @@ interpolating identifiers:
 Both tools use bound parameters. Their results contain only metadata visible
 to the connected identity.
 
+`reddb_catalog`, `reddb_describe_collection`, `reddb_find_field`, and
+`reddb_query` come from one protocol-neutral RedDB tool registry. MCP exposes
+that registry directly, while ASK projects its read-only agent profile and
+executes every call under the scope captured from the asking user. The registry
+also defines the future ACP projection; RedDB does not yet expose an ACP
+transport or session server. `reddb_final_query` is deliberately ASK-only
+because it marks the terminal validation step of that harness, not a general
+database operation.
+
 When planner-first ASK is enabled, its bounded reasoning loop reuses the
 read-only subset of this tool vocabulary internally. Metadata calls,
 parameterized exploratory `reddb_query` calls, and one terminal
