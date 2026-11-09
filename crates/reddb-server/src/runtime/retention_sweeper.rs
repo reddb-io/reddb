@@ -169,6 +169,12 @@ pub(crate) fn maintenance_timestamp(
 /// sweeper never holds locks long enough to block the write path.
 pub(crate) const DEFAULT_SWEEPER_BATCH: usize = 1_000;
 
+/// A cold delete materializes each row before publishing its tombstone. Keep
+/// one disk-resident tick small enough that foreground reads can run between
+/// maintenance batches. The hot resident path retains the 1,000-row default.
+/// Qualification bound: 32 cold rows x about 30 ms/row is about one second.
+pub(crate) const DISK_RESIDENT_SWEEPER_BATCH: usize = 32;
+
 /// Per-collection sweeper state surfaced on `red.retention`.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SweeperState {
@@ -698,6 +704,54 @@ mod tests {
         assert_eq!(row_count(&runtime, "ttl_restart"), 0);
         drop(manager);
         drop(runtime);
+    }
+
+    #[test]
+    fn disk_resident_ttl_tick_caps_cold_delete_work() {
+        let directory = tempfile::tempdir().expect("TTL cold-delete fixture");
+        let options = RedDBOptions::persistent(directory.path().join("ttl-cold.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true);
+        {
+            let mut runtime = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+            drop(runtime.background_tasks.take());
+            runtime
+                .execute_query("CREATE TABLE ttl_cold (id INTEGER)")
+                .expect("table");
+            let values = (0..64)
+                .map(|id| format!("({id})"))
+                .collect::<Vec<_>>()
+                .join(",");
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO ttl_cold (id) VALUES {values} WITH EXPIRES AT 1"
+                ))
+                .expect("expired rows");
+            runtime.flush().expect("persist cold TTL fixture");
+        }
+
+        let mut runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options)
+        })
+        .expect("reopen disk-resident runtime");
+        drop(runtime.background_tasks.take());
+
+        let swept = runtime.sweep_individual_ttl_tick_at(DEFAULT_SWEEPER_BATCH, 2);
+        assert_eq!(
+            swept, 32,
+            "one disk-resident maintenance tick must cap cold row materialization"
+        );
+        assert_eq!(
+            runtime
+                .db()
+                .store()
+                .get_collection("ttl_cold")
+                .expect("cold TTL collection")
+                .scheduled_metadata_expiry_count(),
+            32,
+            "logical expiry must remain queued for later physical ticks"
+        );
+        assert_eq!(row_count(&runtime, "ttl_cold"), 0);
     }
 
     #[test]

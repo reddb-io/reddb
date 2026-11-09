@@ -188,6 +188,11 @@ impl RedDBRuntime {
         }
 
         let store = self.inner.db.store();
+        let batch_size = if store.config().resident_memory_bytes_max.is_some() {
+            batch_size.min(super::retention_sweeper::DISK_RESIDENT_SWEEPER_BATCH)
+        } else {
+            batch_size
+        };
         let mut collections = store.list_collections();
         collections.sort();
         if collections.is_empty() {
