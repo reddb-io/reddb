@@ -37,9 +37,9 @@ pub const DEFAULT_POOL_SIZE: usize = 4;
 /// Async handle to a remote RedDB server over gRPC.
 ///
 /// Internally either a single-endpoint client or a primary +
-/// read-replica cluster. Writes always go to the primary; reads
-/// round-robin across the replicas (or the primary when the replica
-/// pool is empty / `force_primary` is set).
+/// read-replica cluster. Writes and arbitrary queries always go to the
+/// primary. Explicitly local reads use health-aware replica selection (or the
+/// primary when the replica pool is empty / `force_primary` is set).
 pub struct GrpcClient {
     /// Active primary, replica pools, and the membership that names them.
     /// They move under one lock so a request cannot observe a promoted
@@ -184,9 +184,10 @@ impl GrpcClient {
         })
     }
 
-    /// Multi-host gRPC client. Writes go to `primary`; reads
-    /// round-robin across `replicas` unless `force_primary` is set
-    /// (equivalent to passing `?route=primary` in the URI).
+    /// Multi-host gRPC client. Writes and arbitrary queries go to `primary`;
+    /// explicitly local reads use health-aware selection across `replicas`
+    /// unless `force_primary` is set (equivalent to passing
+    /// `?route=primary` in the URI).
     pub async fn connect_cluster(
         primary: String,
         replicas: Vec<String>,

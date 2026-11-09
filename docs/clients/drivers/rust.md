@@ -111,13 +111,20 @@ let rows = client
 | `memory://`  | Embedded in-memory engine  | —            | `embedded`         |
 | `file:///…`  | Embedded on-disk engine    | —            | `embedded`         |
 
-Topology / multi-host (read-replicas + primary failover):
+Topology / multi-host (primary + read replicas):
 
 ```rust
+use reddb_client::QueryOptions;
+
 let db = Reddb::connect("grpc://primary:55055,replica1:55055,replica2:55055").await?;
+let rows = db
+    .query_with_options("SELECT * FROM users", QueryOptions::local())
+    .await?;
 ```
 
-The driver round-robins reads across replicas and pins writes to the primary. See [Connection Strings — gRPC cluster](../connection-strings.md#grpc-cluster-primary--read-replicas).
+The driver pins writes and arbitrary `query()` calls to the primary. Explicit
+read-consistency options enable health-aware replica routing. See [Connection
+Strings — gRPC cluster](../connection-strings.md#grpc-cluster-primary--read-replicas).
 
 ## What's in the crate
 

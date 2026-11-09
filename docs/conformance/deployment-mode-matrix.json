@@ -37,9 +37,10 @@
           "status": "partial",
           "tests": [
             "crates/reddb-client/tests/grpc_pool_concurrency.rs",
-            "crates/reddb-client/tests/topology_e2e.rs"
+            "crates/reddb-client/tests/topology_e2e.rs",
+            "tests/grouped/replication/e2e_cli_primary_replica.rs"
           ],
-          "gap": "Promotion and consistency routing use mock endpoints; the public client is not yet in the real primary/replica CLI journey."
+          "gap": "The public facade now proves primary-pinned writes, explicit local reads, and fail-closed primary loss against real CLI processes. Promotion and post-promotion writes remain mock-backed because the CLI runtime has no promotion operation."
         },
         "cluster": {
           "status": "partial",
