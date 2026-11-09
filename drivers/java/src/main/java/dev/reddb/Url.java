@@ -19,8 +19,8 @@ import java.util.Map;
  *   reds://[user[:pass]@]host[:port][?...]     RedWire over TLS
  *   http://host[:port]/                        HTTP (REST)
  *   https://host[:port]/                       HTTPS
- *   red:///abs/path/file.rdb                   embedded (out of scope here)
- *   red://memory  red://:memory  red://:memory:  embedded in-memory (out of scope)
+ *   file:///abs/path/file.rdb  red:///abs/path  embedded single-file
+ *   memory://  red://memory                    embedded in-memory
  * </pre>
  *
  * Default ports follow the RedDB listener contract: RedWire 5050,
@@ -73,7 +73,7 @@ public final class Url {
     /** True for `reds://` or `https://`. */
     public boolean isTls() { return kind == Kind.REDWIRE_TLS || kind == Kind.HTTPS; }
 
-    /** True for either embedded variant — the Java driver doesn't ship an embedded engine. */
+    /** True for either embedded variant. */
     public boolean isEmbedded() { return kind == Kind.EMBEDDED_FILE || kind == Kind.EMBEDDED_MEMORY; }
 
     /**
@@ -85,8 +85,9 @@ public final class Url {
             throw new IllegalArgumentException(
                 "connect requires a URI string (e.g. 'red://localhost:5050')");
         }
-        // Embedded shortcuts — `red:`, `red:/`, `red://`, `red://memory`, etc.
-        if (uri.equals("red:") || uri.equals("red:/") || uri.equals("red://")
+        // Embedded shortcuts — canonical memory:// / file:// plus red:// aliases.
+        if (uri.equals("memory:") || uri.equals("memory://")
+            || uri.equals("red:") || uri.equals("red:/") || uri.equals("red://")
             || uri.equals("red://memory") || uri.equals("red://memory/")
             || uri.equals("red://:memory") || uri.equals("red://:memory:")) {
             return new Builder().original(uri).kind(Kind.EMBEDDED_MEMORY).build();
@@ -94,6 +95,18 @@ public final class Url {
         if (uri.startsWith("red:///")) {
             String p = uri.substring("red://".length()); // keeps leading '/'
             return new Builder().original(uri).kind(Kind.EMBEDDED_FILE).path(p).build();
+        }
+        if (uri.toLowerCase(Locale.ROOT).startsWith("file://")) {
+            URI parsed = parseAsJavaUri(uri);
+            if (parsed.getHost() != null && !parsed.getHost().isEmpty()
+                && !parsed.getHost().equals("localhost")) {
+                throw new IllegalArgumentException("embedded file URI must not name a remote host");
+            }
+            if (parsed.getPath() == null || parsed.getPath().isEmpty()) {
+                throw new IllegalArgumentException("embedded file URI is missing a path");
+            }
+            return new Builder().original(uri).kind(Kind.EMBEDDED_FILE)
+                .path(parsed.getPath()).build();
         }
 
         String scheme = schemeOf(uri);

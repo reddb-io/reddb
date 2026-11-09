@@ -31,19 +31,14 @@ fn readFixtureManifest(allocator: std.mem.Allocator) ![]u8 {
         "../../../testdata/conformance/redwire/params/manifest.json",
     };
 
-    const io = std.Options.debug_io;
     for (candidates) |path| {
-        const buffer = try allocator.alloc(u8, 1024 * 1024);
-        errdefer allocator.free(buffer);
-        const bytes = std.Io.Dir.cwd().readFile(io, path, buffer) catch |err| switch (err) {
+        const bytes = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch |err| switch (err) {
             error.FileNotFound => {
-                allocator.free(buffer);
                 continue;
             },
             else => return err,
         };
-        if (bytes.len == buffer.len) return buffer;
-        return try allocator.realloc(buffer, bytes.len);
+        return bytes;
     }
     return error.FixtureManifestNotFound;
 }

@@ -20,6 +20,7 @@
 #![cfg(feature = "grpc")]
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -27,7 +28,7 @@ use reddb_client::bookmark_routing::{BookmarkTarget, CausalReadOptions, QueryOpt
 use reddb_client::grpc::GrpcClient;
 use reddb_client::topology::ClusterMembership;
 use reddb_client::RedDBClient;
-use reddb_client::ValueOut;
+use reddb_client::{JsonValue, ValueOut};
 use reddb_grpc_proto::red_db_server::{RedDb, RedDbServer};
 use reddb_grpc_proto::*;
 use reddb_wire::topology::{Endpoint as WireEndpoint, ReplicaInfo};
@@ -75,6 +76,7 @@ macro_rules! stub_rpc {
 
 struct SlowMock {
     endpoint_label: &'static str,
+    write_calls: Arc<AtomicUsize>,
 }
 
 #[tonic::async_trait]
@@ -121,6 +123,17 @@ impl RedDb for SlowMock {
                 self.endpoint_label
             ),
             affected_rows: 0,
+        }))
+    }
+
+    async fn create_row(
+        &self,
+        _request: Request<JsonCreateRequest>,
+    ) -> Result<Response<EntityReply>, Status> {
+        self.write_calls.fetch_add(1, Ordering::AcqRel);
+        Ok(Response::new(EntityReply {
+            id: 1,
+            ..EntityReply::default()
         }))
     }
 
@@ -246,7 +259,6 @@ impl RedDb for SlowMock {
     stub_rpc!(graph_hits, JsonPayloadRequest, PayloadReply);
     stub_rpc!(graph_cycles, JsonPayloadRequest, PayloadReply);
     stub_rpc!(graph_topological_sort, JsonPayloadRequest, PayloadReply);
-    stub_rpc!(create_row, JsonCreateRequest, EntityReply);
     stub_rpc!(create_node, JsonCreateRequest, EntityReply);
     stub_rpc!(create_edge, JsonCreateRequest, EntityReply);
     stub_rpc!(create_vector, JsonCreateRequest, EntityReply);
@@ -299,13 +311,27 @@ async fn spawn_slow_mock() -> (SocketAddr, oneshot::Sender<()>) {
 }
 
 async fn spawn_labeled_mock(endpoint_label: &'static str) -> (SocketAddr, oneshot::Sender<()>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let (addr, shutdown, _write_calls) = spawn_labeled_tracking_mock(endpoint_label).await;
+    (addr, shutdown)
+}
+
+async fn spawn_labeled_tracking_mock(
+    endpoint_label: &'static str,
+) -> (SocketAddr, oneshot::Sender<()>, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock gRPC listener");
+    let addr = listener.local_addr().expect("mock listener address");
     let incoming = TcpListenerStream::new(listener);
     let (tx, rx) = oneshot::channel::<()>();
+    let write_calls = Arc::new(AtomicUsize::new(0));
+    let server_write_calls = Arc::clone(&write_calls);
     tokio::spawn(async move {
         Server::builder()
-            .add_service(RedDbServer::new(SlowMock { endpoint_label }))
+            .add_service(RedDbServer::new(SlowMock {
+                endpoint_label,
+                write_calls: server_write_calls,
+            }))
             .serve_with_incoming_shutdown(incoming, async {
                 let _ = rx.await;
             })
@@ -315,7 +341,7 @@ async fn spawn_labeled_mock(endpoint_label: &'static str) -> (SocketAddr, onesho
     // Tonic spins up lazily; give the listener a tick to start
     // accepting before we connect.
     tokio::time::sleep(Duration::from_millis(20)).await;
-    (addr, tx)
+    (addr, tx, write_calls)
 }
 
 fn endpoint_label(result: &reddb_client::QueryResult) -> &str {
@@ -453,8 +479,7 @@ async fn pool_runs_queries_in_parallel_vs_legacy_mutex_baseline() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn causal_query_falls_back_to_primary_when_replica_is_stale_but_tokenless_read_stays_replica_default(
-) {
+async fn generic_query_stays_on_primary_and_causal_query_rejects_a_stale_replica() {
     let (primary_addr, primary_shutdown) = spawn_labeled_mock("primary").await;
     let (replica_addr, replica_shutdown) = spawn_labeled_mock("replica").await;
     let primary_url = format!("http://{primary_addr}");
@@ -473,14 +498,14 @@ async fn causal_query_falls_back_to_primary_when_replica_is_stale_but_tokenless_
         vec![replica_url.clone()],
     ));
 
-    let tokenless = client
+    let generic = client
         .query("select endpoint")
         .await
-        .expect("tokenless read");
+        .expect("generic query");
     assert_eq!(
-        endpoint_label(&tokenless),
-        "replica",
-        "ordinary reads keep the eventual-consistency replica default"
+        endpoint_label(&generic),
+        "primary",
+        "arbitrary SQL stays on the primary because SELECT may be effectful"
     );
 
     let causal = client
@@ -596,4 +621,67 @@ async fn query_options_route_each_read_consistency_level_with_lagging_replica() 
     let _ = primary_shutdown.send(());
     let _ = stale_shutdown.send(());
     let _ = fresh_shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn topology_promotion_moves_strong_reads_and_writes_to_the_new_primary() {
+    let (old_addr, old_shutdown, old_writes) = spawn_labeled_tracking_mock("old-primary").await;
+    let (new_addr, new_shutdown, new_writes) = spawn_labeled_tracking_mock("new-primary").await;
+    let old_url = format!("http://{old_addr}");
+    let new_url = format!("http://{new_addr}");
+
+    let client = GrpcClient::connect_cluster_with_pool_size(
+        old_url.clone(),
+        vec![new_url.clone()],
+        false,
+        1,
+    )
+    .await
+    .expect("connect initial topology");
+
+    client
+        .apply_membership(&ClusterMembership {
+            primary: WireEndpoint {
+                addr: new_url.clone(),
+                region: "us-east-1".into(),
+            },
+            replicas: vec![ReplicaInfo {
+                addr: old_url.clone(),
+                region: "us-east-1".into(),
+                healthy: true,
+                lag_ms: 0,
+                last_applied_lsn: 100,
+                rebootstrapping: false,
+            }],
+            epoch: 2,
+        })
+        .await
+        .expect("apply promoted topology");
+
+    assert_eq!(
+        client.endpoint(),
+        old_url,
+        "URI seed remains diagnostic history"
+    );
+    assert_eq!(client.active_endpoint(), new_url);
+    assert_eq!(client.replica_endpoints(), [old_url]);
+
+    let strong = client
+        .query_with_options("select endpoint", QueryOptions::strong())
+        .await
+        .expect("strong read after promotion");
+    assert_eq!(endpoint_label(&strong), "new-primary");
+
+    client
+        .insert(
+            "items",
+            &JsonValue::object([("name", JsonValue::string("after-promotion"))]),
+        )
+        .await
+        .expect("write after promotion");
+    assert_eq!(new_writes.load(Ordering::Acquire), 1);
+    assert_eq!(old_writes.load(Ordering::Acquire), 0);
+
+    let _ = old_shutdown.send(());
+    let _ = new_shutdown.send(());
 }

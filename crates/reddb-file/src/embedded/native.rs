@@ -69,7 +69,6 @@ fn file_mutation_stamp(file: &File) -> std::io::Result<Option<FileMutationStamp>
 /// lock held through another handle of the same process, and under Windows
 /// `LockFileEx` would be denied outright (see `open_inner_with_file`).
 pub struct EmbeddedRdbWriterLock {
-    #[cfg_attr(not(unix), allow(dead_code))]
     path: PathBuf,
     _file: File,
 }
@@ -113,13 +112,11 @@ impl EmbeddedRdbWriterLock {
 impl Drop for EmbeddedRdbWriterLock {
     fn drop(&mut self) {
         // Unlink while still holding the lock so a closed store is back to
-        // one operator-visible artifact; `acquire` re-checks the inode to
-        // stay correct across this. Without an inode identity check the
-        // file is left in place instead.
-        #[cfg(unix)]
-        {
-            let _ = fs::remove_file(&self.path);
-        }
+        // one operator-visible artifact. Rust opens Windows files with delete
+        // sharing, so the same ordering also closes the long-standing Windows
+        // gap without releasing the writer fence before deletion. Unix
+        // `acquire` re-checks the inode if it raced this unlink.
+        let _ = fs::remove_file(&self.path);
     }
 }
 

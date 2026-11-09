@@ -1157,7 +1157,6 @@ fn a_second_writer_lock_on_the_same_store_is_refused_until_released() {
     assert!(err.contains("already open for writing"), "{err}");
 
     drop(first);
-    #[cfg(unix)]
     assert_eq!(
         artifact_names(dir.path()),
         vec!["data.rdb"],

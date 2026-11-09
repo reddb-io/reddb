@@ -12,7 +12,7 @@ impl RedDBServer {
         let db = self.runtime.db();
         object.insert(
             "current_term".to_string(),
-            JsonValue::Number(db.options().replication.term as f64),
+            JsonValue::Number(self.runtime.current_replication_term() as f64),
         );
         let profile = db.options().replication.failover_profile;
         let mut profile_json = Map::new();

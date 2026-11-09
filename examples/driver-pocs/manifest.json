@@ -1,0 +1,79 @@
+{
+  "version": "1.0",
+  "matrix": "docs/conformance/deployment-mode-matrix.json",
+  "journey": [
+    "connect through the public facade",
+    "create a table",
+    "insert values with parameters",
+    "select and validate the inserted row",
+    "close the connection"
+  ],
+  "drivers": [
+    {
+      "id": "rust",
+      "mode": "serverless",
+      "evidence": "crates/reddb-client/tests/redwire_query_with_live.rs",
+      "command": "RED_SMOKE=1 RED_BIN=/path/to/red cargo test --locked -p reddb-io-client --features redwire --test redwire_query_with_live"
+    },
+    {
+      "id": "javascript",
+      "mode": "embedded",
+      "evidence": "drivers/js/test/native-engine.e2e.test.mjs",
+      "command": "REDDB_NATIVE_ADDON=/path/to/reddb.node node --test drivers/js/test/native-engine.e2e.test.mjs"
+    },
+    {
+      "id": "python",
+      "mode": "embedded",
+      "evidence": "drivers/python/tests/test_smoke.py",
+      "command": "python -m pytest drivers/python/tests/test_smoke.py"
+    },
+    {
+      "id": "go",
+      "mode": "embedded",
+      "evidence": "drivers/go/embedded_test.go",
+      "command": "cd drivers/go && REDDB_EMBEDDED_SMOKE=1 REDDB_FFI_LIBRARY=/path/to/libreddb_ffi.so go test -run TestEmbeddedNativeABI -v ."
+    },
+    {
+      "id": "dotnet",
+      "mode": "embedded",
+      "evidence": "drivers/dotnet/tests/Reddb.Tests/EmbeddedTests.cs",
+      "command": "cd drivers/dotnet && REDDB_EMBEDDED_SMOKE=1 REDDB_FFI_LIBRARY=/path/to/libreddb_ffi.so dotnet test tests/Reddb.Tests --filter FullyQualifiedName~EmbeddedTests"
+    },
+    {
+      "id": "java",
+      "mode": "embedded",
+      "evidence": "drivers/java/src/test/java/dev/reddb/EmbeddedTest.java",
+      "command": "cd drivers/java && REDDB_EMBEDDED_SMOKE=1 REDDB_FFI_LIBRARY=/path/to/libreddb_ffi.so ./gradlew test --tests dev.reddb.EmbeddedTest"
+    },
+    {
+      "id": "kotlin",
+      "mode": "embedded",
+      "evidence": "drivers/kotlin/src/test/kotlin/dev/reddb/EmbeddedTest.kt",
+      "command": "cd drivers/kotlin && REDDB_EMBEDDED_SMOKE=1 REDDB_FFI_LIBRARY=/path/to/libreddb_ffi.so ./gradlew test --tests dev.reddb.EmbeddedTest"
+    },
+    {
+      "id": "php",
+      "mode": "embedded",
+      "evidence": "drivers/php/tests/EmbeddedTest.php",
+      "command": "cd drivers/php && REDDB_EMBEDDED_SMOKE=1 REDDB_FFI_LIBRARY=/path/to/libreddb_ffi.so php -d ffi.enable=true vendor/bin/phpunit --filter EmbeddedTest"
+    },
+    {
+      "id": "dart",
+      "mode": "embedded",
+      "evidence": "drivers/dart/test/embedded_test.dart",
+      "command": "cd drivers/dart && REDDB_EMBEDDED_SMOKE=1 REDDB_FFI_LIBRARY=/path/to/libreddb_ffi.so dart test test/embedded_test.dart"
+    },
+    {
+      "id": "cpp",
+      "mode": "embedded",
+      "evidence": "drivers/cpp/tests/embedded_test.cpp",
+      "command": "cmake --build build/cpp --target embedded_test && ctest --test-dir build/cpp -R embedded_test --output-on-failure"
+    },
+    {
+      "id": "zig",
+      "mode": "embedded",
+      "evidence": "drivers/zig/tests/embedded_test.zig",
+      "command": "cd drivers/zig && zig build embedded-test -Dreddb-ffi-dir=/path/to/reddb-ffi"
+    }
+  ]
+}

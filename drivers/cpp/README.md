@@ -1,9 +1,8 @@
 # reddb C++ driver
 
 C++20 client for RedDB. Speaks the RedWire binary protocol over TCP
-(plain or TLS) and the HTTP/HTTPS REST surface. Remote-only — embedded
-URIs (`red:///path`, `memory://`, `file://`) throw
-`EmbeddedUnsupported`.
+(plain or TLS), the HTTP/HTTPS REST surface, and optionally embeds the
+same Rust engine in-process through `reddb-ffi`.
 
 ## Build
 
@@ -13,6 +12,25 @@ cmake --build drivers/cpp/build -j
 ctest --test-dir drivers/cpp/build --output-on-failure
 ```
 
+To enable `memory://`, `file://...`, and `red:///...`, build the shared C ABI
+and pass its platform library to CMake:
+
+```sh
+cargo build --release -p reddb-io-ffi
+cmake -S drivers/cpp -B drivers/cpp/build \
+  -DREDDB_FFI_LIBRARY=/absolute/path/to/target/release/deps/libreddb_ffi.so
+```
+
+Use `libreddb_ffi.dylib` on macOS or `reddb_ffi.dll.lib` on Windows. The
+dynamic library must be available to the operating-system loader at runtime.
+Without `REDDB_FFI_LIBRARY`, embedded URIs fail closed with
+`EmbeddedUnsupported`; remote transports are unchanged.
+
+Stable RedDB releases publish a version-matched
+`reddb-ffi-<platform>.tar.gz` containing `include/reddb.h` and the shared
+library under `lib/`. Download that archive instead of compiling Rust when
+consuming a released driver tag.
+
 ### Dependencies
 
 | Dependency | Required? | Notes |
@@ -20,6 +38,7 @@ ctest --test-dir drivers/cpp/build --output-on-failure
 | OpenSSL    | Required  | TLS + SCRAM-SHA-256 (HMAC, PBKDF2, RAND) |
 | zstd       | Optional  | Frame compression. When absent, `COMPRESSED` frames cannot be encoded; receiving one throws `CompressedButNoZstd`. |
 | libcurl    | Optional  | HTTP transport. Without it, only `red://` / `reds://` URIs work. |
+| reddb-ffi  | Optional  | In-process engine for memory and one-file persistent databases. |
 | GoogleTest | Fetched   | Vendored via `FetchContent` (v1.14.0). |
 
 ## Quickstart
@@ -99,6 +118,9 @@ auto conn = reddb::connect("reds://db.example.com:5050", o);
 | `red://host?proto=https`             | HTTPS via libcurl        |
 | `http://host[:port]`                 | HTTP via libcurl         |
 | `https://host[:port]`                | HTTPS via libcurl        |
+| `memory://` / `red://`               | Embedded in-memory engine |
+| `file:///path/data.rdb`              | Embedded single-file engine |
+| `red:///path/data.rdb`               | Embedded single-file engine |
 
 ## Rich helpers (SDK Helper Spec v0.1)
 
@@ -158,7 +180,7 @@ drivers/cpp/
     http/client.cpp
   tests/
     url_test.cpp  scram_test.cpp  frame_test.cpp
-    redwire_conn_test.cpp  smoke_test.cpp
+    redwire_conn_test.cpp  smoke_test.cpp  embedded_test.cpp
 ```
 
 ## Production deploy

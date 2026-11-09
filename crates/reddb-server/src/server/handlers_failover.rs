@@ -23,9 +23,9 @@ impl RedDBServer {
     ///   * Caller is currently a replica (role guard) — primaries
     ///     don't promote themselves.
     ///   * Remote backend is configured (lease lives there).
-    ///   * Replica apply health is `ok` — no unresolved WAL gap or
-    ///     divergence. A replica that's behind cannot become the
-    ///     authoritative writer.
+    ///   * Replica apply health is `ok` / `healthy`, or it is reconnecting
+    ///     after observing a primary frontier; its applied LSN must cover
+    ///     that latest observed primary LSN.
     ///   * Lease can be acquired — `try_acquire` returns success.
     ///     Failure surfaces the existing holder so the operator
     ///     understands why.
@@ -37,9 +37,10 @@ impl RedDBServer {
     /// On success the response includes the new lease's generation
     /// and acquired_at. **Promotion does NOT flip the running role
     /// to primary** — the operator's runbook is to restart the
-    /// process with `RED_REPLICATION_MODE=primary` after a
-    /// successful promotion. Auto-role-flip is a Phase 11.6 follow-
-    /// up that requires draining live read traffic safely.
+    /// process with `REDDB_NODE_ROLE=primary` and the returned
+    /// `RED_REPLICATION_TERM` after a successful promotion. Auto-
+    /// role-flip is a Phase 11.6 follow-up that requires draining
+    /// live read traffic safely.
     pub(crate) fn handle_admin_failover_promote(&self, body: Vec<u8>) -> HttpResponse {
         // Role guard.
         if !matches!(
@@ -76,15 +77,21 @@ impl RedDBServer {
             return json_error(412, reason);
         };
 
-        // Apply health guard. Anything other than `ok` / `healthy`
-        // / `connecting` indicates the replica isn't current.
+        let applied_lsn = self
+            .runtime
+            .config_u64("red.replication.last_applied_lsn", 0);
+        let last_seen_primary_lsn = self
+            .runtime
+            .config_u64("red.replication.last_seen_primary_lsn", 0);
+
+        // A caught-up replica transitions from `healthy` to `connecting`
+        // when its primary disappears. That state is promotion-ready only
+        // when a non-zero observed frontier proves it previously synced.
         let health = self.runtime.replica_apply_health().unwrap_or_default();
-        if matches!(
-            health.as_str(),
-            "stalled_gap" | "divergence" | "apply_error"
-        ) {
+        let reconnecting_after_sync = health == "connecting" && last_seen_primary_lsn > 0;
+        if !matches!(health.as_str(), "ok" | "healthy") && !reconnecting_after_sync {
             let reason = format!(
-                "promotion refused — replica apply state is `{health}`; resolve before promoting"
+                "promotion refused — replica apply state `{health}` is not promotion-ready"
             );
             if let Err(err) = self.runtime.emit_control_event(
                 crate::runtime::control_events::EventKind::ReplicationSafety,
@@ -96,6 +103,34 @@ impl RedDBServer {
                     "apply_health".to_string(),
                     crate::runtime::control_events::Sensitivity::raw(health),
                 )],
+            ) {
+                return json_error(500, err.to_string());
+            }
+            return json_error(409, reason);
+        }
+
+        if applied_lsn < last_seen_primary_lsn {
+            let reason = format!(
+                "promotion refused — replica applied LSN {applied_lsn} is behind last seen primary LSN {last_seen_primary_lsn}"
+            );
+            if let Err(err) = self.runtime.emit_control_event(
+                crate::runtime::control_events::EventKind::ReplicationSafety,
+                crate::runtime::control_events::Outcome::Denied,
+                "promotion_refused",
+                Some("replication:apply_lag".to_string()),
+                Some(reason.clone()),
+                vec![
+                    (
+                        "applied_lsn".to_string(),
+                        crate::runtime::control_events::Sensitivity::raw(applied_lsn.to_string()),
+                    ),
+                    (
+                        "last_seen_primary_lsn".to_string(),
+                        crate::runtime::control_events::Sensitivity::raw(
+                            last_seen_primary_lsn.to_string(),
+                        ),
+                    ),
+                ],
             ) {
                 return json_error(500, err.to_string());
             }
@@ -136,6 +171,10 @@ impl RedDBServer {
             .clone()
             .unwrap_or_else(|| "main".to_string());
         let store = crate::replication::LeaseStore::new(backend);
+        let current_term = self.runtime.current_replication_term();
+        let Some(promotion_term) = current_term.checked_add(1) else {
+            return json_error(409, "promotion refused — replication term exhausted");
+        };
 
         match crate::runtime::lease_lifecycle::admin_promote_lease(
             &store,
@@ -143,13 +182,10 @@ impl RedDBServer {
             &database_key,
             &holder_id,
             ttl_ms,
-            self.runtime.current_replication_term(),
+            promotion_term,
         ) {
             Ok(lease) => {
                 let replica_id = self.runtime.resolve_replica_id();
-                let applied_lsn = self
-                    .runtime
-                    .config_u64("red.replication.last_applied_lsn", 0);
                 let timeline = match self
                     .runtime
                     .record_failover_timeline_promotion(&replica_id, applied_lsn)
@@ -211,6 +247,12 @@ impl RedDBServer {
                             crate::runtime::control_events::Sensitivity::raw(ttl_ms.to_string()),
                         ),
                         (
+                            "term".to_string(),
+                            crate::runtime::control_events::Sensitivity::raw(
+                                promotion_term.to_string(),
+                            ),
+                        ),
+                        (
                             "timeline".to_string(),
                             crate::runtime::control_events::Sensitivity::raw(
                                 timeline_id.0.to_string(),
@@ -231,6 +273,7 @@ impl RedDBServer {
                     lease.generation,
                     lease.acquired_at_ms,
                     lease.expires_at_ms,
+                    promotion_term,
                     timeline_id.0,
                     applied_lsn,
                 );
@@ -348,6 +391,7 @@ mod tests {
         let body = String::from_utf8(response.body.to_vec()).expect("response body");
 
         assert_eq!(response.status, 200, "{body}");
+        assert!(body.contains(r#""term":2"#), "{body}");
         assert!(body.contains(r#""timeline":2"#), "{body}");
         assert!(body.contains(r#""applied_lsn":42"#), "{body}");
 
@@ -363,6 +407,53 @@ mod tests {
         assert_eq!(timeline.ancestor_lsn(reddb_file::TimelineId(2)), Some(42));
         assert_eq!(timeline.entries[1].reason, "promote replica-a");
 
+        cleanup(&data_path, &database_key);
+    }
+
+    #[test]
+    fn admin_failover_promote_refuses_connecting_replica_without_observed_frontier() {
+        let data_path = temp_data_path("connecting");
+        let database_key = format!("admin-promote-{}", crate::utils::now_unix_nanos());
+        cleanup(&data_path, &database_key);
+
+        let runtime = replica_runtime_for_promote(&data_path, &database_key);
+        runtime
+            .db()
+            .store()
+            .set_config_tree("red.replication", &crate::json!({ "state": "connecting" }));
+        let server = RedDBServer::new(runtime);
+
+        let response = server.handle_admin_failover_promote(promote_request());
+        let body = String::from_utf8(response.body.to_vec()).expect("response body");
+
+        assert_eq!(response.status, 409, "{body}");
+        assert!(body.contains("not promotion-ready"), "{body}");
+        cleanup(&data_path, &database_key);
+    }
+
+    #[test]
+    fn admin_failover_promote_refuses_replica_behind_seen_primary() {
+        let data_path = temp_data_path("behind_primary");
+        let database_key = format!("admin-promote-{}", crate::utils::now_unix_nanos());
+        cleanup(&data_path, &database_key);
+
+        let runtime = replica_runtime_for_promote(&data_path, &database_key);
+        runtime.db().store().set_config_tree(
+            "red.replication",
+            &crate::json!({
+                "state": "healthy",
+                "last_applied_lsn": 41,
+                "last_seen_primary_lsn": 42,
+            }),
+        );
+        let server = RedDBServer::new(runtime);
+
+        let response = server.handle_admin_failover_promote(promote_request());
+        let body = String::from_utf8(response.body.to_vec()).expect("response body");
+
+        assert_eq!(response.status, 409, "{body}");
+        assert!(body.contains("applied LSN 41"), "{body}");
+        assert!(body.contains("primary LSN 42"), "{body}");
         cleanup(&data_path, &database_key);
     }
 

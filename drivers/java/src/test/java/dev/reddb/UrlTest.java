@@ -83,7 +83,7 @@ class UrlTest {
 
     @Test
     void recognisesEmbeddedInMemoryAliases() {
-        for (String s : new String[]{"red:", "red:/", "red://", "red://memory", "red://memory/", "red://:memory", "red://:memory:"}) {
+        for (String s : new String[]{"memory://", "red:", "red:/", "red://", "red://memory", "red://memory/", "red://:memory", "red://:memory:"}) {
             Url u = Url.parse(s);
             assertEquals(Url.Kind.EMBEDDED_MEMORY, u.kind(), "expected memory for " + s);
             assertTrue(u.isEmbedded());
@@ -93,6 +93,13 @@ class UrlTest {
     @Test
     void recognisesEmbeddedFileTriple() {
         Url u = Url.parse("red:///var/lib/reddb/data.rdb");
+        assertEquals(Url.Kind.EMBEDDED_FILE, u.kind());
+        assertEquals("/var/lib/reddb/data.rdb", u.path());
+    }
+
+    @Test
+    void recognisesCanonicalEmbeddedFile() {
+        Url u = Url.parse("file:///var/lib/reddb/data.rdb");
         assertEquals(Url.Kind.EMBEDDED_FILE, u.kind());
         assertEquals("/var/lib/reddb/data.rdb", u.path());
     }
@@ -141,8 +148,8 @@ class UrlTest {
     void portDefaultsTo5050() {
         assertEquals(5050, Url.parse("red://h").port());
         assertEquals(5050, Url.parse("reds://h").port());
-        assertEquals(5050, Url.parse("http://h").port());
-        assertEquals(5050, Url.parse("https://h").port());
+        assertEquals(5000, Url.parse("http://h").port());
+        assertEquals(55555, Url.parse("https://h").port());
     }
 
     @Test

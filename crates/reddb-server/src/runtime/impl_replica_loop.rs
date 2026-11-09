@@ -121,6 +121,23 @@ mod tests {
     }
 
     #[test]
+    fn reconnecting_replica_retains_the_last_observed_primary_frontier() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+        runtime.persist_replication_health("healthy", "", Some(42), Some(7));
+
+        runtime.persist_replication_health("connecting", "primary unavailable", None, None);
+
+        assert_eq!(
+            runtime.config_u64("red.replication.last_seen_primary_lsn", 0),
+            42
+        );
+        assert_eq!(
+            runtime.config_u64("red.replication.last_seen_oldest_lsn", 0),
+            7
+        );
+    }
+
+    #[test]
     fn rebootstrap_ready_message_treats_reclone_as_executed_reclone_basebackup() {
         assert_eq!(
             rebootstrap_ready_message(reddb_file::ReplicaCatchupMode::Reclone, 42),
@@ -330,8 +347,13 @@ impl RedDBRuntime {
         let catchup_mode = catchup_mode
             .map(reddb_file::ReplicaCatchupMode::as_str)
             .unwrap_or("");
-        let primary_lsn = primary_lsn.unwrap_or(0);
-        let oldest_available_lsn = oldest_available_lsn.unwrap_or(0);
+        // A connection failure carries no new frontier. Preserve the last
+        // observed values so failover can distinguish a never-synced replica
+        // from one that was caught up immediately before the primary vanished.
+        let primary_lsn = primary_lsn
+            .unwrap_or_else(|| self.config_u64("red.replication.last_seen_primary_lsn", 0));
+        let oldest_available_lsn = oldest_available_lsn
+            .unwrap_or_else(|| self.config_u64("red.replication.last_seen_oldest_lsn", 0));
         // Issue #1243 — observe every persisted health transition for
         // reconnect telemetry. This is the single chokepoint the replica
         // loop routes all state changes through, so the counter sees each

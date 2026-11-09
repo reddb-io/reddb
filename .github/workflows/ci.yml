@@ -236,6 +236,10 @@ jobs:
         run: node scripts/verify-contract-matrix.mjs
       - name: Contract-matrix tooling contract test
         run: node --test scripts/contract_matrix_contract.test.mjs
+      - name: Verify all official drivers account for all four deployment modes
+        run: node scripts/verify-deployment-mode-matrix.mjs
+      - name: Deployment-mode tooling contract test
+        run: node --test scripts/deployment_mode_matrix_contract.test.mjs
       - name: Installer checksum contract test
         run: node --test scripts/install_script_contract.test.mjs
       - name: Docs-shim ⇔ required-checks ⇔ ci.yml lock-step (#1307)
@@ -368,7 +372,7 @@ jobs:
       - platforms
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
@@ -387,10 +391,100 @@ jobs:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
           save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: '0.14.1'
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.25'
+          cache-dependency-path: drivers/go/go.sum
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
+        with:
+          dotnet-version: '8.0.x'
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+        with:
+          sdk: stable
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.3'
+          extensions: curl, ffi, hash, json, openssl
       - name: Build workflow contracts
         run: node --test scripts/build_workflow_contract.test.mjs
       - run: cargo fmt --all -- --check
       - run: cargo check --locked --all
+      - name: Native ABI embedded single-file journey
+        run: |
+          cargo test --locked -p reddb-io-ffi
+          cargo build --locked -p reddb-io-ffi
+      - name: Go embedded single-file journey
+        working-directory: drivers/go
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: go test -run TestEmbeddedNativeABI -v .
+      - name: .NET embedded single-file journey
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: dotnet test drivers/dotnet/tests/Reddb.Tests/Reddb.Tests.csproj --filter FullyQualifiedName~EmbeddedTests
+      - name: Java embedded single-file journey
+        working-directory: drivers/java
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: ./gradlew test --tests dev.reddb.EmbeddedTest
+      - name: Kotlin embedded single-file journey
+        working-directory: drivers/kotlin
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: ./gradlew test --tests dev.reddb.EmbeddedTest
+      - name: Dart embedded single-file journey
+        working-directory: drivers/dart
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: |
+          dart pub get
+          dart test test/embedded_test.dart
+      - name: PHP embedded single-file journey
+        working-directory: drivers/php
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: |
+          composer install --no-interaction --no-progress
+          php -d ffi.enable=true vendor/bin/phpunit --filter EmbeddedTest
+      - name: C++ embedded single-file journey
+        run: |
+          ffi_library="$(find "$GITHUB_WORKSPACE/target/debug" -name 'libreddb_ffi.so' -print -quit)"
+          test -n "$ffi_library"
+          cmake -S drivers/cpp -B /tmp/reddb-cpp-embedded \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DREDDB_FFI_LIBRARY="$ffi_library"
+          cmake --build /tmp/reddb-cpp-embedded --target embedded_test -j2
+          LD_LIBRARY_PATH="$(dirname "$ffi_library")" \
+            ctest --test-dir /tmp/reddb-cpp-embedded -R '^embedded_test$' --output-on-failure
+      - name: Zig connection routing contract
+        working-directory: drivers/zig
+        run: |
+          zig build test --summary all
+          zig build connect-contract --summary all
+      - name: Zig embedded single-file journey
+        working-directory: drivers/zig
+        run: |
+          ffi_library="$(find "$GITHUB_WORKSPACE/target/debug" -name 'libreddb_ffi.so' -print -quit)"
+          test -n "$ffi_library"
+          ffi_root=/tmp/reddb-zig-ffi
+          mkdir -p "$ffi_root/include" "$ffi_root/lib"
+          cp "$GITHUB_WORKSPACE/crates/reddb-ffi/include/reddb.h" "$ffi_root/include/reddb.h"
+          cp "$ffi_library" "$ffi_root/lib/libreddb_ffi.so"
+          LD_LIBRARY_PATH="$ffi_root/lib" \
+            zig build embedded-test -Dreddb-ffi-dir="$ffi_root" --summary all
       - name: Scoped S3 credential rotation contracts
         run: |
           cargo check --locked --all --features backend-s3
@@ -788,7 +882,7 @@ jobs:
           extensions: curl, hash, json, openssl
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
-          version: '0.16.0'
+          version: '0.14.1'
       - name: JS RedWire parameter fixtures
         working-directory: drivers/js
         run: node --test test/redwire.params.test.mjs
@@ -895,7 +989,7 @@ jobs:
           . .venv/bin/activate
           pip install --upgrade pip maturin pytest
           maturin develop
-          python -m pytest tests/test_readme_examples.py -q
+          python -m pytest tests/test_readme_examples.py tests/test_smoke.py -q
 
   publish-dry-run:
     # Catches crates.io packaging issues (missing include paths, stale

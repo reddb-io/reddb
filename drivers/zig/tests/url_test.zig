@@ -155,3 +155,11 @@ test "red:// percent-encoded password" {
     defer p.deinit(t.allocator);
     try t.expectEqualStrings("p@ss", p.password.?);
 }
+
+test "embedded URI fails closed when the shared ABI is not linked" {
+    if (reddb.build_options.enable_embedded) return error.SkipZigTest;
+    try t.expectError(
+        reddb.Error.EmbeddedUnavailable,
+        reddb.connect(t.allocator, "memory://", null),
+    );
+}

@@ -260,6 +260,21 @@ test("the Node addon is only shipped after it loaded on its own runner, and neve
   assert.match(workflow, /-name 'reddb-node-\*'/, "the addon must be in SHA256SUMS so the platform package can verify it");
 });
 
+test("the shared embedded ABI is loaded, packaged and release-blocking", () => {
+  const workflow = read(".github/workflows/release.yml");
+  const verifier = read("scripts/verify-release-assets.sh");
+  const runbook = read("docs/release-runbook.md");
+  const buildJob = workflow.slice(workflow.indexOf("\n  build:\n"), workflow.indexOf("\n  artifact-sizes:\n"));
+
+  assert.match(buildJob, /cargo build --locked --release --target \$\{\{ matrix\.target \}\} -p reddb-io-ffi/);
+  assert.match(buildJob, /name: Package shared embedded ABI[\s\S]*reddb_abi_version[\s\S]*reddb_open/);
+  assert.match(buildJob, /reddb-ffi-\$\{\{ matrix\.asset_name \}\}\*/);
+  assert.match(workflow, /-name 'reddb-ffi-\*'/);
+  assert.match(verifier, /FFI_SUFFIXES=\(\)/);
+  assert.match(verifier, /reddb-ffi-\$\{suffix\}\.tar\.gz/);
+  assert.match(runbook, /shared embedded ABI archive/);
+});
+
 test("release workflows publish aggregate checksum manifests for installers", () => {
   const releaseWorkflow = read(".github/workflows/release.yml");
   const rcWorkflow = read(".github/workflows/release-candidate.yml");

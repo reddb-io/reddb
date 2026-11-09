@@ -3,6 +3,8 @@ package reddb
 import (
 	"fmt"
 	"net/url"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -42,14 +44,18 @@ type ParsedURI struct {
 //	red://[user[:pass]@]host[:port]/?...   plain RedWire (default port 5050)
 //	reds://...                              RedWire over TLS
 //	http://...   https://...                HTTP / HTTPS REST
-//	red:///path/to/file.rdb                 embedded (not yet supported)
-//	red://memory  red://:memory  red://:memory:   embedded in-memory (not yet)
+//	memory://  red://memory                 embedded in-memory
+//	file:///path/to/file.rdb  red:///path   embedded single-file
 func ParseURI(uri string) (*ParsedURI, error) {
 	if uri == "" {
 		return nil, NewError(CodeUnparseableURI, "uri is empty")
 	}
 
 	switch {
+	case uri == "memory:" || uri == "memory://":
+		return &ParsedURI{Kind: KindEmbedded, Original: uri}, nil
+	case strings.HasPrefix(strings.ToLower(uri), "file://"):
+		return parseFileURI(uri)
 	case isRedScheme(uri):
 		return parseRedURI(uri)
 	case strings.HasPrefix(uri, "reds://"):
@@ -78,12 +84,14 @@ func parseRedURI(uri string) (*ParsedURI, error) {
 	switch uri {
 	case "red:", "red:/", "red://", "red://memory", "red://memory/",
 		"red://:memory", "red://:memory:":
-		return nil, NewError(CodeEmbeddedUnsupported,
-			"embedded in-memory mode requires a future cgo build of the driver")
+		return &ParsedURI{Kind: KindEmbedded, Original: uri}, nil
 	}
 	if strings.HasPrefix(uri, "red:///") {
-		return nil, NewError(CodeEmbeddedUnsupported,
-			"embedded file mode requires a future cgo build of the driver")
+		return &ParsedURI{
+			Kind:     KindEmbedded,
+			Path:     filepath.FromSlash(strings.TrimPrefix(uri, "red://")),
+			Original: uri,
+		}, nil
 	}
 
 	// Strip `red://` and parse what's left as `host[:port]/path?query`.
@@ -138,6 +146,24 @@ func parseRedURI(uri string) (*ParsedURI, error) {
 			fmt.Sprintf("uri missing host: %q", uri))
 	}
 	return out, nil
+}
+
+func parseFileURI(uri string) (*ParsedURI, error) {
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return nil, WrapError(CodeUnparseableURI, "failed to parse embedded file uri", err)
+	}
+	if parsed.Host != "" && parsed.Host != "localhost" {
+		return nil, NewError(CodeUnparseableURI, "embedded file uri must not name a remote host")
+	}
+	if parsed.Path == "" {
+		return nil, NewError(CodeUnparseableURI, "embedded file uri is missing a path")
+	}
+	path := filepath.FromSlash(parsed.Path)
+	if runtime.GOOS == "windows" && len(path) >= 3 && path[0] == '\\' && path[2] == ':' {
+		path = path[1:]
+	}
+	return &ParsedURI{Kind: KindEmbedded, Path: path, Original: uri}, nil
 }
 
 // parseRemoteURI handles reds://, http://, https://. The kind is fixed at the

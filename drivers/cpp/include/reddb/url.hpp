@@ -3,8 +3,8 @@
 //
 // red://, reds://, http://, https:// are the supported network
 // transports. Embedded variants (`red:///path`, `memory://`,
-// `file://...`) throw `EmbeddedUnsupported` because the C++
-// driver is a remote-only client.
+// `file://...`) are classified here; `connect()` decides whether the
+// optional embedded engine was linked into this build.
 
 #pragma once
 
@@ -16,7 +16,7 @@
 namespace reddb {
 
 enum class UrlKind {
-    Embedded, // red://, red:///path, memory://, file:// — unsupported here
+    Embedded, // red://, red:///path, memory://, file://
     Http,
     Https,
     Red,      // red:// (TCP, no TLS)

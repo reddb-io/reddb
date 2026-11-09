@@ -224,7 +224,6 @@ void main() {
     test('passes through "collection already exists" error', () async {
       final q = _FakeQuerier(
         replies: [
-          <String, Object?>{},
           {
             'rows': [
               {'rid': 'x'},

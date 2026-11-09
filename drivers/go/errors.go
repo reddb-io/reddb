@@ -19,8 +19,7 @@ const (
 	CodeUnsupportedProto ErrorCode = "UNSUPPORTED_PROTO"
 	// CodeUnparseableURI — URL parser refused the input.
 	CodeUnparseableURI ErrorCode = "UNPARSEABLE_URI"
-	// CodeEmbeddedUnsupported — embedded (file/in-memory) modes aren't built in
-	// for the pure-Go driver yet (cgo binding TBD).
+	// CodeEmbeddedUnsupported — the native embedded library is unavailable or incompatible.
 	CodeEmbeddedUnsupported ErrorCode = "EMBEDDED_UNSUPPORTED"
 	// CodeNetwork — TCP / TLS / DNS error.
 	CodeNetwork ErrorCode = "NETWORK"

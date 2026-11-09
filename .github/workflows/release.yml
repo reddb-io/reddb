@@ -316,6 +316,13 @@ jobs:
         if: steps.plan.outputs.should_skip != 'true'
         run: node scripts/verify-contract-matrix.mjs
 
+      - name: Four deployment modes matrix gate (release-blocking)
+        # ADR 0081 — every official language facade must account for
+        # serverless, embedded, server+replicas and cluster. Readiness may only
+        # become true once all four executable journeys are qualified.
+        if: steps.plan.outputs.should_skip != 'true'
+        run: node scripts/verify-deployment-mode-matrix.mjs
+
       - name: Public docs match the contract matrix (release-blocking)
         # Issue #568 — refuse to cut a release when README/docs/driver READMEs
         # drift from the contract matrix (i.e. a doc could promise a feature the
@@ -396,6 +403,7 @@ jobs:
         run: |
           cargo build --locked --release --target ${{ matrix.target }} --bin red
           cargo build --locked --release --target ${{ matrix.target }} --bin red_client -p reddb-io-client --no-default-features
+          cargo build --locked --release --target ${{ matrix.target }} -p reddb-io-ffi
 
       - name: Build (musl, static)
         # Both Linux musl targets build fully static via the messense musl-cross
@@ -476,6 +484,70 @@ jobs:
             shasum -a 256 "${ASSET}" > "${ASSET}.sha256" 2>/dev/null || certutil -hashfile "${ASSET}" SHA256 > "${ASSET}.sha256"
           done
 
+      - name: Package shared embedded ABI
+        if: "!matrix.cross"
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            *windows*) LIB_PATTERN=reddb_ffi.dll ;;
+            *apple*)   LIB_PATTERN=libreddb_ffi.dylib ;;
+            *)         LIB_PATTERN=libreddb_ffi.so ;;
+          esac
+          TARGET_DIR="target/${{ matrix.target }}/release"
+          FFI_LIBRARY="$(find "$TARGET_DIR" -type f -name "$LIB_PATTERN" -print -quit)"
+          test -n "$FFI_LIBRARY"
+          python - "$FFI_LIBRARY" <<'PY'
+          import ctypes
+          import pathlib
+          import sys
+
+          library = ctypes.CDLL(str(pathlib.Path(sys.argv[1]).resolve()))
+          library.reddb_abi_version.restype = ctypes.c_uint32
+          version = library.reddb_abi_version()
+          if version != 1:
+              raise SystemExit(f"unexpected reddb ABI version: {version}")
+
+          library.reddb_open.argtypes = [
+              ctypes.c_char_p,
+              ctypes.POINTER(ctypes.c_void_p),
+              ctypes.POINTER(ctypes.c_void_p),
+          ]
+          library.reddb_open.restype = ctypes.c_int
+          library.reddb_close.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+          library.reddb_close.restype = ctypes.c_int
+          library.reddb_string_free.argtypes = [ctypes.c_void_p]
+
+          def take_error(pointer):
+              if not pointer.value:
+                  return ""
+              message = ctypes.cast(pointer, ctypes.c_char_p).value.decode("utf-8", "replace")
+              library.reddb_string_free(pointer)
+              return message
+
+          handle = ctypes.c_void_p()
+          error = ctypes.c_void_p()
+          status = library.reddb_open(None, ctypes.byref(handle), ctypes.byref(error))
+          if status != 0:
+              raise SystemExit(f"reddb_open failed ({status}): {take_error(error)}")
+          status = library.reddb_close(handle, ctypes.byref(error))
+          if status != 0:
+              raise SystemExit(f"reddb_close failed ({status}): {take_error(error)}")
+          PY
+
+          PACKAGE="reddb-ffi-${{ matrix.asset_name }}"
+          mkdir -p "$PACKAGE/include" "$PACKAGE/lib"
+          cp crates/reddb-ffi/include/reddb.h "$PACKAGE/include/"
+          cp "$FFI_LIBRARY" "$PACKAGE/lib/"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            FFI_IMPORT="$(find "$TARGET_DIR" -type f -name 'reddb_ffi.dll.lib' -print -quit)"
+            test -n "$FFI_IMPORT"
+            cp "$FFI_IMPORT" "$PACKAGE/lib/"
+          fi
+          tar -czf "${PACKAGE}.tar.gz" "$PACKAGE"
+          shasum -a 256 "${PACKAGE}.tar.gz" > "${PACKAGE}.tar.gz.sha256" 2>/dev/null || \
+            certutil -hashfile "${PACKAGE}.tar.gz" SHA256 > "${PACKAGE}.tar.gz.sha256"
+
       - name: Verify portability (musl x86_64 — static, runs anywhere)
         # x86_64-musl runs on this x86_64 runner, so assert the portability
         # guarantee directly: no glibc dependency (fully static) + smoke runs.
@@ -515,6 +587,7 @@ jobs:
             red-${{ matrix.asset_name }}*
             red_client-${{ matrix.asset_name }}*
             reddb-node-${{ matrix.asset_name }}*
+            reddb-ffi-${{ matrix.asset_name }}*
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats || true
@@ -611,7 +684,7 @@ jobs:
           set -euo pipefail
           (
             cd release
-            find . -maxdepth 1 -type f \( -name 'red-*' -o -name 'red_client-*' -o -name 'reddb-node-*' \) ! -name '*.sha256' -print0 \
+            find . -maxdepth 1 -type f \( -name 'red-*' -o -name 'red_client-*' -o -name 'reddb-node-*' -o -name 'reddb-ffi-*' \) ! -name '*.sha256' -print0 \
               | sort -z \
               | xargs -0 sha256sum \
               | sed 's#  \./#  #'
@@ -781,6 +854,7 @@ jobs:
 
           ## Release Assets
 
+          - \`reddb-ffi-<platform>.tar.gz\`: version-matched shared embedded engine ABI and C header for native language drivers.
           - \`checksums.txt\` / \`SHA256SUMS\`: aggregate SHA-256 manifest for release binaries and SBOMs.
           - \`red-${TAG}.spdx.json\` / \`red-${TAG}.cyclonedx.json\`: source SBOMs for the release.
           - \`artifact-sizes.md\`: release evidence from the binary/container size gate, not an installer input.

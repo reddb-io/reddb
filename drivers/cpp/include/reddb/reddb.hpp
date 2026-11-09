@@ -3,7 +3,7 @@
 // performs auth, and hands back a `Conn` interface.
 //
 // Embedded URIs (`red://`, `red:///path`, `memory://`, `file://`)
-// throw `EmbeddedUnsupported` — this is a remote-only driver.
+// use the in-process engine when the driver is built with reddb-ffi.
 
 #pragma once
 
