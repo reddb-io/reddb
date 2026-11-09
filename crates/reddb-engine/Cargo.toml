@@ -19,7 +19,7 @@ reddb-crypto = { workspace = true }
 zeroize = "1"
 crc32fast = "1.4"
 hex = "0.4"
-parking_lot = "0.12"
+parking_lot = "0.13"
 regex = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
