@@ -223,7 +223,12 @@ trybuild = "1"
 # Use the same AWS-LC backend as the server so OAuth tests do not enable
 # RustCrypto's affected crypto-bigint dependency (RUSTSEC-2026-0387).
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+serde = "1"
 serde_json = "1"
+# Parse the real `red acp` process output with the canonical ACP v1/v2
+# wire types. Keeping the draft-v2 feature here makes protocol drift a
+# compile/test failure without adding the schema crate to production builds.
+agent-client-protocol-schema = { version = "=1.16.0", default-features = false, features = ["unstable_protocol_v2"] }
 prost = "0.14"
 snap = "1"
 # HTTP smoke tests (REST endpoints) and AI-live comment-clustering

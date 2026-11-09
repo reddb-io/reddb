@@ -1472,8 +1472,8 @@ mod tests {
         }
         let _reset = ResetIdentity;
         crate::runtime::impl_core::set_current_tenant("tenant-a".into());
-        crate::runtime::impl_core::set_current_auth_identity(
-            "alice".into(),
+        execution_context::set_current_auth_principal(
+            crate::auth::UserId::scoped("tenant-a", "alice"),
             crate::auth::Role::Read,
         );
 
@@ -1481,8 +1481,8 @@ mod tests {
         let (_, session) = new_session(&server);
 
         crate::runtime::impl_core::set_current_tenant("tenant-b".into());
-        crate::runtime::impl_core::set_current_auth_identity(
-            "bob".into(),
+        execution_context::set_current_auth_principal(
+            crate::auth::UserId::scoped("tenant-b", "bob"),
             crate::auth::Role::Admin,
         );
         assert_eq!(session.identity.tenant.as_deref(), Some("tenant-a"));
@@ -1503,6 +1503,25 @@ mod tests {
             Some("alice")
         );
         assert!(session.identity.snapshot.is_none());
+
+        let scope = execution_context::with_snapshot_bundle(&session.identity, || {
+            server.runtime.ai_scope()
+        });
+        assert_eq!(scope.tenant.as_deref(), Some("tenant-a"));
+        assert_eq!(
+            scope
+                .identity
+                .as_ref()
+                .map(|(user, role)| (user.as_str(), *role)),
+            Some(("alice", crate::auth::Role::Read))
+        );
+        assert_eq!(
+            scope
+                .auth_principal
+                .as_ref()
+                .map(|principal| (principal.tenant.as_deref(), principal.username.as_str())),
+            Some((Some("tenant-a"), "alice"))
+        );
     }
 
     #[test]
