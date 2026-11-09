@@ -23,6 +23,7 @@ struct Inner {
     queued_max: usize,
     queued: AtomicUsize,
     semaphore: Arc<Semaphore>,
+    bulk_semaphore: Option<Arc<Semaphore>>,
 }
 
 /// One active synchronous-engine slot.
@@ -32,6 +33,7 @@ struct Inner {
 #[derive(Debug)]
 pub(crate) struct ExecutionPermit {
     _permit: OwnedSemaphorePermit,
+    _bulk_permit: Option<OwnedSemaphorePermit>,
     wait: Duration,
 }
 
@@ -69,6 +71,7 @@ impl ExecutionAdmission {
                 queued_max,
                 queued: AtomicUsize::new(0),
                 semaphore: Arc::new(Semaphore::new(active_max)),
+                bulk_semaphore: (active_max > 1).then(|| Arc::new(Semaphore::new(active_max - 1))),
             }),
         }
     }
@@ -95,11 +98,51 @@ impl ExecutionAdmission {
     /// registered waiters. Cancellation is safe: dropping this future releases
     /// its queue accounting through [`QueueGuard`].
     pub(crate) async fn acquire(&self) -> Result<ExecutionPermit, ExecutionAdmissionError> {
+        self.acquire_inner(false).await
+    }
+
+    /// Acquire the worker reserved for small latency-sensitive probes. Bulk
+    /// work cannot occupy the final host slot when at least two slots exist.
+    pub(crate) async fn acquire_latency(&self) -> Result<ExecutionPermit, ExecutionAdmissionError> {
+        self.acquire_inner(true).await
+    }
+
+    pub(crate) async fn acquire_classified(
+        &self,
+        latency_sensitive: bool,
+    ) -> Result<ExecutionPermit, ExecutionAdmissionError> {
+        self.acquire_inner(latency_sensitive).await
+    }
+
+    async fn acquire_inner(
+        &self,
+        latency_sensitive: bool,
+    ) -> Result<ExecutionPermit, ExecutionAdmissionError> {
         let started = Instant::now();
+
+        let bulk_permit = if latency_sensitive {
+            None
+        } else if let Some(semaphore) = &self.inner.bulk_semaphore {
+            match Arc::clone(semaphore).try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    let queue_guard = QueueGuard::enter(Arc::clone(&self.inner))?;
+                    let permit = Arc::clone(semaphore)
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| ExecutionAdmissionError::Closed)?;
+                    drop(queue_guard);
+                    Some(permit)
+                }
+            }
+        } else {
+            None
+        };
 
         if let Ok(permit) = Arc::clone(&self.inner.semaphore).try_acquire_owned() {
             return Ok(ExecutionPermit {
                 _permit: permit,
+                _bulk_permit: bulk_permit,
                 wait: started.elapsed(),
             });
         }
@@ -113,6 +156,7 @@ impl ExecutionAdmission {
 
         Ok(ExecutionPermit {
             _permit: permit,
+            _bulk_permit: bulk_permit,
             wait: started.elapsed(),
         })
     }
@@ -233,5 +277,35 @@ mod tests {
         assert_eq!(active_high_water.load(Ordering::Relaxed), 2);
         assert_eq!(admission.active(), 0);
         assert_eq!(admission.queued(), 0);
+    }
+
+    #[tokio::test]
+    async fn bulk_work_cannot_occupy_latency_reserve() {
+        let admission = ExecutionAdmission::new(3, 3);
+        let first = admission.acquire().await.expect("first bulk slot");
+        let second = admission.acquire().await.expect("second bulk slot");
+        assert_eq!(admission.active(), 2);
+
+        let waiting_admission = admission.clone();
+        let waiting = tokio::spawn(async move { waiting_admission.acquire().await });
+        tokio::task::yield_now().await;
+        assert_eq!(admission.queued(), 1);
+
+        let latency = admission
+            .acquire_latency()
+            .await
+            .expect("reserved latency slot");
+        assert_eq!(admission.active(), 3);
+        drop(latency);
+        assert_eq!(admission.active(), 2);
+
+        drop(first);
+        let third = waiting
+            .await
+            .expect("bulk waiter")
+            .expect("third bulk slot");
+        drop(second);
+        drop(third);
+        assert_eq!(admission.active(), 0);
     }
 }

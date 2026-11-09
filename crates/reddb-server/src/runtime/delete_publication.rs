@@ -293,6 +293,7 @@ impl DeletePublication {
         self.finished = true;
         let mut failure = None;
         for original in &self.preimages {
+            self.manager.remove_metadata_expiry(original.id);
             let fields = crate::application::ports::entity_row_fields_snapshot(original);
             if !fields.is_empty() {
                 if let Err(error) = self.runtime.index_store_ref().index_entity_delete(

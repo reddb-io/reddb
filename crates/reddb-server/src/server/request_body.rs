@@ -4,6 +4,22 @@ pub(crate) fn extract_query(body: &[u8]) -> Result<String, HttpResponse> {
     extract_query_request(body).map(|request| request.query)
 }
 
+pub(crate) fn is_trivial_scalar_query(body: &[u8]) -> bool {
+    extract_query_request(body).is_ok_and(|request| is_trivial_scalar_sql(&request.query))
+}
+
+pub(crate) fn is_trivial_scalar_sql(sql: &str) -> bool {
+    let normalized = sql.trim().trim_end_matches(';').trim();
+    let tokens: Vec<_> = normalized.split_ascii_whitespace().collect();
+    matches!(tokens.as_slice(), [select, one]
+        if select.eq_ignore_ascii_case("select") && *one == "1")
+        || matches!(tokens.as_slice(), [select, one, as_token, alias]
+            if select.eq_ignore_ascii_case("select")
+                && *one == "1"
+                && as_token.eq_ignore_ascii_case("as")
+                && !alias.is_empty())
+}
+
 pub(crate) fn extract_query_request(body: &[u8]) -> Result<ParsedQueryRequest, HttpResponse> {
     let text =
         std::str::from_utf8(body).map_err(|_| json_error(400, "request body must be UTF-8"))?;
@@ -106,4 +122,28 @@ pub(crate) fn parse_json_body_allow_empty(body: &[u8]) -> Result<JsonValue, Http
         return Ok(JsonValue::Object(Map::new()));
     }
     parse_json_body(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn latency_reserve_classifier_accepts_only_trivial_scalar_queries() {
+        for sql in ["SELECT 1", " select 1; ", "SELECT 1 AS health"] {
+            assert!(is_trivial_scalar_sql(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT 1 FROM users",
+            "SELECT pg_sleep(1)",
+            "SELECT 1; DELETE FROM users",
+            "WITH value AS (SELECT 1) SELECT * FROM value",
+        ] {
+            assert!(!is_trivial_scalar_sql(sql), "{sql}");
+        }
+        assert!(is_trivial_scalar_query(br#"{"query":"SELECT 1"}"#));
+        assert!(!is_trivial_scalar_query(
+            br#"{"query":"SELECT * FROM users"}"#
+        ));
+    }
 }

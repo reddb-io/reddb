@@ -805,6 +805,34 @@ impl SegmentManager {
             .map(Option::flatten)
     }
 
+    /// Rebuild one legacy per-row TTL projection entry without materializing
+    /// the cold row. The caller inventories IDs in bounded ticks.
+    pub fn rebuild_metadata_expiry(&self, id: EntityId) -> Result<(), StoreError> {
+        if let Some(entity) = self.get(id) {
+            let metadata = self.get_metadata(id);
+            self.restore_metadata_expiry(&entity, metadata.as_ref());
+            return Ok(());
+        }
+        let backing = self.backing.read();
+        let Some(backing) = backing.as_ref() else {
+            self.remove_metadata_expiry(id);
+            return Ok(());
+        };
+        if backing.removed.contains(&id) {
+            self.remove_metadata_expiry(id);
+            return Ok(());
+        }
+        let record = backing.source.get_record(id, backing.read_bytes_max)?;
+        let Some(record) = record else {
+            self.remove_metadata_expiry(id);
+            return Ok(());
+        };
+        let (entity, metadata) =
+            record.decode_with_budget(backing.format_version, backing.read_bytes_max)?;
+        self.restore_metadata_expiry(&entity, metadata.as_ref());
+        Ok(())
+    }
+
     pub(super) fn materialize_backing_entity(&self, id: EntityId) -> Result<(), SegmentError> {
         if self.get_with(id, |_| ()).is_some() {
             return Ok(());

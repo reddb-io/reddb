@@ -353,11 +353,15 @@ impl RedDBServer {
         is_health_request: bool,
         started: Instant,
     ) -> Response {
+        let latency_sensitive = self.request_uses_latency_reserve(&request);
         let execution_permit = if is_health_request {
             None
         } else {
             let remaining = self.handler_timeout.saturating_sub(started.elapsed());
-            match tokio::time::timeout(remaining, self.execution_admission.acquire()).await {
+            let acquire = self
+                .execution_admission
+                .acquire_classified(latency_sensitive);
+            match tokio::time::timeout(remaining, acquire).await {
                 Ok(Ok(execution_permit)) => {
                     self.http_metrics
                         .record_queue_wait(transport, execution_permit.wait().as_secs_f64());
@@ -473,8 +477,12 @@ impl RedDBServer {
     ) -> Response {
         let execution_permit = if self.streaming_request_uses_execution_admission(&request) {
             let remaining = self.handler_timeout.saturating_sub(started.elapsed());
+            let latency_sensitive = self.request_uses_latency_reserve(&request);
+            let acquire = self
+                .execution_admission
+                .acquire_classified(latency_sensitive);
             let permit =
-                match tokio::time::timeout(remaining, self.execution_admission.acquire()).await {
+                match tokio::time::timeout(remaining, acquire).await {
                     Ok(Ok(execution_permit)) => {
                         self.http_metrics
                             .record_queue_wait(transport, execution_permit.wait().as_secs_f64());

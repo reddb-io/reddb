@@ -363,27 +363,8 @@ impl RedDBRuntime {
 
     pub fn apply_retention_policy(&self) -> RedDBResult<()> {
         self.check_write(crate::runtime::write_gate::WriteKind::Maintenance)?;
-        self.sweep_retention_tick(usize::MAX);
-        let expired = self
-            .inner
-            .db
-            .ttl_expired_entities_now()
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        let store = self.inner.db.store();
-        for (collection, id) in expired {
-            let deleted = store
-                .delete(&collection, id)
-                .map_err(|err| RedDBError::Internal(err.to_string()))?;
-            if deleted {
-                store.context_index().remove_entity(id);
-                self.cdc_emit(
-                    crate::replication::cdc::ChangeOperation::Delete,
-                    &collection,
-                    id.raw(),
-                    "entity",
-                );
-            }
-        }
+        self.sweep_retention_tick(crate::runtime::retention_sweeper::DEFAULT_SWEEPER_BATCH);
+        self.sweep_individual_ttl_tick(crate::runtime::retention_sweeper::DEFAULT_SWEEPER_BATCH);
         self.inner
             .db
             .enforce_retention_policy()

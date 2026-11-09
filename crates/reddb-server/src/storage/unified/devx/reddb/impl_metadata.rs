@@ -1,5 +1,5 @@
 use super::*;
-use crate::storage::unified::metadata::{MetadataFilter, MetadataValue};
+use crate::storage::unified::metadata::MetadataValue;
 
 const PHYSICAL_METADATA_KEY: &str = "physical";
 
@@ -103,15 +103,7 @@ impl RedDB {
             self.persist_physical_metadata_record(&metadata)?;
         }
 
-        let _ = self.sweep_ttl_expired_entities()?;
-
         Ok(())
-    }
-
-    pub(crate) fn ttl_expired_entities_now(
-        &self,
-    ) -> Result<Vec<(String, EntityId)>, Box<dyn std::error::Error>> {
-        self.ttl_expired_entities_at(current_unix_ms())
     }
 
     pub fn replica_allows_entity_at_read(
@@ -125,55 +117,35 @@ impl RedDB {
         !self.entity_expired_at(collection, entity, current_unix_ms())
     }
 
-    fn sweep_ttl_expired_entities(&self) -> Result<usize, Box<dyn std::error::Error>> {
-        let to_delete = self.ttl_expired_entities_now()?;
-
-        let mut deleted = 0usize;
-        for (collection, id) in to_delete {
-            match self.store.delete(&collection, id) {
-                Ok(true) => deleted = deleted.saturating_add(1),
-                Ok(false) => {}
-                Err(err) => {
-                    return Err(format!(
-                        "failed deleting expired entity {id} from collection '{collection}': {err:?}"
-                    )
-                    .into());
-                }
-            }
-        }
-
-        Ok(deleted)
-    }
-
-    fn ttl_expired_entities_at(
-        &self,
-        now_ms: u64,
-    ) -> Result<Vec<(String, EntityId)>, Box<dyn std::error::Error>> {
-        let mut to_delete = Vec::<(String, EntityId)>::new();
-
-        let mut absolute_expired = self.expired_entities_by_expires_at(now_ms)?;
-        to_delete.append(&mut absolute_expired);
-
-        let mut relative_expired = self.expired_entities_by_ttl(now_ms)?;
-        to_delete.append(&mut relative_expired);
-
-        to_delete.sort_unstable();
-        to_delete.dedup();
-
-        Ok(to_delete)
-    }
-
-    fn entity_expired_at(
+    pub(crate) fn entity_expired_at(
         &self,
         collection: &str,
         entity: &crate::storage::UnifiedEntity,
         now_ms: u64,
     ) -> bool {
-        let Some(metadata) = self.store.get_metadata(collection, entity.id) else {
-            return false;
+        match self.try_entity_expired_at(collection, entity, now_ms) {
+            Ok(expired) => expired,
+            Err(error) => {
+                tracing::warn!(%error, collection, entity_id = entity.id.raw(), "TTL metadata read failed closed");
+                true
+            }
+        }
+    }
+
+    pub(crate) fn try_entity_expired_at(
+        &self,
+        collection: &str,
+        entity: &crate::storage::UnifiedEntity,
+        now_ms: u64,
+    ) -> Result<bool, crate::storage::StoreError> {
+        let Some(metadata) = self
+            .store
+            .try_get_metadata(collection, entity.id, usize::MAX)?
+        else {
+            return Ok(false);
         };
 
-        Self::entity_metadata_expired_at(entity, &metadata, now_ms)
+        Ok(Self::entity_metadata_expired_at(entity, &metadata, now_ms))
     }
 
     pub(crate) fn entity_metadata_expired_at(
@@ -206,89 +178,6 @@ impl RedDB {
             .saturating_mul(1000)
             .saturating_add(ttl_ms)
             <= now_ms
-    }
-
-    fn expired_entities_by_expires_at(
-        &self,
-        now_ms: u64,
-    ) -> Result<Vec<(String, EntityId)>, Box<dyn std::error::Error>> {
-        let mut ids = self.store.filter_metadata_all(&[(
-            "_expires_at".to_string(),
-            MetadataFilter::Le(MetadataValue::Timestamp(now_ms)),
-        )]);
-
-        if let Ok(now_ms_i64) = i64::try_from(now_ms) {
-            ids.extend(self.store.filter_metadata_all(&[(
-                "_expires_at".to_string(),
-                MetadataFilter::Le(MetadataValue::Int(now_ms_i64)),
-            )]));
-        }
-
-        let now_ms_f64 = now_ms as f64;
-        if now_ms_f64.is_finite() {
-            ids.extend(self.store.filter_metadata_all(&[(
-                "_expires_at".to_string(),
-                MetadataFilter::Le(MetadataValue::Float(now_ms_f64)),
-            )]));
-        }
-
-        Ok(ids)
-    }
-
-    fn expired_entities_by_ttl(
-        &self,
-        now_ms: u64,
-    ) -> Result<Vec<(String, EntityId)>, Box<dyn std::error::Error>> {
-        let mut candidates = Vec::<(String, EntityId)>::new();
-
-        let ttl_ms_candidates = self
-            .store
-            .filter_metadata_all(&[("_ttl_ms".to_string(), MetadataFilter::IsNotNull)]);
-        candidates.extend(ttl_ms_candidates);
-
-        let ttl_candidates = self
-            .store
-            .filter_metadata_all(&[("_ttl".to_string(), MetadataFilter::IsNotNull)]);
-        candidates.extend(ttl_candidates);
-
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        candidates.sort_unstable();
-        candidates.dedup();
-
-        let mut expired = Vec::<(String, EntityId)>::new();
-        for (collection, entity_id) in candidates {
-            let Some(entity) = self.store.get(&collection, entity_id) else {
-                continue;
-            };
-
-            let Some(metadata) = self.store.get_metadata(&collection, entity_id) else {
-                continue;
-            };
-
-            let ttl_ms = metadata.get("_ttl_ms").and_then(Self::metadata_u64);
-            let ttl_secs = if ttl_ms.is_none() {
-                metadata.get("_ttl").and_then(|value| {
-                    Self::metadata_u64(value).and_then(|value_secs| value_secs.checked_mul(1000))
-                })
-            } else {
-                None
-            };
-
-            let Some(ttl_ms) = ttl_ms.or(ttl_secs) else {
-                continue;
-            };
-
-            let created_at_ms = entity.created_at.saturating_mul(1000);
-            let expiry_ms = created_at_ms.saturating_add(ttl_ms);
-            if expiry_ms <= now_ms {
-                expired.push((collection, entity_id));
-            }
-        }
-
-        Ok(expired)
     }
 
     fn metadata_u64(value: &MetadataValue) -> Option<u64> {

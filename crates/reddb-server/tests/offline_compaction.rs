@@ -1709,6 +1709,10 @@ fn compact_rewrites_live_records_and_preserves_source() {
     let before = std::fs::read(&source).expect("source image");
     let destination = directory.path().join("compacted");
     let report = compact_paged(&source, &destination).expect("compact");
+    assert!(
+        !destination.join("compaction.progress.json").exists(),
+        "a completed single-file compact must remove transient progress state"
+    );
     assert!(report.destination_bytes < report.source_bytes / 2);
     assert_eq!(report.records, 1000);
     assert_eq!(std::fs::read(&source).expect("preserved image"), before);

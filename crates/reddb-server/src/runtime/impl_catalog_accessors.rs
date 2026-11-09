@@ -115,6 +115,10 @@ impl RedDBRuntime {
                 .emit_global();
                 RedDBError::Engine(msg)
             })?;
+        // The checkpoint now contains every mutation fenced above. Rebase the
+        // ordered live overlay while publication is still exclusive so a
+        // concurrent writer cannot be cleared after its WAL change.
+        self.index_store_ref().clear_paged_btree_overlays();
         self.inner.probabilistic.replayed_names.lock().clear();
         drop(publication);
         let checkpoint_lsn = self.cdc_current_lsn();
