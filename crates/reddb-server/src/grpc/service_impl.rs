@@ -2785,7 +2785,7 @@ impl RedDb for GrpcRuntime {
         let mut map = crate::json::Map::new();
         map.insert(
             "current_term".into(),
-            JsonValue::Number(db.options().replication.term as f64),
+            JsonValue::Number(self.runtime.current_replication_term() as f64),
         );
 
         match role {

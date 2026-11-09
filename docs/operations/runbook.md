@@ -169,22 +169,43 @@ Pick the host with the highest `current_lsn`.
 ### Promote
 
 ```bash
-curl -X POST http://<chosen>:5000/admin/failover/promote \
+PROMOTION=$(curl -fsS -X POST http://<chosen>:5000/admin/failover/promote \
   -H "Authorization: Bearer $RED_ADMIN_TOKEN" \
-  -d '{"holder_id": "promoter-runbook", "ttl_ms": 60000}'
+  -d '{"holder_id": "promoter-runbook", "ttl_ms": 60000}')
+echo "$PROMOTION" | jq .
 ```
 
 The handler refuses (409) when:
 
 - The instance isn't a replica.
-- Apply health is `stalled_gap`, `divergence`, or `apply_error`.
+- The replica has not completed a successful pull, or its applied LSN is
+  behind the latest primary LSN it observed. A previously synchronized replica
+  may be in `connecting` after the primary disappears; its retained frontier is
+  still checked before promotion.
 - Another holder owns a fresh lease.
 
 A 412 means no remote backend is configured (lease has nowhere to live).
 
 ### Finish the promotion
 
-The endpoint **does not auto-flip the role** — it acquires the lease + audits. The runbook step is to restart the chosen replica with `RED_REPLICATION_MODE=primary`. Old primary, when it comes back, must boot as a replica or refuse to start (operator policy).
+The endpoint **does not auto-flip the role**. It acquires a lease in the next
+replication term, records the timeline, and returns that term. Stop the replica
+process and reopen the same database file as primary:
+
+```bash
+PROMOTION_TERM=$(echo "$PROMOTION" | jq -r .term)
+REDDB_NODE_ROLE=primary \
+RED_REPLICATION_TERM="$PROMOTION_TERM" \
+RED_LEASE_REQUIRED=true \
+red server --path /data/reddb.rdb
+```
+
+Keep the same CAS backend, remote key, lease prefix, and promotion
+`holder_id` on the restarted process. A former primary that still has the old
+term is fenced at startup, even after its old lease expires. Do not disable
+`RED_LEASE_REQUIRED` on either writer: doing so removes this split-brain guard.
+The CAS object is control-plane lease state; the promoted database itself
+remains the same single `.rdb` file.
 
 ---
 
