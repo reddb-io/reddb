@@ -598,6 +598,9 @@ impl RedDBRuntime {
 
         let store = self.inner.db.store();
         for (collection, id, _xid, _previous_xmax) in pending {
+            if let Some(manager) = store.get_collection(&collection) {
+                manager.remove_metadata_expiry(id);
+            }
             store.context_index().remove_entity(id);
             self.cdc_emit(
                 crate::replication::cdc::ChangeOperation::Delete,

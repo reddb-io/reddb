@@ -1306,7 +1306,7 @@ impl IndexStore {
             }
         }
         for index in indexes {
-            if self.index_is_paged(index) {
+            if self.index_is_paged(index) && !matches!(index.method, IndexMethodKind::BTree) {
                 continue;
             }
             for fields in rows.clone() {
@@ -1342,7 +1342,9 @@ impl IndexStore {
             .map(|(name, value)| (name.to_string(), value.clone()))
             .collect();
         indexes
-            .filter(|index| !self.index_is_paged(index))
+            .filter(|index| {
+                !self.index_is_paged(index) || matches!(index.method, IndexMethodKind::BTree)
+            })
             .filter(|index| {
                 versioned
                     || index.columns.iter().any(|column| {
@@ -1733,6 +1735,9 @@ impl IndexStore {
         if rows.is_empty() {
             return Ok(());
         }
+        for (entity_id, fields) in rows {
+            self.paged_btree_overlay_insert(collection, *entity_id, fields)?;
+        }
         let registry = self.registry.read();
 
         // Pre-collect the index list for this collection once so the
@@ -1838,6 +1843,7 @@ impl IndexStore {
         entity_id: EntityId,
         fields: &[(String, Value)],
     ) -> Result<(), String> {
+        self.paged_btree_overlay_insert(collection, entity_id, fields)?;
         let registry = self.registry.read();
         for idx in registry.values() {
             if idx.collection != collection || self.index_is_paged(idx) {
@@ -1921,6 +1927,7 @@ impl IndexStore {
         entity_id: EntityId,
         fields: &[(String, Value)],
     ) -> Result<(), String> {
+        self.paged_btree_overlay_delete(collection, entity_id, fields)?;
         let registry = self.registry.read();
         for idx in registry.values() {
             if idx.collection != collection || self.index_is_paged(idx) {
@@ -1999,6 +2006,7 @@ impl IndexStore {
         old_fields: &[(String, Value)],
         new_fields: &[(String, Value)],
     ) -> Result<(), String> {
+        self.paged_btree_overlay_update(collection, entity_id, old_fields, new_fields)?;
         // Snapshot the indexed columns once to avoid holding the registry
         // lock across delete/insert sub-calls (those re-acquire it).
         // Also include parent path segments (e.g. "body" for "body.service.tier")

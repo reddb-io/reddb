@@ -258,12 +258,13 @@ fn finish_ordered_index_records(
     db: &RedDB,
     query: &TableQuery,
     effective_projections: &[Projection],
+    index_order_satisfied: bool,
     mut records: Vec<UnifiedRecord>,
     table_name: &str,
     table_alias: &str,
     has_added_order_by_columns: bool,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
-    if !query.order_by.is_empty() {
+    if !query.order_by.is_empty() && !index_order_satisfied {
         crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
         super::super::join_filter::try_sort_records_by_order_by_with_db(
             Some(db),
@@ -939,7 +940,8 @@ fn execute_runtime_canonical_table_query_inner(
         } else {
             None
         };
-        let paged_result = idx_store.paged_btree_lookup(&query.table, filter)?;
+        let (paged_result, paged_order_satisfied) =
+            idx_store.paged_btree_lookup_for_query(&query.table, filter, &query.order_by)?;
         let uses_paged_range = paged_result.is_some();
         let sorted_res = match paged_result {
             Some(ids) => Some(ids),
@@ -1007,11 +1009,22 @@ fn execute_runtime_canonical_table_query_inner(
             // path below so user-specified system fields (e.g. SELECT rid,
             // age FROM t) are not silently dropped.
             let lean = explicit_cols.is_empty(); // SELECT * → lean path
-            let limit = if query.order_by.is_empty() && query.offset.is_none() {
-                query.limit.map(|l| l as usize).unwrap_or(usize::MAX)
-            } else {
-                usize::MAX
-            };
+            let limit =
+                if (query.order_by.is_empty() && query.offset.is_none()) || paged_order_satisfied {
+                    query
+                        .limit
+                        .map(|limit| {
+                            usize::try_from(limit).unwrap_or(usize::MAX).saturating_add(
+                                query
+                                    .offset
+                                    .and_then(|offset| usize::try_from(offset).ok())
+                                    .unwrap_or(0),
+                            )
+                        })
+                        .unwrap_or(usize::MAX)
+                } else {
+                    usize::MAX
+                };
 
             // Lean/SELECT-* path uses the borrow-based
             // `SegmentManager::for_each_id` → `runtime_table_record_lean_ref`
@@ -1067,6 +1080,7 @@ fn execute_runtime_canonical_table_query_inner(
                     db,
                     query,
                     &effective_projections,
+                    paged_order_satisfied,
                     records,
                     table_name,
                     table_alias,
@@ -1095,6 +1109,7 @@ fn execute_runtime_canonical_table_query_inner(
                 db,
                 query,
                 &effective_projections,
+                paged_order_satisfied,
                 records,
                 table_name,
                 table_alias,
@@ -1203,6 +1218,7 @@ fn execute_runtime_canonical_table_query_inner(
                                 db,
                                 query,
                                 &effective_projections,
+                                false,
                                 records,
                                 table_name,
                                 table_alias,
@@ -1385,6 +1401,7 @@ fn execute_runtime_canonical_table_query_inner(
                     db,
                     query,
                     &effective_projections,
+                    false,
                     records,
                     table_name,
                     table_alias,

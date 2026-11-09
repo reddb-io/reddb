@@ -48,7 +48,8 @@ fn shared_alias_resume_matches(
     (
         legacy.root_page == canonical.root_page,
         legacy.key_index_root == canonical.key_index_root,
-        legacy.secondary_indices == canonical.secondary_indices,
+        legacy.secondary_indices == canonical.secondary_indices
+            && legacy.metadata_expiries == canonical.metadata_expiries,
     )
 }
 
@@ -582,6 +583,9 @@ impl UnifiedStore {
             let mut states = std::collections::BTreeMap::new();
             let mut entity_id_next = self.resident.next_entity_id.load(Ordering::SeqCst);
             let collections = self.resident.collections.read();
+            let metadata_expiry_prepared = collections
+                .values()
+                .all(|manager| manager.metadata_expiry_projection_ready());
             let publishes_rows = {
                 let summary = self.recovery_xid_summary.read();
                 live.iter().any(|(name, tree)| {
@@ -636,6 +640,28 @@ impl UnifiedStore {
                     }
                     count
                 };
+                let metadata_expiries = if metadata_expiry_prepared {
+                    let mut expiries = Vec::new();
+                    if let Some(tree) = tree {
+                        for (deadline_ms, entity_id) in manager.metadata_expiry_entries() {
+                            if tree
+                                .get(&entity_id.raw().to_be_bytes())
+                                .map_err(|error| {
+                                    StoreError::Io(std::io::Error::other(error.to_string()))
+                                })?
+                                .is_some()
+                            {
+                                expiries.push(reddb_file::native_resume::MetadataExpiryResume {
+                                    deadline_ms,
+                                    entity_id: entity_id.raw(),
+                                });
+                            }
+                        }
+                    }
+                    expiries
+                } else {
+                    Vec::new()
+                };
                 states.insert(
                     name.clone(),
                     CollectionResume {
@@ -664,12 +690,14 @@ impl UnifiedStore {
                                     .collect()
                             })
                             .unwrap_or_default(),
+                        metadata_expiries,
                     },
                 );
             }
             let resume = CatalogResume {
                 entity_id_next,
                 xid_high_water_mark,
+                metadata_expiry_prepared,
                 collections: states,
             };
             encode_catalog_resume(metadata, &resume)
@@ -1900,6 +1928,17 @@ impl UnifiedStore {
                             counters.row_id_next,
                         );
                         manager.restore_sequence_id_next(counters.sequence_id_next);
+                        let expiry_entries = counters
+                            .metadata_expiries
+                            .iter()
+                            .map(|entry| (entry.deadline_ms, EntityId::new(entry.entity_id)))
+                            .collect::<Vec<_>>();
+                        manager.restore_metadata_expiry_projection(
+                            &expiry_entries,
+                            resume
+                                .as_ref()
+                                .is_some_and(|resume| resume.metadata_expiry_prepared),
+                        );
                     }
                     // Load B-tree with root page if it exists
                     if root_page > 0 || counters.is_some() {
@@ -1981,6 +2020,7 @@ impl UnifiedStore {
                                     m.register_row_id(*row_id);
                                 }
                                 if self.config.resident_memory_bytes_max.is_some() {
+                                    m.restore_metadata_expiry(&entity, metadata.as_ref());
                                     self.register_entity_id(id);
                                     m.restore_sequence_id_next(
                                         entity.sequence_id.saturating_add(1),

@@ -246,7 +246,7 @@ const POLICY_COLUMNS: [&str; 8] = [
 // the same four-column shape.
 const STATS_COLUMNS: [&str; 4] = ["collection", "entity", "metric", "value"];
 
-const RETENTION_COLUMNS: [&str; 8] = [
+const RETENTION_COLUMNS: [&str; 11] = [
     "name",
     "retention_duration",
     "oldest_row_ts",
@@ -256,6 +256,9 @@ const RETENTION_COLUMNS: [&str; 8] = [
     "rows_swept_total",
     "segments_retired_total",
     "current_rows_pending_sweep_estimate",
+    "ttl_rows_swept_total",
+    "ttl_pending_sweep_estimate",
+    "ttl_last_sweep_duration_ms",
 ];
 
 const QUEUE_COLUMNS: [&str; 8] = [

@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 const MAGIC: &[u8; 4] = b"RDRS";
 const VERSION: u32 = 4;
 const SECONDARY_VERSION: u32 = 5;
+const METADATA_EXPIRY_VERSION: u32 = 6;
 const SECONDARY_COUNT_MAX: usize = 4096;
 const SECONDARY_NAME_BYTES_MAX: usize = 1024;
 
@@ -23,6 +24,12 @@ pub struct SecondaryIndexResume {
     pub definition: [u8; 32],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MetadataExpiryResume {
+    pub deadline_ms: u64,
+    pub entity_id: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectionResume {
     pub root_page: u32,
@@ -32,12 +39,17 @@ pub struct CollectionResume {
     pub sequence_id_next: u64,
     pub key_index_root: Option<u32>,
     pub secondary_indices: BTreeMap<String, SecondaryIndexResume>,
+    pub metadata_expiries: Vec<MetadataExpiryResume>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogResume {
     pub entity_id_next: u64,
     pub xid_high_water_mark: Option<u64>,
+    /// Version 6 proves that every collection's persisted TTL projection is
+    /// complete, including the meaningful empty case. Older trailers rebuild
+    /// it incrementally instead of scanning during open.
+    pub metadata_expiry_prepared: bool,
     pub collections: BTreeMap<String, CollectionResume>,
 }
 
@@ -83,11 +95,24 @@ pub fn encode_catalog_resume(out: &mut Vec<u8>, resume: &CatalogResume) -> RdbFi
         return Err(invalid("invalid catalog resume counters"));
     }
     validate_key_roots(&resume.collections)?;
+    if !resume.metadata_expiry_prepared
+        && resume
+            .collections
+            .values()
+            .any(|state| !state.metadata_expiries.is_empty())
+    {
+        return Err(invalid("unprepared catalog carries metadata expiries"));
+    }
+    for state in resume.collections.values() {
+        validate_metadata_expiries(state.entities, &state.metadata_expiries)?;
+    }
     let has_secondary = resume
         .collections
         .values()
         .any(|state| !state.secondary_indices.is_empty());
-    let version = if has_secondary {
+    let version = if resume.metadata_expiry_prepared {
+        METADATA_EXPIRY_VERSION
+    } else if has_secondary {
         SECONDARY_VERSION
     } else {
         VERSION
@@ -108,12 +133,21 @@ pub fn encode_catalog_resume(out: &mut Vec<u8>, resume: &CatalogResume) -> RdbFi
         out.extend_from_slice(&state.sequence_id_next.to_le_bytes());
         out.push(u8::from(state.key_index_root.is_some()));
         out.extend_from_slice(&state.key_index_root.unwrap_or(0).to_le_bytes());
-        if has_secondary {
+        if version >= SECONDARY_VERSION {
             out.extend_from_slice(&(state.secondary_indices.len() as u32).to_le_bytes());
             for (name, index) in &state.secondary_indices {
                 encode_native_paged_collection_root(out, name, index.root_page);
                 out.extend_from_slice(&index.codec_version.to_le_bytes());
                 out.extend_from_slice(&index.definition);
+            }
+        }
+        if version >= METADATA_EXPIRY_VERSION {
+            let expiry_count = u32::try_from(state.metadata_expiries.len())
+                .map_err(|_| invalid("too many metadata expiries"))?;
+            out.extend_from_slice(&expiry_count.to_le_bytes());
+            for expiry in &state.metadata_expiries {
+                out.extend_from_slice(&expiry.deadline_ms.to_le_bytes());
+                out.extend_from_slice(&expiry.entity_id.to_le_bytes());
             }
         }
     }
@@ -155,7 +189,10 @@ pub fn decode_catalog_resume(data: &[u8]) -> RdbFileResult<Option<CatalogResume>
     }
     position += 4;
     let version = read_u32(data, &mut position)?;
-    if !matches!(version, 3 | VERSION | SECONDARY_VERSION) {
+    if !matches!(
+        version,
+        3 | VERSION | SECONDARY_VERSION | METADATA_EXPIRY_VERSION
+    ) {
         return Err(invalid("unsupported catalog resume version"));
     }
     let entity_id_next = read_u64(data, &mut position)?;
@@ -177,9 +214,10 @@ pub fn decode_catalog_resume(data: &[u8]) -> RdbFileResult<Option<CatalogResume>
     let mut collections = BTreeMap::new();
     for _ in 0..count {
         let root = decode_native_paged_collection_root(data, &mut position)?;
+        let entities = read_u64(data, &mut position)?;
         let state = CollectionResume {
             root_page: root.root_page,
-            entities: read_u64(data, &mut position)?,
+            entities,
             entity_id_next: read_u64(data, &mut position)?,
             row_id_next: read_u64(data, &mut position)?,
             sequence_id_next: read_u64(data, &mut position)?,
@@ -197,6 +235,11 @@ pub fn decode_catalog_resume(data: &[u8]) -> RdbFileResult<Option<CatalogResume>
             } else {
                 BTreeMap::new()
             },
+            metadata_expiries: if version >= METADATA_EXPIRY_VERSION {
+                decode_metadata_expiries(data, &mut position, entities)?
+            } else {
+                Vec::new()
+            },
         };
         if roots.get(&root.collection) != Some(&state.root_page)
             || state.entity_id_next == 0
@@ -213,8 +256,50 @@ pub fn decode_catalog_resume(data: &[u8]) -> RdbFileResult<Option<CatalogResume>
     Ok(Some(CatalogResume {
         entity_id_next,
         xid_high_water_mark,
+        metadata_expiry_prepared: version >= METADATA_EXPIRY_VERSION,
         collections,
     }))
+}
+
+fn validate_metadata_expiries(
+    collection_entities: u64,
+    expiries: &[MetadataExpiryResume],
+) -> RdbFileResult<()> {
+    if expiries.len() as u64 > collection_entities {
+        return Err(invalid("metadata expiry count exceeds collection entities"));
+    }
+    let mut previous = None;
+    let mut entities = std::collections::BTreeSet::new();
+    for expiry in expiries {
+        if expiry.entity_id == 0
+            || previous.is_some_and(|previous| previous >= *expiry)
+            || !entities.insert(expiry.entity_id)
+        {
+            return Err(invalid("invalid metadata expiry projection"));
+        }
+        previous = Some(*expiry);
+    }
+    Ok(())
+}
+
+fn decode_metadata_expiries(
+    data: &[u8],
+    position: &mut usize,
+    entities: u64,
+) -> RdbFileResult<Vec<MetadataExpiryResume>> {
+    let count = read_u32(data, position)? as usize;
+    if count as u64 > entities || count > data.len().saturating_sub(*position) / 16 {
+        return Err(invalid("metadata expiry count exceeds catalog bounds"));
+    }
+    let mut expiries = Vec::with_capacity(count);
+    for _ in 0..count {
+        expiries.push(MetadataExpiryResume {
+            deadline_ms: read_u64(data, position)?,
+            entity_id: read_u64(data, position)?,
+        });
+    }
+    validate_metadata_expiries(entities, &expiries)?;
+    Ok(expiries)
 }
 
 fn validate_key_roots(collections: &BTreeMap<String, CollectionResume>) -> RdbFileResult<()> {
@@ -316,6 +401,7 @@ mod tests {
         CatalogResume {
             entity_id_next: 999,
             xid_high_water_mark: Some(4000),
+            metadata_expiry_prepared: false,
             collections: BTreeMap::from([(
                 "rows".into(),
                 CollectionResume {
@@ -326,6 +412,7 @@ mod tests {
                     sequence_id_next: 5000,
                     key_index_root: Some(81),
                     secondary_indices: BTreeMap::new(),
+                    metadata_expiries: Vec::new(),
                 },
             )]),
         }
@@ -377,6 +464,48 @@ mod tests {
         let mut data = catalog();
         encode_catalog_resume(&mut data, &resume()).expect("legacy");
         assert_eq!(&data[start + 4..start + 8], &4u32.to_le_bytes());
+    }
+
+    #[test]
+    fn metadata_expiry_projection_roundtrips_and_rejects_ambiguous_entries() {
+        let mut state = resume();
+        state.metadata_expiry_prepared = true;
+        state
+            .collections
+            .get_mut("rows")
+            .expect("rows")
+            .metadata_expiries = vec![
+            MetadataExpiryResume {
+                deadline_ms: 1_000,
+                entity_id: 7,
+            },
+            MetadataExpiryResume {
+                deadline_ms: 2_000,
+                entity_id: 8,
+            },
+        ];
+        let mut data = catalog();
+        let start = data.len();
+        encode_catalog_resume(&mut data, &state).expect("TTL projection");
+        assert_eq!(&data[start + 4..start + 8], &6u32.to_le_bytes());
+        assert_eq!(
+            decode_catalog_resume(&data).expect("decode"),
+            Some(state.clone())
+        );
+        for end in start + 4..data.len() {
+            assert!(
+                decode_catalog_resume(&data[..end]).is_err(),
+                "truncation at {end}"
+            );
+        }
+
+        let expiries = &mut state
+            .collections
+            .get_mut("rows")
+            .expect("rows")
+            .metadata_expiries;
+        expiries[1].entity_id = 7;
+        assert!(encode_catalog_resume(&mut catalog(), &state).is_err());
     }
 
     #[test]

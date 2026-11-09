@@ -927,6 +927,53 @@ impl RedDBServer {
         let _ = writeln!(body, "# TYPE reddb_db_size_bytes gauge");
         let _ = writeln!(body, "reddb_db_size_bytes {}", db_size_bytes);
 
+        if let Some(pager) = self.runtime.db().store().pager() {
+            let total_pages = pager.page_count().unwrap_or(0);
+            let free_pages = pager.free_page_count().unwrap_or(0);
+            let _ = writeln!(
+                body,
+                "# HELP reddb_storage_pages Physical pages by allocation state."
+            );
+            let _ = writeln!(body, "# TYPE reddb_storage_pages gauge");
+            let _ = writeln!(body, "reddb_storage_pages{{state=\"total\"}} {total_pages}");
+            let _ = writeln!(body, "reddb_storage_pages{{state=\"free\"}} {free_pages}");
+        }
+
+        let retention = self.runtime.retention_sweeper_snapshot();
+        let ttl_rows_swept = retention.iter().fold(0u64, |total, (_, state)| {
+            total.saturating_add(state.ttl_rows_swept_total)
+        });
+        let ttl_pending = retention.iter().fold(0u64, |total, (_, state)| {
+            total.saturating_add(state.ttl_pending_estimate)
+        });
+        let ttl_last_duration_ms = retention
+            .iter()
+            .map(|(_, state)| state.ttl_last_sweep_duration_ms)
+            .max()
+            .unwrap_or(0);
+        let _ = writeln!(
+            body,
+            "# HELP reddb_ttl_rows_swept_total Individual-TTL rows reclaimed since process start."
+        );
+        let _ = writeln!(body, "# TYPE reddb_ttl_rows_swept_total counter");
+        let _ = writeln!(body, "reddb_ttl_rows_swept_total {ttl_rows_swept}");
+        let _ = writeln!(
+            body,
+            "# HELP reddb_ttl_pending_sweep_estimate Conservative due-TTL backlog signal."
+        );
+        let _ = writeln!(body, "# TYPE reddb_ttl_pending_sweep_estimate gauge");
+        let _ = writeln!(body, "reddb_ttl_pending_sweep_estimate {ttl_pending}");
+        let _ = writeln!(
+            body,
+            "# HELP reddb_ttl_last_sweep_duration_seconds Longest latest per-collection TTL sweep."
+        );
+        let _ = writeln!(body, "# TYPE reddb_ttl_last_sweep_duration_seconds gauge");
+        let _ = writeln!(
+            body,
+            "reddb_ttl_last_sweep_duration_seconds {}",
+            ttl_last_duration_ms as f64 / 1_000.0
+        );
+
         if let Some(secs) = cold_start_secs {
             let _ = writeln!(
                 body,

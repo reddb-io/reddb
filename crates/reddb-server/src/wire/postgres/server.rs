@@ -128,11 +128,17 @@ fn pg_frame_requires_execution(frame: &FrontendMessage) -> bool {
 
 async fn acquire_pg_execution(
     runtime: &RedDBRuntime,
+    latency_sensitive: bool,
 ) -> Result<crate::transport::execution_admission::ExecutionPermit, &'static str> {
     use crate::transport::execution_admission::ExecutionAdmissionError;
 
     let admission = runtime.execution_admission();
-    match tokio::time::timeout(runtime.execution_queue_timeout(), admission.acquire()).await {
+    match tokio::time::timeout(
+        runtime.execution_queue_timeout(),
+        admission.acquire_classified(latency_sensitive),
+    )
+    .await
+    {
         Ok(Ok(permit)) => Ok(permit),
         Ok(Err(ExecutionAdmissionError::QueueFull)) => {
             Err("execution_queue_full: engine execution queue is full; retryable=true")
@@ -495,7 +501,12 @@ where
         // releases it before the first socket write, so a slow client cannot
         // occupy engine capacity while rows drain.
         let mut execution_permit = if pg_frame_requires_execution(&frame) {
-            match acquire_pg_execution(&runtime).await {
+            let latency_sensitive = matches!(
+                &frame,
+                FrontendMessage::Query(sql)
+                    if crate::server::is_trivial_scalar_sql(sql)
+            );
+            match acquire_pg_execution(&runtime, latency_sensitive).await {
                 Ok(permit) => Some(permit),
                 Err(message) => {
                     // SQLSTATE 53000 = insufficient_resources. Keep the stable

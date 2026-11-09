@@ -207,6 +207,7 @@ pub use self::http_limits::{
 use self::http_principal_limiter::PrincipalConnectionLimiter;
 use self::http_request_metrics::HttpRequestMetrics;
 use self::patch_support::*;
+pub(crate) use self::request_body::is_trivial_scalar_sql;
 use self::request_body::*;
 use self::routing::*;
 use self::serverless_support::*;

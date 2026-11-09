@@ -163,6 +163,110 @@ impl RedDBRuntime {
         }
     }
 
+    /// Reclaim per-entity `WITH TTL` / `WITH EXPIRES AT` deadlines without a
+    /// metadata or collection scan. Current paged files restore the deadline
+    /// index from the resume trailer; legacy files build it in bounded ticks.
+    /// Only the primary materializes deletes, and every batch uses the regular
+    /// DELETE/WAL path.
+    pub fn sweep_individual_ttl_tick(&self, batch_size: usize) -> u64 {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+            .unwrap_or(0);
+        self.sweep_individual_ttl_tick_at(batch_size, now_ms)
+    }
+
+    pub(crate) fn sweep_individual_ttl_tick_at(&self, batch_size: usize, now_ms: u64) -> u64 {
+        if batch_size == 0 || self.inner.db.is_replica_role() {
+            return 0;
+        }
+        if self
+            .check_write(crate::runtime::write_gate::WriteKind::Maintenance)
+            .is_err()
+        {
+            return 0;
+        }
+
+        let store = self.inner.db.store();
+        let mut collections = store.list_collections();
+        collections.sort();
+        if collections.is_empty() {
+            return 0;
+        }
+        if let Some(next) = self.inner.retention_sweeper.read().next_ttl_collection() {
+            if let Some(start) = collections.iter().position(|name| name == next) {
+                collections.rotate_left(start);
+            }
+        }
+
+        let mut remaining = batch_size;
+        let mut swept_total = 0u64;
+        for (index, collection) in collections.iter().enumerate() {
+            if remaining == 0 {
+                break;
+            }
+            let Some(manager) = store.get_collection(collection) else {
+                continue;
+            };
+            let started = std::time::Instant::now();
+            if !manager.metadata_expiry_projection_ready() {
+                let complete = self
+                    .inner
+                    .retention_sweeper
+                    .write()
+                    .rebuild_ttl_projection_tick(&store, collection, batch_size)
+                    .map(|(_, complete)| complete)
+                    .unwrap_or(false);
+                if !complete {
+                    let duration_ms =
+                        started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                    let mut state = self.inner.retention_sweeper.write();
+                    state.record_ttl_tick(collection, 0, 1, duration_ms, now_ms);
+                    state.resume_ttl_at(collections[(index + 1) % collections.len()].clone());
+                    break;
+                }
+            }
+            let mut candidates = manager.expired_metadata_ids(now_ms, remaining.saturating_add(1));
+            let has_more = candidates.len() > remaining;
+            candidates.truncate(remaining);
+            if candidates.is_empty() {
+                continue;
+            }
+            remaining = remaining.saturating_sub(candidates.len());
+
+            let statement = format!(
+                "DELETE FROM {} WHERE rid >= 0",
+                quote_maintenance_identifier(collection)
+            );
+            let result = super::retention_sweeper::with_ttl_delete_candidates(
+                candidates,
+                collection,
+                now_ms,
+                || self.execute_query(&statement),
+            );
+            let (swept, pending_estimate) = match result {
+                Ok(result) => (result.affected_rows, u64::from(has_more)),
+                Err(_) => (0, 1),
+            };
+            swept_total = swept_total.saturating_add(swept);
+            let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            self.inner.retention_sweeper.write().record_ttl_tick(
+                collection,
+                swept,
+                pending_estimate,
+                duration_ms,
+                now_ms,
+            );
+            if remaining == 0 {
+                self.inner
+                    .retention_sweeper
+                    .write()
+                    .resume_ttl_at(collections[(index + 1) % collections.len()].clone());
+            }
+        }
+        swept_total
+    }
+
     pub fn refresh_due_materialized_views(&self) {
         let due = {
             let mut cache = self.inner.materialized_views.write();
@@ -179,4 +283,8 @@ impl RedDBRuntime {
             let _ = self.execute_query(&stmt);
         }
     }
+}
+
+fn quote_maintenance_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }

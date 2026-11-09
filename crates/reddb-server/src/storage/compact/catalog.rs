@@ -270,6 +270,7 @@ mod tests {
             sequence_id_next: 2,
             key_index_root: None,
             secondary_indices: BTreeMap::new(),
+            metadata_expiries: Vec::new(),
         }
     }
 
@@ -300,6 +301,7 @@ mod tests {
             resume: Some(f::native_resume::CatalogResume {
                 entity_id_next: 100,
                 xid_high_water_mark: Some(8),
+                metadata_expiry_prepared: false,
                 collections: [
                     ("users".into(), resume(10)),
                     ("red_config".into(), resume(20)),

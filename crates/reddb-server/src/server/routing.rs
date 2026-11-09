@@ -314,6 +314,14 @@ impl RedDBServer {
         self.is_streaming_request(request) && !is_stream_ask_query_body(&request.body)
     }
 
+    pub(crate) fn request_uses_latency_reserve(&self, request: &HttpRequest) -> bool {
+        let request_path = Self::route_alias_target(&request.method, &request.path)
+            .unwrap_or_else(|| request.path.clone());
+        request.method == "POST"
+            && request_path == "/query"
+            && super::request_body::is_trivial_scalar_query(&request.body)
+    }
+
     /// Issue #807 / 750c — resolve the tenant a `/query/stream` request runs
     /// under so a minted cursor can be scoped to it. A tenant-qualified
     /// credential is authoritative; only platform or anonymous callers may

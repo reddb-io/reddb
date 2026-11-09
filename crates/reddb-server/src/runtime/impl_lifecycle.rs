@@ -114,9 +114,17 @@ impl RedDBRuntime {
     }
 
     pub fn flush(&self) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        let publication = store.vault_publication_lock.lock();
         self.inner
             .db
-            .flush()
+            .flush_local_only()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.index_store_ref().clear_paged_btree_overlays();
+        drop(publication);
+        self.inner
+            .db
+            .upload_to_remote_backend()
             .map_err(|err| RedDBError::Internal(err.to_string()))
     }
 
@@ -1135,6 +1143,9 @@ impl RedDBRuntime {
                             inner,
                         };
                         rt.sweep_retention_tick(
+                            crate::runtime::retention_sweeper::DEFAULT_SWEEPER_BATCH,
+                        );
+                        rt.sweep_individual_ttl_tick(
                             crate::runtime::retention_sweeper::DEFAULT_SWEEPER_BATCH,
                         );
                     },

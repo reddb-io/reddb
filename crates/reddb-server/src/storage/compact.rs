@@ -485,6 +485,22 @@ mod canonical_config_wal_tests {
     use super::*;
 
     #[test]
+    fn compaction_progress_is_machine_readable() {
+        let directory = tempfile::tempdir().expect("progress directory");
+        write_compaction_progress(directory.path(), "rewrite", 2, 5, 1_000)
+            .expect("write progress");
+        let progress: crate::serde_json::Value = crate::serde_json::from_slice(
+            &std::fs::read(directory.path().join("compaction.progress.json"))
+                .expect("progress file"),
+        )
+        .expect("progress JSON");
+        assert_eq!(progress["phase"].as_str(), Some("rewrite"));
+        assert_eq!(progress["completed_trees"].as_u64(), Some(2));
+        assert_eq!(progress["total_trees"].as_u64(), Some(5));
+        assert_eq!(progress["records"].as_u64(), Some(1_000));
+    }
+
+    #[test]
     fn every_legacy_collection_action_is_rejected_before_name_normalization() {
         use f::StoreWalActionFrame as Action;
 
@@ -790,6 +806,18 @@ fn compact_paged_inner(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o700))?;
     }
+    let total_trees = catalog.roots.len()
+        + catalog.resume.as_ref().map_or(0, |resume| {
+            resume
+                .collections
+                .values()
+                .map(|state| {
+                    usize::from(state.key_index_root.is_some()) + state.secondary_indices.len()
+                })
+                .sum::<usize>()
+        });
+    let mut completed_trees = 0usize;
+    write_compaction_progress(destination, "rewrite", completed_trees, total_trees, 0)?;
     let output = destination.join(name);
     let temporary = destination.join(".compacting.rdb");
     ensure(output != temporary, "reserved compaction source filename")?;
@@ -833,29 +861,56 @@ fn compact_paged_inner(
             )?;
         }
         records += count;
+        completed_trees += 1;
+        write_compaction_progress(
+            destination,
+            "rewrite",
+            completed_trees,
+            total_trees,
+            records,
+        )?;
     }
     if let Some(resume) = &catalog.resume {
         for state in resume.collections.values() {
             if let Some(root) = state.key_index_root {
-                records += rewrite_tree(
+                let count = rewrite_tree(
                     &source,
                     &target,
                     root,
                     &mut roots,
                     &mut repaired_leaf_backlinks,
                 )?;
+                records += count;
+                completed_trees += 1;
+                write_compaction_progress(
+                    destination,
+                    "rewrite",
+                    completed_trees,
+                    total_trees,
+                    records,
+                )?;
             }
             for index in state.secondary_indices.values() {
-                records += rewrite_tree(
+                let count = rewrite_tree(
                     &source,
                     &target,
                     index.root_page,
                     &mut roots,
                     &mut repaired_leaf_backlinks,
                 )?;
+                records += count;
+                completed_trees += 1;
+                write_compaction_progress(
+                    destination,
+                    "rewrite",
+                    completed_trees,
+                    total_trees,
+                    records,
+                )?;
             }
         }
     }
+    write_compaction_progress(destination, "assets", completed_trees, total_trees, records)?;
     let mut assets = assets::Assets::new(&source, &target);
     assets.vault()?;
     let physical = assets.physical()?;
@@ -965,6 +1020,7 @@ fn compact_paged_inner(
     }
     let assets_verification = assets.into_verification();
     drop(target);
+    write_compaction_progress(destination, "verify", completed_trees, total_trees, records)?;
     let reopened = Arc::new(Source::open(&temporary)?);
     if salvage.is_some() || lost_collections.is_some() {
         salvage::verify_vault(&temporary, &reopened)?;
@@ -1039,6 +1095,13 @@ fn compact_paged_inner(
         )?;
     }
     sync_directory(destination)?;
+    write_compaction_progress(
+        destination,
+        "publish",
+        completed_trees,
+        total_trees,
+        records,
+    )?;
     // hard_link is create-new even if an unexpected file appears during work.
     std::fs::hard_link(&temporary, &output)?;
     sync_directory(destination)?;
@@ -1047,7 +1110,37 @@ fn compact_paged_inner(
     if let Some(parent) = destination.parent().filter(|p| !p.as_os_str().is_empty()) {
         sync_directory(parent)?;
     }
+    write_compaction_progress(
+        destination,
+        "complete",
+        completed_trees,
+        total_trees,
+        records,
+    )?;
+    sync_directory(destination)?;
+    std::fs::remove_file(destination.join("compaction.progress.json"))?;
+    sync_directory(destination)?;
     Ok(report)
+}
+
+fn write_compaction_progress(
+    destination: &Path,
+    phase: &str,
+    completed_trees: usize,
+    total_trees: usize,
+    records: u64,
+) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(destination.join("compaction.progress.json"))?;
+    write!(
+        file,
+        "{{\"phase\":\"{phase}\",\"completed_trees\":{completed_trees},\"total_trees\":{total_trees},\"records\":{records}}}"
+    )?;
+    file.flush()?;
+    Ok(())
 }
 fn identity_roots(roots: &BTreeMap<u32, u32>) -> BTreeMap<u32, u32> {
     roots.values().map(|root| (*root, *root)).collect()
