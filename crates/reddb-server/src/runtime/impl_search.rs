@@ -4,6 +4,40 @@ use crate::storage::unified::context_index::{entity_tokens_for_search, tokenize_
 use reddb_rql::ast::Expr;
 
 const ASK_AUDIT_COLLECTION: &str = "red_ask_audit";
+const ASK_SYNTHESIS_SYSTEM_PROMPT: &str = include_str!("ai/prompts/ask_synthesis.txt");
+
+/// Immutable authorization context shared by every ASK metadata,
+/// exploratory, and final query. Every execution reinstalls this exact caller
+/// scope before entering the query engine.
+struct AskToolContext<'a> {
+    runtime: &'a RedDBRuntime,
+    scope: &'a crate::runtime::statement_frame::EffectiveScope,
+}
+
+impl<'a> AskToolContext<'a> {
+    fn new(
+        runtime: &'a RedDBRuntime,
+        scope: &'a crate::runtime::statement_frame::EffectiveScope,
+    ) -> Self {
+        Self { runtime, scope }
+    }
+
+    fn execute_tool(
+        &self,
+        call: &crate::runtime::ai::ask_planner::PlannerToolCall,
+    ) -> RedDBResult<String> {
+        self.runtime.execute_ask_planner_tool(self.scope, call)
+    }
+
+    fn execute_candidate(
+        &self,
+        rql: &str,
+        params: &[crate::json::Value],
+    ) -> RedDBResult<RuntimeQueryResult> {
+        self.runtime
+            .execute_planner_candidate(self.scope, rql, params)
+    }
+}
 
 fn mark_table_scan_as_index_seek(
     node: &mut crate::storage::query::planner::CanonicalLogicalNode,
@@ -2199,24 +2233,21 @@ impl RedDBRuntime {
             api_base: planner_api_base,
         } = crate::ai::resolve_connection_from_runtime(&planner_provider, None, self)?;
 
-        // The closure-model seam: the planner LLM behind a `PlannerModel`.
-        // Deterministic by default (temperature 0). The narrowed slice is
-        // the only schema that reaches the model.
-        let planner_closure = |prompt: &str| -> RedDBResult<String> {
-            let response = call_ask_llm(
+        // The provider-neutral chat seam owns a native tool transcript. The
+        // adapter only performs one deterministic model turn.
+        let planner_chat = |messages: &[crate::ai::AiChatMessage],
+                            tools: &[crate::ai::AiToolDefinition]|
+         -> RedDBResult<crate::ai::AiChatResponse> {
+            call_ask_chat(
                 &planner_provider,
                 transport.clone(),
                 planner_api_key.clone(),
                 planner_model.clone(),
-                prompt.to_string(),
                 planner_api_base.clone(),
+                messages.to_vec(),
+                tools.to_vec(),
                 settings.max_completion_tokens as usize,
-                Some(0.0),
-                None,
-                false,
-                None,
-            )?;
-            Ok(response.output_text)
+            )
         };
         // `ASK ... PLAN` shows the first typed action but executes no metadata
         // tool, query, or synthesis call.
@@ -2233,22 +2264,27 @@ impl RedDBRuntime {
                     )?,
                 )));
             }
-            let route = ask_planner::plan_and_route(&ask.question, &slice, &planner_closure)?;
+            let route = ask_planner::plan_and_route_chat(
+                &ask.question,
+                &slice,
+                budget.remaining(),
+                &planner_chat,
+            )?;
             return Ok(PlannerPrepass::Handled(Box::new(
                 self.build_plan_only_result(raw_query, &scope, &route)?,
             )));
         }
 
         // Production and unit tests share this state machine. The executor is
-        // deliberately narrow: only fixed parameterized metadata queries can
-        // run between planner rounds.
-        let tool_executor =
-            |call: &ask_planner::PlannerToolCall| self.execute_ask_planner_tool(&scope, call);
-        let (route, observations) = match ask_planner::run_bounded_agent_loop(
+        // deliberately narrow: fixed parameterized metadata reads and
+        // parser-validated exploratory reads can run between planner rounds.
+        let tool_context = AskToolContext::new(self, &scope);
+        let tool_executor = |call: &ask_planner::PlannerToolCall| tool_context.execute_tool(call);
+        let (route, observations) = match ask_planner::run_bounded_chat_agent_loop(
             &ask.question,
             &slice,
             &mut budget,
-            &planner_closure,
+            &planner_chat,
             &tool_executor,
         )? {
             ask_planner::AgentLoopOutcome::Routed {
@@ -2340,7 +2376,8 @@ impl RedDBRuntime {
         settings: &crate::runtime::ai::cost_guard::Settings,
         transport: crate::runtime::ai::transport::AiTransport,
     ) -> RedDBResult<RuntimeQueryResult> {
-        let executed = self.execute_planner_candidate(scope, candidate_rql, candidate_params)?;
+        let executed =
+            AskToolContext::new(self, scope).execute_candidate(candidate_rql, candidate_params)?;
         let (sources_flat_json, source_urns, source_payloads) =
             planner_sources_from_result(&executed.result);
         let sources_flat_bytes =
@@ -4638,6 +4675,134 @@ fn cost_guard_rejection_to_error(
     ))
 }
 
+fn flatten_ask_chat(
+    messages: &[crate::ai::AiChatMessage],
+    tools: &[crate::ai::AiToolDefinition],
+) -> String {
+    let mut prompt = String::new();
+    for message in messages {
+        match message {
+            crate::ai::AiChatMessage::System(content) => {
+                prompt.push_str("SYSTEM:\n");
+                prompt.push_str(content);
+            }
+            crate::ai::AiChatMessage::User(content) => {
+                prompt.push_str("USER:\n");
+                prompt.push_str(content);
+            }
+            crate::ai::AiChatMessage::Assistant {
+                content,
+                tool_calls,
+            } => {
+                prompt.push_str("ASSISTANT:\n");
+                if let Some(content) = content {
+                    prompt.push_str(content);
+                }
+                for call in tool_calls {
+                    prompt.push_str("\nTOOL_CALL ");
+                    prompt.push_str(&call.name);
+                    prompt.push(' ');
+                    prompt.push_str(&call.arguments.to_string_compact());
+                }
+            }
+            crate::ai::AiChatMessage::ToolResult { name, content, .. } => {
+                prompt.push_str("TOOL_RESULT ");
+                prompt.push_str(name);
+                prompt.push_str(":\n");
+                prompt.push_str(content);
+            }
+        }
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str("AVAILABLE_TOOLS (JSON schemas):\n");
+    for tool in tools {
+        prompt.push_str(&tool.name);
+        prompt.push(' ');
+        prompt.push_str(&tool.input_schema.to_string_compact());
+        prompt.push('\n');
+    }
+    prompt
+}
+
+#[allow(clippy::too_many_arguments)]
+fn call_ask_chat(
+    provider: &crate::ai::AiProvider,
+    transport: crate::runtime::ai::transport::AiTransport,
+    api_key: String,
+    model: String,
+    api_base: String,
+    messages: Vec<crate::ai::AiChatMessage>,
+    tools: Vec<crate::ai::AiToolDefinition>,
+    max_output_tokens: usize,
+) -> RedDBResult<crate::ai::AiChatResponse> {
+    if matches!(
+        provider,
+        crate::ai::AiProvider::HuggingFace
+            | crate::ai::AiProvider::Local
+            | crate::ai::AiProvider::Custom(_)
+    ) {
+        let prompt = flatten_ask_chat(&messages, &tools);
+        let response = call_ask_llm(
+            provider,
+            transport,
+            api_key,
+            model,
+            prompt,
+            api_base,
+            max_output_tokens,
+            Some(0.0),
+            None,
+            false,
+            None,
+        )?;
+        return Ok(crate::ai::AiChatResponse {
+            provider: response.provider,
+            model: response.model,
+            output_text: Some(response.output_text),
+            tool_calls: Vec::new(),
+            prompt_tokens: response.prompt_tokens,
+            completion_tokens: response.completion_tokens,
+            total_tokens: response.total_tokens,
+            stop_reason: response.stop_reason,
+        });
+    }
+
+    let chat = crate::ai::AiChatRequest {
+        messages,
+        tools,
+        temperature: Some(0.0),
+        seed: None,
+        max_output_tokens: Some(max_output_tokens),
+    };
+    match provider {
+        crate::ai::AiProvider::Anthropic => {
+            let request = crate::ai::AnthropicChatRequest {
+                api_key,
+                model,
+                api_base,
+                anthropic_version: crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string(),
+                chat,
+            };
+            crate::runtime::ai::block_on_ai(async move {
+                crate::ai::anthropic_chat_async(&transport, request).await
+            })
+            .and_then(|result| result)
+        }
+        _ => {
+            let request = crate::ai::OpenAiChatRequest {
+                api_key,
+                model,
+                api_base,
+                chat,
+            };
+            crate::runtime::ai::block_on_ai(async move {
+                crate::ai::openai_chat_async(&transport, request).await
+            })
+            .and_then(|result| result)
+        }
+    }
+}
+
 fn call_ask_llm(
     provider: &crate::ai::AiProvider,
     transport: crate::runtime::ai::transport::AiTransport,
@@ -4994,7 +5159,7 @@ fn planner_reasoning_json(
     );
     final_step.insert(
         "tool".to_string(),
-        crate::json::Value::String("reddb_query".to_string()),
+        crate::json::Value::String("reddb_final_query".to_string()),
     );
     final_step.insert(
         "phase".to_string(),
@@ -5090,11 +5255,8 @@ fn planner_sources_from_result(
 /// the model must cite with `[^N]`, plus the executed query for context.
 fn build_planner_synthesis_prompt(question: &str, executed_query: &str, rows: &[String]) -> String {
     let mut prompt = String::new();
-    prompt.push_str(
-        "You are answering a question using ONLY the executed query result rows below. \
-         Cite every claim with an inline [^N] marker where N is the 1-based row number. \
-         Do not invent facts beyond the rows.\n\n",
-    );
+    prompt.push_str(ASK_SYNTHESIS_SYSTEM_PROMPT.trim());
+    prompt.push_str("\n\n");
     prompt.push_str("Executed query: ");
     prompt.push_str(executed_query);
     prompt.push_str("\n\nRows:\n");

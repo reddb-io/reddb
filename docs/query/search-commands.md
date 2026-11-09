@@ -322,7 +322,8 @@ ASK executes a retrieval-then-synthesis pipeline:
 When `red.config.ai.ask.planner` is enabled, a **factual** question enters a
 bounded tool loop. It can inspect the visible catalog, describe a collection,
 find an exact field name, or execute a bounded parameterized exploratory query
-before producing one final read-only RQL query. Every tool call consumes one
+with `reddb_query` before producing one final read-only RQL query with
+`reddb_final_query`. Every tool call consumes one
 `STEPS` unit, and the loop reserves its last unit for the final query. SQL uses
 `$N` placeholders with typed `params`; observations are bounded and treated as
 untrusted data. Every call is re-validated through the production parser and

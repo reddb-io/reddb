@@ -589,7 +589,11 @@ ASK 'question'
 With `red.config.ai.ask.planner = false` (the current rollout default), plain
 `ASK` follows the retrieval-RAG path above. With the planner enabled, factual
 questions enter a bounded tool loop: visible catalog discovery, optional
-parameterized exploratory reads, then one final parameterized RQL query. If
+parameterized exploratory reads through `reddb_query`, then one final
+parameterized RQL query through `reddb_final_query`. OpenAI-compatible and
+Anthropic providers receive a structured message transcript and native tool
+schemas; text-only providers use the same bounded state machine through the
+compatibility envelope. If
 you need deterministic cross-collection retrieval without an LLM, use SQL/RQL
 directly:
 
