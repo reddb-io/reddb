@@ -132,7 +132,7 @@ fn indexed_table_records(
         let result = (|| -> RedDBResult<bool> {
             crate::runtime::function_budget::charge(1)?;
             if resolver.resolve_read_candidate(entity).is_none()
-                || !db.replica_allows_entity_at_read(table, entity)
+                || !db.entity_visible_at_read(table, entity)
                 || !matches(entity)?
             {
                 return Ok(true);
@@ -347,7 +347,7 @@ fn execute_geo_candidate_scan(
             if !candidate_ids.contains(&entity.id.raw()) {
                 return true;
             }
-            if !db.replica_allows_entity_at_read(&query.table, entity) {
+            if !db.entity_visible_at_read(&query.table, entity) {
                 return true;
             }
             let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity_ref(
@@ -1053,7 +1053,7 @@ fn execute_runtime_canonical_table_query_inner(
                         if table_row_resolver.resolve_read_candidate(entity).is_none() {
                             return Ok(true);
                         }
-                        if !db.replica_allows_entity_at_read(&query.table, entity) {
+                        if !db.entity_visible_at_read(&query.table, entity) {
                             return Ok(true);
                         }
                         if let Some(cf) = compiled_filter.as_ref() {
@@ -1816,7 +1816,7 @@ fn execute_runtime_canonical_table_query_inner(
                         }
                         crate::runtime::observe_timeseries_tag_index_point();
                     }
-                    if !db.replica_allows_entity_at_read(&query.table, entity) {
+                    if !db.entity_visible_at_read(&query.table, entity) {
                         return Ok(None);
                     }
                     let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity_ref(
@@ -1891,7 +1891,7 @@ fn execute_runtime_canonical_table_query_inner(
                     if records.len() >= limit {
                         return Ok(false); // stop iteration
                     }
-                    if !db.replica_allows_entity_at_read(&query.table, entity) {
+                    if !db.entity_visible_at_read(&query.table, entity) {
                         return Ok(true);
                     }
                     if let Some(candidates) = tag_series_candidates.as_ref() {
@@ -2223,7 +2223,7 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                     EntityId::new(entity_id),
                 );
                 if let Some(entity) = entity {
-                    if !db.replica_allows_entity_at_read(&context.query.table, &entity) {
+                    if !db.entity_visible_at_read(&context.query.table, &entity) {
                         return Ok(Vec::new());
                     }
                     return Ok(
@@ -2320,7 +2320,7 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                     if records.len() >= limit {
                         return Ok(false);
                     }
-                    if !db.replica_allows_entity_at_read(&context.query.table, entity) {
+                    if !db.entity_visible_at_read(&context.query.table, entity) {
                         return Ok(true);
                     }
                     if compiled_entity_filter_matches(

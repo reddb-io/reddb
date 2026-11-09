@@ -38,17 +38,17 @@ sub-millisecond-lag case local and cheap while guaranteeing a lagging replica ne
 turns a causal read into a long stall or a hard error. This requires the routing
 table to track each node's frontier and bookmark-eligibility.
 
-**TTL/expiry replication — primary-authoritative materialization plus replica
-read-time filtering.** Only the primary materializes an expiry into a delete in the
+**TTL/expiry replication — primary-authoritative materialization plus read-time
+filtering.** Only the primary materializes an expiry into a delete in the
 log; replicas apply that delete like any other mutation and **never** expire on
 their own clock — so the persistent state can never diverge from clock skew (the
-core Valkey lesson). In addition, a replica filters out, at read time, any record
-already past its absolute expiry stamp, so it never serves data that is logically
-expired even before the authoritative delete arrives. The read-side filter is a
-view, not a state mutation, so it does not cause divergence. This generalises the
-pattern queues already use; the timeseries chunk sweep and any row-level TTL must be
-brought under the same primary-authoritative rule, and the read filter added on the
-replica read path.
+core Valkey lesson). Both the primary and replicas filter out, at read time, any
+record already past its absolute expiry stamp, so no node serves logically expired
+data while the primary's bounded physical-delete backlog drains. The read-side
+filter is a view, not a state mutation, so it does not cause divergence. This
+generalises the pattern queues already use; the timeseries chunk sweep and any
+row-level TTL must be brought under the same primary-authoritative mutation rule
+and the same logical read-visibility contract.
 
 ## Consequences
 

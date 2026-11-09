@@ -106,12 +106,19 @@ impl RedDB {
         Ok(())
     }
 
-    pub fn replica_allows_entity_at_read(
+    pub fn entity_visible_at_read(
         &self,
         collection: &str,
         entity: &crate::storage::UnifiedEntity,
     ) -> bool {
-        if !self.is_replica_role() {
+        if self
+            .store
+            .get_collection(collection)
+            .is_some_and(|manager| {
+                manager.metadata_expiry_projection_ready()
+                    && manager.scheduled_metadata_expiry_count() == 0
+            })
+        {
             return true;
         }
         !self.entity_expired_at(collection, entity, current_unix_ms())
