@@ -153,6 +153,25 @@ mod tests {
     }
 
     #[test]
+    fn paged_count_excludes_expired_rows_before_the_sweeper_deletes_them() {
+        let (_directory, mut runtime, _options) = fixture();
+        drop(runtime.background_tasks.take());
+        runtime
+            .execute_query(
+                "INSERT INTO count_rows (id, payload) VALUES (99, 'expired') WITH EXPIRES AT 1",
+            )
+            .expect("expired row");
+        runtime
+            .db()
+            .store()
+            .get_collection("count_rows")
+            .expect("count collection")
+            .restore_metadata_expiry_projection(&[], false);
+
+        assert_eq!(count(&runtime), 12);
+    }
+
+    #[test]
     fn missing_count_projection_falls_back_until_the_next_checkpoint() {
         let (_directory, runtime, options) = fixture();
         let store = runtime.db().store();

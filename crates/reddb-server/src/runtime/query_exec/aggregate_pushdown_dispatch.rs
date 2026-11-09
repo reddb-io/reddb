@@ -145,6 +145,9 @@ pub(super) fn try_execute_pushdown_aggregate(
     crate::runtime::function_budget::try_scan_result(
         |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
+            if !db.entity_visible_at_read(table_name, entity) {
+                return Ok(true);
+            }
             if let Some(f) = compiled_filter.as_ref() {
                 if f.try_evaluate(entity)? != CompiledEntityFilterDecision::Match {
                     return Ok(true);

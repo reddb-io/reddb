@@ -57,11 +57,7 @@ impl RedDBRuntime {
                 crate::storage::unified::EntityId::new(entity_id),
             )
             .filter(entity_visible_under_current_snapshot)
-            .filter(|entity| {
-                self.inner
-                    .db
-                    .replica_allows_entity_at_read(table_name, entity)
-            });
+            .filter(|entity| self.inner.db.entity_visible_at_read(table_name, entity));
 
         let count = if entity.is_some() { 1u64 } else { 0 };
 

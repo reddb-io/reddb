@@ -411,11 +411,11 @@ mod tests {
         assert_eq!(manager.expired_metadata_ids(2, 10).len(), 5);
 
         assert_eq!(runtime.sweep_individual_ttl_tick_at(2, 2), 2);
-        assert_eq!(row_count(&runtime, "ttl_rows"), 4);
+        assert_eq!(manager.scheduled_metadata_expiry_count(), 4);
         assert_eq!(runtime.sweep_individual_ttl_tick_at(2, 2), 2);
-        assert_eq!(row_count(&runtime, "ttl_rows"), 2);
+        assert_eq!(manager.scheduled_metadata_expiry_count(), 2);
         assert_eq!(runtime.sweep_individual_ttl_tick_at(2, 2), 1);
-        assert_eq!(row_count(&runtime, "ttl_rows"), 1);
+        assert_eq!(manager.scheduled_metadata_expiry_count(), 1);
 
         let metrics = runtime
             .execute_query(
@@ -461,6 +461,57 @@ mod tests {
 
         assert_eq!(manager.scheduled_metadata_expiry_count(), 0);
         assert_eq!(row_count(&runtime, "ttl_background"), 0);
+    }
+
+    #[test]
+    fn expired_rows_are_invisible_on_the_primary_before_the_sweeper_deletes_them() {
+        let mut runtime = RedDBRuntime::in_memory().expect("runtime");
+        drop(runtime.background_tasks.take());
+        runtime
+            .execute_query("CREATE TABLE ttl_primary_visibility (id INTEGER)")
+            .expect("table");
+        runtime
+            .execute_query("INSERT INTO ttl_primary_visibility (id) VALUES (1) WITH EXPIRES AT 1")
+            .expect("expired row");
+
+        let result = runtime
+            .execute_query("SELECT id FROM ttl_primary_visibility")
+            .expect("select expired row");
+
+        assert!(
+            result.result.records.is_empty(),
+            "primary reads must not expose logically expired rows before bounded physical cleanup"
+        );
+    }
+
+    #[test]
+    fn grouped_aggregates_exclude_expired_rows_before_the_sweeper_deletes_them() {
+        let mut runtime = RedDBRuntime::in_memory().expect("runtime");
+        drop(runtime.background_tasks.take());
+        runtime
+            .execute_query("CREATE TABLE ttl_grouped_visibility (bucket TEXT, id INTEGER)")
+            .expect("table");
+        runtime
+            .execute_query("INSERT INTO ttl_grouped_visibility (bucket, id) VALUES ('live', 1)")
+            .expect("live row");
+        runtime
+            .execute_query(
+                "INSERT INTO ttl_grouped_visibility (bucket, id) VALUES ('expired', 2) \
+                 WITH EXPIRES AT 1",
+            )
+            .expect("expired row");
+
+        let result = runtime
+            .execute_query(
+                "SELECT bucket, COUNT(*) AS n FROM ttl_grouped_visibility GROUP BY bucket",
+            )
+            .expect("grouped count");
+
+        assert_eq!(result.result.records.len(), 1);
+        assert_eq!(
+            result.result.records[0].get("bucket"),
+            Some(&Value::text("live"))
+        );
     }
 
     #[test]
