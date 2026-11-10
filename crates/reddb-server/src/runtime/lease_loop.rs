@@ -24,7 +24,7 @@
 
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::api::{RedDBError, RedDBResult};
 use crate::replication::lease::LeaseStore;
@@ -96,16 +96,18 @@ pub fn start_lease_loop_if_required(runtime: &RedDBRuntime) -> RedDBResult<()> {
     let lifecycle_for_runtime = Arc::clone(&lifecycle);
     let _ = runtime.set_lease_lifecycle(lifecycle_for_runtime);
 
-    spawn_refresh_thread(runtime.clone(), lifecycle, ttl_ms);
+    spawn_refresh_thread(runtime.clone(), lifecycle);
     Ok(())
 }
 
-fn spawn_refresh_thread(runtime: RedDBRuntime, lifecycle: Arc<LeaseLifecycle>, ttl_ms: u64) {
-    let interval = Duration::from_millis(ttl_ms.saturating_div(3).max(1_000));
+fn spawn_refresh_thread(runtime: RedDBRuntime, lifecycle: Arc<LeaseLifecycle>) {
     // Timer wheel replaces thread::sleep(interval) — wakes exactly when the
     // next refresh is due. Zero CPU during the idle window.
-    let wheel = Arc::new(LeaseTimerWheel::new(100));
-    wheel.schedule("lease-refresh".to_string(), Instant::now() + interval);
+    let wheel = Arc::new(LeaseTimerWheel::new(1));
+    wheel.schedule(
+        "lease-refresh".to_string(),
+        Instant::now() + lifecycle.refresh_delay(),
+    );
 
     let wheel_for_handler = Arc::clone(&wheel);
     let _ = thread::Builder::new()
@@ -131,7 +133,10 @@ fn spawn_refresh_thread(runtime: RedDBRuntime, lifecycle: Arc<LeaseLifecycle>, t
                 }
 
                 // Reschedule the next refresh.
-                wheel_for_handler.schedule("lease-refresh".to_string(), Instant::now() + interval);
+                wheel_for_handler.schedule(
+                    "lease-refresh".to_string(),
+                    Instant::now() + lifecycle.refresh_delay(),
+                );
                 true
             });
         });

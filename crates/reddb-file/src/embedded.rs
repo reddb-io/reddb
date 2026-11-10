@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
+mod native_lock;
+#[cfg(not(target_arch = "wasm32"))]
 pub use native::EmbeddedRdbWriterLock;
 
 mod portable;
