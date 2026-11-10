@@ -6,6 +6,8 @@ contract. It applies to `red://`, `reds://`, `grpc://`, `grpcs://`, `http://`,
 `https://`, `ws://`, and `wss://`. A browser uses HTTP(S) or WS(S); it cannot
 open native TCP or gRPC connections. Rust WebSocket support requires the
 `redwire-websocket` feature; HTTP and gRPC require their existing features.
+Node runtimes without a global `WebSocket` constructor can supply
+`options.WebSocketImpl`.
 
 Other language drivers and low-level, explicitly constructed transport handles
 do not automatically acquire this high-level routing lifecycle.
