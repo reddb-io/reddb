@@ -1163,6 +1163,9 @@ struct RuntimeInner {
         std::collections::VecDeque<String>,
     )>,
     result_blob_cache: crate::storage::cache::BlobCache,
+    // Serializes L2 promotion with result publication and invalidation,
+    // without blocking readers of the in-memory result.
+    result_blob_promotion: parking_lot::Mutex<()>,
     result_blob_entries: parking_lot::RwLock<(
         HashMap<String, RuntimeResultCacheEntry>,
         std::collections::VecDeque<String>,

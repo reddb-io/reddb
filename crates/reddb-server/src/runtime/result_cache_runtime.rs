@@ -395,6 +395,7 @@ impl RedDBRuntime {
         // single-file L2 existed. A hit is promoted into the new backend; new
         // writes never duplicate payloads in this legacy collection.
         if self.inner.embedded_single_file {
+            let _promotion = self.inner.result_blob_promotion.lock();
             let mut cache = self.inner.result_blob_entries.write();
             if let Some(bytes) = self.get_embedded_result_cache_payload(key) {
                 let policy = crate::storage::cache::BlobCachePolicy::default()
@@ -419,66 +420,12 @@ impl RedDBRuntime {
     }
 
     fn get_blob_result_cache_entry_from_blob_cache(&self, key: &str) -> Option<RuntimeQueryResult> {
-        let promote = {
+        {
             let cache = self.inner.result_blob_entries.read();
             if cache.4.contains(key) {
                 let entry = cache.0.get(key)?;
-                if entry.cached_at.elapsed().as_secs() >= self.result_cache_ttl_secs() {
-                    return None;
-                }
-                if cache
-                    .5
-                    .is_some_and(|until| std::time::Instant::now() < until)
-                {
-                    return Some(entry.result.clone());
-                }
-                true
-            } else {
-                false
-            }
-        };
-        // Persist a volatile hit only after writes have stopped. Invalidation
-        // and publication share this lock, so a delayed promotion cannot
-        // reintroduce a value from before an acknowledged table write.
-        if promote {
-            let mut cache = self.inner.result_blob_entries.write();
-            if cache.4.contains(key) {
-                let entry = cache.0.get(key)?.clone();
-                let ttl = self.result_cache_ttl_secs();
-                let elapsed = entry.cached_at.elapsed();
-                if elapsed.as_secs() >= ttl {
-                    return None;
-                }
-                if cache
-                    .5
-                    .is_some_and(|until| std::time::Instant::now() < until)
-                {
-                    return Some(entry.result);
-                }
-                let remaining = std::time::Duration::from_secs(ttl).saturating_sub(elapsed);
-                let ttl_ms = u64::try_from(remaining.as_millis())
-                    .unwrap_or(u64::MAX)
-                    .max(1);
-                let policy = crate::storage::cache::BlobCachePolicy::default()
-                    .ttl_ms(ttl_ms)
-                    .priority(200);
-                let bytes = encode_result_cache_payload(&entry)
-                    .unwrap_or_else(|| result_cache_fingerprint(&entry.result).into_bytes());
-                let put = crate::storage::cache::BlobCachePut::new(bytes)
-                    .with_dependencies(entry.scopes.iter().cloned())
-                    .with_policy(policy);
-                if self
-                    .inner
-                    .result_blob_cache
-                    .put(RESULT_CACHE_BLOB_NAMESPACE, key, put)
-                    .is_ok()
-                {
-                    cache.4.remove(key);
-                } else {
-                    cache.2 = true;
-                }
-                cache.3 = cache.3.wrapping_add(1);
-                return Some(entry.result);
+                return (entry.cached_at.elapsed().as_secs() < self.result_cache_ttl_secs())
+                    .then(|| entry.result.clone());
             }
         }
         let (hit, revision) = {
@@ -523,6 +470,69 @@ impl RedDBRuntime {
         drop(cache);
         self.record_result_cache_evictions(evicted);
         Some(result)
+    }
+
+    // The cache sweeper calls this after writes have been quiet. A single
+    // promotion runs at a time, and it does not hold the result-map lock
+    // during L2 I/O. Invalidation and foreground puts take the same gate.
+    pub(super) fn promote_volatile_result_cache_entry(&self) {
+        let Some(_promotion) = self.inner.result_blob_promotion.try_lock() else {
+            return;
+        };
+        let ttl = self.result_cache_ttl_secs();
+        let candidate = {
+            let cache = self.inner.result_blob_entries.read();
+            if cache
+                .5
+                .is_none_or(|until| std::time::Instant::now() < until)
+            {
+                return;
+            }
+            cache.4.iter().find_map(|key| {
+                let entry = cache.0.get(key)?;
+                (entry.cached_at.elapsed().as_secs() < ttl).then(|| (key.clone(), entry.clone()))
+            })
+        };
+        let Some((key, entry)) = candidate else {
+            return;
+        };
+        let remaining =
+            std::time::Duration::from_secs(ttl).saturating_sub(entry.cached_at.elapsed());
+        if remaining.is_zero() {
+            return;
+        }
+        let ttl_ms = u64::try_from(remaining.as_millis())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let policy = crate::storage::cache::BlobCachePolicy::default()
+            .ttl_ms(ttl_ms)
+            .priority(200);
+        let bytes = encode_result_cache_payload(&entry)
+            .unwrap_or_else(|| result_cache_fingerprint(&entry.result).into_bytes());
+        let put = crate::storage::cache::BlobCachePut::new(bytes)
+            .with_dependencies(entry.scopes.iter().cloned())
+            .with_policy(policy);
+        let result = self
+            .inner
+            .result_blob_cache
+            .put(RESULT_CACHE_BLOB_NAMESPACE, &key, put);
+        let mut cache = self.inner.result_blob_entries.write();
+        if result.is_ok()
+            && cache.4.contains(&key)
+            && cache
+                .0
+                .get(&key)
+                .is_some_and(|current| current.cached_at == entry.cached_at)
+        {
+            cache.4.remove(&key);
+        } else {
+            // A failed or evicted publication may still have left L2 state.
+            cache.2 = true;
+            if result.is_err() {
+                cache.5 = Some(std::time::Instant::now() + RESULT_CACHE_WRITE_QUIET_PERIOD);
+            }
+        }
+        cache.3 = cache.3.wrapping_add(1);
     }
 
     fn get_embedded_result_cache_payload(&self, key: &str) -> Option<Vec<u8>> {
@@ -603,6 +613,7 @@ impl RedDBRuntime {
         let put = crate::storage::cache::BlobCachePut::new(bytes)
             .with_dependencies(dependencies)
             .with_policy(policy);
+        let _promotion = self.inner.result_blob_promotion.lock();
         let mut cache = self.inner.result_blob_entries.write();
         let volatile = cache
             .5
@@ -733,6 +744,7 @@ impl RedDBRuntime {
     }
 
     fn invalidate_result_cache_inner(&self, clear_embedded: bool) {
+        let _promotion = self.inner.result_blob_promotion.lock();
         let mut cache = self.inner.result_cache.write();
         cache.0.clear();
         cache.1.clear();
@@ -755,6 +767,7 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn invalidate_result_cache_for_table(&self, table: &str) {
+        let _promotion = self.inner.result_blob_promotion.lock();
         let legacy_has_match = {
             let cache = self.inner.result_cache.read();
             let (ref map, _) = *cache;
@@ -829,5 +842,82 @@ impl RedDBRuntime {
         self.inner
             .result_blob_cache
             .invalidate_namespace(super::ASK_ANSWER_CACHE_NAMESPACE);
+    }
+}
+
+#[cfg(test)]
+mod crash_tests {
+    use crate::{RedDBOptions, RedDBRuntime};
+    use std::sync::Arc;
+
+    const CHILD_PATH: &str = "REDDB_RESULT_CACHE_COMMIT_GAP_TEST_PATH";
+
+    #[test]
+    #[ignore = "crash-gap reproducer; run explicitly until durable invalidation is atomic"]
+    fn committed_insert_before_cache_invalidation_does_not_recover_stale_result() {
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(path))
+                .expect("open child database");
+            for sql in [
+                "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
+                "CREATE TABLE cache_gap (id INT)",
+                "INSERT INTO cache_gap (id) VALUES (1)",
+                "SELECT id FROM cache_gap ORDER BY id",
+            ] {
+                runtime.execute_query(sql).expect("prepare cache");
+            }
+            runtime.checkpoint().expect("persist cached result");
+            *runtime.index_store_ref().mutation_hook.lock() =
+                Some(Arc::new(|collection, phase| {
+                    if collection == "cache_gap"
+                        && phase == super::super::index_store::MutationTestPhase::StoragePublished
+                    {
+                        std::process::exit(86);
+                    }
+                }));
+            runtime
+                .execute_query("INSERT INTO cache_gap (id) VALUES (2)")
+                .expect("hook must terminate before return");
+            panic!("storage-published hook was not reached");
+        }
+
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("cache-gap.rdb");
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "runtime::result_cache_runtime::crash_tests::committed_insert_before_cache_invalidation_does_not_recover_stale_result",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(CHILD_PATH, &path)
+            .output()
+            .expect("run child");
+        assert_eq!(
+            output.status.code(),
+            Some(86),
+            "child did not reach crash hook: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
+        let cached = runtime
+            .execute_query("SELECT id FROM cache_gap ORDER BY id")
+            .expect("cached read");
+        runtime
+            .execute_query("SET CONFIG runtime.result_cache.enabled = false")
+            .expect("disable cache");
+        let actual = runtime
+            .execute_query("SELECT id FROM cache_gap ORDER BY id")
+            .expect("authoritative read");
+        assert_eq!(
+            actual.result.records.len(),
+            2,
+            "committed insert must have survived"
+        );
+        assert_eq!(
+            cached.result.records.len(),
+            actual.result.records.len(),
+            "recovered L2 result must not be stale"
+        );
     }
 }

@@ -382,6 +382,7 @@ impl RedDBRuntime {
                     std::collections::VecDeque::new(),
                 )),
                 result_blob_cache,
+                result_blob_promotion: parking_lot::Mutex::new(()),
                 result_blob_entries: parking_lot::RwLock::new((
                     HashMap::new(),
                     std::collections::VecDeque::new(),
@@ -1096,6 +1097,11 @@ impl RedDBRuntime {
                                 millis: 5,
                             },
                         );
+                        let rt = RedDBRuntime {
+                            background_tasks: None,
+                            inner,
+                        };
+                        rt.promote_volatile_result_cache_entry();
                     },
                 );
         }

@@ -783,14 +783,19 @@ fn blob_result_cache_promotes_volatile_result_after_writes_stop() {
         assert_eq!(selected_ids(&rt, query), vec![1]);
         exec(&rt, "INSERT INTO items (id) VALUES (2)");
         assert_eq!(selected_ids(&rt, query), vec![1, 2]);
-        std::thread::sleep(std::time::Duration::from_millis(1100));
         let before = rt.result_blob_cache().stats().insertions();
-        assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while rt.result_blob_cache().stats().insertions() == before
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
         assert_eq!(
             rt.result_blob_cache().stats().insertions(),
             before + 1,
-            "a hit after the quiet period should publish to L2"
+            "the background worker should publish the result after the quiet period"
         );
+        assert_eq!(selected_ids(&rt, query), vec![1, 2]);
         rt.checkpoint().expect("checkpoint promoted result");
     }
     {
@@ -819,11 +824,17 @@ fn blob_result_cache_promotion_preserves_remaining_ttl() {
     assert_eq!(selected_ids(&rt, query), vec![1]);
     exec(&rt, "INSERT INTO items (id) VALUES (2)");
     assert_eq!(selected_ids(&rt, query), vec![1, 2]);
-    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let started = std::time::Instant::now();
     let before = rt.result_blob_cache().stats().insertions();
-    assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+    let deadline = started + std::time::Duration::from_secs(4);
+    while rt.result_blob_cache().stats().insertions() == before
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
     assert_eq!(rt.result_blob_cache().stats().insertions(), before + 1);
-    std::thread::sleep(std::time::Duration::from_millis(4100));
+    let remaining = std::time::Duration::from_millis(5300).saturating_sub(started.elapsed());
+    std::thread::sleep(remaining);
     let before = rt.result_cache_metrics();
     assert_eq!(selected_ids(&rt, query), vec![1, 2]);
     assert_eq!(

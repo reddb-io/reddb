@@ -83,8 +83,8 @@ tenant and auth identity, so scoped callers do not share cached rows.
 When `runtime.result_cache.backend = 'blob_cache'`, eligible results can
 be rehydrated from L2 after restart until their TTL expires. Following
 invalidation by a table write, new results are kept only in memory while
-matching writes continue. A cache hit at least one second after the last
-matching invalidation promotes the result to L2 with its remaining TTL.
+matching writes continue. A background worker promotes the result to L2 with its remaining TTL
+after at least one second without a matching invalidation.
 A restart before promotion recomputes the result. Statements rejected by the normal safety gate
 still do not persist: volatile builtins, active-transaction reads,
 oversized result sets, vault results, and pre-serialized fast paths are

@@ -61,8 +61,8 @@ application SQL callers see does not change; the storage underneath does.
 Tenant and auth identity stay part of the key. Table writes flush the
 result-cache namespace when a dependency matches or L2 entries are untracked;
 otherwise unrelated results stay cached. After a matching invalidation, new
-results remain in memory during frequent writes; a hit after one second of
-quiet promotes them to the single-file L2 with their remaining TTL. Restart
+results remain in memory during frequent writes; a background worker promotes them to the single-file L2 after one
+second of quiet, with their remaining TTL. Restart
 before promotion recomputes the result.
 
 Page Cache and Entity Cache are internal acceleration structures.
