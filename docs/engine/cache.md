@@ -85,10 +85,17 @@ be rehydrated from L2 after restart until their TTL expires. Following
 invalidation by a table write, new results are kept only in memory while
 matching writes continue. A background worker promotes the result to L2 with its remaining TTL
 after at least one second without a matching invalidation.
-A restart before promotion recomputes the result. Statements rejected by the normal safety gate
+A restart before promotion recomputes the result. Persisted results carry a
+data epoch recorded with the data's WAL commit; a result from an older epoch
+is recomputed after recovery. This can also discard an unrelated result after
+a write. Results saved in the previous payload format are recomputed once on
+upgrade. Statements rejected by the normal safety gate
 still do not persist: volatile builtins, active-transaction reads,
-oversized result sets, vault results, and pre-serialized fast paths are
+oversized result sets, system-collection and vault results, and pre-serialized fast paths are
 recomputed instead.
+
+An older binary does not maintain this epoch. Do not reuse a persisted result
+cache after writing the database with a version that predates epoch tracking.
 
 ```
 SELECT * FROM users WHERE active = true

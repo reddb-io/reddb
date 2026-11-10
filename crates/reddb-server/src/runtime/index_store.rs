@@ -1096,6 +1096,7 @@ pub(crate) enum MutationTestPhase {
     DirectWireQueryStarted,
     DmlPostImageCandidate,
     StoragePublished,
+    BeforeResultCacheInvalidation,
     BeforeEvents,
     BeforeUndoTopology,
     UndoIndexRemoved,

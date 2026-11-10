@@ -149,7 +149,7 @@ impl UnifiedStore {
         let mut pending = None;
         let committed = staged.and_then(|()| {
             pending = self.enqueue_grouped_actions(&actions.actions)?;
-            if let Some(pending) = &pending {
+            if let Some(pending) = &mut pending {
                 // Checkpoint drains these queued actions before replacing the WAL.
                 drop(publication.take());
                 self.complete_grouped_actions(pending, &actions.actions)

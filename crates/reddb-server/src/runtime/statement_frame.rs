@@ -303,6 +303,8 @@ pub(super) struct StatementExecutionFrame {
     own_xids: HashSet<Xid>,
     serializable_reader: Option<Xid>,
     cache_key: String,
+    cache_data_epoch: Option<u64>,
+    cache_revision: u64,
     is_volatile_query: bool,
     cache_safe: bool,
     /// Effective tenant captured at frame-build time after WITHIN /
@@ -400,6 +402,7 @@ impl StatementExecutionFrame {
         identity_source: StatementIdentity<'_>,
     ) -> RedDBResult<Self> {
         let query = identity_source.text();
+        let (cache_data_epoch, cache_revision) = runtime.result_cache_snapshot();
         if let StatementIdentity::Expr(expr) = identity_source {
             reject_unresolvable_as_of(expr)?;
         }
@@ -471,6 +474,8 @@ impl StatementExecutionFrame {
             own_xids,
             serializable_reader,
             cache_key,
+            cache_data_epoch,
+            cache_revision,
             is_volatile_query,
             cache_safe,
             effective_scope,
@@ -553,7 +558,7 @@ impl StatementExecutionFrame {
         }
         if self.can_read_result_cache() {
             runtime
-                .get_result_cache_entry(self.cache_key())
+                .get_result_cache_entry(self.cache_key(), self.cache_data_epoch)
                 .map(|mut result| {
                     if let Some(vector) = result.result.stats.vector.as_mut() {
                         vector.cache_hit = true;
@@ -578,7 +583,10 @@ impl StatementExecutionFrame {
                     result: result.clone(),
                     cached_at: std::time::Instant::now(),
                     scopes,
+                    data_epoch: self.cache_data_epoch.unwrap_or(0),
                 },
+                self.cache_data_epoch,
+                self.cache_revision,
             );
         }
     }

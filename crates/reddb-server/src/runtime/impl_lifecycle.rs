@@ -390,6 +390,7 @@ impl RedDBRuntime {
                     0,
                     HashSet::new(),
                     None,
+                    db.store().result_cache_epoch().unwrap_or(0),
                 )),
                 ask_answer_cache_entries: parking_lot::RwLock::new((
                     HashSet::new(),
@@ -755,22 +756,25 @@ impl RedDBRuntime {
         // Save system info to red_config on boot
         {
             let sys = SystemInfo::collect();
-            runtime.inner.db.store().set_config_tree(
-                "red.system",
-                &crate::serde_json::json!({
-                    "pid": sys.pid,
-                    "cpu_cores": sys.cpu_cores,
-                    "total_memory_bytes": sys.total_memory_bytes,
-                    "available_memory_bytes": sys.available_memory_bytes,
-                    "os": sys.os,
-                    "arch": sys.arch,
-                    "hostname": sys.hostname,
-                    "started_at": SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64
-                }),
-            );
+            let store = runtime.inner.db.store();
+            store.with_boot_system_info_update(|| {
+                store.set_config_tree(
+                    "red.system",
+                    &crate::serde_json::json!({
+                        "pid": sys.pid,
+                        "cpu_cores": sys.cpu_cores,
+                        "total_memory_bytes": sys.total_memory_bytes,
+                        "available_memory_bytes": sys.available_memory_bytes,
+                        "os": sys.os,
+                        "arch": sys.arch,
+                        "hostname": sys.hostname,
+                        "started_at": SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64
+                    }),
+                )
+            });
 
             // Seed defaults on first boot (only if red_config is empty or missing defaults)
             let store = runtime.inner.db.store();

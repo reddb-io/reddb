@@ -1103,6 +1103,7 @@ impl UnifiedStore {
             commit: None,
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
+            result_cache_epoch: Arc::new(result_cache_epoch::ResultCacheEpochState::default()),
             snapshot_manager: std::sync::OnceLock::new(),
             embedded_commit_session: std::sync::OnceLock::new(),
             #[cfg(test)]
@@ -1175,6 +1176,7 @@ impl UnifiedStore {
             .map_err(StoreError::Io)?;
         let catalog = store.load_from_pages(false, None)?;
         StoreCommitCoordinator::replay_read_only(&store, &wal_path).map_err(StoreError::Io)?;
+        store.load_result_cache_epoch()?;
         let pending_drops = store.legacy_pending_collection_drops()?.unwrap_or_default();
         for name in pending_drops {
             if !catalog
@@ -1272,6 +1274,7 @@ impl UnifiedStore {
             commit,
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
+            result_cache_epoch: Arc::new(result_cache_epoch::ResultCacheEpochState::default()),
             snapshot_manager: std::sync::OnceLock::new(),
             embedded_commit_session: std::sync::OnceLock::new(),
             #[cfg(test)]
@@ -1306,6 +1309,7 @@ impl UnifiedStore {
                 .replay_into(&store, boot_wal)
                 .map_err(StoreError::Io)?;
         }
+        store.load_result_cache_epoch()?;
         trace_startup_phase(path, "paged_wal_replay", wal_replay_started);
         if catalog_load.migrated {
             // Publish only the renamed catalog keys. Existing row, key and

@@ -63,7 +63,10 @@ result-cache namespace when a dependency matches or L2 entries are untracked;
 otherwise unrelated results stay cached. After a matching invalidation, new
 results remain in memory during frequent writes; a background worker promotes them to the single-file L2 after one
 second of quiet, with their remaining TTL. Restart
-before promotion recomputes the result.
+before promotion recomputes the result. Persisted results are accepted after
+recovery only when their data epoch matches the epoch committed with the data;
+older payload formats and results made obsolete by any intervening data write
+are recomputed.
 
 Page Cache and Entity Cache are internal acceleration structures.
 They are listed here only so readers stop trying to use them as

@@ -689,6 +689,9 @@ impl RedDB {
         let remote_key = options.remote_key.clone();
 
         let store = Arc::new(store);
+        // Embedded WAL replay may have advanced the result-cache epoch after
+        // loading the snapshot; publish that recovered value before boot writes.
+        store.load_result_cache_epoch()?;
         if let Some((snapshot_lsn, replica_id)) = &replica_bootstrap {
             store.set_config_tree(
                 "red.replication",

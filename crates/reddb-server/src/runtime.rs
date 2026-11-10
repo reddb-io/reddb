@@ -938,6 +938,7 @@ struct RuntimeResultCacheEntry {
     result: RuntimeQueryResult,
     cached_at: std::time::Instant,
     scopes: HashSet<String>,
+    data_epoch: u64,
 }
 
 pub const METRIC_CACHE_SHADOW_DIVERGENCE_TOTAL: &str = "cache_shadow_divergence_total";
@@ -1176,6 +1177,8 @@ struct RuntimeInner {
         // Results kept in memory while their tables are changing.
         HashSet<String>,
         Option<std::time::Instant>,
+        // Last data epoch whose table invalidation has been processed.
+        u64,
     )>,
     ask_answer_cache_entries:
         parking_lot::RwLock<(HashSet<String>, std::collections::VecDeque<String>)>,

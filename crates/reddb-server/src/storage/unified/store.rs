@@ -366,6 +366,9 @@ pub struct UnifiedStore {
     /// probabilistic snapshot from store state.
     pub(crate) replayed_probabilistic_deltas:
         parking_lot::Mutex<Vec<(u8, u8, String, Vec<Vec<u8>>)>>,
+    // Zero means result-cache epochs are not active. Once active, user
+    // commits advance the epoch in the same durable batch as their data.
+    result_cache_epoch: Arc<result_cache_epoch::ResultCacheEpochState>,
     /// Serialize vault publication with snapshot capture and WAL truncation.
     /// Physical metadata and native header publication take it too (#2376).
     /// Reentrant because embedded checkpoint calls the snapshot encoder while
@@ -412,6 +415,7 @@ mod impl_pages;
 mod impl_vault_import;
 mod key_index;
 mod keyed_write;
+mod result_cache_epoch;
 mod row_publication;
 pub(crate) use row_publication::RowPublication;
 mod mvcc_reclaim;

@@ -12,7 +12,7 @@ const RESULT_CACHE_MAX_ENTRIES: usize = 1000;
 const RESULT_CACHE_ENABLED_KEY: &str = "runtime.result_cache.enabled";
 const RESULT_CACHE_TTL_KEY: &str = "runtime.result_cache.ttl_seconds";
 const RESULT_CACHE_CAPACITY_KEY: &str = "runtime.result_cache.capacity_entries";
-const RESULT_CACHE_PAYLOAD_MAGIC: &[u8; 8] = b"RDRC0001";
+const RESULT_CACHE_PAYLOAD_MAGIC: &[u8; 8] = b"RDRC0002";
 const RESULT_CACHE_WRITE_QUIET_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,7 +167,9 @@ fn read_bytes<'a>(input: &mut &'a [u8]) -> Option<&'a [u8]> {
 fn encode_result_cache_payload(entry: &RuntimeResultCacheEntry) -> Option<Vec<u8>> {
     let result = &entry.result;
     // Execution measurements must not survive as a persisted cached execution.
-    if result.result.stats.vector.is_some()
+    if entry.scopes.iter().any(|scope| {
+        reddb_engine::storage::system_collection_names::canonical_or_self(scope).starts_with("red.")
+    }) || result.result.stats.vector.is_some()
         || result.result.pre_serialized_json.is_some()
         || result_cache_static_str(result.statement).is_none()
         || result_cache_static_str(result.engine).is_none()
@@ -184,6 +186,7 @@ fn encode_result_cache_payload(entry: &RuntimeResultCacheEntry) -> Option<Vec<u8
 
     let mut out = Vec::new();
     out.extend_from_slice(RESULT_CACHE_PAYLOAD_MAGIC);
+    out.extend_from_slice(&entry.data_epoch.to_le_bytes());
     write_string(&mut out, &result.query)?;
     out.push(mode_to_byte(result.mode));
     write_string(&mut out, result.statement)?;
@@ -222,13 +225,16 @@ fn encode_result_cache_payload(entry: &RuntimeResultCacheEntry) -> Option<Vec<u8
     Some(out)
 }
 
-fn decode_result_cache_payload(mut input: &[u8]) -> Option<(RuntimeQueryResult, HashSet<String>)> {
+fn decode_result_cache_payload(
+    mut input: &[u8],
+) -> Option<(RuntimeQueryResult, HashSet<String>, u64)> {
     if input.len() < RESULT_CACHE_PAYLOAD_MAGIC.len()
         || &input[..RESULT_CACHE_PAYLOAD_MAGIC.len()] != RESULT_CACHE_PAYLOAD_MAGIC
     {
         return None;
     }
     input = &input[RESULT_CACHE_PAYLOAD_MAGIC.len()..];
+    let data_epoch = read_u64(&mut input)?;
 
     let query = read_string(&mut input)?;
     let mode = mode_from_byte(read_u8(&mut input)?)?;
@@ -293,6 +299,7 @@ fn decode_result_cache_payload(mut input: &[u8]) -> Option<(RuntimeQueryResult, 
             notice: None,
         },
         scopes,
+        data_epoch,
     ))
 }
 
@@ -320,6 +327,43 @@ impl RedDBRuntime {
         self.config_u64(RESULT_CACHE_CAPACITY_KEY, RESULT_CACHE_MAX_ENTRIES as u64) as usize
     }
 
+    pub(super) fn result_cache_snapshot(&self) -> (Option<u64>, u64) {
+        let epoch = if self.result_cache_enabled()
+            && matches!(
+                self.result_cache_backend(),
+                RuntimeResultCacheBackend::BlobCache | RuntimeResultCacheBackend::Shadow
+            ) {
+            let store = self.inner.db.store();
+            if store.result_cache_epoch_uninitialized() {
+                let _promotion = self.inner.result_blob_promotion.lock();
+                if store.result_cache_epoch_uninitialized()
+                    && self
+                        .inner
+                        .result_blob_cache
+                        .try_invalidate_namespace(RESULT_CACHE_BLOB_NAMESPACE)
+                        .is_err()
+                {
+                    return (None, self.inner.result_blob_entries.read().3);
+                }
+                store.ensure_result_cache_epoch().ok()
+            } else {
+                store.result_cache_epoch()
+            }
+        } else {
+            Some(0)
+        };
+        let cache = self.inner.result_blob_entries.read();
+        if cache.6 != 0 || !cache.0.is_empty() || epoch.unwrap_or(0) == 0 {
+            return (epoch, cache.3);
+        }
+        drop(cache);
+        let mut cache = self.inner.result_blob_entries.write();
+        if cache.6 == 0 && cache.0.is_empty() {
+            cache.6 = epoch.unwrap_or(0);
+        }
+        (epoch, cache.3)
+    }
+
     pub fn result_cache_metrics(&self) -> (u64, u64, u64) {
         use std::sync::atomic::Ordering::Relaxed;
         (
@@ -337,11 +381,15 @@ impl RedDBRuntime {
         }
     }
 
-    pub(super) fn get_result_cache_entry(&self, key: &str) -> Option<RuntimeQueryResult> {
+    pub(super) fn get_result_cache_entry(
+        &self,
+        key: &str,
+        epoch: Option<u64>,
+    ) -> Option<RuntimeQueryResult> {
         if !self.result_cache_enabled() {
             return None;
         }
-        let hit = self.get_result_cache_entry_inner(key);
+        let hit = self.get_result_cache_entry_inner(key, epoch);
         let counter = if hit.is_some() {
             &self.inner.result_cache_hits
         } else {
@@ -351,13 +399,23 @@ impl RedDBRuntime {
         hit
     }
 
-    fn get_result_cache_entry_inner(&self, key: &str) -> Option<RuntimeQueryResult> {
+    fn get_result_cache_entry_inner(
+        &self,
+        key: &str,
+        epoch: Option<u64>,
+    ) -> Option<RuntimeQueryResult> {
         match self.result_cache_backend() {
-            RuntimeResultCacheBackend::Legacy => self.get_legacy_result_cache_entry(key),
-            RuntimeResultCacheBackend::BlobCache => self.get_blob_result_cache_entry(key),
+            RuntimeResultCacheBackend::Legacy => self.get_legacy_result_cache_entry(key, None),
+            RuntimeResultCacheBackend::BlobCache => {
+                epoch.and_then(|epoch| self.get_blob_result_cache_entry(key, epoch))
+            }
             RuntimeResultCacheBackend::Shadow => {
-                let legacy = self.get_legacy_result_cache_entry(key);
-                let blob = self.get_blob_result_cache_entry(key);
+                let legacy = epoch.and_then(|epoch| {
+                    (self.inner.db.store().result_cache_epoch() == Some(epoch))
+                        .then(|| self.get_legacy_result_cache_entry(key, Some(epoch)))
+                        .flatten()
+                });
+                let blob = epoch.and_then(|epoch| self.get_blob_result_cache_entry(key, epoch));
                 if let (Some(ref legacy), Some(ref blob)) = (&legacy, &blob) {
                     if result_cache_fingerprint(legacy) != result_cache_fingerprint(blob) {
                         self.inner
@@ -375,11 +433,17 @@ impl RedDBRuntime {
         }
     }
 
-    fn get_legacy_result_cache_entry(&self, key: &str) -> Option<RuntimeQueryResult> {
+    fn get_legacy_result_cache_entry(
+        &self,
+        key: &str,
+        epoch: Option<u64>,
+    ) -> Option<RuntimeQueryResult> {
         let ttl = self.result_cache_ttl_secs();
         let cache = self.inner.result_cache.read();
         cache.0.get(key).and_then(|entry| {
-            if entry.cached_at.elapsed().as_secs() < ttl {
+            if entry.cached_at.elapsed().as_secs() < ttl
+                && epoch.is_none_or(|epoch| entry.data_epoch == epoch)
+            {
                 Some(entry.result.clone())
             } else {
                 None
@@ -387,45 +451,25 @@ impl RedDBRuntime {
         })
     }
 
-    fn get_blob_result_cache_entry(&self, key: &str) -> Option<RuntimeQueryResult> {
-        if let Some(result) = self.get_blob_result_cache_entry_from_blob_cache(key) {
-            return Some(result);
+    fn get_blob_result_cache_entry(&self, key: &str, epoch: u64) -> Option<RuntimeQueryResult> {
+        if self.inner.db.store().result_cache_epoch() != Some(epoch) {
+            return None;
         }
-        // One-way compatibility read for databases written before the generic
-        // single-file L2 existed. A hit is promoted into the new backend; new
-        // writes never duplicate payloads in this legacy collection.
-        if self.inner.embedded_single_file {
-            let _promotion = self.inner.result_blob_promotion.lock();
-            let mut cache = self.inner.result_blob_entries.write();
-            if let Some(bytes) = self.get_embedded_result_cache_payload(key) {
-                let policy = crate::storage::cache::BlobCachePolicy::default()
-                    .ttl_ms(self.result_cache_ttl_secs() * 1000)
-                    .priority(200);
-                let put = crate::storage::cache::BlobCachePut::new(bytes).with_policy(policy);
-                cache.2 = true;
-                cache.3 = cache.3.wrapping_add(1);
-                let inserted = self
-                    .inner
-                    .result_blob_cache
-                    .put(RESULT_CACHE_BLOB_NAMESPACE, key, put)
-                    .is_ok();
-                drop(cache);
-                if !inserted {
-                    return None;
-                }
-                return self.get_blob_result_cache_entry_from_blob_cache(key);
-            }
-        }
-        None
+        self.get_blob_result_cache_entry_from_blob_cache(key, epoch)
     }
 
-    fn get_blob_result_cache_entry_from_blob_cache(&self, key: &str) -> Option<RuntimeQueryResult> {
+    fn get_blob_result_cache_entry_from_blob_cache(
+        &self,
+        key: &str,
+        epoch: u64,
+    ) -> Option<RuntimeQueryResult> {
         {
             let cache = self.inner.result_blob_entries.read();
             if cache.4.contains(key) {
                 let entry = cache.0.get(key)?;
-                return (entry.cached_at.elapsed().as_secs() < self.result_cache_ttl_secs())
-                    .then(|| entry.result.clone());
+                return (entry.data_epoch == epoch
+                    && entry.cached_at.elapsed().as_secs() < self.result_cache_ttl_secs())
+                .then(|| entry.result.clone());
             }
         }
         let (hit, revision) = {
@@ -435,12 +479,15 @@ impl RedDBRuntime {
                 .result_blob_cache
                 .get(RESULT_CACHE_BLOB_NAMESPACE, key)?;
             if let Some(entry) = cache.0.get(key) {
-                return Some(entry.result.clone());
+                return (entry.data_epoch == epoch).then(|| entry.result.clone());
             }
             (hit, cache.3)
         };
 
-        let (result, scopes) = decode_result_cache_payload(hit.value())?;
+        let (result, scopes, data_epoch) = decode_result_cache_payload(hit.value())?;
+        if data_epoch != epoch || self.inner.db.store().result_cache_epoch() != Some(epoch) {
+            return None;
+        }
         let mut cache = self.inner.result_blob_entries.write();
         if cache.3 != revision {
             return None;
@@ -450,6 +497,7 @@ impl RedDBRuntime {
             result: result.clone(),
             cached_at: std::time::Instant::now(),
             scopes,
+            data_epoch,
         };
         // Single hash lookup: drive the LRU-order push_back only on Vacant.
         match map.entry(key.to_string()) {
@@ -464,7 +512,7 @@ impl RedDBRuntime {
         let evicted = trim_result_cache(map, order, self.result_cache_capacity());
         *untracked |= evicted > 0;
         if evicted > 0 {
-            let (ref map, _, _, _, ref mut volatile_keys, _) = *cache;
+            let (ref map, _, _, _, ref mut volatile_keys, ..) = *cache;
             volatile_keys.retain(|key| map.contains_key(key));
         }
         drop(cache);
@@ -480,6 +528,9 @@ impl RedDBRuntime {
             return;
         };
         let ttl = self.result_cache_ttl_secs();
+        let Some(epoch) = self.inner.db.store().result_cache_epoch() else {
+            return;
+        };
         let candidate = {
             let cache = self.inner.result_blob_entries.read();
             if cache
@@ -490,7 +541,8 @@ impl RedDBRuntime {
             }
             cache.4.iter().find_map(|key| {
                 let entry = cache.0.get(key)?;
-                (entry.cached_at.elapsed().as_secs() < ttl).then(|| (key.clone(), entry.clone()))
+                (entry.data_epoch == epoch && entry.cached_at.elapsed().as_secs() < ttl)
+                    .then(|| (key.clone(), entry.clone()))
             })
         };
         let Some((key, entry)) = candidate else {
@@ -535,51 +587,28 @@ impl RedDBRuntime {
         cache.3 = cache.3.wrapping_add(1);
     }
 
-    fn get_embedded_result_cache_payload(&self, key: &str) -> Option<Vec<u8>> {
-        let manager = self
-            .inner
-            .db
-            .store()
-            .get_collection(RESULT_CACHE_EMBEDDED_COLLECTION)?;
-        let mut latest: Option<(u64, Vec<u8>)> = None;
-        manager.for_each_entity(|entity| {
-            let Some(row) = entity.data.as_row() else {
-                return true;
-            };
-            let namespace_matches = row.get_field("namespace").and_then(|value| match value {
-                reddb_types::Value::Text(value) => Some(value.as_ref()),
-                _ => None,
-            }) == Some(RESULT_CACHE_BLOB_NAMESPACE);
-            let key_matches = row.get_field("key").and_then(|value| match value {
-                reddb_types::Value::Text(value) => Some(value.as_ref()),
-                _ => None,
-            }) == Some(key);
-            if namespace_matches && key_matches {
-                if let Some(reddb_types::Value::Blob(payload)) = row.get_field("payload") {
-                    let id = entity.id.raw();
-                    if latest
-                        .as_ref()
-                        .is_none_or(|(latest_id, _)| id >= *latest_id)
-                    {
-                        latest = Some((id, payload.clone()));
-                    }
-                }
-            }
-            true
-        });
-        latest.map(|(_, payload)| payload)
-    }
-
-    pub(super) fn put_result_cache_entry(&self, key: &str, entry: RuntimeResultCacheEntry) {
+    pub(super) fn put_result_cache_entry(
+        &self,
+        key: &str,
+        entry: RuntimeResultCacheEntry,
+        epoch: Option<u64>,
+        revision: u64,
+    ) {
         if !self.result_cache_enabled() {
             return;
         }
         match self.result_cache_backend() {
             RuntimeResultCacheBackend::Legacy => self.put_legacy_result_cache_entry(key, entry),
-            RuntimeResultCacheBackend::BlobCache => self.put_blob_result_cache_entry(key, entry),
+            RuntimeResultCacheBackend::BlobCache => {
+                if epoch.is_some() {
+                    self.put_blob_result_cache_entry(key, entry, revision);
+                }
+            }
             RuntimeResultCacheBackend::Shadow => {
-                self.put_legacy_result_cache_entry(key, entry.clone());
-                self.put_blob_result_cache_entry(key, entry);
+                if epoch.is_some() && self.inner.db.store().result_cache_epoch() == epoch {
+                    self.put_legacy_result_cache_entry(key, entry.clone());
+                    self.put_blob_result_cache_entry(key, entry, revision);
+                }
             }
         }
     }
@@ -603,7 +632,12 @@ impl RedDBRuntime {
         self.record_result_cache_evictions(evicted);
     }
 
-    fn put_blob_result_cache_entry(&self, key: &str, entry: RuntimeResultCacheEntry) {
+    fn put_blob_result_cache_entry(
+        &self,
+        key: &str,
+        entry: RuntimeResultCacheEntry,
+        revision: u64,
+    ) {
         let policy = crate::storage::cache::BlobCachePolicy::default()
             .ttl_ms(self.result_cache_ttl_secs() * 1000)
             .priority(200);
@@ -615,6 +649,11 @@ impl RedDBRuntime {
             .with_policy(policy);
         let _promotion = self.inner.result_blob_promotion.lock();
         let mut cache = self.inner.result_blob_entries.write();
+        if cache.3 != revision
+            || self.inner.db.store().result_cache_epoch() != Some(entry.data_epoch)
+        {
+            return;
+        }
         let volatile = cache
             .5
             .is_some_and(|until| std::time::Instant::now() < until);
@@ -652,7 +691,7 @@ impl RedDBRuntime {
         *untracked |= evicted > 0;
         *revision = revision.wrapping_add(1);
         if evicted > 0 {
-            let (ref map, _, _, _, ref mut volatile_keys, _) = *cache;
+            let (ref map, _, _, _, ref mut volatile_keys, ..) = *cache;
             volatile_keys.retain(|key| map.contains_key(key));
         }
         drop(cache);
@@ -753,6 +792,9 @@ impl RedDBRuntime {
         blob_entries.1.clear();
         blob_entries.4.clear();
         blob_entries.5 = None;
+        if let Some(epoch) = self.inner.db.store().result_cache_epoch() {
+            blob_entries.6 = epoch;
+        }
         blob_entries.2 = self.invalidate_blob_result_namespace();
         blob_entries.3 = blob_entries.3.wrapping_add(1);
         if clear_embedded {
@@ -767,17 +809,33 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn invalidate_result_cache_for_table(&self, table: &str) {
+        #[cfg(test)]
+        self.index_store_ref().mutation_test_hook(
+            table,
+            super::index_store::MutationTestPhase::BeforeResultCacheInvalidation,
+        );
         let _promotion = self.inner.result_blob_promotion.lock();
+        let previous_epoch = self.inner.result_blob_entries.read().6;
+        let current_epoch = self.inner.db.store().result_cache_epoch();
+        let refresh_shadow = self.result_cache_backend() == RuntimeResultCacheBackend::Shadow
+            && previous_epoch.checked_add(1) == current_epoch;
         let legacy_has_match = {
             let cache = self.inner.result_cache.read();
             let (ref map, _) = *cache;
             !map.is_empty() && map.values().any(|entry| entry.scopes.contains(table))
         };
-        if legacy_has_match {
+        if legacy_has_match || refresh_shadow {
             let mut cache = self.inner.result_cache.write();
             let (ref mut map, ref mut order) = *cache;
             map.retain(|_, entry| !entry.scopes.contains(table));
             order.retain(|key| map.contains_key(key));
+            if let Some(epoch) = current_epoch.filter(|_| refresh_shadow) {
+                for entry in map.values_mut() {
+                    if entry.data_epoch == previous_epoch {
+                        entry.data_epoch = epoch;
+                    }
+                }
+            }
         }
 
         if matches!(
@@ -785,6 +843,24 @@ impl RedDBRuntime {
             RuntimeResultCacheBackend::BlobCache | RuntimeResultCacheBackend::Shadow
         ) {
             let mut blob_entries = self.inner.result_blob_entries.write();
+            let previous_epoch = blob_entries.6;
+            if let Some(epoch) = self.inner.db.store().result_cache_epoch() {
+                if previous_epoch.checked_add(1) == Some(epoch) {
+                    for entry in blob_entries.0.values_mut() {
+                        if entry.data_epoch == previous_epoch && !entry.scopes.contains(table) {
+                            entry.data_epoch = epoch;
+                        }
+                    }
+                } else if previous_epoch != epoch && !blob_entries.0.is_empty() {
+                    // Multiple or out-of-order writes leave dependencies
+                    // uncertain. Recompute without synchronous publication.
+                    blob_entries.5 =
+                        Some(std::time::Instant::now() + RESULT_CACHE_WRITE_QUIET_PERIOD);
+                }
+                blob_entries.6 = epoch;
+            }
+            // A query that started before any write must not publish after it.
+            blob_entries.3 = blob_entries.3.wrapping_add(1);
             let has_match = blob_entries
                 .0
                 .values()
@@ -806,7 +882,7 @@ impl RedDBRuntime {
                 blob_entries
                     .0
                     .retain(|_, entry| !entry.scopes.contains(table));
-                let (ref map, ref mut order, _, ref mut revision, ref mut volatile_keys, _) =
+                let (ref map, ref mut order, _, ref mut revision, ref mut volatile_keys, ..) =
                     *blob_entries;
                 order.retain(|key| map.contains_key(key));
                 volatile_keys.retain(|key| map.contains_key(key));
@@ -823,7 +899,7 @@ impl RedDBRuntime {
                 ref mut untracked,
                 ref mut revision,
                 ref mut volatile_keys,
-                _,
+                ..,
             ) = *blob_entries;
             if blob_map.values().any(|entry| entry.scopes.contains(table)) {
                 blob_map.retain(|_, entry| !entry.scopes.contains(table));
@@ -851,6 +927,12 @@ mod crash_tests {
     use std::sync::Arc;
 
     const CHILD_PATH: &str = "REDDB_RESULT_CACHE_COMMIT_GAP_TEST_PATH";
+    const CHILD_OPERATION: &str = "REDDB_RESULT_CACHE_COMMIT_GAP_TEST_OPERATION";
+
+    #[test]
+    fn legacy_payload_without_a_data_epoch_is_not_rehydrated() {
+        assert!(super::decode_result_cache_payload(b"RDRC0001old-payload").is_none());
+    }
 
     #[test]
     fn promotion_gate_does_not_block_hits_and_orders_invalidation() {
@@ -925,7 +1007,74 @@ mod crash_tests {
     }
 
     #[test]
-    #[ignore = "crash-gap reproducer; run explicitly until durable invalidation is atomic"]
+    fn published_write_cannot_return_an_old_in_memory_result() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(
+            directory.path().join("live-gap.rdb"),
+        ))
+        .expect("runtime");
+        for sql in [
+            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
+            "CREATE TABLE live_gap (id INT)",
+            "INSERT INTO live_gap (id) VALUES (1)",
+            "SELECT id FROM live_gap ORDER BY id",
+        ] {
+            runtime.execute_query(sql).expect("prepare cache");
+        }
+        let (published_tx, published_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let resume_rx = Arc::new(parking_lot::Mutex::new(resume_rx));
+        *runtime.index_store_ref().mutation_hook.lock() =
+            Some(Arc::new(move |collection, phase| {
+                if collection == "live_gap"
+                    && phase == super::super::index_store::MutationTestPhase::StoragePublished
+                {
+                    published_tx.send(()).expect("report publication");
+                    resume_rx
+                        .lock()
+                        .recv_timeout(Duration::from_secs(10))
+                        .expect("resume writer");
+                }
+            }));
+        let writer = runtime.clone();
+        let writer_thread = std::thread::spawn(move || {
+            writer.execute_query("INSERT INTO live_gap (id) VALUES (2)")
+        });
+        published_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("storage publication");
+        let reader = runtime.clone();
+        let (read_tx, read_rx) = mpsc::channel();
+        let reader_thread = std::thread::spawn(move || {
+            let rows = reader
+                .execute_query("SELECT id FROM live_gap ORDER BY id")
+                .expect("read during publication")
+                .result
+                .records
+                .len();
+            read_tx.send(rows).expect("report rows");
+        });
+        let early = read_rx.recv_timeout(Duration::from_secs(2));
+        resume_tx.send(()).expect("resume writer");
+        writer_thread.join().expect("writer thread").expect("write");
+        let rows = match early {
+            Ok(rows) => rows,
+            Err(mpsc::RecvTimeoutError::Timeout) => read_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("reader finished"),
+            Err(error) => panic!("reader failed: {error}"),
+        };
+        reader_thread.join().expect("reader thread");
+        assert_eq!(
+            rows, 2,
+            "old cached result was returned after storage publication"
+        );
+    }
+
+    #[test]
     fn committed_insert_before_cache_invalidation_does_not_recover_stale_result() {
         if let Some(path) = std::env::var_os(CHILD_PATH) {
             let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(path))
@@ -939,57 +1088,109 @@ mod crash_tests {
                 runtime.execute_query(sql).expect("prepare cache");
             }
             runtime.checkpoint().expect("persist cached result");
-            *runtime.index_store_ref().mutation_hook.lock() =
-                Some(Arc::new(|collection, phase| {
+            *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(
+                |collection, phase| {
                     if collection == "cache_gap"
-                        && phase == super::super::index_store::MutationTestPhase::StoragePublished
+                        && phase == super::super::index_store::MutationTestPhase::BeforeResultCacheInvalidation
                     {
                         std::process::exit(86);
                     }
-                }));
+                },
+            ));
+            let operation = std::env::var(CHILD_OPERATION).expect("child operation");
+            if operation.starts_with("wal_") {
+                std::env::set_var("REDDB_EMBEDDED_RDB_CRASH_AT", &operation);
+            }
+            let sql = match operation.as_str() {
+                "insert"
+                | "wal_after_frame_write"
+                | "wal_after_frame_sync"
+                | "wal_after_superblock_write" => "INSERT INTO cache_gap (id) VALUES (2)",
+                "update" => "UPDATE cache_gap SET id = 2 WHERE id = 1",
+                "delete" => "DELETE FROM cache_gap WHERE id = 1",
+                _ => panic!("unknown operation"),
+            };
             runtime
-                .execute_query("INSERT INTO cache_gap (id) VALUES (2)")
+                .execute_query(sql)
                 .expect("hook must terminate before return");
             panic!("storage-published hook was not reached");
         }
 
         let dir = tempfile::tempdir().expect("temporary directory");
-        let path = dir.path().join("cache-gap.rdb");
-        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
-            .args([
-                "--exact",
-                "runtime::result_cache_runtime::crash_tests::committed_insert_before_cache_invalidation_does_not_recover_stale_result",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env(CHILD_PATH, &path)
-            .output()
-            .expect("run child");
-        assert_eq!(
-            output.status.code(),
-            Some(86),
-            "child did not reach crash hook: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
-        let cached = runtime
-            .execute_query("SELECT id FROM cache_gap ORDER BY id")
-            .expect("cached read");
-        runtime
-            .execute_query("SET CONFIG runtime.result_cache.enabled = false")
-            .expect("disable cache");
-        let actual = runtime
-            .execute_query("SELECT id FROM cache_gap ORDER BY id")
-            .expect("authoritative read");
-        assert_eq!(
-            actual.result.records.len(),
-            2,
-            "committed insert must have survived"
-        );
-        assert_eq!(
-            cached.result.records.len(),
-            actual.result.records.len(),
-            "recovered L2 result must not be stale"
-        );
+        for (operation, expected) in [
+            ("insert", Some(vec![1, 2])),
+            ("update", Some(vec![2])),
+            ("delete", Some(vec![])),
+            ("wal_after_frame_write", None),
+            ("wal_after_frame_sync", None),
+            ("wal_after_superblock_write", None),
+        ] {
+            let path = dir.path().join(format!("cache-gap-{operation}.rdb"));
+            let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "runtime::result_cache_runtime::crash_tests::committed_insert_before_cache_invalidation_does_not_recover_stale_result",
+                    "--nocapture",
+                ])
+                .env(CHILD_PATH, &path)
+                .env(CHILD_OPERATION, operation)
+                .output()
+                .expect("run child");
+            assert_eq!(
+                output.status.code(),
+                Some(if operation.starts_with("wal_") {
+                    173
+                } else {
+                    86
+                }),
+                "{operation} child did not reach crash hook: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let runtime =
+                RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
+            let before = runtime.result_cache_metrics();
+            let cached = runtime
+                .execute_query("SELECT id FROM cache_gap ORDER BY id")
+                .expect("cached read");
+            let after = runtime.result_cache_metrics();
+            let values = |result: &crate::runtime::RuntimeQueryResult| {
+                result
+                    .result
+                    .records
+                    .iter()
+                    .map(|record| match record.get("id") {
+                        Some(reddb_types::Value::Integer(value)) => *value,
+                        other => panic!("expected id, got {other:?}"),
+                    })
+                    .collect::<Vec<_>>()
+            };
+            runtime
+                .execute_query("SET CONFIG runtime.result_cache.enabled = false")
+                .expect("disable cache");
+            let actual = runtime
+                .execute_query("SELECT id FROM cache_gap ORDER BY id")
+                .expect("authoritative read");
+            let actual = values(&actual);
+            if let Some(expected) = expected {
+                assert_eq!(actual, expected, "{operation} committed data must survive");
+            } else {
+                assert!(
+                    actual == vec![1] || actual == vec![1, 2],
+                    "{operation} recovered a partial write"
+                );
+            }
+            assert_eq!(
+                values(&cached),
+                actual,
+                "{operation} recovered a stale result"
+            );
+            if actual != vec![1] {
+                assert_eq!(
+                    after.1 - before.1,
+                    1,
+                    "{operation} must reject the old L2 entry"
+                );
+            }
+        }
     }
 }
