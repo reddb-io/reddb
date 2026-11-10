@@ -28,16 +28,11 @@ impl RedDBRuntime {
         collection: &str,
         entity_id: u64,
         entity_kind: &str,
-    ) -> u64 {
-        let _publication = self.inner.logical_publication.lock();
-        let deferred = self.inner.db.replication.is_some() && self.current_xid().is_some();
-        let lsn = if deferred {
-            0
-        } else {
-            self.inner
-                .cdc
-                .emit(operation, collection, entity_id, entity_kind)
-        };
+    ) -> RedDBResult<u64> {
+        let lsn = self
+            .inner
+            .cdc
+            .emit(operation, collection, entity_id, entity_kind);
 
         // Append to logical WAL replication buffer (if primary mode)
         if self.inner.db.replication.is_some() {
@@ -66,9 +61,9 @@ impl RedDBRuntime {
                 range_id: None,
                 ownership_epoch: None,
             };
-            self.stage_or_publish_logical_record(record);
+            self.stage_or_publish_logical_record(record)?;
         }
-        lsn
+        Ok(lsn)
     }
 
     pub(crate) fn cdc_emit_insert_batch_no_cache_invalidate(
@@ -76,21 +71,21 @@ impl RedDBRuntime {
         collection: &str,
         ids: &[EntityId],
         entity_kind: &str,
-    ) -> Vec<u64> {
+    ) -> RedDBResult<Vec<u64>> {
         if ids.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         // Without logical replication, CDC only needs the in-memory event
         // ring. Reserve all LSNs and push the batch under one mutex instead
         // of taking the ring lock once per inserted row.
         if self.inner.db.replication.is_none() {
-            return self.inner.cdc.emit_batch_same_collection(
+            return Ok(self.inner.cdc.emit_batch_same_collection(
                 crate::replication::cdc::ChangeOperation::Insert,
                 collection,
                 entity_kind,
                 ids.iter().map(|id| id.raw()),
-            );
+            ));
         }
 
         // Replication needs one logical-WAL record per entity with the
@@ -113,16 +108,11 @@ impl RedDBRuntime {
         collection: &str,
         entity_id: u64,
         entity_kind: &str,
-    ) -> u64 {
-        let _publication = self.inner.logical_publication.lock();
-        let deferred = self.inner.db.replication.is_some() && self.current_xid().is_some();
-        let lsn = if deferred {
-            0
-        } else {
-            self.inner
-                .cdc
-                .emit(operation, collection, entity_id, entity_kind)
-        };
+    ) -> RedDBResult<u64> {
+        let lsn = self
+            .inner
+            .cdc
+            .emit(operation, collection, entity_id, entity_kind);
         // Perf: prior to this we called `invalidate_result_cache()`
         // which wipes EVERY cached query, across every table, under
         // a write lock — turning each INSERT into a serialisation
@@ -157,9 +147,9 @@ impl RedDBRuntime {
                 range_id: None,
                 ownership_epoch: None,
             };
-            self.stage_or_publish_logical_record(record);
+            self.stage_or_publish_logical_record(record)?;
         }
-        lsn
+        Ok(lsn)
     }
 
     pub(crate) fn cdc_emit_kv(
@@ -171,7 +161,6 @@ impl RedDBRuntime {
         before: Option<crate::json::Value>,
         after: Option<crate::json::Value>,
     ) -> u64 {
-        let _publication = self.inner.logical_publication.lock();
         let lsn = self
             .inner
             .cdc
@@ -222,7 +211,7 @@ impl RedDBRuntime {
         entity_kind: &str,
         metadata: Option<&crate::storage::Metadata>,
         invalidate_cache: bool,
-    ) -> u64 {
+    ) -> RedDBResult<u64> {
         self.cdc_emit_prebuilt_with_columns(
             operation,
             collection,
@@ -249,25 +238,19 @@ impl RedDBRuntime {
         metadata: Option<&crate::storage::Metadata>,
         invalidate_cache: bool,
         changed_columns: Option<Vec<String>>,
-    ) -> u64 {
+    ) -> RedDBResult<u64> {
         if invalidate_cache {
             self.invalidate_result_cache();
         }
 
-        let _publication = self.inner.logical_publication.lock();
         let public_id = entity.logical_id().raw();
-        let deferred = self.inner.db.replication.is_some() && self.current_xid().is_some();
-        let lsn = if deferred {
-            0
-        } else {
-            self.inner.cdc.emit_with_columns(
-                operation,
-                collection,
-                public_id,
-                entity_kind,
-                changed_columns,
-            )
-        };
+        let lsn = self.inner.cdc.emit_with_columns(
+            operation,
+            collection,
+            public_id,
+            entity_kind,
+            changed_columns,
+        );
 
         if self.inner.db.replication.is_some() {
             let store = self.inner.db.store();
@@ -294,10 +277,10 @@ impl RedDBRuntime {
                 range_id: None,
                 ownership_epoch: None,
             };
-            self.stage_or_publish_logical_record(record);
+            self.stage_or_publish_logical_record(record)?;
         }
 
-        lsn
+        Ok(lsn)
     }
 
     pub(crate) fn current_replication_term(&self) -> u64 {
@@ -310,7 +293,8 @@ impl RedDBRuntime {
         entity_kind: &str,
         items: I,
         invalidate_cache: bool,
-    ) where
+    ) -> RedDBResult<()>
+    where
         I: IntoIterator<
             Item = (
                 &'a str,
@@ -322,7 +306,7 @@ impl RedDBRuntime {
         let items: Vec<(&str, &UnifiedEntity, Option<&crate::storage::Metadata>)> =
             items.into_iter().collect();
         if items.is_empty() {
-            return;
+            return Ok(());
         }
 
         if invalidate_cache {
@@ -330,8 +314,9 @@ impl RedDBRuntime {
         }
 
         for (collection, entity, metadata) in items {
-            self.cdc_emit_prebuilt(operation, collection, entity, entity_kind, metadata, false);
+            self.cdc_emit_prebuilt(operation, collection, entity, entity_kind, metadata, false)?;
         }
+        Ok(())
     }
 
     /// Poll CDC events since a given LSN.
@@ -343,11 +328,20 @@ impl RedDBRuntime {
         self.inner.cdc.poll(since_lsn, max_count)
     }
 
-    /// PLAN.md Phase 11.4 — current CDC LSN. Public mutation
-    /// surfaces (HTTP query, gRPC entity ops) call this immediately
-    /// after a successful write to feed `enforce_commit_policy`.
+    /// Current event cursor for CDC polling. A committed replication batch
+    /// can contain several events, so this is not a replica ACK position.
     pub fn cdc_current_lsn(&self) -> u64 {
         self.inner.cdc.current_lsn()
+    }
+
+    /// Published logical commit frontier; standalone instances retain their
+    /// local event cursor. Request-specific receipts are handled separately.
+    pub fn replication_commit_lsn(&self) -> u64 {
+        if self.inner.db.replication.is_some() {
+            self.primary_logical_head_lsn()
+        } else {
+            self.cdc_current_lsn()
+        }
     }
 
     pub fn kv_watch_events_since(

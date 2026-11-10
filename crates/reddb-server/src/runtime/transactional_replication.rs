@@ -6,30 +6,92 @@ use crate::replication::cdc::ChangeRecord;
 use crate::runtime::execution_context::current_connection_id;
 use crate::storage::unified::{DeferredStoreWalActions, EntityData, RowData};
 use reddb_engine::storage::store_wal::StoreWalAction;
+use std::sync::atomic::Ordering;
 
 const OUTBOX_COLLECTION: &str = "red.storage.metadata";
 const OUTBOX_KEY: &str = "replication.transaction_outbox";
+// Members are hex-encoded inside the envelope and again by the JSON stream.
+// Leave room below the default 32 MiB gRPC message bound for both expansions.
+const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PENDING_RECORDS: usize = 65_536;
+
+#[derive(Default)]
+pub(super) struct PendingLogicalChanges {
+    records: Vec<(u64, ChangeRecord)>,
+    encoded_bytes: usize,
+    rejected: bool,
+}
+
+impl PendingLogicalChanges {
+    pub(super) fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub(super) fn truncate(&mut self, length: usize) {
+        self.records.truncate(length);
+        self.encoded_bytes = self
+            .records
+            .iter()
+            .map(|(_, record)| record.encode().len())
+            .sum();
+    }
+
+    fn push(&mut self, xid: u64, record: ChangeRecord) -> RedDBResult<()> {
+        let bytes = record.encode().len();
+        if self.rejected
+            || self.records.len() >= MAX_PENDING_RECORDS
+            || self.encoded_bytes.saturating_add(bytes) > MAX_PENDING_BYTES
+        {
+            self.rejected = true;
+            return Err(Self::limit_error());
+        }
+        self.encoded_bytes += bytes;
+        self.records.push((xid, record));
+        Ok(())
+    }
+
+    fn limit_error() -> RedDBError {
+        RedDBError::InvalidOperation(
+            "transaction replication buffer limit exceeded; ROLLBACK is required".into(),
+        )
+    }
+}
 
 impl RedDBRuntime {
-    pub(super) fn stage_or_publish_logical_record(&self, record: ChangeRecord) {
-        if let Some(xid) = self.current_xid() {
-            self.inner
+    pub(super) fn stage_or_publish_logical_record(&self, record: ChangeRecord) -> RedDBResult<()> {
+        if let Some(xid) = self
+            .current_xid()
+            .filter(|_| UnifiedStore::deferred_store_wal_capture_active())
+        {
+            return self
+                .inner
                 .pending_logical_records
                 .lock()
                 .entry(current_connection_id())
                 .or_default()
-                .push((xid, record));
-        } else if let Some(primary) = &self.inner.db.replication {
-            primary.append_logical_record(record.lsn, record.encode());
+                .push(xid, record);
         }
+        if self.inner.db.replication.is_none() {
+            return Ok(());
+        }
+        let store = self.inner.db.store();
+        let _storage = store.vault_publication_lock.lock();
+        let _publication = self.inner.logical_publication.lock();
+        // This path also retains already-running autocommits when an earlier
+        // transaction's projection failed. Never skip an unpublished prefix.
+        self.persist_logical_outbox(vec![record], 0, DeferredStoreWalActions::default())?;
+        self.recover_transactional_replication().map_err(|error| {
+            RedDBError::Internal(format!(
+                "commit is locally durable; replication publication is pending: {error}"
+            ))
+        })
     }
 
     pub(super) fn commit_transactional_replication(
         &self,
         connection_id: u64,
-        mut actions: DeferredStoreWalActions,
+        actions: DeferredStoreWalActions,
     ) -> RedDBResult<()> {
-        let _publication = self.inner.logical_publication.lock();
         let store = self.inner.db.store();
         let pending = self
             .inner
@@ -37,19 +99,92 @@ impl RedDBRuntime {
             .lock()
             .remove(&connection_id)
             .unwrap_or_default();
+        if pending.rejected {
+            return Err(PendingLogicalChanges::limit_error());
+        }
         let retained: Vec<_> = pending
+            .records
             .into_iter()
             .filter(|(xid, _)| !self.snapshot_manager().is_aborted(*xid))
             .collect();
-        let outbox_xid = retained.first().map(|(xid, _)| *xid).unwrap_or(0);
+        let mut outbox_xid = retained.first().map(|(xid, _)| *xid).unwrap_or(0);
         let mut records: Vec<_> = retained.into_iter().map(|(_, record)| record).collect();
+        if self.inner.db.replication.is_some() {
+            for (collection, id, xid, _) in self
+                .inner
+                .pending_tombstones
+                .read()
+                .get(&connection_id)
+                .into_iter()
+                .flatten()
+            {
+                if self.snapshot_manager().is_aborted(*xid) {
+                    continue;
+                }
+                if outbox_xid == 0 {
+                    outbox_xid = *xid;
+                }
+                let cdc_lsn = self.inner.cdc.emit(
+                    crate::replication::cdc::ChangeOperation::Delete,
+                    collection,
+                    id.raw(),
+                    "entity",
+                );
+                records.push(ChangeRecord {
+                    term: self.current_replication_term(),
+                    lsn: cdc_lsn,
+                    timestamp: crate::utils::now_unix_millis(),
+                    operation: crate::replication::cdc::ChangeOperation::Delete,
+                    collection: collection.clone(),
+                    entity_id: id.raw(),
+                    entity_kind: "entity".into(),
+                    entity_bytes: None,
+                    metadata: None,
+                    refresh_records: None,
+                    range_id: None,
+                    ownership_epoch: None,
+                });
+            }
+        }
         if records.is_empty() {
             return store
                 .append_deferred_store_wal_actions(actions)
                 .map_err(|error| RedDBError::Internal(error.to_string()));
         }
-        self.recover_transactional_replication()?;
-        let first = self.inner.cdc.current_lsn();
+        self.persist_logical_outbox(records, outbox_xid, actions)
+    }
+
+    fn persist_logical_outbox(
+        &self,
+        mut records: Vec<ChangeRecord>,
+        outbox_xid: u64,
+        mut actions: DeferredStoreWalActions,
+    ) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        let _storage = store.vault_publication_lock.lock();
+        if records.is_empty() {
+            return store
+                .append_deferred_store_wal_actions(actions)
+                .map_err(|error| RedDBError::Internal(error.to_string()));
+        }
+        let _publication = self.inner.logical_publication.lock();
+        let first = self.inner.logical_allocated_lsn.load(Ordering::Acquire);
+        if outbox_xid != 0 {
+            if records.len() > MAX_PENDING_RECORDS
+                || records
+                    .iter()
+                    .map(|record| record.encode().len())
+                    .sum::<usize>()
+                    > MAX_PENDING_BYTES
+            {
+                return Err(PendingLogicalChanges::limit_error());
+            }
+            records =
+                vec![
+                    ChangeRecord::for_transaction(0, crate::utils::now_unix_millis(), records)
+                        .with_term(self.current_replication_term()),
+                ];
+        }
         for (index, record) in records.iter_mut().enumerate() {
             record.lsn = first
                 .checked_add(index as u64 + 1)
@@ -59,6 +194,16 @@ impl RedDBRuntime {
             .iter()
             .map(|record| String::from_utf8(record.encode()).expect("JSON is UTF-8"))
             .collect();
+        if outbox_xid != 0
+            && payloads.iter().any(|payload| {
+                payload.len().saturating_mul(2).saturating_add(96)
+                    > crate::grpc::RedDBGrpcServer::max_message_bytes().saturating_sub(64 * 1024)
+            })
+        {
+            return Err(RedDBError::InvalidOperation(
+                "transaction exceeds replication transport limit; ROLLBACK is required".into(),
+            ));
+        }
         let payload = crate::serde_json::to_string(&payloads)
             .map_err(|error| RedDBError::Internal(error.to_string()))?;
         let mut outbox = UnifiedEntity::new(
@@ -73,6 +218,10 @@ impl RedDBRuntime {
                     [
                         ("key".into(), reddb_types::Value::text(OUTBOX_KEY)),
                         ("value".into(), reddb_types::Value::text(payload)),
+                        (
+                            "cdc_lsn".into(),
+                            reddb_types::Value::UnsignedInteger(self.inner.cdc.current_lsn()),
+                        ),
                     ]
                     .into_iter()
                     .collect(),
@@ -103,20 +252,17 @@ impl RedDBRuntime {
                 .map_err(|undo| RedDBError::Internal(undo.to_string()))?;
             return Err(RedDBError::Internal(error.to_string()));
         }
+        let last = records.last().expect("nonempty outbox").lsn;
+        self.inner
+            .logical_allocated_lsn
+            .store(last, Ordering::Release);
         replication_crash_point("after_wal");
-        // Local commit is now durable. Projection failure must not turn it into
-        // an in-memory rollback; retain the outbox for recovery instead.
-        if let Err(error) = self.publish_transaction_outbox(outbox.id, &records) {
-            tracing::error!(%error, "committed replication outbox awaits recovery");
-        }
+        // The source transaction's visibility has not been committed yet.
+        // Projection and outbox retirement run only after MVCC finalization.
         Ok(())
     }
 
-    fn publish_transaction_outbox(
-        &self,
-        id: EntityId,
-        records: &[ChangeRecord],
-    ) -> RedDBResult<()> {
+    fn publish_transaction_outbox(&self, records: &[ChangeRecord]) -> RedDBResult<()> {
         let Some(primary) = &self.inner.db.replication else {
             return Ok(());
         };
@@ -124,39 +270,8 @@ impl RedDBRuntime {
             primary
                 .try_append_logical_record(record.lsn, record.encode())
                 .map_err(|error| RedDBError::Internal(error.to_string()))?;
-            if self.inner.cdc.current_lsn() < record.lsn {
-                let public_id = record
-                    .entity_bytes
-                    .as_ref()
-                    .and_then(|bytes| {
-                        UnifiedStore::deserialize_entity(
-                            bytes,
-                            self.inner.db.store().format_version(),
-                        )
-                        .ok()
-                    })
-                    .map(|entity| entity.logical_id().raw())
-                    .unwrap_or(record.entity_id);
-                self.inner
-                    .cdc
-                    .publish_committed(crate::replication::cdc::ChangeEvent {
-                        lsn: record.lsn,
-                        timestamp: record.timestamp,
-                        operation: record.operation,
-                        collection: record.collection.clone(),
-                        entity_id: public_id,
-                        entity_kind: record.entity_kind.clone(),
-                        changed_columns: None,
-                        kv: None,
-                    });
-            }
         }
         replication_crash_point("after_projection");
-        self.inner
-            .db
-            .store()
-            .delete(OUTBOX_COLLECTION, id)
-            .map_err(|error| RedDBError::Internal(error.to_string()))?;
         Ok(())
     }
 
@@ -165,6 +280,8 @@ impl RedDBRuntime {
             return Ok(());
         }
         let store = self.inner.db.store();
+        let _storage = store.vault_publication_lock.lock();
+        let _publication = self.inner.logical_publication.lock();
         let Some(manager) = store.get_collection(OUTBOX_COLLECTION) else {
             return Ok(());
         };
@@ -173,14 +290,25 @@ impl RedDBRuntime {
             .try_for_each_entity(usize::MAX, &mut |entity: &UnifiedEntity| {
                 if let EntityData::Row(row) = &entity.data {
                     if row.get_field("key").and_then(|value| value.as_text()) == Some(OUTBOX_KEY) {
-                        batches.push((entity.id, row.get_field("value").cloned()));
+                        batches.push((
+                            entity.id,
+                            entity.xmin,
+                            row.get_field("value").cloned(),
+                            row.get_field("cdc_lsn")
+                                .and_then(|value| match value {
+                                    reddb_types::Value::UnsignedInteger(value) => Some(*value),
+                                    _ => None,
+                                })
+                                .unwrap_or(0),
+                        ));
                     }
                 }
                 true
             })
             .map_err(|error| RedDBError::Internal(error.to_string()))?;
         let mut decoded = Vec::with_capacity(batches.len());
-        for (id, value) in batches {
+        for (id, xid, value, cdc_lsn) in batches {
+            self.inner.cdc.set_current_lsn(cdc_lsn);
             let payload = value
                 .as_ref()
                 .and_then(|value| value.as_text())
@@ -192,11 +320,27 @@ impl RedDBRuntime {
                 .map(|payload| ChangeRecord::decode(payload.as_bytes()))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(RedDBError::Internal)?;
-            decoded.push((id, records));
+            if let Some(last) = records.last() {
+                self.inner
+                    .logical_allocated_lsn
+                    .fetch_max(last.lsn, Ordering::AcqRel);
+            }
+            decoded.push((id, xid, records));
         }
-        decoded.sort_by_key(|(_, records)| records.first().map(|record| record.lsn));
-        for (id, records) in decoded {
-            self.publish_transaction_outbox(id, &records)?;
+        decoded.sort_by_key(|(_, _, records)| records.first().map(|record| record.lsn));
+        let mut previous = None;
+        for (id, xid, records) in decoded {
+            if self.snapshot_manager().is_active(xid) {
+                break;
+            }
+            self.publish_transaction_outbox(&records)?;
+            // Retain the latest durable envelope as the canonical logical and
+            // CDC frontier, independent of the derived spool's lifetime.
+            if let Some(previous) = previous.replace(id) {
+                store
+                    .delete(OUTBOX_COLLECTION, previous)
+                    .map_err(|error| RedDBError::Internal(error.to_string()))?;
+            }
         }
         Ok(())
     }
@@ -204,7 +348,11 @@ impl RedDBRuntime {
 
 fn replication_crash_point(point: &str) {
     #[cfg(debug_assertions)]
-    if std::env::var("REDDB_TRANSACTION_REPLICATION_CRASH_AT").ok().as_deref() == Some(point) {
+    if std::env::var("REDDB_TRANSACTION_REPLICATION_CRASH_AT")
+        .ok()
+        .as_deref()
+        == Some(point)
+    {
         std::process::exit(173);
     }
     let _ = point;

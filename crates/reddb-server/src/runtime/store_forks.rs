@@ -287,7 +287,9 @@ impl RedDBRuntime {
                 "store forks require an independent committed checkpoint",
             ));
         }
-        let fork_lsn = self.primary_logical_head_lsn().max(self.cdc_current_lsn());
+        let fork_lsn = self
+            .primary_logical_head_lsn()
+            .max(self.replication_commit_lsn());
         if at_lsn.is_some_and(|lsn| lsn != fork_lsn) {
             return Err(failure("FORK STORE AT LSN requires the current committed LSN; historical points require a retained backup and WAL restore"));
         }

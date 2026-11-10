@@ -603,8 +603,10 @@ impl<'a> QueryRequestExecutor<'a> {
             }
         }?;
         if matches!(result.statement_type, "insert" | "update" | "delete") {
-            self.runtime
-                .enforce_commit_policy_for_request(self.runtime.cdc_current_lsn(), commit_policy)?;
+            self.runtime.enforce_commit_policy_for_request(
+                self.runtime.replication_commit_lsn(),
+                commit_policy,
+            )?;
         }
         self.runtime.own_query_result(result)
     }

@@ -412,7 +412,7 @@ impl RedDBRuntime {
                         &contract.name,
                         entity.id.raw(),
                         "entity",
-                    );
+                    )?;
                 }
             }
         }

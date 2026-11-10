@@ -606,6 +606,11 @@ impl PrimaryReplication {
         store: Arc<crate::storage::unified::UnifiedStore>,
     ) -> io::Result<Self> {
         let mut primary = Self::new_with_config(data_path, config);
+        if let Some(path) = data_path.filter(|_| primary.logical_wal_spool.is_none()) {
+            // A persistent primary must not silently downgrade to an in-memory
+            // stream when its durable spool cannot be opened.
+            primary.logical_wal_spool = Some(Arc::new(LogicalWalSpool::open(path)?));
+        }
         if let Some(bytes) = super::metadata::read(&store, super::metadata::SLOTS)? {
             let catalog =
                 reddb_file::ReplicationSlotCatalog::decode(&bytes).map_err(io::Error::other)?;

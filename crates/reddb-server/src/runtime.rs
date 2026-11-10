@@ -1307,11 +1307,13 @@ struct RuntimeInner {
     pending_kv_watch_events:
         parking_lot::RwLock<HashMap<u64, Vec<(u64, crate::replication::cdc::KvWatchEvent)>>>,
     pending_vault_writes: parking_lot::RwLock<HashMap<u64, Vec<impl_kv::PendingVaultWrite>>>,
-    pending_store_wal_actions:
-        parking_lot::RwLock<HashMap<u64, crate::storage::unified::DeferredStoreWalActions>>,
+    pending_store_wal_actions: parking_lot::RwLock<
+        HashMap<u64, Vec<(u64, crate::storage::unified::DeferredStoreWalActions)>>,
+    >,
     pending_logical_records:
-        parking_lot::Mutex<HashMap<u64, Vec<(u64, crate::replication::cdc::ChangeRecord)>>>,
+        parking_lot::Mutex<HashMap<u64, transactional_replication::PendingLogicalChanges>>,
     logical_publication: parking_lot::ReentrantMutex<()>,
+    logical_allocated_lsn: std::sync::atomic::AtomicU64,
     /// Transaction-scoped table UPDATE CLAIM ownership.
     ///
     /// Keyed by `(collection, logical_row_id)` and valued by connection id.
