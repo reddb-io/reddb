@@ -33,6 +33,7 @@ only high-cardinality dimension and is bounded (see §5).
 |---|---|---|---|---|
 | `cache_blob_l1_bytes_in_use` | gauge | `namespace` | bytes | `METRIC_CACHE_BLOB_L1_BYTES_IN_USE` |
 | `cache_blob_l1_bytes_max` | gauge | — | bytes | `BlobCacheStats.l1_bytes_max` |
+| `reddb_cache_blob_namespace_bytes_max` | gauge | — | bytes | `BlobCacheStats.namespace_bytes_max` |
 | `cache_blob_l1_hits_total` | counter | `namespace` | events | `BlobCacheStats.hits` |
 | `cache_blob_l1_misses_total` | counter | `namespace` | events | `BlobCacheStats.misses` |
 | `cache_blob_l1_evictions_total` | counter | `namespace` | events | `BlobCacheStats.evictions` |

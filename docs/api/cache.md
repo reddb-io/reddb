@@ -81,30 +81,36 @@ conflicts 409, namespace exhaustion 429 and storage unavailability 503.
 
 ## Capacity and expiration maintenance
 
-The server cache is payload-byte-bounded. Set its L1 payload limit and
+The server cache is bounded by a conservative estimate of resident L1 memory.
+The estimate includes values, keys, metadata, tags, dependency-index key copies,
+and stable container overhead. Set the global limit, per-namespace limit, and
 namespace count with environment variables before start:
 
 ```sh
 REDDB_CACHE_BLOB_L1_BYTES_MAX=536870912
+REDDB_CACHE_BLOB_NAMESPACE_BYTES_MAX=67108864
 REDDB_CACHE_BLOB_MAX_NAMESPACES=1024
 ```
 
-The equivalent persisted keys are `cache.blob.l1_bytes_max` and
-`cache.blob.max_namespaces`; they apply on the next boot. The configured L1
-limit is always capped by RedDB's process-wide memory budget. Expired and
-namespace-flushed entries are reclaimed by a dedicated bounded worker every
-250 ms (at most 512 inspected entries or 5 ms per pass), so maintenance does
-not occupy query workers or perform a stop-the-world scan.
+The equivalent persisted keys are `cache.blob.l1_bytes_max`,
+`cache.blob.namespace_bytes_max`, and `cache.blob.max_namespaces`; they apply on
+the next boot. Both memory limits are capped by RedDB's process-wide memory
+budget, and the namespace limit cannot exceed the effective global limit.
+Expired entries are selected from per-shard deadline indexes, so a pass costs
+in proportion to due TTL records rather than total cache size. Namespace flush
+reclamation uses a separate bounded generation scan only while a flush is
+pending. The dedicated worker runs every 250 ms (at most 512 inspected records
+or 5 ms per pass), so maintenance does not occupy query workers or perform a
+stop-the-world scan.
 
 `GET /metrics` exposes aggregate hit/miss, insert, invalidation, eviction,
 current bytes/entries/namespaces, and the effective L1 and namespace limits.
 The `namespace="__all__"` label is intentional: current counters are global,
 not per-namespace measurements.
 
-`l1_bytes_max` accounts cached value bytes, not exact process RSS. Key strings,
-tags and hash/index metadata add allocator overhead, so leave headroom in the
-process-wide memory budget; the namespace limit is not a per-namespace key
-quota.
+The memory estimate is intentionally conservative and stable; it is not an
+allocator-specific RSS measurement. Keep normal process headroom for allocator
+fragmentation and temporary request buffers.
 
 The normal server runtime is currently an in-memory, process-local cache. It
 starts cold after restart. The engine crate has an opt-in file-backed L2 API,

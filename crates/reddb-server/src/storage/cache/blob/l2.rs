@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -146,8 +146,17 @@ impl BlobCacheL2 {
             }
             _ => return None,
         };
+        let size = payload.len();
         Some(Entry {
-            size: payload.len(),
+            l1_charge_bytes: Entry::estimate_l1_charge_bytes(
+                size,
+                &key.namespace,
+                &key.key,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+            ),
+            size,
             bytes: Arc::<[u8]>::from(payload),
             content_metadata: None,
             tags: BTreeSet::new(),
@@ -705,7 +714,7 @@ mod tests {
     fn l2_cache(path: &Path) -> BlobCache {
         BlobCache::open_with_l2(
             BlobCacheConfig::default()
-                .with_l1_bytes_max(128)
+                .with_l1_bytes_max(64 * 1024)
                 .with_shard_count(1)
                 .with_max_namespaces(4)
                 .with_l2_path(path),

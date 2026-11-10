@@ -6039,6 +6039,7 @@ fn format_cache_stats_pretty(body: &str) -> String {
         ("entries", "Entries"),
         ("bytes_in_use", "L1 bytes in use"),
         ("l1_bytes_max", "L1 bytes max"),
+        ("namespace_bytes_max", "Namespace bytes max"),
         ("l2_bytes_in_use", "L2 bytes in use"),
         ("l2_bytes_max", "L2 bytes max"),
         ("namespaces", "Namespaces"),

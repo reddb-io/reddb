@@ -801,7 +801,7 @@ impl RedDBServer {
         }
         let _ = writeln!(
             body,
-            "# HELP reddb_cache_blob_l1_bytes_in_use Aggregate L1 payload bytes currently used by Blob Cache."
+            "# HELP reddb_cache_blob_l1_bytes_in_use Estimated resident L1 bytes currently used by Blob Cache."
         );
         let _ = writeln!(body, "# TYPE reddb_cache_blob_l1_bytes_in_use gauge");
         let _ = writeln!(
@@ -812,13 +812,23 @@ impl RedDBServer {
         );
         let _ = writeln!(
             body,
-            "# HELP reddb_cache_blob_l1_bytes_max Configured L1 payload-byte limit after the process memory-budget cap."
+            "# HELP reddb_cache_blob_l1_bytes_max Configured estimated L1 memory limit after the process memory-budget cap."
         );
         let _ = writeln!(body, "# TYPE reddb_cache_blob_l1_bytes_max gauge");
         let _ = writeln!(
             body,
             "reddb_cache_blob_l1_bytes_max {}",
             result_blob_stats.l1_bytes_max()
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_cache_blob_namespace_bytes_max Configured estimated L1 memory limit per namespace."
+        );
+        let _ = writeln!(body, "# TYPE reddb_cache_blob_namespace_bytes_max gauge");
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_namespace_bytes_max {}",
+            result_blob_stats.namespace_bytes_max()
         );
         let _ = writeln!(
             body,

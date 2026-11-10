@@ -114,6 +114,11 @@ pub const MATRIX: &[ConfigDefault] = &[
         default: || num(crate::storage::cache::DEFAULT_BLOB_L2_BYTES_MAX as f64),
     },
     ConfigDefault {
+        key: "cache.blob.namespace_bytes_max",
+        tier: Tier::Critical,
+        default: || num(crate::storage::cache::DEFAULT_BLOB_NAMESPACE_BYTES_MAX as f64),
+    },
+    ConfigDefault {
         key: "cache.blob.max_namespaces",
         tier: Tier::Critical,
         default: || num(crate::storage::cache::DEFAULT_BLOB_MAX_NAMESPACES as f64),
@@ -404,6 +409,7 @@ mod tests {
         let required_critical = [
             "cache.blob.l1_bytes_max",
             "cache.blob.l2_bytes_max",
+            "cache.blob.namespace_bytes_max",
             "cache.blob.max_namespaces",
             "durability.mode",
             "runtime.result_cache.backend",

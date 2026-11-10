@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::cmp::Ordering as CmpOrdering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -21,7 +22,36 @@ pub(super) struct Shard {
     free_slots: Vec<usize>,
     hand: usize,
     sweep_hand: usize,
+    stale_sweep_epoch: u64,
+    stale_sweep_completed_epoch: u64,
+    stale_sweep_slots_remaining: usize,
+    expiry_heap: BinaryHeap<ExpiryRecord>,
+    expiry_sequence: u64,
     pub(super) bytes: usize,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ExpiryRecord {
+    deadline_unix_ms: u64,
+    sequence: u64,
+    key: BlobCacheKey,
+}
+
+impl Ord for ExpiryRecord {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        // BinaryHeap is a max-heap. Reverse deadline/sequence ordering so the
+        // earliest deadline is at the top without requiring BlobCacheKey: Ord.
+        other
+            .deadline_unix_ms
+            .cmp(&self.deadline_unix_ms)
+            .then_with(|| other.sequence.cmp(&self.sequence))
+    }
+}
+
+impl PartialOrd for ExpiryRecord {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Shard {
@@ -33,6 +63,11 @@ impl Shard {
             free_slots: Vec::new(),
             hand: 0,
             sweep_hand: 0,
+            stale_sweep_epoch: 0,
+            stale_sweep_completed_epoch: 0,
+            stale_sweep_slots_remaining: 0,
+            expiry_heap: BinaryHeap::new(),
+            expiry_sequence: 0,
             bytes: 0,
         }
     }
@@ -223,13 +258,14 @@ impl Shard {
             .expect("live expiry target exists");
         entry.expires_at_unix_ms = expires_at_unix_ms;
         entry.last_access_unix_ms = now_ms;
+        self.track_expiry(key);
     }
 
     pub(super) fn insert(&mut self, key: BlobCacheKey, mut entry: Entry) -> InsertOutcome {
         self.l2_second_hit_markers.remove(&key);
         let old_entry = if let Some(old) = self.entries.shift_remove(&key) {
             let slot_index = old.slot_index;
-            self.bytes = self.bytes.saturating_sub(old.size);
+            self.bytes = self.bytes.saturating_sub(old.l1_charge_bytes);
             entry.slot_index = slot_index;
             Some(old)
         } else {
@@ -241,9 +277,10 @@ impl Shard {
             None
         };
 
-        self.bytes += entry.size;
+        self.bytes = self.bytes.saturating_add(entry.l1_charge_bytes);
         self.slots[entry.slot_index] = Some(key.clone());
         self.entries.insert(key.clone(), entry);
+        self.track_expiry(&key);
         InsertOutcome {
             old_entry,
             admitted: true,
@@ -291,7 +328,7 @@ impl Shard {
                 .entries
                 .shift_remove(&candidate)
                 .expect("candidate exists");
-            self.bytes = self.bytes.saturating_sub(removed.size);
+            self.bytes = self.bytes.saturating_sub(removed.l1_charge_bytes);
             self.slots[self.hand] = None;
             self.free_slots.push(self.hand);
             self.advance_hand();
@@ -307,12 +344,13 @@ impl Shard {
     pub(super) fn remove(&mut self, key: &BlobCacheKey) -> Option<Entry> {
         self.l2_second_hit_markers.remove(key);
         let removed = self.entries.shift_remove(key)?;
-        self.bytes = self.bytes.saturating_sub(removed.size);
+        self.bytes = self.bytes.saturating_sub(removed.l1_charge_bytes);
         self.slots[removed.slot_index] = None;
         self.free_slots.push(removed.slot_index);
         if self.entries.is_empty() || self.hand >= self.slots.len() {
             self.hand = 0;
         }
+        self.maybe_rebuild_expiry_index();
         Some(removed)
     }
 
@@ -340,53 +378,55 @@ impl Shard {
             .collect()
     }
 
-    /// Scan a bounded, rotating slice of this shard and remove entries whose
-    /// effective expiry has elapsed. The independent cursor prevents a small
-    /// maintenance budget from repeatedly visiting only the first keys.
+    pub(super) fn remove_one_from_namespace(
+        &mut self,
+        namespace: &str,
+    ) -> Option<(BlobCacheKey, Entry)> {
+        let key = self
+            .entries
+            .keys()
+            .find(|key| key.namespace == namespace)
+            .cloned()?;
+        let entry = self.remove(&key).expect("selected namespace entry exists");
+        Some((key, entry))
+    }
+
+    /// Remove due entries from the deadline index. Stale heap records are
+    /// validated against the current entry and discarded lazily.
     pub(super) fn sweep_expired(
         &mut self,
         now_ms: u64,
-        namespace_generations: &HashMap<String, u64>,
         entries_limit: usize,
         started: Instant,
         time_limit: Option<Duration>,
     ) -> ShardSweep {
         let mut sweep = ShardSweep::default();
-        if self.entries.is_empty() || entries_limit == 0 {
-            sweep.completed_cycle = self.entries.is_empty();
+        if entries_limit == 0 {
             return sweep;
         }
 
-        let slots_at_start = self.slots.len();
-        let mut slots_visited = 0usize;
-        while slots_visited < slots_at_start && sweep.entries_scanned < entries_limit {
+        while sweep.entries_scanned < entries_limit {
             if time_limit.is_some_and(|limit| started.elapsed() >= limit) {
                 break;
             }
-            if self.sweep_hand >= self.slots.len() {
-                self.sweep_hand = 0;
+            let Some(record) = self.expiry_heap.peek() else {
+                sweep.completed_cycle = true;
+                break;
+            };
+            if record.deadline_unix_ms > now_ms {
+                sweep.completed_cycle = true;
+                break;
             }
-            let slot = self.sweep_hand;
-            self.sweep_hand = (self.sweep_hand + 1) % self.slots.len();
-            slots_visited += 1;
-
-            let Some(key) = self.slots[slot].clone() else {
-                continue;
-            };
-            let Some(entry) = self.entries.get(&key) else {
-                continue;
-            };
+            let record = self.expiry_heap.pop().expect("peeked expiry record exists");
             sweep.entries_scanned += 1;
             *sweep
                 .scanned_by_namespace
-                .entry(key.namespace.clone())
+                .entry(record.key.namespace.clone())
                 .or_default() += 1;
 
-            let stale_generation = entry.namespace_generation
-                != namespace_generations
-                    .get(&key.namespace)
-                    .copied()
-                    .unwrap_or(0);
+            let Some(entry) = self.entries.get(&record.key) else {
+                continue;
+            };
             let expired = if entry.extended.is_active() {
                 matches!(
                     EffectiveExpiry::compute(
@@ -400,13 +440,89 @@ impl Shard {
             } else {
                 entry.is_expired_at(now_ms)
             };
-            if stale_generation || expired {
-                let entry = self.remove(&key).expect("sweep candidate exists");
-                sweep.removed.push((key, entry, expired));
+            if expired {
+                let entry = self
+                    .remove(&record.key)
+                    .expect("indexed expiry candidate exists");
+                sweep.removed.push((record.key, entry, true));
+            } else if let Some(deadline_unix_ms) = self
+                .entries
+                .get(&record.key)
+                .and_then(Self::effective_removal_deadline)
+            {
+                self.push_expiry_record(record.key, deadline_unix_ms);
             }
         }
-        sweep.completed_cycle = slots_visited == slots_at_start;
         sweep
+    }
+
+    /// Reclaim entries hidden by an O(1) namespace generation flush. This is
+    /// deliberately separate from TTL expiry so ordinary sweeps do not scan
+    /// the cache when no namespace flush is pending.
+    pub(super) fn sweep_stale_generations(
+        &mut self,
+        namespace_generations: &HashMap<String, u64>,
+        epoch: u64,
+        entries_limit: usize,
+        started: Instant,
+        time_limit: Option<Duration>,
+    ) -> ShardSweep {
+        let mut sweep = ShardSweep::default();
+        if self.stale_sweep_epoch != epoch {
+            self.stale_sweep_epoch = epoch;
+            self.sweep_hand = 0;
+            self.stale_sweep_slots_remaining = self.slots.len();
+        }
+        if self.entries.is_empty() || entries_limit == 0 {
+            if self.entries.is_empty() {
+                self.stale_sweep_slots_remaining = 0;
+                self.stale_sweep_completed_epoch = epoch;
+                sweep.completed_cycle = true;
+            }
+            return sweep;
+        }
+
+        while self.stale_sweep_slots_remaining > 0 && sweep.entries_scanned < entries_limit {
+            if time_limit.is_some_and(|limit| started.elapsed() >= limit) {
+                break;
+            }
+            if self.sweep_hand >= self.slots.len() {
+                self.sweep_hand = 0;
+            }
+            let slot = self.sweep_hand;
+            self.sweep_hand = (self.sweep_hand + 1) % self.slots.len();
+            self.stale_sweep_slots_remaining -= 1;
+
+            let Some(key) = self.slots[slot].clone() else {
+                continue;
+            };
+            let Some(entry) = self.entries.get(&key) else {
+                continue;
+            };
+            sweep.entries_scanned += 1;
+            *sweep
+                .scanned_by_namespace
+                .entry(key.namespace.clone())
+                .or_default() += 1;
+            let stale_generation = entry.namespace_generation
+                != namespace_generations
+                    .get(&key.namespace)
+                    .copied()
+                    .unwrap_or(0);
+            if stale_generation {
+                let entry = self.remove(&key).expect("stale sweep candidate exists");
+                sweep.removed.push((key, entry, false));
+            }
+        }
+        sweep.completed_cycle = self.stale_sweep_slots_remaining == 0;
+        if sweep.completed_cycle {
+            self.stale_sweep_completed_epoch = epoch;
+        }
+        sweep
+    }
+
+    pub(super) fn stale_cleanup_completed(&self, epoch: u64) -> bool {
+        self.stale_sweep_completed_epoch >= epoch
     }
 
     pub(super) fn entry_has_any_tag(&self, key: &BlobCacheKey, labels: &HashSet<String>) -> bool {
@@ -438,6 +554,74 @@ impl Shard {
             self.hand = 0;
         } else {
             self.hand = (self.hand + 1) % self.slots.len();
+        }
+    }
+
+    fn track_expiry(&mut self, key: &BlobCacheKey) {
+        if let Some(deadline_unix_ms) = self
+            .entries
+            .get(key)
+            .and_then(Self::effective_removal_deadline)
+        {
+            self.push_expiry_record(key.clone(), deadline_unix_ms);
+        }
+        self.maybe_rebuild_expiry_index();
+    }
+
+    fn maybe_rebuild_expiry_index(&mut self) {
+        let rebuild_threshold = self.entries.len().saturating_mul(2);
+        if (self.entries.is_empty() && !self.expiry_heap.is_empty())
+            || self.expiry_heap.len() > rebuild_threshold
+        {
+            self.rebuild_expiry_index();
+        }
+    }
+
+    fn push_expiry_record(&mut self, key: BlobCacheKey, deadline_unix_ms: u64) {
+        let sequence = self.expiry_sequence;
+        self.expiry_sequence = self.expiry_sequence.wrapping_add(1);
+        self.expiry_heap.push(ExpiryRecord {
+            deadline_unix_ms,
+            sequence,
+            key,
+        });
+    }
+
+    fn rebuild_expiry_index(&mut self) {
+        let deadlines: Vec<_> = self
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                Self::effective_removal_deadline(entry)
+                    .map(|deadline_unix_ms| (key.clone(), deadline_unix_ms))
+            })
+            .collect();
+        self.expiry_heap = BinaryHeap::with_capacity(deadlines.len());
+        for (key, deadline_unix_ms) in deadlines {
+            self.push_expiry_record(key, deadline_unix_ms);
+        }
+    }
+
+    fn effective_removal_deadline(entry: &Entry) -> Option<u64> {
+        if !entry.extended.is_active() {
+            return entry.expires_at_unix_ms;
+        }
+        let idle_deadline = entry.extended.idle_ttl_ms.map(|idle_ttl_ms| {
+            entry
+                .last_access_unix_ms
+                .saturating_add(idle_ttl_ms)
+                .saturating_add(1)
+        });
+        let hard_deadline = entry.expires_at_unix_ms.map(|hard_expiry| {
+            hard_expiry
+                .saturating_add(entry.extended.stale_serve_ms.unwrap_or(0))
+                .saturating_add(1)
+        });
+        match (idle_deadline, hard_deadline) {
+            (Some(idle), Some(hard)) => Some(idle.min(hard)),
+            (Some(idle), None) => Some(idle),
+            (None, Some(hard)) => Some(hard),
+            (None, None) => None,
         }
     }
 }
@@ -503,12 +687,18 @@ mod tests {
 
         let first = shard.insert(k.clone(), entry(b"abc", 128));
         assert!(first.old_entry.is_none());
-        assert_eq!(shard.bytes, 3);
+        assert_eq!(
+            shard.bytes,
+            shard.entries.get(&k).expect("entry").l1_charge_bytes
+        );
 
         let second = shard.insert(k.clone(), entry(b"xy", 128));
         assert_eq!(second.old_entry.expect("old entry").size, 3);
         assert_eq!(shard.len(), 1);
-        assert_eq!(shard.bytes, 2);
+        assert_eq!(
+            shard.bytes,
+            shard.entries.get(&k).expect("entry").l1_charge_bytes
+        );
         assert!(matches!(shard.contains(&k, 1_000, 0), Lookup::Present));
     }
 
@@ -557,7 +747,10 @@ mod tests {
         let removed = shard.remove(&a).expect("removed");
         assert_eq!(removed.size, 2);
         assert_eq!(shard.len(), 1);
-        assert_eq!(shard.bytes, 2);
+        assert_eq!(
+            shard.bytes,
+            shard.entries.get(&b).expect("entry").l1_charge_bytes
+        );
         let evicted = shard.evict_one().expect("remaining entry evicted");
         assert_eq!(evicted.0, b);
     }
@@ -599,5 +792,89 @@ mod tests {
             CachePresence::from(matches!(shard.get(&k, 1_000, 0), Lookup::Hit(_))),
             CachePresence::Absent
         );
+    }
+
+    #[test]
+    fn expiry_sweep_reads_only_due_deadline_records() {
+        let mut shard = Shard::new();
+        for index in 0..10_000 {
+            let key = key(&format!("permanent-{index}"));
+            shard.insert(key, entry(b"v", 128));
+        }
+        let expiring_key = key("expiring");
+        let mut expiring = entry(b"v", 128);
+        expiring.expires_at_unix_ms = Some(1_000);
+        shard.insert(expiring_key.clone(), expiring);
+
+        let sweep = shard.sweep_expired(1_000, 16, Instant::now(), None);
+
+        assert_eq!(sweep.entries_scanned, 1);
+        assert_eq!(sweep.removed.len(), 1);
+        assert_eq!(sweep.removed[0].0, expiring_key);
+        assert_eq!(shard.len(), 10_000);
+    }
+
+    #[test]
+    fn stale_expiry_record_cannot_remove_entry_with_new_deadline() {
+        let mut shard = Shard::new();
+        let cache_key = key("renewed");
+        let mut expiring = entry(b"v", 128);
+        expiring.expires_at_unix_ms = Some(1_000);
+        shard.insert(cache_key.clone(), expiring);
+        shard.update_expiry(&cache_key, Some(2_000), 500);
+
+        let early = shard.sweep_expired(1_000, 16, Instant::now(), None);
+        assert_eq!(early.entries_scanned, 1);
+        assert!(early.removed.is_empty());
+        assert!(matches!(shard.get(&cache_key, 1_500, 0), Lookup::Hit(_)));
+
+        let due = shard.sweep_expired(2_000, 16, Instant::now(), None);
+        assert_eq!(due.removed.len(), 1);
+        assert_eq!(due.removed[0].0, cache_key);
+    }
+
+    #[test]
+    fn stale_expiry_record_cannot_remove_persisted_entry() {
+        let mut shard = Shard::new();
+        let cache_key = key("persisted");
+        let mut expiring = entry(b"v", 128);
+        expiring.expires_at_unix_ms = Some(1_000);
+        shard.insert(cache_key.clone(), expiring);
+        shard.update_expiry(&cache_key, None, 500);
+
+        let sweep = shard.sweep_expired(1_000, 16, Instant::now(), None);
+
+        assert_eq!(sweep.entries_scanned, 1);
+        assert!(sweep.removed.is_empty());
+        assert!(matches!(shard.get(&cache_key, 2_000, 0), Lookup::Hit(_)));
+    }
+
+    #[test]
+    fn repeated_expiry_updates_keep_lazy_index_bounded() {
+        let mut shard = Shard::new();
+        let cache_key = key("renewed-many-times");
+        shard.insert(cache_key.clone(), entry(b"v", 128));
+
+        for deadline in 1..=10_000 {
+            shard.update_expiry(&cache_key, Some(deadline), 0);
+        }
+
+        assert!(shard.expiry_heap.len() <= 2);
+        assert!(matches!(shard.get(&cache_key, 9_999, 0), Lookup::Hit(_)));
+    }
+
+    #[test]
+    fn removing_last_entry_releases_future_expiry_index_storage() {
+        let mut shard = Shard::new();
+        let cache_key = key("removed-before-expiry");
+        let mut expiring = entry(b"v", 128);
+        expiring.expires_at_unix_ms = Some(u64::MAX);
+        shard.insert(cache_key.clone(), expiring);
+        assert_eq!(shard.expiry_heap.len(), 1);
+
+        shard.remove(&cache_key).expect("entry removed");
+
+        assert!(shard.expiry_heap.is_empty());
+        assert_eq!(shard.expiry_heap.capacity(), 0);
     }
 }

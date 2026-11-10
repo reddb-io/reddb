@@ -283,10 +283,29 @@ impl RedDBRuntime {
                 "cache.blob.max_namespaces must be greater than zero".into(),
             ));
         }
+        let configured_namespace_bytes = usize::try_from(boot_cache_u64(
+            db.store().as_ref(),
+            &env_config_overrides,
+            "cache.blob.namespace_bytes_max",
+            u64::try_from(configured_l1).unwrap_or(u64::MAX),
+        ))
+        .map_err(|_| {
+            RedDBError::InvalidConfig("cache.blob.namespace_bytes_max is too large".into())
+        })?;
+        if configured_namespace_bytes == 0 {
+            return Err(RedDBError::InvalidConfig(
+                "cache.blob.namespace_bytes_max must be greater than zero".into(),
+            ));
+        }
         let result_blob_cache_config = crate::storage::cache::BlobCacheConfig::default()
             // The cache-specific setting may reserve less memory, but never
             // escapes the process-wide memory budget.
             .with_l1_bytes_max(configured_l1.min(cache_l1_share))
+            .with_namespace_bytes_max(
+                configured_namespace_bytes
+                    .min(configured_l1)
+                    .min(cache_l1_share),
+            )
             .with_max_namespaces(configured_namespaces);
         let result_blob_cache = crate::storage::cache::BlobCache::open_with_l2(
             result_blob_cache_config,
@@ -1497,6 +1516,7 @@ mod cache_boot_tests {
             "cache.blob",
             &crate::json!({
                 "l1_bytes_max": 1024 * 1024,
+                "namespace_bytes_max": 256 * 1024,
                 "max_namespaces": 7
             }),
         );
@@ -1506,6 +1526,7 @@ mod cache_boot_tests {
         let reopened = RedDBRuntime::with_options(options).expect("configured runtime");
         let stats = reopened.result_blob_cache().stats();
         assert_eq!(stats.l1_bytes_max(), 1024 * 1024);
+        assert_eq!(stats.namespace_bytes_max(), 256 * 1024);
         assert_eq!(stats.max_namespaces(), 7);
     }
 
@@ -1528,6 +1549,27 @@ mod cache_boot_tests {
         assert!(error
             .to_string()
             .contains("cache.blob.max_namespaces must be greater than zero"));
+    }
+
+    #[test]
+    fn zero_cache_namespace_memory_limit_is_rejected_on_boot() {
+        let directory = tempfile::tempdir().expect("cache config fixture");
+        let options = RedDBOptions::persistent(directory.path().join("cache-bytes-zero.rdb"));
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("initial runtime");
+        runtime
+            .db()
+            .store()
+            .set_config_tree("cache.blob.namespace_bytes_max", &crate::json!(0));
+        runtime.flush().expect("persist cache config");
+        drop(runtime);
+
+        let error = match RedDBRuntime::with_options(options) {
+            Ok(_) => panic!("zero namespace memory limit must fail boot"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("cache.blob.namespace_bytes_max must be greater than zero"));
     }
 }
 

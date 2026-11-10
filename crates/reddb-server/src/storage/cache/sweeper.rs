@@ -1,7 +1,9 @@
 //! Bounded Blob Cache maintenance for L1 expiry and namespace flushing.
 //!
-//! `sweep_expired` walks rotating per-shard cursors, so a small recurring
-//! budget eventually covers the whole cache without a stop-the-world scan.
+//! `sweep_expired` consumes due records from per-shard deadline indexes, so
+//! ordinary TTL work depends on the number of deadlines due rather than the
+//! total cache size. A separate rotating scan runs only while a namespace
+//! generation flush needs physical reclamation.
 //! The runtime invokes it every 250 ms on a dedicated maintenance thread.
 //!
 //! # Operations
@@ -52,8 +54,7 @@ use super::blob::BlobCache;
 /// Bound for a single sweeper invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SweepLimit {
-    /// Hard cap on entries scanned. The sweep stops as soon as this many
-    /// entries have been visited (whether evicted or not).
+    /// Hard cap on deadline/generation records inspected.
     Entries(usize),
     /// Hard cap on wall-clock milliseconds. The sweep stops as soon as the
     /// elapsed time crosses this threshold.
@@ -137,9 +138,9 @@ pub struct BlobCacheSweeper;
 impl BlobCacheSweeper {
     /// Bounded sweep of expired L1 entries.
     ///
-    /// Walks the L1 entries (across shards) checking
-    /// `Entry::is_expired_at(now)`, and evicts expired ones via
-    /// [`BlobCache::invalidate_key`]. Honors `limit` precisely.
+    /// Pops due L1 deadlines across shards, revalidates them against the
+    /// current entry, and evicts only entries whose effective expiry elapsed.
+    /// Honors `limit` precisely.
     ///
     /// # Concurrency
     ///
@@ -394,12 +395,11 @@ mod tests {
 
         let report = BlobCacheSweeper::sweep_expired(&cache, SweepLimit::Entries(10));
 
-        assert_eq!(report.entries_scanned, 1);
+        assert_eq!(report.entries_scanned, 0);
         assert_eq!(report.entries_evicted, 0);
         assert_eq!(report.bytes_reclaimed, 0);
         assert!(!report.truncated_due_to_limit);
-        assert_eq!(report.by_namespace[0].0, "n");
-        assert_eq!(report.by_namespace[0].1.entries_scanned, 1);
+        assert!(report.by_namespace.is_empty());
     }
 
     #[test]
@@ -456,8 +456,8 @@ mod tests {
         let report = BlobCacheSweeper::sweep_expired(&cache, SweepLimit::Entries(10));
 
         assert_eq!(report.entries_evicted, 1);
-        assert_eq!(report.entries_scanned, 2);
-        assert_eq!(report.bytes_reclaimed, 1);
+        assert_eq!(report.entries_scanned, 1);
+        assert!(report.bytes_reclaimed > 1);
         assert!(cache.get("n", "expired").is_none());
         assert!(cache.get("n", "alive").is_some());
     }

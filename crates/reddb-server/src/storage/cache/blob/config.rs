@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_BLOB_L1_BYTES_MAX: usize = 256 * 1024 * 1024;
+pub const DEFAULT_BLOB_NAMESPACE_BYTES_MAX: usize = DEFAULT_BLOB_L1_BYTES_MAX;
 pub const DEFAULT_BLOB_L2_BYTES_MAX: u64 = 4 * 1024 * 1024 * 1024;
 pub const DEFAULT_BLOB_MAX_NAMESPACES: usize = 256;
 pub const DEFAULT_BLOB_SHARDS: usize = 64;
@@ -45,6 +46,7 @@ pub enum L2Compression {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobCacheConfig {
     pub(super) l1_bytes_max: usize,
+    pub(super) namespace_bytes_max: usize,
     pub(super) l2_bytes_max: u64,
     pub(super) l2_path: Option<PathBuf>,
     pub(super) max_namespaces: usize,
@@ -59,6 +61,7 @@ impl Default for BlobCacheConfig {
     fn default() -> Self {
         Self {
             l1_bytes_max: DEFAULT_BLOB_L1_BYTES_MAX,
+            namespace_bytes_max: DEFAULT_BLOB_NAMESPACE_BYTES_MAX,
             l2_bytes_max: DEFAULT_BLOB_L2_BYTES_MAX,
             l2_path: None,
             max_namespaces: DEFAULT_BLOB_MAX_NAMESPACES,
@@ -87,6 +90,11 @@ impl BlobCacheConfig {
 
     pub fn with_l2_bytes_max(mut self, l2_bytes_max: u64) -> Self {
         self.l2_bytes_max = l2_bytes_max;
+        self
+    }
+
+    pub fn with_namespace_bytes_max(mut self, namespace_bytes_max: usize) -> Self {
+        self.namespace_bytes_max = namespace_bytes_max;
         self
     }
 
@@ -127,6 +135,10 @@ impl BlobCacheConfig {
 
     pub fn l2_bytes_max(&self) -> u64 {
         self.l2_bytes_max
+    }
+
+    pub fn namespace_bytes_max(&self) -> usize {
+        self.namespace_bytes_max
     }
 
     pub fn l2_path(&self) -> Option<&Path> {
@@ -173,6 +185,8 @@ pub enum BlobCacheConfigError {
     ZeroShardCount,
     /// `max_namespaces` must be at least 1.
     ZeroMaxNamespaces,
+    /// `namespace_bytes_max` must be at least 1.
+    ZeroNamespaceBytesMax,
 }
 
 impl BlobCacheConfigBuilder {
@@ -189,6 +203,11 @@ impl BlobCacheConfigBuilder {
 
     pub fn l2_bytes_max(mut self, value: u64) -> Self {
         self.inner.l2_bytes_max = value;
+        self
+    }
+
+    pub fn namespace_bytes_max(mut self, value: usize) -> Self {
+        self.inner.namespace_bytes_max = value;
         self
     }
 
@@ -234,6 +253,9 @@ impl BlobCacheConfigBuilder {
         if self.inner.max_namespaces == 0 {
             return Err(BlobCacheConfigError::ZeroMaxNamespaces);
         }
+        if self.inner.namespace_bytes_max == 0 {
+            return Err(BlobCacheConfigError::ZeroNamespaceBytesMax);
+        }
         Ok(self.inner)
     }
 
@@ -264,5 +286,14 @@ mod tests {
             .try_build()
             .expect_err("zero max_namespaces must be rejected");
         assert_eq!(err, BlobCacheConfigError::ZeroMaxNamespaces);
+    }
+
+    #[test]
+    fn blob_cache_config_builder_rejects_zero_namespace_budget() {
+        let err = BlobCacheConfig::builder()
+            .namespace_bytes_max(0)
+            .try_build()
+            .expect_err("zero namespace_bytes_max must be rejected");
+        assert_eq!(err, BlobCacheConfigError::ZeroNamespaceBytesMax);
     }
 }

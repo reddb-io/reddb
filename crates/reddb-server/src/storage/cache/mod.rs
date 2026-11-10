@@ -39,9 +39,9 @@ pub use aggregates::{AggCacheStats, AggValue, AggregationCache, CardinalityEstim
 pub use blob::{
     BlobCache, BlobCacheConfig, BlobCacheHit, BlobCachePolicy, BlobCachePut, BlobCacheStats,
     CacheError, L1Admission, L2Compression, DEFAULT_BLOB_L1_BYTES_MAX, DEFAULT_BLOB_L2_BYTES_MAX,
-    DEFAULT_BLOB_MAX_NAMESPACES, METRIC_CACHE_BLOB_L1_BYTES_IN_USE,
-    METRIC_CACHE_BLOB_L2_BYTES_IN_USE, METRIC_CACHE_BLOB_L2_FULL_REJECTIONS_TOTAL,
-    METRIC_CACHE_VERSION_MISMATCH_TOTAL,
+    DEFAULT_BLOB_MAX_NAMESPACES, DEFAULT_BLOB_NAMESPACE_BYTES_MAX,
+    METRIC_CACHE_BLOB_L1_BYTES_IN_USE, METRIC_CACHE_BLOB_L2_BYTES_IN_USE,
+    METRIC_CACHE_BLOB_L2_FULL_REJECTIONS_TOTAL, METRIC_CACHE_VERSION_MISMATCH_TOTAL,
 };
 pub use compressor::{CompressError, CompressOpts, Compressed, L2BlobCompressor};
 pub use extended_ttl::{EffectiveExpiry, ExpiryDecision, ExtendedTtlPolicy};
