@@ -886,42 +886,41 @@ mod crash_tests {
         reader_thread.join().expect("reader thread");
         assert_eq!(read.expect("hit blocked by promotion gate"), 2);
 
-        let (published_tx, published_rx) = mpsc::channel();
-        *runtime.index_store_ref().mutation_hook.lock() =
-            Some(Arc::new(move |collection, phase| {
-                if collection == "promotion_gate"
-                    && phase == super::super::index_store::MutationTestPhase::StoragePublished
-                {
-                    published_tx.send(()).expect("report publication");
-                }
-            }));
         let guard = runtime.inner.result_blob_promotion.lock();
-        let writer = runtime.clone();
+        let invalidator = runtime.clone();
+        let (started_tx, started_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
-        let writer_thread = std::thread::spawn(move || {
-            let result = writer.execute_query("INSERT INTO promotion_gate (id) VALUES (3)");
-            done_tx.send(result.is_ok()).expect("report write");
+        let invalidator_thread = std::thread::spawn(move || {
+            started_tx.send(()).expect("report start");
+            invalidator.invalidate_result_cache_for_table("promotion_gate");
+            done_tx.send(()).expect("report invalidation");
         });
-        let published = published_rx.recv_timeout(Duration::from_secs(3));
+        let started = started_rx.recv_timeout(Duration::from_secs(3));
         let completed_early = done_rx.recv_timeout(Duration::from_millis(100));
         drop(guard);
-        assert!(published.is_ok(), "write did not reach storage publication");
+        assert!(started.is_ok(), "invalidation did not start");
         assert!(
             matches!(completed_early, Err(mpsc::RecvTimeoutError::Timeout)),
             "invalidation must wait for an in-flight promotion"
         );
-        assert!(done_rx
+        done_rx
             .recv_timeout(Duration::from_secs(3))
-            .expect("writer did not finish"));
-        writer_thread.join().expect("writer thread");
+            .expect("invalidation did not finish");
+        invalidator_thread.join().expect("invalidator thread");
+        let before = runtime.result_cache_metrics();
         assert_eq!(
             runtime
                 .execute_query("SELECT id FROM promotion_gate ORDER BY id")
-                .expect("read after write")
+                .expect("read after invalidation")
                 .result
                 .records
                 .len(),
-            3
+            2
+        );
+        assert_eq!(
+            runtime.result_cache_metrics().1 - before.1,
+            1,
+            "invalidation must remove the cached result"
         );
     }
 
