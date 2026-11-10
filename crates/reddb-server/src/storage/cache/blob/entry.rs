@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
+use std::mem::size_of;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use super::super::extended_ttl::{EffectiveExpiry, ExpiryDecision, ExtendedTtlPolicy};
+use super::cache::BlobCacheKey;
 use super::{BlobCacheHit, BlobCachePolicy};
 
 #[derive(Debug)]
@@ -12,6 +14,14 @@ pub(super) struct Entry {
     pub(super) content_metadata: Option<Arc<BTreeMap<String, String>>>,
     pub(super) tags: BTreeSet<String>,
     pub(super) dependencies: BTreeSet<String>,
+    /// Conservative admission charge for the resident L1 entry.
+    ///
+    /// This includes the payload, owned strings, container nodes, and the
+    /// key copies held by the tag/dependency indexes. It is intentionally an
+    /// estimate rather than allocator-specific RSS, but unlike `size` it
+    /// prevents tiny values with large keys or many labels from escaping the
+    /// configured memory budget.
+    pub(super) l1_charge_bytes: usize,
     pub(super) size: usize,
     pub(super) visited: AtomicBool,
     pub(super) expires_at_unix_ms: Option<u64>,
@@ -43,6 +53,14 @@ impl Entry {
         key: &str,
     ) -> Self {
         let size = bytes.len();
+        let l1_charge_bytes = Self::estimate_l1_charge_bytes(
+            size,
+            namespace,
+            key,
+            &content_metadata,
+            &tags,
+            &dependencies,
+        );
         Self {
             bytes: Arc::<[u8]>::from(bytes),
             content_metadata: if content_metadata.is_empty() {
@@ -52,6 +70,7 @@ impl Entry {
             },
             tags,
             dependencies,
+            l1_charge_bytes,
             size,
             visited: AtomicBool::new(true),
             expires_at_unix_ms: effective_expires_at_unix_ms(policy, now_ms, namespace, key),
@@ -69,6 +88,7 @@ impl Entry {
             Arc::clone(&self.bytes),
             self.content_metadata.clone(),
             self.version,
+            self.expires_at_unix_ms,
         )
     }
 
@@ -77,6 +97,7 @@ impl Entry {
             Arc::clone(&self.bytes),
             self.content_metadata.clone(),
             self.version,
+            self.expires_at_unix_ms,
             window_remaining_ms,
         )
     }
@@ -84,6 +105,55 @@ impl Entry {
     pub(super) fn is_expired_at(&self, now_ms: u64) -> bool {
         self.expires_at_unix_ms
             .is_some_and(|expires_at| now_ms >= expires_at)
+    }
+
+    pub(super) fn estimate_l1_charge_bytes(
+        payload_bytes: usize,
+        namespace: &str,
+        key: &str,
+        content_metadata: &BTreeMap<String, String>,
+        tags: &BTreeSet<String>,
+        dependencies: &BTreeSet<String>,
+    ) -> usize {
+        // IndexMap/HashSet/BTreeMap node overhead varies by allocator. These
+        // constants are deliberately conservative and stable so admission is
+        // predictable across platforms without pretending to be exact RSS.
+        const MAP_ENTRY_OVERHEAD_BYTES: usize = 64;
+        const TREE_NODE_OVERHEAD_BYTES: usize = 64;
+        const INDEX_ENTRY_OVERHEAD_BYTES: usize = 64;
+        const EXPIRY_INDEX_OVERHEAD_BYTES: usize = 64;
+
+        let key_heap_bytes = namespace.len().saturating_add(key.len());
+        let mut charge = payload_bytes
+            .saturating_add(size_of::<Self>())
+            .saturating_add(size_of::<BlobCacheKey>())
+            .saturating_add(MAP_ENTRY_OVERHEAD_BYTES)
+            // Reserve two lazy deadline-index records for every entry. The
+            // bounded heap can briefly hold a stale and a current deadline;
+            // entries without TTL deliberately overpay so expiry mutation is
+            // accounting-neutral and cannot escape the memory budget.
+            .saturating_add(size_of::<BlobCacheKey>().saturating_mul(2))
+            .saturating_add(EXPIRY_INDEX_OVERHEAD_BYTES.saturating_mul(2))
+            .saturating_add(key_heap_bytes)
+            .saturating_add(key_heap_bytes.saturating_mul(2));
+
+        for (metadata_key, metadata_value) in content_metadata {
+            charge = charge
+                .saturating_add(metadata_key.len())
+                .saturating_add(metadata_value.len())
+                .saturating_add(TREE_NODE_OVERHEAD_BYTES);
+        }
+        for label in tags.iter().chain(dependencies.iter()) {
+            // The entry owns the label and the invalidation index owns a
+            // second cache-key copy for that label.
+            charge = charge
+                .saturating_add(label.len())
+                .saturating_add(TREE_NODE_OVERHEAD_BYTES)
+                .saturating_add(size_of::<BlobCacheKey>())
+                .saturating_add(key_heap_bytes)
+                .saturating_add(INDEX_ENTRY_OVERHEAD_BYTES);
+        }
+        charge
     }
 }
 

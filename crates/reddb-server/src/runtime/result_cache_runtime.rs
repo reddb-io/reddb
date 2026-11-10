@@ -385,6 +385,12 @@ impl RedDBRuntime {
     }
 
     fn get_blob_result_cache_entry(&self, key: &str) -> Option<RuntimeQueryResult> {
+        if let Some(result) = self.get_blob_result_cache_entry_from_blob_cache(key) {
+            return Some(result);
+        }
+        // One-way compatibility read for databases written before the generic
+        // single-file L2 existed. A hit is promoted into the new backend; new
+        // writes never duplicate payloads in this legacy collection.
         if self.inner.embedded_single_file {
             if let Some(bytes) = self.get_embedded_result_cache_payload(key) {
                 let policy = crate::storage::cache::BlobCachePolicy::default()
@@ -399,9 +405,10 @@ impl RedDBRuntime {
                 {
                     return None;
                 }
+                return self.get_blob_result_cache_entry_from_blob_cache(key);
             }
         }
-        self.get_blob_result_cache_entry_from_blob_cache(key)
+        None
     }
 
     fn get_blob_result_cache_entry_from_blob_cache(&self, key: &str) -> Option<RuntimeQueryResult> {
@@ -515,9 +522,6 @@ impl RedDBRuntime {
         let dependencies = entry.scopes.iter().cloned().collect::<Vec<_>>();
         let bytes = encode_result_cache_payload(&entry)
             .unwrap_or_else(|| result_cache_fingerprint(&entry.result).into_bytes());
-        if self.inner.embedded_single_file {
-            self.put_embedded_result_cache_payload(key, &bytes, &dependencies);
-        }
         let put = crate::storage::cache::BlobCachePut::new(bytes)
             .with_dependencies(dependencies)
             .with_policy(policy);
@@ -546,38 +550,6 @@ impl RedDBRuntime {
         let evicted = trim_result_cache(map, order, capacity);
         drop(cache);
         self.record_result_cache_evictions(evicted);
-    }
-
-    fn put_embedded_result_cache_payload(&self, key: &str, bytes: &[u8], scopes: &[String]) {
-        let store = self.inner.db.store();
-        let _ = store.get_or_create_collection(RESULT_CACHE_EMBEDDED_COLLECTION);
-        let entity = crate::storage::UnifiedEntity::new(
-            crate::storage::EntityId::new(0),
-            crate::storage::EntityKind::TableRow {
-                table: std::sync::Arc::from(RESULT_CACHE_EMBEDDED_COLLECTION),
-                row_id: 0,
-            },
-            crate::storage::EntityData::Row(crate::storage::RowData {
-                columns: Vec::new(),
-                named: Some(HashMap::from([
-                    (
-                        "namespace".to_string(),
-                        reddb_types::Value::text(RESULT_CACHE_BLOB_NAMESPACE),
-                    ),
-                    ("key".to_string(), reddb_types::Value::text(key.to_string())),
-                    (
-                        "payload".to_string(),
-                        reddb_types::Value::Blob(bytes.to_vec()),
-                    ),
-                    (
-                        "scopes".to_string(),
-                        reddb_types::Value::text(scopes.join("\n")),
-                    ),
-                ])),
-                schema: None,
-            }),
-        );
-        let _ = store.insert_auto(RESULT_CACHE_EMBEDDED_COLLECTION, entity);
     }
 
     fn invalidate_embedded_result_cache(&self) {

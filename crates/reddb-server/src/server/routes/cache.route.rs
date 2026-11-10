@@ -40,11 +40,32 @@ const CACHE_ROUTES: &[RouteEntry] = &[
         put,
     ),
     RouteEntry::with_aliases(
+        "cache.mget",
+        RouteMethod::Post,
+        "/cache/ns/:namespace/mget",
+        cache_aliases!(RouteMethod::Post, "/v1/cache/ns/:namespace/mget"),
+        mget,
+    ),
+    RouteEntry::with_aliases(
+        "cache.mput",
+        RouteMethod::Post,
+        "/cache/ns/:namespace/mput",
+        cache_aliases!(RouteMethod::Post, "/v1/cache/ns/:namespace/mput"),
+        mput,
+    ),
+    RouteEntry::with_aliases(
         "cache.exists",
         RouteMethod::Get,
         "/cache/ns/:namespace/:key/exists",
         cache_aliases!(RouteMethod::Get, "/v1/cache/ns/:namespace/:key/exists"),
         exists,
+    ),
+    RouteEntry::with_aliases(
+        "cache.expiry",
+        RouteMethod::Patch,
+        "/cache/ns/:namespace/:key/ttl",
+        cache_aliases!(RouteMethod::Patch, "/v1/cache/ns/:namespace/:key/ttl"),
+        expiry,
     ),
     RouteEntry::with_aliases(
         "cache.invalidate",
@@ -90,7 +111,10 @@ macro_rules! cache_handler {
 
 cache_handler!(get, "get", "cache:read");
 cache_handler!(put, "put", "cache:write");
+cache_handler!(mget, "mget", "cache:read");
+cache_handler!(mput, "mput", "cache:write");
 cache_handler!(exists, "exists", "cache:read");
+cache_handler!(expiry, "expiry", "cache:write");
 cache_handler!(invalidate, "invalidate", "cache:invalidate");
 cache_handler!(invalidate_prefix, "invalidate_prefix", "cache:invalidate");
 cache_handler!(invalidate_tags, "invalidate_tags", "cache:invalidate");

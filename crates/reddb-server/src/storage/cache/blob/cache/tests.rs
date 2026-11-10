@@ -8,7 +8,7 @@ use super::*;
 fn small_cache(bytes: usize) -> BlobCache {
     BlobCache::new(
         BlobCacheConfig::default()
-            .with_l1_bytes_max(bytes)
+            .with_l1_bytes_max(bytes.saturating_add(32 * 1024))
             .with_shard_count(1)
             .with_max_namespaces(4),
     )
@@ -114,7 +114,7 @@ fn l2_cache(path: &Path) -> BlobCache {
 fn l2_cache_with_promotion_policy(path: &Path, promotion_policy: L2PromotionPolicy) -> BlobCache {
     BlobCache::open_with_l2(
         BlobCacheConfig::default()
-            .with_l1_bytes_max(128)
+            .with_l1_bytes_max(1_024)
             .with_shard_count(1)
             .with_max_namespaces(4)
             .with_l2_path(path)
@@ -157,8 +157,8 @@ fn put_get_and_exists_round_trip_blob() {
     assert_eq!(stats.misses, 0);
     assert_eq!(stats.insertions, 1);
     assert_eq!(stats.entries, 1);
-    assert_eq!(stats.bytes_in_use, 3);
-    assert_eq!(stats.l1_bytes_max, 128);
+    assert!(stats.bytes_in_use >= 3);
+    assert_eq!(stats.l1_bytes_max, 128 + 32 * 1024);
 }
 
 #[test]
@@ -188,7 +188,20 @@ fn namespace_isolation_keeps_same_key_separate() {
 
 #[test]
 fn byte_capacity_evicts_with_sieve() {
-    let cache = small_cache(6);
+    let entry_charge = Entry::estimate_l1_charge_bytes(
+        3,
+        "n",
+        "a",
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+    let cache = BlobCache::new(
+        BlobCacheConfig::default()
+            .with_l1_bytes_max(entry_charge * 2)
+            .with_shard_count(1)
+            .with_max_namespaces(4),
+    );
     cache
         .put("n", "a", BlobCachePut::new(vec![1, 1, 1]))
         .unwrap();
@@ -203,15 +216,123 @@ fn byte_capacity_evicts_with_sieve() {
     assert!(cache.get("n", "c").is_some(), "new entry remains cached");
     let stats = cache.stats();
     assert_eq!(stats.entries, 2);
-    assert_eq!(stats.bytes_in_use, 6);
+    assert_eq!(stats.bytes_in_use, entry_charge * 2);
     assert!(stats.evictions >= 1);
+}
+
+#[test]
+fn l1_budget_accounts_for_tiny_keys_instead_of_only_payloads() {
+    let entry_charge = Entry::estimate_l1_charge_bytes(
+        0,
+        "n",
+        "a",
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+    let cache = BlobCache::new(
+        BlobCacheConfig::default()
+            .with_l1_bytes_max(entry_charge * 2)
+            .with_namespace_bytes_max(entry_charge * 2)
+            .with_shard_count(1),
+    );
+
+    for key in ["a", "b", "c"] {
+        cache
+            .put("n", key, BlobCachePut::new(Vec::new()))
+            .expect("tiny cache put");
+    }
+
+    let stats = cache.stats();
+    assert_eq!(stats.entries(), 2);
+    assert!(stats.bytes_in_use() <= u64::try_from(entry_charge * 2).unwrap_or(u64::MAX));
+    assert!(stats.evictions() >= 1);
+}
+
+#[test]
+fn namespace_budget_prevents_one_tenant_from_consuming_global_l1() {
+    let entry_charge = Entry::estimate_l1_charge_bytes(
+        1,
+        "a",
+        "1",
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+    let cache = BlobCache::new(
+        BlobCacheConfig::default()
+            .with_l1_bytes_max(entry_charge * 4)
+            .with_namespace_bytes_max(entry_charge * 2)
+            .with_shard_count(1),
+    );
+
+    for key in ["1", "2", "3"] {
+        cache
+            .put("a", key, BlobCachePut::new(vec![1]))
+            .expect("namespace a put");
+    }
+    cache
+        .put("b", "1", BlobCachePut::new(vec![2]))
+        .expect("namespace b put");
+
+    assert!(cache.namespace_bytes("a") <= entry_charge * 2);
+    assert_eq!(
+        cache
+            .get("b", "1")
+            .expect("other namespace survives")
+            .value(),
+        &[2]
+    );
+    assert_eq!(cache.stats().entries(), 3);
+}
+
+#[test]
+fn concurrent_tiny_writes_settle_within_global_and_namespace_budgets() {
+    let entry_charge = Entry::estimate_l1_charge_bytes(
+        0,
+        "n",
+        "thread-0-key-000",
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+    let budget_bytes = entry_charge * 16;
+    let cache = Arc::new(BlobCache::new(
+        BlobCacheConfig::default()
+            .with_l1_bytes_max(budget_bytes)
+            .with_namespace_bytes_max(budget_bytes)
+            .with_shard_count(8),
+    ));
+    let mut writers = Vec::new();
+    for thread_index in 0..8 {
+        let cache = Arc::clone(&cache);
+        writers.push(std::thread::spawn(move || {
+            for key_index in 0..250 {
+                cache
+                    .put(
+                        "n",
+                        format!("thread-{thread_index}-key-{key_index:03}"),
+                        BlobCachePut::new(Vec::new()),
+                    )
+                    .expect("concurrent cache put");
+            }
+        }));
+    }
+    for writer in writers {
+        writer.join().expect("cache writer");
+    }
+
+    let stats = cache.stats();
+    assert!(stats.bytes_in_use() <= u64::try_from(budget_bytes).unwrap_or(u64::MAX));
+    assert!(cache.namespace_bytes("n") <= budget_bytes);
+    assert!(stats.entries() > 0);
 }
 
 #[test]
 fn namespace_cap_rejects_new_namespace() {
     let cache = BlobCache::new(
         BlobCacheConfig::default()
-            .with_l1_bytes_max(128)
+            .with_l1_bytes_max(64 * 1024)
             .with_shard_count(1)
             .with_max_namespaces(1),
     );
@@ -226,7 +347,7 @@ fn namespace_cap_rejects_new_namespace() {
 fn content_metadata_round_trips_and_is_capped() {
     let cache = BlobCache::new(
         BlobCacheConfig::default()
-            .with_l1_bytes_max(128)
+            .with_l1_bytes_max(64 * 1024)
             .with_shard_count(1)
             .with_content_metadata_limits(2, 64),
     );
@@ -325,7 +446,12 @@ fn hot_hits_share_metadata_without_allocations_and_keep_old_versions_alive() {
 
 #[test]
 fn blob_larger_than_l1_budget_is_rejected() {
-    let cache = small_cache(4);
+    let cache = BlobCache::new(
+        BlobCacheConfig::default()
+            .with_l1_bytes_max(4)
+            .with_shard_count(1)
+            .with_max_namespaces(4),
+    );
     let err = cache
         .put("n", "large", BlobCachePut::new(vec![0; 5]))
         .expect_err("blob too large");
@@ -391,6 +517,63 @@ fn ttl_and_absolute_expiry_use_earliest_deadline() {
 
     assert!(cache.get_at("n", "earliest", 1_049).is_some());
     assert!(cache.get_at("n", "earliest", 1_050).is_none());
+}
+
+#[test]
+fn expiry_can_be_replaced_or_removed_without_rewriting_the_entry() {
+    let cache = small_cache(128);
+    cache
+        .put(
+            "n",
+            "session",
+            BlobCachePut::new(b"value".to_vec()).with_tags(["auth"]),
+        )
+        .expect("cache fixture put");
+
+    assert!(cache.expire("n", "session", 60_000).expect("expiry update"));
+    let hit = cache.get("n", "session").expect("live after expiry update");
+    assert_eq!(hit.value(), b"value");
+    assert!(hit.remaining_ttl_ms_at(unix_now_ms()).is_some());
+
+    assert!(cache.persist("n", "session").expect("remove expiry"));
+    let hit = cache.get("n", "session").expect("live after persist");
+    assert_eq!(hit.expires_at_unix_ms(), None);
+    assert_eq!(
+        cache.invalidate_tags("n", &["auth"]),
+        1,
+        "tags survive TTL changes"
+    );
+    assert!(!cache
+        .expire("n", "missing", 10)
+        .expect("missing expiry update is a clean miss"));
+}
+
+#[test]
+fn expiry_update_reaches_l2_only_entries() {
+    let path = l2_path("expiry-update");
+    let cache = l2_cache(&path);
+    cache
+        .put(
+            "n",
+            "cold",
+            BlobCachePut::new(b"value".to_vec())
+                .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
+        )
+        .expect("L2-only fixture put");
+
+    assert!(cache.expire("n", "cold", 60_000).expect("L2 expiry update"));
+    let hit = cache.get("n", "cold").expect("L2 entry remains readable");
+    assert!(hit.remaining_ttl_ms_at(unix_now_ms()).is_some());
+    assert!(cache.persist("n", "cold").expect("remove L2 expiry"));
+    assert_eq!(
+        cache
+            .get("n", "cold")
+            .expect("L2 entry remains after persist")
+            .expires_at_unix_ms(),
+        None
+    );
+    drop(cache);
+    remove_l2(&path);
 }
 
 #[test]
@@ -533,7 +716,20 @@ fn l2_pressure_evicts_entries_instead_of_rejecting_admission() {
 
 #[test]
 fn priority_biases_sieve_eviction_toward_lower_priority_entries() {
-    let cache = small_cache(6);
+    let entry_charge = Entry::estimate_l1_charge_bytes(
+        3,
+        "n",
+        "high",
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+    let cache = BlobCache::new(
+        BlobCacheConfig::default()
+            .with_l1_bytes_max(entry_charge * 2)
+            .with_shard_count(1)
+            .with_max_namespaces(4),
+    );
     cache
         .put(
             "n",
@@ -556,7 +752,7 @@ fn priority_biases_sieve_eviction_toward_lower_priority_entries() {
     assert!(cache.get("n", "low").is_none());
     let stats = cache.stats();
     assert_eq!(stats.entries, 2);
-    assert_eq!(stats.bytes_in_use, 6);
+    assert!(stats.bytes_in_use <= entry_charge * 2);
     assert!(stats.evictions >= 1);
 }
 
@@ -685,7 +881,7 @@ fn invalidate_key_removes_one_entry_and_is_idempotent() {
     let stats = cache.stats();
     assert_eq!(stats.invalidations, 1);
     assert_eq!(stats.entries, 1);
-    assert_eq!(stats.bytes_in_use, 1);
+    assert!(stats.bytes_in_use >= 1);
 }
 
 #[test]
@@ -781,6 +977,31 @@ fn namespace_flush_bumps_generation_and_old_entries_are_immediately_absent() {
         .put("n", "c", BlobCachePut::new(b"c".to_vec()))
         .unwrap();
     assert_eq!(&*cache.get("n", "c").unwrap().bytes, b"c");
+}
+
+#[test]
+fn namespace_flush_reclamation_finishes_across_small_batches_then_stops_scanning() {
+    let cache = small_cache(128);
+    for key in ["a", "b", "c"] {
+        cache
+            .put("n", key, BlobCachePut::new(key.as_bytes().to_vec()))
+            .unwrap();
+    }
+    assert!(cache.invalidate_namespace("n"));
+
+    for _ in 0..2 {
+        let sweep = cache.sweep_expired_l1(Some(1), None);
+        assert_eq!(sweep.entries_scanned, 1);
+        assert!(!sweep.completed);
+    }
+    let final_sweep = cache.sweep_expired_l1(Some(1), None);
+    assert_eq!(final_sweep.entries_scanned, 1);
+    assert!(final_sweep.completed);
+    assert_eq!(cache.stats().entries, 0);
+
+    let idle_sweep = cache.sweep_expired_l1(Some(1), None);
+    assert_eq!(idle_sweep.entries_scanned, 0);
+    assert!(idle_sweep.completed);
 }
 
 #[test]
@@ -894,7 +1115,7 @@ fn l2_rejects_put_when_hard_byte_cap_is_exceeded() {
     let path = l2_path("full");
     let cache = BlobCache::open_with_l2(
         BlobCacheConfig::default()
-            .with_l1_bytes_max(128)
+            .with_l1_bytes_max(64 * 1024)
             .with_shard_count(1)
             .with_l2_bytes_max(2)
             .with_l2_path(&path),
@@ -1195,11 +1416,11 @@ fn invalidate_tags_with_empty_slice_is_a_no_op() {
 #[test]
 fn blob_cache_config_builder_constructs_cache_end_to_end() {
     let config = BlobCacheConfig::builder()
-        .l1_bytes_max(64)
+        .l1_bytes_max(64 * 1024)
         .max_namespaces(2)
         .shard_count(1)
         .build();
-    assert_eq!(config.l1_bytes_max(), 64);
+    assert_eq!(config.l1_bytes_max(), 64 * 1024);
     assert_eq!(config.max_namespaces(), 2);
     assert_eq!(config.shard_count(), 1);
 
@@ -1232,6 +1453,7 @@ fn blob_cache_stats_getters_match_internal_field_state() {
     assert_eq!(stats.entries(), stats.entries);
     assert_eq!(stats.bytes_in_use(), stats.bytes_in_use as u64);
     assert_eq!(stats.l1_bytes_max(), stats.l1_bytes_max);
+    assert_eq!(stats.namespace_bytes_max(), stats.namespace_bytes_max);
     assert_eq!(stats.l2_bytes_in_use(), stats.l2_bytes_in_use);
     assert_eq!(stats.l2_bytes_max(), stats.l2_bytes_max);
     assert_eq!(stats.l2_full_rejections(), stats.l2_full_rejections);

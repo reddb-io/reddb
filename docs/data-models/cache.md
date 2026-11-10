@@ -20,8 +20,8 @@ want to query with SQL.
 | Durable job flow | Queues |
 
 Blob Cache is not meant to replace every Redis data type. It targets exact-key
-cache entries where RedDB can add value with durable L2 storage, SQL-adjacent
-dependency invalidation, and unified observability.
+cache entries where RedDB can add value with SQL-adjacent dependency
+invalidation, a bounded payload budget and unified observability.
 
 ## Architecture
 
@@ -34,16 +34,26 @@ Blob Cache Interface
         +-- L1 memory cache
         |     hot blobs, byte-bounded, sharded
         |
-        +-- membership synopsis
-        |     cheap negative existence checks
+        +-- L2 internal collection
+        |     durable blobs in the same .rdb file
         |
-        +-- L2 native store
-              durable metadata + blob bytes
+        +-- bounded maintenance worker
+              rotating TTL and namespace-generation sweep
 ```
 
-L1 is process-local and optimized for hot hits. When configured, L2 uses native
-cache storage beside the database. Cache state and invalidation are node-local;
-the HTTP API does not add replication or cluster-wide cache coherence.
+The normal server runtime keeps hot values in process-local L1 and durable cache
+rows in the hidden `red.cache.blob_l2` collection inside the primary `.rdb`.
+Its dedicated maintenance worker reclaims expired and namespace-flushed L1
+entries in small, rotating batches without using query workers. L2 deadlines
+are persisted in the store's ordered expiry projection, so the same worker can
+delete unread expired rows in bounded WAL batches without scanning the cache in
+steady state. A missing projection from an older checkpoint is rebuilt in
+bounded ticks. Cache state and invalidation are node-local; the HTTP API does
+not add replication or cluster-wide coherence.
+
+Direct engine callers can still opt into the legacy standalone file backend,
+but the server uses the internal backend so restart recovery preserves the
+single-file packaging contract.
 
 ## TTL Policy
 
@@ -75,9 +85,9 @@ Blob Cache should make "does this key exist?" cheap without trusting
 probabilistic data as truth.
 
 1. Check L1 for a hot exact entry.
-2. Check the namespace membership synopsis.
+2. If L2 is enabled, check its namespace synopsis.
 3. If the synopsis says absent, skip L2.
-4. If the synopsis says maybe, verify against L2 metadata for exact answers.
+4. If the synopsis says maybe, verify against L2 metadata for an exact answer.
 
 False positives are acceptable because they only cause an extra metadata read.
 False hits are not acceptable.
@@ -110,17 +120,23 @@ the mature Redis data-type ecosystem.
 RedDB's cache angle is different:
 
 - Hot hits come from L1 memory.
-- Warm hits can come from L2 without rebuilding the cache after restart.
 - Invalidation can use table / collection dependencies inside the database.
 - Cached blobs live under the same operational umbrella as the rest of RedDB.
+- The remote API supports binary values, batches and TTL mutation without a
+  second service.
 
 That makes Blob Cache strongest for applications that already use RedDB and want
-to avoid running a separate Redis instance for exact-key cached artifacts.
+to avoid running a separate Redis instance for modest, node-local exact-key
+cached artifacts. Redis remains the stronger choice for distributed cache
+coherence, a mature data-structure ecosystem or consistently sub-millisecond
+network tails.
 
 ## Current Status
 
 The native module is accessible through HTTP `/cache/ns/*` and `db.cache.*`
-using the remote JavaScript client's HTTP transport. It is a supporting module,
-not a SQL `CREATE CACHE` collection. See [Remote Blob Cache](/api/cache.md)
-for usage, including a ten-minute TTL example for BigQuery results.
+using the remote JavaScript client's HTTP transport. It provides exact-key and
+batch reads/writes, hard TTL and absolute expiry, `expire`/`persist`, tags,
+prefix invalidation and namespace flush. It is a supporting module, not a SQL
+`CREATE CACHE` collection. See [Remote Blob Cache](/api/cache.md) for the exact
+limits, capacity configuration and persistence boundary.
 Other engine cache layers are documented in [SIEVE Cache](/engine/cache.md).

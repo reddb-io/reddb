@@ -17,9 +17,9 @@ The metric source of truth is
 the source disagree, the source wins — file an issue and update this
 page.
 
-Backup and restore concerns for the L2 spill directory are tracked
-separately in [`blob-cache-backup-restore.md`](./blob-cache-backup-restore.md)
-(in flight via Lane #187).
+The server's L2 lives in the primary `.rdb`; backup and compatibility
+standalone-pager details are in
+[`blob-cache-backup-restore.md`](./blob-cache-backup-restore.md).
 
 ---
 
@@ -33,6 +33,7 @@ only high-cardinality dimension and is bounded (see §5).
 |---|---|---|---|---|
 | `cache_blob_l1_bytes_in_use` | gauge | `namespace` | bytes | `METRIC_CACHE_BLOB_L1_BYTES_IN_USE` |
 | `cache_blob_l1_bytes_max` | gauge | — | bytes | `BlobCacheStats.l1_bytes_max` |
+| `reddb_cache_blob_namespace_bytes_max` | gauge | — | bytes | `BlobCacheStats.namespace_bytes_max` |
 | `cache_blob_l1_hits_total` | counter | `namespace` | events | `BlobCacheStats.hits` |
 | `cache_blob_l1_misses_total` | counter | `namespace` | events | `BlobCacheStats.misses` |
 | `cache_blob_l1_evictions_total` | counter | `namespace` | events | `BlobCacheStats.evictions` |
@@ -76,7 +77,7 @@ sum(cache_blob_l1_bytes_in_use) / scalar(max(cache_blob_l1_bytes_max))
 ```
 
 `cache_blob_l1_bytes_max` is reported as a gauge so the panel adapts
-when operators bump `RED_BLOB_L1_BYTES_MAX` without redeploying the
+when operators bump `REDDB_CACHE_BLOB_L1_BYTES_MAX` without redeploying the
 dashboard.
 
 ### 2.3 L2 saturation
@@ -166,7 +167,7 @@ groups:
           summary: "Blob Cache L1 above 95%"
           description: |
             L1 sustained >95% for 15m. Eviction pressure will dominate
-            and tail latency will rise. Consider raising RED_BLOB_L1_BYTES_MAX.
+            and tail latency will rise. Consider raising REDDB_CACHE_BLOB_L1_BYTES_MAX.
 
       - alert: BlobCacheHitRateLow
         expr: |

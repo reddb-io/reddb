@@ -715,14 +715,13 @@ impl RedDBServer {
             policy.label()
         );
 
-        // Blob Cache observability for the SQL result-cache adapter.
-        // Per-namespace label cardinality is acceptable while the MVP namespace
-        // cap stays near 256; raising that cap should move per-namespace detail
-        // to an on-demand admin query and keep scrape metrics rolled up.
-        let blob_ns = "runtime.result_cache";
+        // BlobCacheStats is process-wide. Use an explicit aggregate label
+        // instead of attributing application-cache traffic to the internal
+        // SQL result-cache namespace.
+        let blob_ns = "__all__";
         let _ = writeln!(
             body,
-            "# HELP reddb_cache_blob_get_total Blob Cache get outcomes by namespace."
+            "# HELP reddb_cache_blob_get_total Aggregate Blob Cache get outcomes."
         );
         let _ = writeln!(body, "# TYPE reddb_cache_blob_get_total counter");
         let _ = writeln!(
@@ -744,7 +743,7 @@ impl RedDBServer {
         );
         let _ = writeln!(
             body,
-            "# HELP reddb_cache_blob_put_total Blob Cache put outcomes by namespace."
+            "# HELP reddb_cache_blob_put_total Aggregate Blob Cache put outcomes."
         );
         let _ = writeln!(body, "# TYPE reddb_cache_blob_put_total counter");
         let _ = writeln!(
@@ -771,14 +770,11 @@ impl RedDBServer {
         );
         let _ = writeln!(
             body,
-            "# HELP reddb_cache_blob_invalidate_total Blob Cache invalidations by namespace and kind."
+            "# HELP reddb_cache_blob_invalidate_total Aggregate Blob Cache invalidations by kind."
         );
         let _ = writeln!(body, "# TYPE reddb_cache_blob_invalidate_total counter");
         for (kind, count) in [
-            ("key", 0),
-            ("prefix", 0),
-            ("tag", 0),
-            ("dependency", result_blob_stats.invalidations()),
+            ("all", result_blob_stats.invalidations()),
             ("namespace", result_blob_stats.namespace_flushes()),
         ] {
             let _ = writeln!(
@@ -789,7 +785,7 @@ impl RedDBServer {
         }
         let _ = writeln!(
             body,
-            "# HELP reddb_cache_blob_evict_total Blob Cache evictions by namespace and reason."
+            "# HELP reddb_cache_blob_evict_total Aggregate Blob Cache evictions by reason."
         );
         let _ = writeln!(body, "# TYPE reddb_cache_blob_evict_total counter");
         for (reason, count) in [
@@ -805,7 +801,7 @@ impl RedDBServer {
         }
         let _ = writeln!(
             body,
-            "# HELP reddb_cache_blob_l1_bytes_in_use L1 bytes currently used by Blob Cache namespace."
+            "# HELP reddb_cache_blob_l1_bytes_in_use Estimated resident L1 bytes currently used by Blob Cache."
         );
         let _ = writeln!(body, "# TYPE reddb_cache_blob_l1_bytes_in_use gauge");
         let _ = writeln!(
@@ -816,7 +812,27 @@ impl RedDBServer {
         );
         let _ = writeln!(
             body,
-            "# HELP reddb_cache_blob_l1_entries L1 entries currently held by Blob Cache namespace."
+            "# HELP reddb_cache_blob_l1_bytes_max Configured estimated L1 memory limit after the process memory-budget cap."
+        );
+        let _ = writeln!(body, "# TYPE reddb_cache_blob_l1_bytes_max gauge");
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_l1_bytes_max {}",
+            result_blob_stats.l1_bytes_max()
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_cache_blob_namespace_bytes_max Configured estimated L1 memory limit per namespace."
+        );
+        let _ = writeln!(body, "# TYPE reddb_cache_blob_namespace_bytes_max gauge");
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_namespace_bytes_max {}",
+            result_blob_stats.namespace_bytes_max()
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_cache_blob_l1_entries Aggregate L1 entries currently held by Blob Cache."
         );
         let _ = writeln!(body, "# TYPE reddb_cache_blob_l1_entries gauge");
         let _ = writeln!(
@@ -827,7 +843,27 @@ impl RedDBServer {
         );
         let _ = writeln!(
             body,
-            "# HELP reddb_cache_blob_l2_bytes_in_use L2 bytes currently used by Blob Cache namespace."
+            "# HELP reddb_cache_blob_namespaces Current Blob Cache namespaces."
+        );
+        let _ = writeln!(body, "# TYPE reddb_cache_blob_namespaces gauge");
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_namespaces {}",
+            result_blob_stats.namespaces()
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_cache_blob_namespaces_max Configured namespace limit."
+        );
+        let _ = writeln!(body, "# TYPE reddb_cache_blob_namespaces_max gauge");
+        let _ = writeln!(
+            body,
+            "reddb_cache_blob_namespaces_max {}",
+            result_blob_stats.max_namespaces()
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_cache_blob_l2_bytes_in_use Aggregate L2 bytes currently used by Blob Cache."
         );
         let _ = writeln!(body, "# TYPE reddb_cache_blob_l2_bytes_in_use gauge");
         let _ = writeln!(
@@ -852,7 +888,7 @@ impl RedDBServer {
         );
         let _ = writeln!(
             body,
-            "# HELP reddb_cache_blob_version_mismatch_total Blob Cache CAS version mismatches by namespace."
+            "# HELP reddb_cache_blob_version_mismatch_total Aggregate Blob Cache CAS version mismatches."
         );
         let _ = writeln!(
             body,

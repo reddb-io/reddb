@@ -1,6 +1,6 @@
 /**
- * Cache client — exposes cache.{get,put,exists,invalidate,invalidatePrefix,
- * invalidateTags,flushNamespace} via the underlying HTTP transport.
+ * Cache client — exposes exact-key reads/writes, batching, TTL management,
+ * and invalidation through the underlying HTTP transport.
  *
  * The HTTP data-plane endpoints under /cache/ns/* authorize the caller's
  * tenant and cache namespace. Invalidation is local to the addressed server.
@@ -22,9 +22,35 @@ export class CacheClient {
    * @returns {Promise<Uint8Array | null>}
    */
   async get(namespace, key) {
+    const entry = await this.getEntry(namespace, key)
+    return entry?.value ?? null
+  }
+
+  /**
+   * Fetch a cached value together with its TTL and version metadata.
+   * Returns null on a miss.
+   * @param {string} namespace
+   * @param {string} key
+   * @returns {Promise<{key:string,value:Uint8Array,size_bytes:number,ttl_ms:number|null,expires_at_unix_ms:number|null,version:number|null,stale:boolean}|null>}
+   */
+  async getEntry(namespace, key) {
     const result = await this._client.call('cache.get', { namespace, key })
     if (result == null || result.value == null) return null
-    return base64ToBytes(result.value)
+    return { ...result, value: base64ToBytes(result.value) }
+  }
+
+  /**
+   * Fetch several keys in one round trip. Results preserve input order.
+   * @param {string} namespace
+   * @param {string[]} keys
+   * @returns {Promise<Array<{key:string,value:Uint8Array|null,size_bytes:number|null,ttl_ms:number|null,expires_at_unix_ms:number|null,version:number|null,stale:boolean}>>}
+   */
+  async getMany(namespace, keys) {
+    const result = await this._client.call('cache.mget', { namespace, keys })
+    return (result?.entries ?? []).map((entry) => ({
+      ...entry,
+      value: entry.value == null ? null : base64ToBytes(entry.value),
+    }))
   }
 
   /**
@@ -49,6 +75,23 @@ export class CacheClient {
   }
 
   /**
+   * Store several entries in one round trip. A batch accepts at most 256
+   * entries and 8 MiB of decoded values.
+   * @param {string} namespace
+   * @param {Array<{key:string,value:Uint8Array|Buffer|string,ttl_ms?:number,tags?:string[],policy?:object}>} entries
+   * @returns {Promise<number>}
+   */
+  async putMany(namespace, entries) {
+    const encoded = entries.map(({ key, value, ...opts }) => ({
+      key,
+      value: bytesToBase64(value),
+      ...opts,
+    }))
+    const result = await this._client.call('cache.mput', { namespace, entries: encoded })
+    return result?.stored ?? 0
+  }
+
+  /**
    * Check whether a key is present.
    * @param {string} namespace
    * @param {string} key
@@ -57,6 +100,28 @@ export class CacheClient {
   async exists(namespace, key) {
     const result = await this._client.call('cache.exists', { namespace, key })
     return result?.status ?? 'maybe'
+  }
+
+  /** Set or replace a key's relative TTL without rewriting its value. */
+  async expire(namespace, key, ttl_ms) {
+    const result = await this._client.call('cache.expiry', { namespace, key, ttl_ms })
+    return result?.updated ?? false
+  }
+
+  /** Set or replace a key's absolute expiry deadline. */
+  async expireAt(namespace, key, expires_at_unix_ms) {
+    const result = await this._client.call('cache.expiry', {
+      namespace,
+      key,
+      expires_at_unix_ms,
+    })
+    return result?.updated ?? false
+  }
+
+  /** Remove expiry from a key without rewriting its value. */
+  async persist(namespace, key) {
+    const result = await this._client.call('cache.expiry', { namespace, key, persist: true })
+    return result?.updated ?? false
   }
 
   /**

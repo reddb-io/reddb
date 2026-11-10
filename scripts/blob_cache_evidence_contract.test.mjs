@@ -40,7 +40,7 @@ test("Blob Cache runtime evidence covers L1, TTL, invalidation, L2, and synopsis
 
 test("Blob Cache result-cache adapter evidence is separated from missing warm-restart contract", () => {
   const frameTests = read("crates/reddb-server/src/runtime/statement_frame.rs");
-  const runtime = read("crates/reddb-server/src/runtime/impl_core.rs");
+  const runtime = read("crates/reddb-server/src/runtime/result_cache_runtime.rs");
   const followUp = read("issues/done/348-result-cache-l2-warm-restart-contract.md");
 
   assert.match(frameTests, /fn blob_cache_backend_populates_blob_path_without_legacy_write\(\)/);

@@ -1,14 +1,15 @@
 //! Byte-oriented Blob Cache.
 //!
-//! This is the first internal tracer for RedDB's exact-key blob cache. It is
-//! intentionally L1-only: a sharded, byte-bounded, in-process cache with SIEVE
-//! eviction, namespace caps, and opaque content metadata. Durable L2 storage,
-//! dependency invalidation, and public APIs land in follow-up slices.
+//! L1 is a sharded, byte-bounded in-process cache with SIEVE eviction. L2 can
+//! use either the legacy standalone pager or RedDB's internal single-file
+//! collection backend.
 
 use super::config::{BlobCacheConfig, L2Compression, L2PromotionPolicy};
 use super::entry::{effective_expires_at_unix_ms, jitter_seed, Entry};
 use super::l2::BlobCacheL2;
-use super::shard::{InsertOutcome, Lookup, Shard};
+use super::l2_backend::BlobCacheL2Backend;
+use super::l2_store::StoreBlobCacheL2;
+use super::shard::{InsertOutcome, Lookup, Shard, ShardSweep};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -16,7 +17,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use indexmap::Equivalent;
 use parking_lot::RwLock;
@@ -120,6 +121,7 @@ pub struct BlobCacheHit {
     pub(super) bytes: Arc<[u8]>,
     pub(super) content_metadata: Option<Arc<BTreeMap<String, String>>>,
     pub(super) version: Option<u64>,
+    pub(super) expires_at_unix_ms: Option<u64>,
     /// `Some(remaining_ms)` when the hit came from the stale-while-revalidate
     /// window of an `ExtendedTtlPolicy`; `None` when the entry was fresh.
     /// Boolean staleness is just `.is_some()`.
@@ -131,11 +133,13 @@ impl BlobCacheHit {
         bytes: Arc<[u8]>,
         content_metadata: Option<Arc<BTreeMap<String, String>>>,
         version: Option<u64>,
+        expires_at_unix_ms: Option<u64>,
     ) -> Self {
         Self {
             bytes,
             content_metadata,
             version,
+            expires_at_unix_ms,
             stale_window_remaining_ms: None,
         }
     }
@@ -144,12 +148,14 @@ impl BlobCacheHit {
         bytes: Arc<[u8]>,
         content_metadata: Option<Arc<BTreeMap<String, String>>>,
         version: Option<u64>,
+        expires_at_unix_ms: Option<u64>,
         window_remaining_ms: u64,
     ) -> Self {
         Self {
             bytes,
             content_metadata,
             version,
+            expires_at_unix_ms,
             stale_window_remaining_ms: Some(window_remaining_ms),
         }
     }
@@ -173,6 +179,17 @@ impl BlobCacheHit {
     /// Optional CAS / freshness version stamped on `put`.
     pub fn version(&self) -> Option<u64> {
         self.version
+    }
+
+    /// Absolute hard-expiry deadline attached to this value, if any.
+    pub fn expires_at_unix_ms(&self) -> Option<u64> {
+        self.expires_at_unix_ms
+    }
+
+    /// Remaining hard TTL at `now_ms`. `None` means the entry does not expire.
+    pub fn remaining_ttl_ms_at(&self, now_ms: u64) -> Option<u64> {
+        self.expires_at_unix_ms
+            .map(|expires_at| expires_at.saturating_sub(now_ms))
     }
 
     /// `true` when the hit was served from the stale-while-revalidate window
@@ -391,6 +408,7 @@ pub struct BlobCacheStats {
     pub(super) entries: usize,
     pub(super) bytes_in_use: usize,
     pub(super) l1_bytes_max: usize,
+    pub(super) namespace_bytes_max: usize,
     pub(super) l2_bytes_in_use: u64,
     pub(super) l2_bytes_max: u64,
     pub(super) l2_full_rejections: u64,
@@ -477,6 +495,10 @@ impl BlobCacheStats {
 
     pub fn l1_bytes_max(&self) -> usize {
         self.l1_bytes_max
+    }
+
+    pub fn namespace_bytes_max(&self) -> usize {
+        self.namespace_bytes_max
     }
 
     pub fn l2_bytes_in_use(&self) -> u64 {
@@ -657,8 +679,12 @@ pub struct BlobCache {
     namespace_generations: RwLock<HashMap<String, u64>>,
     tag_index: RwLock<HashMap<ScopedLabel, HashSet<BlobCacheKey>>>,
     dependency_index: RwLock<HashMap<ScopedLabel, HashSet<BlobCacheKey>>>,
-    l2: Option<Arc<BlobCacheL2>>,
+    l2: Option<Arc<dyn BlobCacheL2Backend>>,
     bytes_in_use: AtomicUsize,
+    namespace_bytes_in_use: RwLock<HashMap<String, usize>>,
+    sweep_shard_cursor: AtomicUsize,
+    namespace_flush_epoch: AtomicU64,
+    namespace_reclaimed_epoch: AtomicU64,
     stats: AtomicStats,
     /// Optional async L2->L1 promotion pool (issue #193). When `None`,
     /// `get` performs the L1 promotion synchronously on the read path.
@@ -691,16 +717,37 @@ impl BlobCache {
         Self::try_new(config)
     }
 
+    /// Open L2 inside the owning RedDB store. The cache rows, byte counter,
+    /// WAL records, and checkpoints remain in the same `.rdb` artifact.
+    pub fn open_with_internal_l2(
+        config: BlobCacheConfig,
+        store: Arc<crate::storage::UnifiedStore>,
+    ) -> Result<Self, CacheError> {
+        let l2 = (config.l2_bytes_max > 0)
+            .then(|| StoreBlobCacheL2::open(store, config.l2_bytes_max))
+            .transpose()?
+            .map(|backend| Arc::new(backend) as Arc<dyn BlobCacheL2Backend>);
+        Self::with_backend(config, l2)
+    }
+
     fn try_new(config: BlobCacheConfig) -> Result<Self, CacheError> {
-        let config = BlobCacheConfig {
-            shard_count: config.shard_count.max(1),
-            ..config
-        };
         let l2 = config
             .l2_path
             .clone()
             .map(|path| BlobCacheL2::open(path, config.l2_bytes_max))
-            .transpose()?;
+            .transpose()?
+            .map(|backend| Arc::new(backend) as Arc<dyn BlobCacheL2Backend>);
+        Self::with_backend(config, l2)
+    }
+
+    fn with_backend(
+        config: BlobCacheConfig,
+        l2: Option<Arc<dyn BlobCacheL2Backend>>,
+    ) -> Result<Self, CacheError> {
+        let config = BlobCacheConfig {
+            shard_count: config.shard_count.max(1),
+            ..config
+        };
         let shards = (0..config.shard_count)
             .map(|_| RwLock::new(Shard::new()))
             .collect();
@@ -711,8 +758,12 @@ impl BlobCache {
             namespace_generations: RwLock::new(HashMap::new()),
             tag_index: RwLock::new(HashMap::new()),
             dependency_index: RwLock::new(HashMap::new()),
-            l2: l2.map(Arc::new),
+            l2,
             bytes_in_use: AtomicUsize::new(0),
+            namespace_bytes_in_use: RwLock::new(HashMap::new()),
+            sweep_shard_cursor: AtomicUsize::new(0),
+            namespace_flush_epoch: AtomicU64::new(0),
+            namespace_reclaimed_epoch: AtomicU64::new(0),
             stats: AtomicStats::new(),
             promotion_pool: OnceLock::new(),
         })
@@ -722,13 +773,11 @@ impl BlobCache {
         Self::new(BlobCacheConfig::default())
     }
 
-    /// Path to the L2 metadata B+ tree directory, when L2 is enabled.
+    /// Path to the legacy standalone L2 pager, when that backend is enabled.
     ///
-    /// Used by the backup orchestrator (`include_blob_cache=true`) so it
-    /// can locate the on-disk L2 tree for tarball / per-file upload, and
-    /// by the runbook procedures in
-    /// `docs/operations/blob-cache-backup-restore.md` §2 / §3 to confirm
-    /// where on disk the cache lives.
+    /// The server's internal L2 is part of the owning `.rdb` and therefore
+    /// returns `None` here. The backup orchestrator only needs this path for
+    /// callers that explicitly selected the compatibility file backend.
     pub fn l2_path(&self) -> Option<&std::path::Path> {
         self.config.l2_path.as_deref()
     }
@@ -778,7 +827,7 @@ impl BlobCache {
             &namespace,
             &key.key,
         );
-        let entry_size = entry.size;
+        let entry_charge = entry.l1_charge_bytes;
         let compressed = if self.l2.is_some() {
             // Compression decision happens in the foreground put — the
             // outcome (`Compressed::Raw` or `Compressed::Zstd`) is what
@@ -842,26 +891,30 @@ impl BlobCache {
         } else {
             shard.insert(key.clone(), entry)
         };
-        drop(shard);
-
+        let old_charge = outcome
+            .old_entry
+            .as_ref()
+            .map_or(0, |entry| entry.l1_charge_bytes);
+        let new_charge = if outcome.admitted { entry_charge } else { 0 };
+        self.adjust_namespace_bytes(&namespace, old_charge, new_charge);
+        if new_charge >= old_charge {
+            self.bytes_in_use
+                .fetch_add(new_charge - old_charge, Ordering::Relaxed);
+        } else {
+            self.bytes_in_use
+                .fetch_sub(old_charge - new_charge, Ordering::Relaxed);
+        }
         if let Some(old_entry) = outcome.old_entry.as_ref() {
             self.deindex_entry(&key, old_entry);
         }
         if outcome.admitted {
             self.index_entry(&key, &tags, &dependencies);
         }
+        drop(shard);
 
-        let old_size = outcome.old_entry.as_ref().map_or(0, |entry| entry.size);
-        let new_size = if outcome.admitted { entry_size } else { 0 };
-        if new_size >= old_size {
-            self.bytes_in_use
-                .fetch_add(new_size - old_size, Ordering::Relaxed);
-        } else {
-            self.bytes_in_use
-                .fetch_sub(old_size - new_size, Ordering::Relaxed);
-        }
         self.stats.insertions.fetch_add(1, Ordering::Relaxed);
         if outcome.admitted {
+            self.evict_namespace_until_within_budget(&namespace, shard_idx);
             self.evict_until_within_budget(shard_idx);
         }
         Ok(())
@@ -892,32 +945,32 @@ impl BlobCache {
                 Some(hit)
             }
             Lookup::Expired(entry) => {
-                drop(shard);
                 let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
                 if let Some(l2) = &self.l2 {
                     l2.delete_key(&cache_key);
                 }
+                drop(shard);
                 self.stats.expirations.fetch_add(1, Ordering::Relaxed);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 None
             }
             Lookup::IdleEvicted(entry) => {
-                drop(shard);
                 let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
                 if let Some(l2) = &self.l2 {
                     l2.delete_key(&cache_key);
                 }
+                drop(shard);
                 self.stats.expirations.fetch_add(1, Ordering::Relaxed);
                 self.stats.l1_idle_evicts.fetch_add(1, Ordering::Relaxed);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 None
             }
             Lookup::Stale(entry) => {
-                drop(shard);
                 let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
+                drop(shard);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 None
             }
@@ -986,6 +1039,54 @@ impl BlobCache {
         self.exists_at(namespace, key, unix_now_ms())
     }
 
+    /// Replace a live entry's expiry with a relative TTL.
+    pub fn expire(&self, namespace: &str, key: &str, ttl_ms: u64) -> Result<bool, CacheError> {
+        let now_ms = unix_now_ms();
+        self.update_expiry(namespace, key, Some(now_ms.saturating_add(ttl_ms)), now_ms)
+    }
+
+    /// Replace a live entry's expiry with an absolute Unix-millisecond deadline.
+    pub fn expire_at(
+        &self,
+        namespace: &str,
+        key: &str,
+        expires_at_unix_ms: u64,
+    ) -> Result<bool, CacheError> {
+        self.update_expiry(namespace, key, Some(expires_at_unix_ms), unix_now_ms())
+    }
+
+    /// Remove expiry from a live entry without rewriting its value or tags.
+    pub fn persist(&self, namespace: &str, key: &str) -> Result<bool, CacheError> {
+        self.update_expiry(namespace, key, None, unix_now_ms())
+    }
+
+    fn update_expiry(
+        &self,
+        namespace: &str,
+        key: &str,
+        expires_at_unix_ms: Option<u64>,
+        now_ms: u64,
+    ) -> Result<bool, CacheError> {
+        if !self.namespace_exists(namespace) {
+            return Ok(false);
+        }
+        let cache_key = BlobCacheKey::new(namespace, key);
+        let namespace_generation = self.current_generation(namespace);
+        let shard_index = self.shard_index(&cache_key);
+        let mut shard = self.shards[shard_index].write();
+        let l1_live = shard.can_update_expiry(&cache_key, now_ms, namespace_generation);
+        let l2_updated = match &self.l2 {
+            Some(l2) => {
+                l2.update_expiry(&cache_key, namespace_generation, now_ms, expires_at_unix_ms)?
+            }
+            None => false,
+        };
+        if l1_live {
+            shard.update_expiry(&cache_key, expires_at_unix_ms, now_ms);
+        }
+        Ok(l1_live || l2_updated)
+    }
+
     fn exists_at(&self, namespace: &str, key: &str, now_ms: u64) -> CachePresence {
         let namespace_generation = self.current_generation(namespace);
         let shard_idx = self.shard_index_parts(namespace, key);
@@ -996,32 +1097,32 @@ impl BlobCache {
                 CachePresence::Present
             }
             Lookup::Expired(entry) => {
-                drop(shard);
                 let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
                 if let Some(l2) = &self.l2 {
                     l2.delete_key(&cache_key);
                 }
+                drop(shard);
                 self.stats.expirations.fetch_add(1, Ordering::Relaxed);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 CachePresence::Absent
             }
             Lookup::IdleEvicted(entry) => {
-                drop(shard);
                 let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
                 if let Some(l2) = &self.l2 {
                     l2.delete_key(&cache_key);
                 }
+                drop(shard);
                 self.stats.expirations.fetch_add(1, Ordering::Relaxed);
                 self.stats.l1_idle_evicts.fetch_add(1, Ordering::Relaxed);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 CachePresence::Absent
             }
             Lookup::Stale(entry) => {
-                drop(shard);
                 let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
+                drop(shard);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 CachePresence::Absent
             }
@@ -1060,12 +1161,13 @@ impl BlobCache {
         let shard_idx = self.shard_index(&cache_key);
         let mut shard = self.shards[shard_idx].write();
         let removed = shard.remove(&cache_key);
-        drop(shard);
 
         if let Some(entry) = removed {
             self.record_invalidated_entry(&cache_key, &entry);
+            drop(shard);
             1
         } else {
+            drop(shard);
             self.l2
                 .as_ref()
                 .and_then(|l2| l2.delete_key(&cache_key))
@@ -1083,22 +1185,19 @@ impl BlobCache {
             return 0;
         }
 
-        let mut removed = Vec::new();
+        let mut count = 0usize;
         for shard in &self.shards {
             let mut shard = shard.write();
             let keys = shard
                 .keys_matching(|key| key.namespace == namespace && key.key.starts_with(prefix));
             for key in keys {
                 if let Some(entry) = shard.remove(&key) {
-                    removed.push((key, entry));
+                    self.record_invalidated_entry(&key, &entry);
+                    count += 1;
                 }
             }
         }
 
-        let count = removed.len();
-        for (key, entry) in removed {
-            self.record_invalidated_entry(&key, &entry);
-        }
         let l2_count = self
             .l2
             .as_ref()
@@ -1155,6 +1254,7 @@ impl BlobCache {
         let mut generations = self.namespace_generations.write();
         let generation = generations.entry(namespace.to_string()).or_insert(0);
         *generation = generation.saturating_add(1);
+        self.namespace_flush_epoch.fetch_add(1, Ordering::Release);
         if let Some(l2) = &self.l2 {
             l2.delete_namespace(namespace);
         }
@@ -1188,6 +1288,7 @@ impl BlobCache {
             entries: self.shards.iter().map(|shard| shard.read().len()).sum(),
             bytes_in_use: self.bytes_in_use.load(Ordering::Relaxed),
             l1_bytes_max: self.config.l1_bytes_max,
+            namespace_bytes_max: self.config.namespace_bytes_max,
             l2_bytes_in_use: self.l2.as_ref().map_or(0, |l2| l2.stats_bytes_in_use()),
             l2_bytes_max: self.config.l2_bytes_max,
             l2_full_rejections: self.stats.l2_full_rejections.load(Ordering::Relaxed),
@@ -1234,6 +1335,147 @@ impl BlobCache {
                 .map_or(0, |l2| l2.stats_bytes_saved_total()),
             l1_stale_serves_total: self.stats.l1_stale_serves.load(Ordering::Relaxed),
             l1_idle_evicts_total: self.stats.l1_idle_evicts.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Remove a bounded set of due L1 entries.
+    ///
+    /// This is the storage primitive behind the cache sweeper. It never
+    /// locks more than one shard at a time. TTL work comes from each shard's
+    /// deadline index; a rotating scan runs only while a namespace-generation
+    /// flush is awaiting physical reclamation.
+    pub(crate) fn sweep_expired_l1(
+        &self,
+        entries_limit: Option<usize>,
+        millis_limit: Option<u32>,
+    ) -> BlobCacheSweepOutcome {
+        let started = Instant::now();
+        let time_limit = millis_limit.map(|millis| Duration::from_millis(u64::from(millis)));
+        let now_ms = unix_now_ms();
+        let hard_entries_limit = entries_limit.unwrap_or(usize::MAX);
+        let shard_count = self.shards.len();
+        let first_shard = self.sweep_shard_cursor.fetch_add(1, Ordering::Relaxed) % shard_count;
+        let flush_epoch = self.namespace_flush_epoch.load(Ordering::Acquire);
+        let stale_cleanup_pending =
+            self.namespace_reclaimed_epoch.load(Ordering::Acquire) < flush_epoch;
+        let mut outcome = BlobCacheSweepOutcome::default();
+        let mut completed_all_shards = true;
+
+        for offset in 0..shard_count {
+            if outcome.entries_scanned >= hard_entries_limit
+                || time_limit.is_some_and(|limit| started.elapsed() >= limit)
+            {
+                completed_all_shards = false;
+                break;
+            }
+            let shard_index = (first_shard + offset) % shard_count;
+            let mut shard = self.shards[shard_index].write();
+            let sweep = shard.sweep_expired(
+                now_ms,
+                hard_entries_limit - outcome.entries_scanned,
+                started,
+                time_limit,
+            );
+            // Finish removal bookkeeping under the shard publication lock.
+            // Otherwise a concurrent put could publish a fresh value for the
+            // same key before the old tag/dependency indexes or L2 record are
+            // removed, making the cleanup erase the fresh entry's metadata.
+            completed_all_shards &= sweep.completed_cycle;
+            self.record_sweep(sweep, &mut outcome);
+
+            if stale_cleanup_pending
+                && outcome.entries_scanned < hard_entries_limit
+                && !time_limit.is_some_and(|limit| started.elapsed() >= limit)
+            {
+                // Keep generations stable while this shard is inspected. A
+                // flush cannot then make a fresh generation look stale.
+                let namespace_generations = self.namespace_generations.read();
+                let stale_sweep = shard.sweep_stale_generations(
+                    &namespace_generations,
+                    flush_epoch,
+                    hard_entries_limit - outcome.entries_scanned,
+                    started,
+                    time_limit,
+                );
+                completed_all_shards &= stale_sweep.completed_cycle;
+                self.record_sweep(stale_sweep, &mut outcome);
+            }
+            drop(shard);
+        }
+
+        if stale_cleanup_pending
+            && self
+                .shards
+                .iter()
+                .all(|shard| shard.read().stale_cleanup_completed(flush_epoch))
+        {
+            self.namespace_reclaimed_epoch
+                .fetch_max(flush_epoch, Ordering::Release);
+        }
+
+        if outcome.expirations > 0 {
+            let expirations = u64::try_from(outcome.expirations).unwrap_or(u64::MAX);
+            self.stats
+                .expirations
+                .fetch_add(expirations, Ordering::Relaxed);
+        }
+        outcome.completed = completed_all_shards;
+        outcome.elapsed_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        outcome
+    }
+
+    /// Remove a bounded set of due L2-only entries from the persistent
+    /// deadline projection. The internal backend resolves due ids without a
+    /// collection scan; the compatibility file backend reports no work.
+    pub(crate) fn sweep_expired_l2(
+        &self,
+        entries_limit: usize,
+        millis_limit: Option<u32>,
+    ) -> BlobCacheSweepOutcome {
+        let Some(l2) = &self.l2 else {
+            return BlobCacheSweepOutcome {
+                completed: true,
+                ..BlobCacheSweepOutcome::default()
+            };
+        };
+        let outcome = l2.sweep_expired(unix_now_ms(), entries_limit, millis_limit);
+        if outcome.expirations > 0 {
+            self.stats.expirations.fetch_add(
+                u64::try_from(outcome.expirations).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+        }
+        outcome
+    }
+
+    fn record_sweep(&self, sweep: ShardSweep, outcome: &mut BlobCacheSweepOutcome) {
+        for (key, entry, _) in &sweep.removed {
+            self.record_removed_entry(key, entry);
+            if let Some(l2) = &self.l2 {
+                l2.delete_key(key);
+            }
+        }
+        outcome.entries_scanned += sweep.entries_scanned;
+        for (namespace, scanned) in sweep.scanned_by_namespace {
+            outcome
+                .by_namespace
+                .entry(namespace)
+                .or_default()
+                .entries_scanned += scanned;
+        }
+        for (key, entry, expired) in sweep.removed {
+            let entry_charge_bytes = u64::try_from(entry.l1_charge_bytes).unwrap_or(u64::MAX);
+            let namespace_stats = outcome
+                .by_namespace
+                .entry(key.namespace.clone())
+                .or_default();
+            namespace_stats.entries_evicted += 1;
+            namespace_stats.bytes_reclaimed = namespace_stats
+                .bytes_reclaimed
+                .saturating_add(entry_charge_bytes);
+            outcome.entries_evicted += 1;
+            outcome.expirations += usize::from(expired);
+            outcome.bytes_reclaimed = outcome.bytes_reclaimed.saturating_add(entry_charge_bytes);
         }
     }
 
@@ -1404,18 +1646,23 @@ impl BlobCache {
     /// stats (the caller already counted the hit) and does not return the
     /// `BlobCacheHit` (the caller already handed bytes to the user).
     fn do_l1_promotion_sync(&self, key: &BlobCacheKey, entry: Entry, shard_idx: usize) {
-        let entry_size = entry.size;
+        let entry_charge = entry.l1_charge_bytes;
         let mut shard = self.shards[shard_idx].write();
         let outcome = shard.insert(key.clone(), entry);
-        drop(shard);
-        let old_size = outcome.old_entry.as_ref().map_or(0, |entry| entry.size);
-        if entry_size >= old_size {
+        let old_charge = outcome
+            .old_entry
+            .as_ref()
+            .map_or(0, |entry| entry.l1_charge_bytes);
+        self.adjust_namespace_bytes(&key.namespace, old_charge, entry_charge);
+        if entry_charge >= old_charge {
             self.bytes_in_use
-                .fetch_add(entry_size - old_size, Ordering::Relaxed);
+                .fetch_add(entry_charge - old_charge, Ordering::Relaxed);
         } else {
             self.bytes_in_use
-                .fetch_sub(old_size - entry_size, Ordering::Relaxed);
+                .fetch_sub(old_charge - entry_charge, Ordering::Relaxed);
         }
+        drop(shard);
+        self.evict_namespace_until_within_budget(&key.namespace, shard_idx);
         self.evict_until_within_budget(shard_idx);
     }
 
@@ -1460,6 +1707,10 @@ impl BlobCache {
             .write()
             .entry(namespace.to_string())
             .or_insert(0);
+        self.namespace_bytes_in_use
+            .write()
+            .entry(namespace.to_string())
+            .or_insert(0);
         Ok(())
     }
 
@@ -1471,7 +1722,7 @@ impl BlobCache {
                 .is_some_and(|l2| l2.has_namespace(namespace))
     }
 
-    fn current_generation(&self, namespace: &str) -> u64 {
+    pub(crate) fn current_generation(&self, namespace: &str) -> u64 {
         self.namespace_generations
             .read()
             .get(namespace)
@@ -1537,7 +1788,9 @@ impl BlobCache {
     }
 
     fn record_removed_entry(&self, key: &BlobCacheKey, entry: &Entry) {
-        self.bytes_in_use.fetch_sub(entry.size, Ordering::Relaxed);
+        self.bytes_in_use
+            .fetch_sub(entry.l1_charge_bytes, Ordering::Relaxed);
+        self.adjust_namespace_bytes(&key.namespace, entry.l1_charge_bytes, 0);
         self.deindex_entry(key, entry);
     }
 
@@ -1582,10 +1835,6 @@ impl BlobCache {
             }
         }
 
-        if candidates.is_empty() {
-            return 0;
-        }
-
         // Group candidates by shard so each shard lock is taken at most
         // once per call.
         let mut by_shard: HashMap<usize, Vec<(BlobCacheKey, HashSet<String>)>> = HashMap::new();
@@ -1597,7 +1846,7 @@ impl BlobCache {
                 .push((key, matched_labels));
         }
 
-        let mut removed = Vec::new();
+        let mut count = 0usize;
         for (shard_idx, keys) in by_shard {
             let mut shard = self.shards[shard_idx].write();
             for (key, matched_labels) in keys {
@@ -1609,17 +1858,26 @@ impl BlobCache {
                 };
                 if still_matches {
                     if let Some(entry) = shard.remove(&key) {
-                        removed.push((key, entry));
+                        self.record_invalidated_entry(&key, &entry);
+                        count += 1;
                     }
                 }
             }
         }
-
-        let count = removed.len();
-        for (key, entry) in removed {
-            self.record_invalidated_entry(&key, &entry);
+        // L2's stable record format predates tag/dependency metadata. Never
+        // allow an L2-only entry to survive a label invalidation and later
+        // resurrect. Until that format grows label indexes, conservatively
+        // flush the remaining L2 namespace while retaining unrelated L1 hits.
+        let l2_count = self
+            .l2
+            .as_ref()
+            .map_or(0, |l2| l2.delete_namespace(namespace));
+        if l2_count > 0 {
+            self.stats
+                .invalidations
+                .fetch_add(l2_count as u64, Ordering::Relaxed);
         }
-        count
+        count.saturating_add(l2_count)
     }
 
     fn shard_index(&self, key: &BlobCacheKey) -> usize {
@@ -1666,11 +1924,10 @@ impl BlobCache {
                 let idx = (preferred_start + offset) % self.shards.len();
                 let mut shard = self.shards[idx].write();
                 if let Some((key, entry)) = shard.evict_one() {
-                    self.bytes_in_use.fetch_sub(entry.size, Ordering::Relaxed);
                     self.stats.evictions.fetch_add(1, Ordering::Relaxed);
-                    evicted = true;
+                    self.record_removed_entry(&key, &entry);
                     drop(shard);
-                    self.deindex_entry(&key, &entry);
+                    evicted = true;
                     break;
                 }
             }
@@ -1679,6 +1936,58 @@ impl BlobCache {
             }
         }
     }
+
+    fn evict_namespace_until_within_budget(&self, namespace: &str, preferred_start: usize) {
+        while self.namespace_bytes(namespace) > self.config.namespace_bytes_max {
+            let mut evicted = false;
+            for offset in 0..self.shards.len() {
+                let idx = (preferred_start + offset) % self.shards.len();
+                let mut shard = self.shards[idx].write();
+                if let Some((key, entry)) = shard.remove_one_from_namespace(namespace) {
+                    self.stats.evictions.fetch_add(1, Ordering::Relaxed);
+                    self.record_removed_entry(&key, &entry);
+                    drop(shard);
+                    evicted = true;
+                    break;
+                }
+            }
+            if !evicted {
+                break;
+            }
+        }
+    }
+
+    fn namespace_bytes(&self, namespace: &str) -> usize {
+        self.namespace_bytes_in_use
+            .read()
+            .get(namespace)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn adjust_namespace_bytes(&self, namespace: &str, old_charge: usize, new_charge: usize) {
+        let mut usage = self.namespace_bytes_in_use.write();
+        let bytes = usage.entry(namespace.to_string()).or_insert(0);
+        *bytes = bytes.saturating_sub(old_charge).saturating_add(new_charge);
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct BlobCacheSweepOutcome {
+    pub(crate) entries_scanned: usize,
+    pub(crate) entries_evicted: usize,
+    pub(crate) expirations: usize,
+    pub(crate) bytes_reclaimed: u64,
+    pub(crate) elapsed_ms: u32,
+    pub(crate) completed: bool,
+    pub(crate) by_namespace: BTreeMap<String, BlobCacheNamespaceSweep>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct BlobCacheNamespaceSweep {
+    pub(crate) entries_scanned: usize,
+    pub(crate) entries_evicted: usize,
+    pub(crate) bytes_reclaimed: u64,
 }
 
 fn unix_now_ms() -> u64 {

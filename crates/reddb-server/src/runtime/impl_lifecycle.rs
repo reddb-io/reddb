@@ -12,6 +12,23 @@
 use super::impl_config_secret::seed_storage_deploy_config;
 use super::*;
 
+fn boot_cache_u64(
+    store: &crate::storage::UnifiedStore,
+    env: &HashMap<String, String>,
+    key: &str,
+    default: u64,
+) -> u64 {
+    if let Some(value) = env.get(key).and_then(|value| value.parse::<u64>().ok()) {
+        return value;
+    }
+    match store.get_config(key) {
+        Some(reddb_types::Value::UnsignedInteger(value)) => value,
+        Some(reddb_types::Value::Integer(value)) => u64::try_from(value).unwrap_or(default),
+        Some(reddb_types::Value::Text(value)) => value.parse::<u64>().unwrap_or(default),
+        _ => default,
+    }
+}
+
 /// Convert the rows produced by a materialized-view body into
 /// `UnifiedEntity` table rows targeting the backing collection.
 /// Issue #595 slice 9c — feeds `UnifiedStore::refresh_collection`.
@@ -242,14 +259,72 @@ impl RedDBRuntime {
                 Err(err) => RedDBError::Internal(err.to_string()),
             }
         })?);
+        let env_config_overrides = crate::runtime::config_overlay::collect_env_overrides();
         // Query results are disposable. Do not create a second persistent
         // database outside the .rdb and its WAL for the cache.
+        let cache_l1_share = memory_shares.blob_cache_l1_bytes();
+        let cache_l1_default = u64::try_from(cache_l1_share).unwrap_or(u64::MAX);
+        let configured_l1 = usize::try_from(boot_cache_u64(
+            db.store().as_ref(),
+            &env_config_overrides,
+            "cache.blob.l1_bytes_max",
+            cache_l1_default,
+        ))
+        .map_err(|_| RedDBError::InvalidConfig("cache.blob.l1_bytes_max is too large".into()))?;
+        let configured_l2 = boot_cache_u64(
+            db.store().as_ref(),
+            &env_config_overrides,
+            "cache.blob.l2_bytes_max",
+            crate::storage::cache::DEFAULT_BLOB_L2_BYTES_MAX,
+        );
+        let configured_namespaces = usize::try_from(boot_cache_u64(
+            db.store().as_ref(),
+            &env_config_overrides,
+            "cache.blob.max_namespaces",
+            u64::try_from(crate::storage::cache::DEFAULT_BLOB_MAX_NAMESPACES).unwrap_or(u64::MAX),
+        ))
+        .map_err(|_| RedDBError::InvalidConfig("cache.blob.max_namespaces is too large".into()))?;
+        if configured_namespaces == 0 {
+            return Err(RedDBError::InvalidConfig(
+                "cache.blob.max_namespaces must be greater than zero".into(),
+            ));
+        }
+        let configured_namespace_bytes = usize::try_from(boot_cache_u64(
+            db.store().as_ref(),
+            &env_config_overrides,
+            "cache.blob.namespace_bytes_max",
+            u64::try_from(configured_l1).unwrap_or(u64::MAX),
+        ))
+        .map_err(|_| {
+            RedDBError::InvalidConfig("cache.blob.namespace_bytes_max is too large".into())
+        })?;
+        if configured_namespace_bytes == 0 {
+            return Err(RedDBError::InvalidConfig(
+                "cache.blob.namespace_bytes_max must be greater than zero".into(),
+            ));
+        }
         let result_blob_cache_config = crate::storage::cache::BlobCacheConfig::default()
-            .with_l1_bytes_max(memory_shares.blob_cache_l1_bytes());
-        let result_blob_cache =
-            crate::storage::cache::BlobCache::open_with_l2(result_blob_cache_config).map_err(
-                |err| RedDBError::Internal(format!("open result Blob Cache L2 failed: {err:?}")),
-            )?;
+            // The cache-specific setting may reserve less memory, but never
+            // escapes the process-wide memory budget.
+            .with_l1_bytes_max(configured_l1.min(cache_l1_share))
+            .with_namespace_bytes_max(
+                configured_namespace_bytes
+                    .min(configured_l1)
+                    .min(cache_l1_share),
+            )
+            // Zero is the explicit off switch. Read-only runtimes cannot
+            // maintain expiry/invalidation state in the internal collection.
+            .with_l2_bytes_max(if options.read_only { 0 } else { configured_l2 })
+            .with_max_namespaces(configured_namespaces);
+        let result_blob_cache = crate::storage::cache::BlobCache::open_with_internal_l2(
+            result_blob_cache_config,
+            db.store(),
+        )
+        .map_err(|err| {
+            RedDBError::Internal(format!(
+                "open single-file result Blob Cache failed: {err:?}"
+            ))
+        })?;
         let storage_ready_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -337,7 +412,7 @@ impl RedDBRuntime {
                     crate::runtime::retention_sweeper::RetentionSweeperState::new(),
                 ),
                 transaction_state: crate::runtime::transaction_state::TransactionState::new(),
-                env_config_overrides: crate::runtime::config_overlay::collect_env_overrides(),
+                env_config_overrides,
                 lock_manager: Arc::new({
                     // Sourced from the matrix: Tier B key
                     // `concurrency.locking.deadlock_timeout_ms`
@@ -989,6 +1064,38 @@ impl RedDBRuntime {
                 );
         }
 
+        // Blob Cache expiration is active maintenance, not a read-path side
+        // effect. Each pulse scans a rotating bounded slice so expired keys
+        // release their L1 budget even when they are never accessed again.
+        // A dedicated low-priority worker keeps this work isolated from query
+        // execution workers.
+        {
+            let weak = Arc::downgrade(&runtime.inner);
+            runtime
+                .background_tasks
+                .as_ref()
+                .expect("foreground runtime")
+                .spawn(
+                    std::thread::Builder::new().name("reddb-cache-sweeper".into()),
+                    move |stopped| loop {
+                        std::thread::park_timeout(std::time::Duration::from_millis(250));
+                        if stopped.load(AtomicOrdering::Acquire) {
+                            break;
+                        }
+                        let Some(inner) = weak.upgrade() else {
+                            break;
+                        };
+                        let _ = crate::storage::cache::sweeper::BlobCacheSweeper::sweep_expired(
+                            &inner.result_blob_cache,
+                            crate::storage::cache::sweeper::SweepLimit::Either {
+                                entries: 512,
+                                millis: 5,
+                            },
+                        );
+                    },
+                );
+        }
+
         // Start backup scheduler if enabled via red_config
         {
             let store = runtime.inner.db.store();
@@ -1407,6 +1514,267 @@ impl RedDBRuntime {
         &self,
     ) -> Option<Arc<crate::auth::browser_token::BrowserTokenAuthority>> {
         self.inner.browser_token_authority.read().clone()
+    }
+}
+
+#[cfg(test)]
+mod cache_boot_tests {
+    use super::*;
+
+    #[test]
+    fn persisted_cache_limits_apply_on_next_boot_within_memory_budget() {
+        let directory = tempfile::tempdir().expect("cache config fixture");
+        let options = RedDBOptions::persistent(directory.path().join("cache-config.rdb"))
+            .with_memory_budget(64 * 1024 * 1024);
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("initial runtime");
+        runtime.db().store().set_config_tree(
+            "cache.blob",
+            &crate::json!({
+                "l1_bytes_max": 1024 * 1024,
+                "l2_bytes_max": 2 * 1024 * 1024,
+                "namespace_bytes_max": 256 * 1024,
+                "max_namespaces": 7
+            }),
+        );
+        runtime.flush().expect("persist cache config");
+        drop(runtime);
+
+        let reopened = RedDBRuntime::with_options(options).expect("configured runtime");
+        let stats = reopened.result_blob_cache().stats();
+        assert_eq!(stats.l1_bytes_max(), 1024 * 1024);
+        assert_eq!(stats.l2_bytes_max(), 2 * 1024 * 1024);
+        assert_eq!(stats.namespace_bytes_max(), 256 * 1024);
+        assert_eq!(stats.max_namespaces(), 7);
+    }
+
+    #[test]
+    fn single_file_l2_survives_runtime_restart_without_sidecar() {
+        let directory = tempfile::tempdir().expect("single-file L2 fixture");
+        let path = directory.path().join("cache-l2.rdb");
+        let options = RedDBOptions::persistent(&path);
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("initial runtime");
+        runtime
+            .result_blob_cache()
+            .put(
+                "tenant",
+                "key",
+                crate::storage::cache::BlobCachePut::new(b"durable".to_vec()).with_policy(
+                    crate::storage::cache::BlobCachePolicy::default()
+                        .l1_admission(crate::storage::cache::L1Admission::Never),
+                ),
+            )
+            .expect("write internal L2");
+        assert!(runtime.result_blob_cache().l2_path().is_none());
+        runtime.flush().expect("checkpoint internal L2");
+        drop(runtime);
+
+        let reopened = RedDBRuntime::with_options(options).expect("reopen runtime");
+        assert_eq!(
+            reopened
+                .result_blob_cache()
+                .get("tenant", "key")
+                .expect("L2 hit after restart")
+                .bytes()
+                .as_ref(),
+            b"durable"
+        );
+        drop(reopened);
+        let siblings: Vec<_> = std::fs::read_dir(directory.path())
+            .expect("list fixture")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(siblings, vec!["cache-l2.rdb"]);
+    }
+
+    #[test]
+    fn single_file_l2_deadline_survives_restart_and_sweeps_atomically() {
+        let directory = tempfile::tempdir().expect("single-file L2 TTL fixture");
+        let path = directory.path().join("cache-l2-ttl.rdb");
+        let options = RedDBOptions::persistent(&path);
+        let mut runtime = RedDBRuntime::with_options(options.clone()).expect("initial runtime");
+        drop(runtime.background_tasks.take());
+        runtime
+            .result_blob_cache()
+            .put(
+                "tenant",
+                "expired",
+                crate::storage::cache::BlobCachePut::new(b"expired".to_vec()).with_policy(
+                    crate::storage::cache::BlobCachePolicy::default()
+                        .expires_at_unix_ms(1)
+                        .l1_admission(crate::storage::cache::L1Admission::Never),
+                ),
+            )
+            .expect("write expiring L2 entry");
+        runtime.flush().expect("checkpoint L2 deadline");
+        drop(runtime);
+
+        let mut reopened = RedDBRuntime::with_options(options).expect("reopen runtime");
+        drop(reopened.background_tasks.take());
+        let manager = reopened
+            .db()
+            .store()
+            .get_collection(crate::storage::cache::blob::INTERNAL_L2_COLLECTION)
+            .expect("L2 collection");
+        assert_eq!(manager.scheduled_metadata_expiry_count(), 1);
+        let bytes_before = reopened.result_blob_cache().stats().l2_bytes_in_use();
+        assert!(bytes_before > 0);
+
+        // Generic row TTL must not bypass the cache's atomic byte-counter
+        // update. The dedicated cache sweeper owns this collection.
+        assert_eq!(reopened.sweep_individual_ttl_tick_at(64, u64::MAX), 0);
+        assert_eq!(
+            reopened.result_blob_cache().stats().l2_bytes_in_use(),
+            bytes_before
+        );
+        let report = crate::storage::cache::BlobCacheSweeper::sweep_expired(
+            reopened.result_blob_cache(),
+            crate::storage::cache::SweepLimit::Entries(1),
+        );
+        assert_eq!(report.entries_evicted, 1);
+        assert_eq!(reopened.result_blob_cache().stats().l2_bytes_in_use(), 0);
+        assert_eq!(manager.scheduled_metadata_expiry_count(), 0);
+    }
+
+    #[test]
+    fn expired_l2_payload_pages_are_reused() {
+        let directory = tempfile::tempdir().expect("L2 page reuse fixture");
+        let path = directory.path().join("cache-l2-reuse.rdb");
+        let options = RedDBOptions::persistent(&path)
+            .with_memory_budget(32 * 1024 * 1024)
+            .with_bounded_disk_residency(true);
+        let mut runtime = RedDBRuntime::with_options(options.clone()).expect("runtime");
+        drop(runtime.background_tasks.take());
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let payload: Vec<u8> = std::iter::repeat_with(|| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[0]
+        })
+        .take(64 * 1024)
+        .collect();
+        for id in 0..8 {
+            runtime
+                .result_blob_cache()
+                .put(
+                    "reuse",
+                    format!("expired-{id}"),
+                    crate::storage::cache::BlobCachePut::new(payload.clone()).with_policy(
+                        crate::storage::cache::BlobCachePolicy::default()
+                            .expires_at_unix_ms(1)
+                            .l1_admission(crate::storage::cache::L1Admission::Never),
+                    ),
+                )
+                .expect("expired L2 payload");
+        }
+        runtime.checkpoint().expect("initial L2 checkpoint");
+        let initial_pages = runtime
+            .db()
+            .store()
+            .pager()
+            .expect("pager")
+            .page_count()
+            .expect("initial page count");
+        drop(runtime);
+
+        let mut runtime = RedDBRuntime::with_options(options).expect("reopened runtime");
+        drop(runtime.background_tasks.take());
+        let store = runtime.db().store();
+        let pager = store.pager().expect("pager");
+        let report = crate::storage::cache::BlobCacheSweeper::sweep_expired(
+            runtime.result_blob_cache(),
+            crate::storage::cache::SweepLimit::Entries(64),
+        );
+        assert_eq!(report.entries_evicted, 8);
+        runtime.checkpoint().expect("expired L2 checkpoint");
+
+        let mut cursor = store
+            .mvcc_reclaim_cursor(crate::storage::cache::blob::INTERNAL_L2_COLLECTION.to_string())
+            .expect("L2 reclaim cursor");
+        for _ in 0..64 {
+            store
+                .reclaim_mvcc_tick(
+                    &mut cursor,
+                    &runtime.snapshot_manager(),
+                    runtime.mvcc_vacuum_cutoff_xid(),
+                    64,
+                    8,
+                )
+                .expect("L2 MVCC reclaim");
+            if cursor.finished() {
+                break;
+            }
+        }
+        assert!(cursor.finished());
+        drop(cursor);
+        for _ in 0..3 {
+            runtime.checkpoint().expect("publish reusable L2 pages");
+        }
+        let free_before_reuse = pager.free_page_count().expect("free pages");
+
+        for id in 0..8 {
+            runtime
+                .result_blob_cache()
+                .put(
+                    "reuse",
+                    format!("replacement-{id}"),
+                    crate::storage::cache::BlobCachePut::new(payload.clone()).with_policy(
+                        crate::storage::cache::BlobCachePolicy::default()
+                            .expires_at_unix_ms(u64::MAX)
+                            .l1_admission(crate::storage::cache::L1Admission::Never),
+                    ),
+                )
+                .expect("replacement L2 payload");
+        }
+        runtime.checkpoint().expect("replacement L2 checkpoint");
+        let pages_after_reuse = pager.page_count().expect("page count after reuse");
+        assert!(
+            pages_after_reuse <= initial_pages.saturating_add(16),
+            "expired L2 pages were not reused: initial={initial_pages}, free_before={free_before_reuse}, after={pages_after_reuse}"
+        );
+    }
+
+    #[test]
+    fn zero_cache_namespace_limit_is_rejected_on_boot() {
+        let directory = tempfile::tempdir().expect("cache config fixture");
+        let options = RedDBOptions::persistent(directory.path().join("cache-config-zero.rdb"));
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("initial runtime");
+        runtime
+            .db()
+            .store()
+            .set_config_tree("cache.blob.max_namespaces", &crate::json!(0));
+        runtime.flush().expect("persist cache config");
+        drop(runtime);
+
+        let error = match RedDBRuntime::with_options(options) {
+            Ok(_) => panic!("zero limit must fail boot"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("cache.blob.max_namespaces must be greater than zero"));
+    }
+
+    #[test]
+    fn zero_cache_namespace_memory_limit_is_rejected_on_boot() {
+        let directory = tempfile::tempdir().expect("cache config fixture");
+        let options = RedDBOptions::persistent(directory.path().join("cache-bytes-zero.rdb"));
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("initial runtime");
+        runtime
+            .db()
+            .store()
+            .set_config_tree("cache.blob.namespace_bytes_max", &crate::json!(0));
+        runtime.flush().expect("persist cache config");
+        drop(runtime);
+
+        let error = match RedDBRuntime::with_options(options) {
+            Ok(_) => panic!("zero namespace memory limit must fail boot"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("cache.blob.namespace_bytes_max must be greater than zero"));
     }
 }
 
