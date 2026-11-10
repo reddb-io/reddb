@@ -89,6 +89,33 @@ impl WalBuffer {
             .collect()
     }
 
+    /// Read shared records while bounding their aggregate payload bytes.
+    /// The first matching record is returned even when it exceeds the byte
+    /// budget so the transport can reject that indivisible record explicitly.
+    pub fn read_since_shared_bounded(
+        &self,
+        since_lsn: u64,
+        max_count: usize,
+        max_payload_bytes: usize,
+    ) -> Vec<(u64, Arc<[u8]>)> {
+        let records = self.records.read().unwrap_or_else(|e| e.into_inner());
+        let mut payload_bytes = 0usize;
+        records
+            .iter()
+            .filter(|(lsn, _)| *lsn > since_lsn)
+            .take(max_count)
+            .take_while(|(_, data)| {
+                let next_payload_bytes = payload_bytes.saturating_add(data.len());
+                let include = payload_bytes == 0 || next_payload_bytes <= max_payload_bytes;
+                if include {
+                    payload_bytes = next_payload_bytes;
+                }
+                include
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Current LSN.
     pub fn current_lsn(&self) -> u64 {
         *self.current_lsn.read().unwrap_or_else(|e| e.into_inner())
@@ -330,6 +357,28 @@ impl LogicalWalSpool {
             .take(max_count)
             .map(|entry| (entry.lsn, logical_wal_data_with_framing_term(&entry)))
             .collect())
+    }
+
+    pub fn read_since_bounded(
+        &self,
+        since_lsn: u64,
+        max_count: usize,
+        max_payload_bytes: usize,
+    ) -> io::Result<Vec<(u64, Vec<u8>)>> {
+        let start_offset = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.seek_floor_offset(since_lsn)
+        };
+        Ok(reddb_file::read_logical_wal_entries_from_bounded(
+            &self.path,
+            start_offset,
+            since_lsn,
+            max_count,
+            max_payload_bytes,
+        )?
+        .into_iter()
+        .map(|entry| (entry.lsn, logical_wal_data_with_framing_term(&entry)))
+        .collect())
     }
 
     /// Byte offset a resume at `since_lsn` would seek to before

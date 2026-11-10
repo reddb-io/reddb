@@ -222,10 +222,10 @@ pub use local_backend::{local_backend_atomic_upload, local_backend_download};
 pub use logical_wal::{
     build_logical_wal_seek_index, encode_logical_wal_v2_for_compat, encode_logical_wal_v3,
     read_and_repair_logical_wal_entries, read_logical_wal_entries_from,
-    rewrite_logical_wal_entries, LogicalWalEntry, LOGICAL_WAL_CRC_LEN,
-    LOGICAL_WAL_SEEK_INDEX_INTERVAL, LOGICAL_WAL_SPOOL_MAGIC, LOGICAL_WAL_SPOOL_VERSION_CURRENT,
-    LOGICAL_WAL_SPOOL_VERSION_V1, LOGICAL_WAL_SPOOL_VERSION_V2, LOGICAL_WAL_SPOOL_VERSION_V3,
-    LOGICAL_WAL_V3_HEADER_LEN,
+    read_logical_wal_entries_from_bounded, rewrite_logical_wal_entries, LogicalWalEntry,
+    LOGICAL_WAL_CRC_LEN, LOGICAL_WAL_SEEK_INDEX_INTERVAL, LOGICAL_WAL_SPOOL_MAGIC,
+    LOGICAL_WAL_SPOOL_VERSION_CURRENT, LOGICAL_WAL_SPOOL_VERSION_V1, LOGICAL_WAL_SPOOL_VERSION_V2,
+    LOGICAL_WAL_SPOOL_VERSION_V3, LOGICAL_WAL_V3_HEADER_LEN,
 };
 pub use native_index_artifact::{
     decode_native_doc_pathvalue_frame, decode_native_fulltext_frame,
