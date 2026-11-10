@@ -1,5 +1,6 @@
 //! Native path opening, process locks, and append-tail caching.
 
+use super::native_lock;
 use super::*;
 use crate::vfs::BorrowedStdFile as NativeFile;
 use fs2::FileExt;
@@ -64,13 +65,13 @@ fn file_mutation_stamp(file: &File) -> std::io::Result<Option<FileMutationStamp>
 /// silently discard the other's commits. Holding this lock for the writer's
 /// lifetime makes the second opener fail instead.
 ///
-/// It lives in a sibling lock file, not on the data file: the per-operation
-/// lock takes a fresh handle, which under POSIX `flock` would contend with a
-/// lock held through another handle of the same process, and under Windows
-/// `LockFileEx` would be denied outright (see `open_inner_with_file`).
+/// The sibling lock protects initial creation and interoperates with older
+/// writers. A second lock on the data file itself fences hardlinks, symlinks,
+/// and renamed aliases. It uses a range independent of publication locks.
 pub struct EmbeddedRdbWriterLock {
     path: PathBuf,
     _file: File,
+    _data_file: Option<File>,
 }
 
 impl EmbeddedRdbWriterLock {
@@ -103,7 +104,43 @@ impl EmbeddedRdbWriterLock {
             // happened between our open and our lock, we hold an orphaned
             // inode no later opener can see, so start over on the live path.
             if lock_file_is_live(&file, &path)? {
-                return Ok(Self { path, _file: file });
+                let mut guard = Self {
+                    path,
+                    _file: file,
+                    _data_file: None,
+                };
+                let (mut data_file, created) = match OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(data_path)
+                {
+                    Ok(file) => (file, true),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
+                        OpenOptions::new().read(true).write(true).open(data_path)?,
+                        false,
+                    ),
+                    Err(error) => return Err(error.into()),
+                };
+                if let Err(error) = native_lock::try_lock_writer(&data_file) {
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        return Err(RdbFileError::InvalidOperation(format!(
+                            "{} is already open for writing through this or another path; an embedded single-file store has exactly one writer process",
+                            data_path.display()
+                        )));
+                    }
+                    return Err(error.into());
+                }
+                if created {
+                    create_file(
+                        &mut NativeFile(&mut data_file),
+                        data_path,
+                        &[],
+                        now_unix_ms(),
+                    )?;
+                }
+                guard._data_file = Some(data_file);
+                return Ok(guard);
             }
         }
     }
@@ -171,7 +208,7 @@ impl EmbeddedRdbArtifact {
     pub fn try_open(path: impl AsRef<Path>) -> RdbFileResult<EmbeddedRdbOpen> {
         let path = path.as_ref();
         let mut file = File::open(path)?;
-        FileExt::try_lock_shared(&file)?;
+        native_lock::try_lock_shared(&file)?;
         Self::open_inner_with_file(&mut NativeFile(&mut file), path, true)
     }
 
@@ -181,7 +218,7 @@ impl EmbeddedRdbArtifact {
     ) -> RdbFileResult<(EmbeddedRdbOpen, Option<Vec<u8>>)> {
         let path = path.as_ref();
         let mut file = File::open(path)?;
-        FileExt::lock_shared(&file)?;
+        native_lock::lock_shared(&file)?;
         Self::open_inner_with_snapshot(&mut NativeFile(&mut file), path)
     }
 
@@ -191,7 +228,7 @@ impl EmbeddedRdbArtifact {
     ) -> RdbFileResult<(EmbeddedRdbOpen, Option<Vec<u8>>)> {
         let path = path.as_ref();
         let mut file = File::open(path)?;
-        FileExt::try_lock_shared(&file)?;
+        native_lock::try_lock_shared(&file)?;
         Self::open_inner_with_snapshot(&mut NativeFile(&mut file), path)
     }
 
@@ -203,7 +240,7 @@ impl EmbeddedRdbArtifact {
         let mut file = File::open(path)?;
         // Readers wait for an in-flight publication. On Windows an unlocked
         // ReadFile races the writer's mandatory byte-range lock and fails 33.
-        FileExt::lock_shared(&file)?;
+        native_lock::lock_shared(&file)?;
         Self::open_inner_with_file(&mut NativeFile(&mut file), path, validate_snapshot_refs)
     }
 
@@ -223,17 +260,17 @@ impl EmbeddedRdbArtifact {
         // and on Windows that lock would deny any *other* handle this module
         // opened to the same path (see `open_inner_with_file`).
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        file.lock_exclusive()?;
+        native_lock::lock_exclusive(&file)?;
 
         let result = checkpoint_file(&mut NativeFile(&mut file), path, snapshot, min_wal_bytes)?;
-        FileExt::unlock(&file)?;
+        native_lock::unlock(&file)?;
         Ok(result)
     }
 
     pub fn open_strict_manifest(path: impl AsRef<Path>) -> RdbFileResult<EmbeddedRdbOpen> {
         let path = path.as_ref();
         let file = File::open(path)?;
-        FileExt::lock_shared(&file)?;
+        native_lock::lock_shared(&file)?;
         Self::open_strict_manifest_file(file, path)
     }
 
@@ -241,7 +278,7 @@ impl EmbeddedRdbArtifact {
     pub fn try_open_strict_manifest(path: impl AsRef<Path>) -> RdbFileResult<EmbeddedRdbOpen> {
         let path = path.as_ref();
         let file = File::open(path)?;
-        FileExt::try_lock_shared(&file)?;
+        native_lock::try_lock_shared(&file)?;
         Self::open_strict_manifest_file(file, path)
     }
 
@@ -273,7 +310,7 @@ impl EmbeddedRdbArtifact {
             return Ok(None);
         }
         let mut file = File::open(&open.path)?;
-        FileExt::lock_shared(&file)?;
+        native_lock::lock_shared(&file)?;
         read_snapshot_file(&mut NativeFile(&mut file), open)
     }
 
@@ -307,7 +344,7 @@ impl EmbeddedRdbArtifact {
         // Single locked handle for the whole append — see
         // `write_snapshot_with_wal_capacity` and `open_inner_with_file`.
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        file.lock_exclusive()?;
+        native_lock::lock_exclusive(&file)?;
 
         let open = Self::open_inner_with_file(&mut NativeFile(&mut file), path, false)?;
         let stamp = file_mutation_stamp(&file)?;
@@ -341,7 +378,7 @@ impl EmbeddedRdbArtifact {
             snapshot_validated,
         )?;
         let next_stamp = file_mutation_stamp(&file)?;
-        FileExt::unlock(&file)?;
+        native_lock::unlock(&file)?;
         if let Some(stamp) = next_stamp
             .filter(|_| published.open.selected_superblock.generation == published.generation)
         {
@@ -404,7 +441,7 @@ fn scan_wal(open: &EmbeddedRdbOpen) -> RdbFileResult<WalScan> {
     }
 
     let mut file = File::open(&open.path)?;
-    FileExt::lock_shared(&file)?;
+    native_lock::lock_shared(&file)?;
     scan_wal_with_file(&mut NativeFile(&mut file), open, wal_start)
 }
 

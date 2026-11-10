@@ -511,8 +511,10 @@ impl RedDBRuntime {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(failure(error)),
         };
-        if let Some(file) = &file {
-            fs2::FileExt::try_lock_exclusive(file).map_err(failure)?;
+        if lock.is_none() {
+            if let Some(file) = &file {
+                fs2::FileExt::try_lock_exclusive(file).map_err(failure)?;
+            }
         }
         for owned in [
             reddb_file::unified_wal_path(&path),
