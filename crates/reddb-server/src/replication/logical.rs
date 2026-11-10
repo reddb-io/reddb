@@ -1014,10 +1014,10 @@ impl LogicalChangeApplier {
         let xid = manager.map(|manager| manager.begin());
         let capture = crate::storage::unified::store::StoreWalCaptureGuard::begin(None);
         let applied = (|| -> RedDBResult<()> {
-            for (_index, member) in members.iter().enumerate() {
+            for member in &members {
                 Self::apply_member(db, member, metrics, xid)?;
                 #[cfg(test)]
-                if _index == 0 {
+                if std::ptr::eq(member, &members[0]) {
                     let barrier = metrics
                         .transaction_member_barrier
                         .lock()
