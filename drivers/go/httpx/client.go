@@ -252,6 +252,14 @@ func (c *Client) Close() error {
 
 // --- internals -------------------------------------------------------
 
+func (c *Client) Topology(ctx context.Context, protocol string) (any, error) {
+	response, err := c.do(ctx, "GET", "/v1/topology?transport="+url.QueryEscape(protocol), nil)
+	if err != nil {
+		return nil, err
+	}
+	return parseEnvelope(response)
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
 	url := c.base + path
 	var reader io.Reader

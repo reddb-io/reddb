@@ -14,6 +14,9 @@ namespace Reddb;
 /// </summary>
 public interface IConn : IAsyncDisposable
 {
+    /// <summary>Explicit replica read with an enforceable consistency policy.</summary>
+    ValueTask<ReadOnlyMemory<byte>> QueryWithOptionsAsync(string sql, ReadOptions options, params object?[] args)
+        => ValueTask.FromException<ReadOnlyMemory<byte>>(new NotSupportedException("CONSISTENCY_UNSUPPORTED"));
     /// <summary>Run a SQL query. Returns the engine's JSON envelope as bytes.</summary>
     ValueTask<ReadOnlyMemory<byte>> QueryAsync(string sql, CancellationToken cancellationToken = default);
 

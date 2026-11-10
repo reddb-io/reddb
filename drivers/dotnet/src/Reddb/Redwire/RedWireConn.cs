@@ -21,7 +21,7 @@ namespace Reddb.Redwire;
 /// All public ops are async and cancellable; concurrent calls
 /// serialise through the mutex.
 /// </summary>
-public sealed class RedWireConn : IConn
+public sealed class RedWireConn : IConn, ITopologySource
 {
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -365,6 +365,12 @@ public sealed class RedWireConn : IConn
             Frame.Kind.QueryWithParams,
             ValueCodec.EncodeQueryWithParams(sql, args),
             CancellationToken.None).ConfigureAwait(false);
+    }
+
+    async ValueTask<JsonObject?> ITopologySource.TopologyAsync(string protocol, CancellationToken cancellationToken)
+    {
+        if ((_serverFeatures & TopologyCodec.Feature) == 0) return null;
+        return TopologyCodec.Decode(await SendQueryAsync(TopologyCodec.Kind, Encoding.ASCII.GetBytes(protocol), cancellationToken));
     }
 
     private async ValueTask<ReadOnlyMemory<byte>> SendQueryAsync(

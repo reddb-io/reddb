@@ -35,6 +35,7 @@ from .errors import (
 )
 from . import scram as scram_lib
 from .params import normalize_json_value, normalize_params
+from .routing import decode_topology, FEATURE_TOPOLOGY, TOPOLOGY_KIND
 
 # ---------------------------------------------------------------------------
 # Protocol constants — keep in sync with src/wire/redwire/{frame,mod}.rs.
@@ -335,6 +336,15 @@ class RedwireClient:
         if resp.kind != Kind.Pong:
             raise ProtocolError(f"expected Pong, got {kind_name(resp.kind)}")
 
+    async def topology(self, protocol: str) -> dict[str, Any] | None:
+        if not self._server_features & FEATURE_TOPOLOGY:
+            return None
+        reply = await self._round_trip(Frame(kind=TOPOLOGY_KIND,
+            correlation_id=self._corr(), payload=protocol.encode("ascii")))
+        if reply.kind != Kind.Result:
+            _expect_json(reply, ok_kinds=(Kind.Result,))
+        return decode_topology(reply.payload)
+
     async def close(self) -> None:
         if self._closed:
             return
@@ -363,8 +373,16 @@ class RedwireClient:
         if self._closed:
             raise ConnectionClosed("client is closed")
         async with self._lock:
-            await _write_frame(self._writer, frame, self._opts.timeout)
-            return await _read_frame(self._reader, self._opts.timeout)
+            try:
+                await _write_frame(self._writer, frame, self._opts.timeout)
+                reply = await _read_frame(self._reader, self._opts.timeout)
+                if reply.correlation_id != frame.correlation_id:
+                    raise ProtocolError("mismatched response correlation")
+                return reply
+            except BaseException:
+                self._closed = True
+                self._writer.close()
+                raise
 
 
 # ---------------------------------------------------------------------------

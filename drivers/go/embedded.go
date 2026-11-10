@@ -42,7 +42,7 @@ var loadNativeABI = sync.OnceValues(func() (_ *nativeABI, err error) {
 			name = "libreddb_ffi.so"
 		}
 	}
-	library, err := purego.Dlopen(name, purego.RTLD_NOW|purego.RTLD_LOCAL)
+	library, err := openNativeLibrary(name)
 	if err != nil {
 		return nil, fmt.Errorf("load %s: %w", name, err)
 	}

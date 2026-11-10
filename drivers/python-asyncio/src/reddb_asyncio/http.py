@@ -77,6 +77,9 @@ class HttpClient:
         if self._owns_client:
             await self._client.aclose()
 
+    async def topology(self, protocol: str) -> dict[str, Any]:
+        return await self._request("GET", "/v1/topology", params={"transport": protocol})
+
     # ------------------------------------------------------------------ auth
 
     async def login(self, username: str, password: str) -> dict[str, Any]:

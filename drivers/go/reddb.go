@@ -186,13 +186,20 @@ func Connect(ctx context.Context, uri string, opts ...Option) (Conn, error) {
 		o.Password = parsed.Password
 	}
 
+	if parsed.Kind == KindEmbedded {
+		return connectEmbedded(parsed.Path)
+	}
+	return connectRouted(ctx, parsed, &o)
+}
+
+func connectDirect(ctx context.Context, parsed *ParsedURI, o *Options) (Conn, error) {
 	switch parsed.Kind {
 	case KindRedWire, KindRedWires:
-		return connectRedWire(ctx, parsed, &o)
+		return connectRedWire(ctx, parsed, o)
 	case KindGRPC, KindGRPCS:
-		return connectGRPC(ctx, parsed, &o)
+		return connectGRPC(ctx, parsed, o)
 	case KindHTTP, KindHTTPS:
-		return connectHTTP(ctx, parsed, &o)
+		return connectHTTP(ctx, parsed, o)
 	case KindEmbedded:
 		return connectEmbedded(parsed.Path)
 	}

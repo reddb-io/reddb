@@ -40,6 +40,29 @@ public static class Reddb
         CancellationToken cancellationToken)
     {
         if (parsed.IsEmbedded) return Embedded.EmbeddedConn.Open(parsed);
+        string protocol = parsed.Scheme switch {
+            RedUrl.Kind.Redwire => "red", RedUrl.Kind.RedwireTls => "reds",
+            RedUrl.Kind.Http => "http", RedUrl.Kind.Https => "https",
+            _ => throw new ArgumentException("unsupported remote transport"),
+        };
+        string host = parsed.Host!.Contains(':') ? $"[{parsed.Host}]" : parsed.Host;
+        string seed = TopologyCodec.Address($"{protocol}://{host}:{parsed.Port}{parsed.Path}", protocol)!;
+        var original = new Uri(parsed.Original);
+        async ValueTask<IConn> Dial(string address, CancellationToken token) {
+            var target = new UriBuilder(address) {
+                UserName = parsed.Username ?? "", Password = parsed.Password ?? "",
+                Query = original.Query.TrimStart('?'),
+            };
+            return await ConnectDirectAsync(RedUrl.Parse(target.Uri.AbsoluteUri), opts, token);
+        }
+        var router = new RoutedConn(seed, await ConnectDirectAsync(parsed, opts, cancellationToken),
+            protocol, parsed.Params.TryGetValue("route", out string? route) && route.Equals("primary", StringComparison.OrdinalIgnoreCase), Dial);
+        try { await router.InitializeAsync(cancellationToken); return router; }
+        catch { await router.DisposeAsync(); throw; }
+    }
+
+    private static async ValueTask<IConn> ConnectDirectAsync(RedUrl parsed, ConnectOptions opts, CancellationToken cancellationToken)
+    {
         return parsed.Scheme switch
         {
             RedUrl.Kind.Redwire or RedUrl.Kind.RedwireTls

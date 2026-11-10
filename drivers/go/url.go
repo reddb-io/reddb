@@ -262,9 +262,9 @@ func firstNonEmpty(values ...string) string {
 func (p *ParsedURI) HTTPBaseURL() string {
 	switch p.Kind {
 	case KindHTTP:
-		return fmt.Sprintf("http://%s:%d", p.Host, p.Port)
+		return fmt.Sprintf("http://%s:%d%s", p.Host, p.Port, p.Path)
 	case KindHTTPS:
-		return fmt.Sprintf("https://%s:%d", p.Host, p.Port)
+		return fmt.Sprintf("https://%s:%d%s", p.Host, p.Port, p.Path)
 	}
 	return ""
 }

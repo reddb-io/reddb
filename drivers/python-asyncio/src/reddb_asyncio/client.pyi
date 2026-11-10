@@ -5,6 +5,8 @@ from .kv import KvClient
 from .queue import QueueClient
 
 class Reddb:
+    async def query_with_options(self, sql: str, options: dict[str, Any],
+        params: list[Any] | tuple[Any, ...] | None = None) -> dict[str, Any]: ...
     kv: KvClient
     documents: DocumentClient
     queue: QueueClient
