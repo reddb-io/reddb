@@ -286,19 +286,23 @@ fn projection_io_failure_retains_ordered_commits_without_reusing_lsns() {
 
 #[test]
 fn transaction_batch_is_one_record_and_cdc_cursor_survives_reopen() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
     let options = RedDBOptions::persistent(directory.path().join("primary.rdb"))
         .with_replication(ReplicationConfig::primary());
-    let primary = RedDBRuntime::with_options(options.clone()).unwrap();
+    let primary = RedDBRuntime::with_options(options.clone()).expect("primary runtime should open");
     primary
         .execute_query("CREATE TABLE batched (id INT)")
-        .unwrap();
+        .expect("batched table should be created");
     set_current_connection_id(9030);
-    primary.execute_query("BEGIN").unwrap();
+    primary
+        .execute_query("BEGIN")
+        .expect("transaction should begin");
     primary
         .execute_query("INSERT INTO batched (id) VALUES (1), (2), (3)")
-        .unwrap();
-    primary.execute_query("COMMIT").unwrap();
+        .expect("batched insert should succeed");
+    primary
+        .execute_query("COMMIT")
+        .expect("insert transaction should commit");
     clear_current_connection_id();
     let records = logical_records(&primary);
     assert_eq!(records.len(), 1);
@@ -307,32 +311,40 @@ fn transaction_batch_is_one_record_and_cdc_cursor_survives_reopen() {
         reddb_server::replication::cdc::ChangeOperation::Transaction
     );
     set_current_connection_id(9030);
-    primary.execute_query("BEGIN").unwrap();
-    primary.execute_query("DELETE FROM batched").unwrap();
-    primary.execute_query("COMMIT").unwrap();
+    primary
+        .execute_query("BEGIN")
+        .expect("transaction should begin");
+    primary
+        .execute_query("DELETE FROM batched")
+        .expect("batched delete should succeed");
+    primary
+        .execute_query("COMMIT")
+        .expect("delete transaction should commit");
     clear_current_connection_id();
     let before = primary.cdc_current_lsn();
     assert!(before >= 6);
     drop(primary);
-    let reopened = RedDBRuntime::with_options(options).unwrap();
+    let reopened = RedDBRuntime::with_options(options).expect("primary runtime should reopen");
     reopened
         .execute_query("INSERT INTO batched (id) VALUES (4)")
-        .unwrap();
+        .expect("post-reopen insert should succeed");
     assert!(reopened.cdc_current_lsn() > before);
     assert_eq!(logical_records(&reopened).len(), 3);
 }
 
 #[test]
 fn oversized_transaction_cannot_commit_a_partial_source_or_projection() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
     let options = RedDBOptions::persistent(directory.path().join("primary.rdb"))
         .with_replication(ReplicationConfig::primary());
-    let primary = RedDBRuntime::with_options(options.clone()).unwrap();
+    let primary = RedDBRuntime::with_options(options.clone()).expect("primary runtime should open");
     primary
         .execute_query("CREATE TABLE bounded (id INT, payload BLOB)")
-        .unwrap();
+        .expect("bounded table should be created");
     set_current_connection_id(9040);
-    primary.execute_query("BEGIN").unwrap();
+    primary
+        .execute_query("BEGIN")
+        .expect("transaction should begin");
     // Incompressible bytes exercise the encoded-record limit, not the value
     // compressor's best case for a repeated string.
     let mut seed = 1u64;
@@ -359,16 +371,16 @@ fn oversized_transaction_cannot_commit_a_partial_source_or_projection() {
     clear_current_connection_id();
     assert!(primary
         .execute_query("SELECT id FROM bounded")
-        .unwrap()
+        .expect("bounded table should remain queryable")
         .result
         .records
         .is_empty());
     assert!(logical_records(&primary).is_empty());
     drop(primary);
-    let reopened = RedDBRuntime::with_options(options).unwrap();
+    let reopened = RedDBRuntime::with_options(options).expect("primary runtime should reopen");
     assert!(reopened
         .execute_query("SELECT id FROM bounded")
-        .unwrap()
+        .expect("bounded table should remain queryable after reopen")
         .result
         .records
         .is_empty());

@@ -1140,10 +1140,11 @@ mod tests {
 
     #[test]
     fn transaction_retry_supersedes_versions_from_aborted_apply() {
-        let replica = crate::RedDBRuntime::with_options(crate::RedDBOptions::in_memory()).unwrap();
+        let replica = crate::RedDBRuntime::with_options(crate::RedDBOptions::in_memory())
+            .expect("in-memory replica should open");
         replica
             .execute_query("CREATE TABLE users (id INT, payload BLOB)")
-            .unwrap();
+            .expect("users table should be created");
         let applier = LogicalChangeApplier::new(0);
         applier
             .apply(
@@ -1151,13 +1152,16 @@ mod tests {
                 &record(1, b"old"),
                 ApplyMode::Replica,
             )
-            .unwrap();
+            .expect("initial record should apply");
         let mut update = record(2, b"new");
         let mut entity = UnifiedStore::deserialize_entity(
-            update.entity_bytes.as_ref().unwrap(),
+            update
+                .entity_bytes
+                .as_ref()
+                .expect("update record should contain an entity"),
             crate::api::REDDB_FORMAT_VERSION,
         )
-        .unwrap();
+        .expect("update entity should deserialize");
         entity.set_logical_id(EntityId::new(1));
         update.entity_bytes = Some(UnifiedStore::serialize_entity(
             &entity,
@@ -1176,7 +1180,7 @@ mod tests {
         assert_eq!(
             replica
                 .execute_query("SELECT * FROM users")
-                .unwrap()
+                .expect("users query should succeed after failed apply")
                 .result
                 .records
                 .len(),
@@ -1184,17 +1188,17 @@ mod tests {
         );
         applier
             .apply(replica.db().as_ref(), &transaction, ApplyMode::Replica)
-            .unwrap();
+            .expect("transaction retry should apply");
         let versions = replica
             .db()
             .store()
             .get_collection("users")
-            .unwrap()
+            .expect("users collection should exist")
             .query_all(|_| true);
         assert_eq!(
             replica
                 .execute_query("SELECT * FROM users")
-                .unwrap()
+                .expect("users query should succeed after retry")
                 .result
                 .records
                 .len(),
@@ -1210,15 +1214,16 @@ mod tests {
 
     #[test]
     fn failed_replay_cannot_hide_an_already_committed_transaction() {
-        let replica = crate::RedDBRuntime::with_options(crate::RedDBOptions::in_memory()).unwrap();
+        let replica = crate::RedDBRuntime::with_options(crate::RedDBOptions::in_memory())
+            .expect("in-memory replica should open");
         replica
             .execute_query("CREATE TABLE users (id INT, payload BLOB)")
-            .unwrap();
+            .expect("users table should be created");
         let transaction =
             ChangeRecord::for_transaction(1, 1, vec![record(1, b"a"), record(2, b"b")]);
         LogicalChangeApplier::new(0)
             .apply(replica.db().as_ref(), &transaction, ApplyMode::Replica)
-            .unwrap();
+            .expect("transaction should apply initially");
         replica
             .db()
             .store()
@@ -1230,7 +1235,7 @@ mod tests {
         assert_eq!(
             replica
                 .execute_query("SELECT * FROM users")
-                .unwrap()
+                .expect("users query should succeed after failed replay")
                 .result
                 .records
                 .len(),
