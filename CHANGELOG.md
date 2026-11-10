@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.31.0
+
+### Minor Changes
+
+- [#2762](https://github.com/reddb-io/reddb/pull/2762) [`11f9a0c`](https://github.com/reddb-io/reddb/commit/11f9a0c63e3085c8276135aa1c1d9ac3b0fa37d6) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add production L1/L2 cache APIs with single-file persistence and bounded automatic TTL reclamation.
+
 ## 1.30.1
 
 ### Patch Changes
