@@ -627,7 +627,7 @@ pub(crate) fn wire_param_value(
 }
 
 fn enforce_wire_commit_policy_after_write(runtime: &RedDBRuntime) -> Result<(), Vec<u8>> {
-    let post_lsn = runtime.replication_commit_lsn();
+    let post_lsn = runtime.cdc_current_lsn();
     runtime
         .enforce_commit_policy(post_lsn)
         .map(|_| ())

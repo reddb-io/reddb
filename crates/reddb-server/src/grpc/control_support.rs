@@ -153,7 +153,7 @@ impl GrpcRuntime {
     /// just-completed write because the runtime advances it
     /// synchronously inside the storage path.
     pub(crate) fn enforce_commit_policy_after_write(&self) -> Result<(), Status> {
-        let post_lsn = self.runtime.replication_commit_lsn();
+        let post_lsn = self.runtime.cdc_current_lsn();
         self.runtime
             .enforce_commit_policy(post_lsn)
             .map(|_| ())
