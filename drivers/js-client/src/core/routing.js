@@ -69,13 +69,44 @@ export class RoutingClient {
   async endpoint(address) {
     if (this.closed) throw new RedDBError('CLOSED', 'connection is closed')
     if (!this.clients.has(address)) {
-      const pending = this.dial(address).catch((error) => {
+      const pending = this.connectEndpoint(address).catch((error) => {
         this.clients.delete(address)
         throw error
       })
       this.clients.set(address, pending)
     }
     return this.clients.get(address)
+  }
+
+  async connectEndpoint(address) {
+    const controller = new AbortController()
+    let client
+    let ready = false
+    let timer
+    const connect = this.dial(address, controller.signal).then(async (transport) => {
+      client = transport
+      if (controller.signal.aborted || this.closed) {
+        await client.close()
+        throw new RedDBError('CLOSED', 'connection was closed while connecting')
+      }
+      if (['http', 'https', 'grpc', 'grpcs'].includes(this.protocol)) {
+        await client.call('health', { signal: controller.signal })
+      }
+      return client
+    })
+    try {
+      const endpoint = await Promise.race([connect, new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort()
+          reject(new RedDBError('ETIMEDOUT', 'endpoint connection timed out'))
+        }, 5000)
+      })])
+      ready = true
+      return endpoint
+    } finally {
+      clearTimeout(timer)
+      if (!ready) { controller.abort(); await client?.close() }
+    }
   }
 
   async refresh() {
@@ -99,14 +130,19 @@ export class RoutingClient {
         // for its full authenticated advertisement in the same refresh.
         if (primary !== address && !candidates.includes(primary)) candidates.push(primary)
         await this.endpoint(primary)
-        const replicaLagMs = new Map((Array.isArray(topology.replicas) ? topology.replicas.slice(0, 256) : [])
-          .map((replica) => [topologyAddress(replica.addr, this.protocol), replica.lag_ms]))
+        const replicaCandidates = (Array.isArray(topology.replicas) ? topology.replicas.slice(0, 256) : [])
+          .filter((replica) => replica.healthy === true && replica.rebootstrapping !== true)
+          .map((replica) => ({ ...replica, addr: topologyAddress(replica.addr, this.protocol) }))
+          .filter((replica) => replica.addr && replica.addr !== primary)
+        const ready = await Promise.allSettled(replicaCandidates.map(async (replica) => {
+          await this.endpoint(replica.addr)
+          return replica
+        }))
+        const replicas = ready.filter((result) => result.status === 'fulfilled').map((result) => result.value)
+        const replicaLagMs = new Map(replicas.map((replica) => [replica.addr, replica.lag_ms]))
         this.primary = primary
         this.replicaLagMs = replicaLagMs
-        this.replicas = (Array.isArray(topology.replicas) ? topology.replicas.slice(0, 256) : [])
-          .filter((replica) => replica.healthy === true && replica.rebootstrapping !== true)
-          .map((replica) => topologyAddress(replica.addr, this.protocol))
-          .filter((replica) => replica && replica !== primary)
+        this.replicas = replicas.map((replica) => replica.addr)
         if (primary === address) {
           await this.prune()
           return
@@ -182,7 +218,7 @@ export class RoutingClient {
     if (!this.transactionEndpoint && !this.sessionEndpoint && this.now() >= this.refreshAt) await this.refresh()
     const command = method === 'query' ? transactionCommand(params.sql ?? '') : null
     const options = params.readOptions
-    if (options && (!['strong', 'local', 'bounded_staleness'].includes(options.consistency)
+    if (options != null && (typeof options !== 'object' || !['strong', 'local', 'bounded_staleness'].includes(options.consistency)
       || options.consistency === 'bounded_staleness'
         && (!Number.isFinite(options.maxLagMs) || options.maxLagMs < 0))) {
       throw new RedDBError('CONSISTENCY_UNSUPPORTED', 'unsupported read consistency')

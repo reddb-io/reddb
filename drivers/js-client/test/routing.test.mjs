@@ -55,6 +55,7 @@ test('read failure falls back; an ambiguous write is never replayed', async () =
         version: 1, primary: { addr: primary }, replicas: [{ addr: replica, healthy: true }],
       }
       if (method === 'insert') { writes++; throw Object.assign(new Error('lost commit reply'), { code: 'ECONNRESET' }) }
+      if (method === 'health') return true
       reads++
       if (address === replica) throw Object.assign(new Error('disconnected'), { code: 'ECONNRESET' })
       return 'primary read'
@@ -270,9 +271,32 @@ test('explicit reads enforce consistency and generic SQL stays on the primary', 
   assert.equal((await client.queryWithOptions('UPDATE users SET id = 1', { consistency: 'local' })).address, primary)
   await assert.rejects(client.queryWithOptions('SELECT 1', { consistency: 'causal' }), { code: 'CONSISTENCY_UNSUPPORTED' })
   await assert.rejects(client.queryWithOptions('SELECT 1', { consistency: 'bounded_staleness', maxLagMs: -1 }), { code: 'CONSISTENCY_UNSUPPORTED' })
+  for (const invalid of [false, 0, '', [], 'local']) {
+    await assert.rejects(client.queryWithOptions('SELECT 1', invalid), { code: 'CONSISTENCY_UNSUPPORTED' })
+  }
   const db = new NodeRedDB(client)
   await db.queryWithOptions('SELECT $1', { consistency: 'local' }, 42)
   await db.close()
   const raw = new NodeRedDB({ call() { assert.fail('consistency must not be dropped') } })
   assert.throws(() => raw.queryWithOptions('SELECT 1', { consistency: 'strong' }), { code: 'CONSISTENCY_UNSUPPORTED' })
+})
+
+test('unreachable replica is excluded before publishing routing membership', async () => {
+  const primary = 'http://primary:5000'
+  const dead = 'http://dead:5000'
+  const transport = {
+    async call(method) {
+      if (method === 'topology') return { version: 1, primary: { addr: primary }, replicas: [{ addr: dead, healthy: true }] }
+      return primary
+    },
+    async close() {},
+  }
+  const dial = async (address) => {
+    if (address === dead) throw Object.assign(new Error('unreachable'), { code: 'ECONNREFUSED' })
+    return transport
+  }
+  const client = await new RoutingClient(primary, transport, dial, 'http').initialize()
+  assert.deepEqual(client.replicas, [])
+  assert.equal(await client.queryWithOptions('SELECT 1', { consistency: 'local' }), primary)
+  await client.close()
 })

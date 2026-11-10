@@ -384,6 +384,16 @@ impl RemoteRouter {
             if self.endpoint(state, &primary).await.is_err() {
                 continue;
             }
+            let mut ready_replicas = Vec::with_capacity(membership.replicas.len());
+            for replica in std::mem::take(&mut membership.replicas) {
+                if replica.healthy
+                    && !replica.rebootstrapping
+                    && self.endpoint(state, &replica.addr).await.is_ok()
+                {
+                    ready_replicas.push(replica);
+                }
+            }
+            membership.replicas = ready_replicas;
             state.health.update_membership(membership.clone());
             state.membership = membership;
             state.clients.retain(|address, client| {

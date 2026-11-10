@@ -105,6 +105,8 @@ async function startNode(protocol, node, membership, calls) {
         if (headers[':path'].endsWith('/Topology')) {
           assert.equal(headers['x-reddb-topology-transport'], 'grpc')
           reply = protobufBytes(1, topologyBytes(membership()))
+        } else if (headers[':path'].endsWith('/Ready')) {
+          reply = Buffer.from([8, 1])
         } else {
           const body = Buffer.concat(chunks).subarray(5)
           const sql = body.subarray(2, 2 + body[1]).toString()

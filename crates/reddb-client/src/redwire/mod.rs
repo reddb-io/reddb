@@ -206,6 +206,7 @@ impl RedWireClient {
                 session_id,
                 server_features,
             } => Ok(Self {
+                usable: true,
                 stream,
                 next_correlation_id: 1,
                 session_id,
