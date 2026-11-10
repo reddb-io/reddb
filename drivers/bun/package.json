@@ -4,7 +4,7 @@
   "description": "RedDB wire protocol client for Bun — ultra-fast native TCP",
   "main": "index.ts",
   "dependencies": {
-    "@reddb-io/client": "^1.30.0"
+    "@reddb-io/client": "workspace:*"
   },
   "files": [
     "index.ts",

@@ -15,7 +15,11 @@ importers:
         specifier: ^2.31.0
         version: 2.31.0
 
-  drivers/bun: {}
+  drivers/bun:
+    dependencies:
+      '@reddb-io/client':
+        specifier: workspace:*
+        version: link:../js-client
 
   drivers/js: {}
 
@@ -134,6 +138,7 @@ packages:
 
   '@aflsolutions/graphology-communities-leiden@1.1.1':
     resolution: {integrity: sha512-kqjUf7oofB2c3RKvUIP3dIqwMzZxtVdDYLtr2Z2DFOmWa9RbNfUeQRns+UeODtWtEfwh6j83UiMRxRMDIdGC5A==}
+    deprecated: Moved to @alessandro-afloarei/graphology-communities-leiden
     peerDependencies:
       graphology-types: '>=0.19.0'
 
