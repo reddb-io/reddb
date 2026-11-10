@@ -453,6 +453,9 @@ red mcp [--uri memory://]
 ## red acp
 
 Start the local ACP v1/v2 session adapter backed by the native ASK harness.
+An ACP-compatible host launches this command as a child process and exchanges
+JSON-RPC messages over stdio. It is not an interactive terminal: running it by
+hand leaves it waiting for protocol input rather than displaying a prompt.
 
 ```bash
 red acp [--path ./data/reddb.rdb]
@@ -465,7 +468,9 @@ red acp [--path ./data/reddb.rdb]
 The adapter uses newline-delimited JSON-RPC over stdio and negotiates v1 or v2
 during `initialize`. ACP v2 remains draft. The adapter is embedded-only in this
 release; it does not advertise remote authentication or external MCP
-attachment. See [ACP (ASK sessions)](/api/acp.md).
+attachment. For remote databases, use authenticated MCP and its `reddb.ask`
+tool. See [ACP (ASK sessions)](/api/acp.md) for the ASK/MCP/ACP decision guide,
+provider setup, host configuration, and protocol lifecycle.
 
 ## red auth
 
