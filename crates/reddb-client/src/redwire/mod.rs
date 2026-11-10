@@ -17,6 +17,8 @@ mod io;
 pub mod scram;
 #[cfg(feature = "redwire-tls")]
 mod tls;
+#[cfg(feature = "redwire-websocket")]
+mod websocket;
 
 pub use reddb_wire::redwire::{Flags, Frame, FrameError, MessageKind};
 #[cfg(feature = "redwire-tls")]
@@ -191,15 +193,50 @@ impl std::fmt::Debug for RedWireClient {
 }
 
 impl RedWireClient {
-    pub async fn topology(&mut self, protocol: &str) -> Result<Option<crate::topology::ClusterMembership>> {
+    #[cfg(feature = "redwire-websocket")]
+    pub(crate) async fn connect_websocket(url: &str, opts: ConnectOptions) -> Result<Self> {
+        let mut stream = websocket::connect(url, &opts).await?;
+        stream
+            .write_all(&supported_client_preface())
+            .await
+            .map_err(|error| ClientError::new(ErrorCode::Network, error.to_string()))?;
+        match handshake::run(&mut stream, &opts).await? {
+            HandshakeOutcome::Authenticated {
+                session_id,
+                server_features,
+            } => Ok(Self {
+                stream,
+                next_correlation_id: 1,
+                session_id,
+                server_features,
+            }),
+            HandshakeOutcome::Refused(reason) => {
+                Err(ClientError::new(ErrorCode::AuthRefused, reason))
+            }
+        }
+    }
+
+    pub async fn topology(
+        &mut self,
+        protocol: &str,
+    ) -> Result<Option<crate::topology::ClusterMembership>> {
+        if self.server_features & reddb_wire::routing::FEATURE_TOPOLOGY == 0 {
+            return Ok(None);
+        }
         let request = reddb_wire::redwire::build_request_frame(
-            self.next_corr(), MessageKind::Topology, protocol.as_bytes().to_vec(),
-        ).map_err(frame_build_err)?;
+            self.next_corr(),
+            MessageKind::Topology,
+            protocol.as_bytes().to_vec(),
+        )
+        .map_err(frame_build_err)?;
         io::write_frame(&mut self.stream, &request).await?;
         let response = self.read_frame().await?;
-        let payload = expect_result_or_error(response.kind, &response.payload).map_err(reply_err)?;
+        let payload =
+            expect_result_or_error(response.kind, &response.payload).map_err(reply_err)?;
         reddb_wire::decode_topology(payload)
-            .map(|topology| topology.map(|topology| crate::topology::TopologyConsumer::consume(topology, None)))
+            .map(|topology| {
+                topology.map(|topology| crate::topology::TopologyConsumer::consume(topology, None))
+            })
             .map_err(|error| ClientError::new(ErrorCode::Protocol, error.to_string()))
     }
 

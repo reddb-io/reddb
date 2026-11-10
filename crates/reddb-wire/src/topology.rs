@@ -207,6 +207,14 @@ pub fn decode_topology(bytes: &[u8]) -> Result<Option<Topology>, TopologyError> 
     let primary_addr = cur.read_str()?;
     let primary_region = cur.read_str()?;
     let replica_count = cur.read_u32()? as usize;
+    // Even an empty-address replica needs two string lengths, a healthy
+    // byte, lag, and LSN. Validate before allocating from a peer's count.
+    let replica_bytes_min = replica_count
+        .checked_mul(21)
+        .ok_or(TopologyError::Truncated)?;
+    if replica_bytes_min > cur.remaining() {
+        return Err(TopologyError::Truncated);
+    }
     let mut replicas = Vec::with_capacity(replica_count);
     for _ in 0..replica_count {
         let addr = cur.read_str()?;

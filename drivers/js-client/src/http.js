@@ -76,7 +76,7 @@ export class HttpRpcClient {
       )
     }
     const { url, init } = route(this.baseUrl, params)
-    const response = await fetch(url, this.attachAuth(init))
+    const response = await fetch(url, this.attachAuth({ ...init, signal: params.signal ?? init.signal }))
     if (method === 'query') {
       // Keep the whole envelope: `statement` and `affected_rows` sit next to
       // `result`, which is all the generic unwrap below would return.

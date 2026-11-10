@@ -130,7 +130,14 @@ export function transactionCommand(sql) {
   if (tokens[0] === 'BEGIN') return 'BEGIN'
   if (tokens[0] === 'START' && tokens[1] === 'TRANSACTION') return 'START TRANSACTION'
   if (tokens.includes(';')) return null
+  if (['COMMIT', 'ROLLBACK'].includes(tokens[0]) && tokens.includes('CHAIN')) return 'BEGIN'
   if (tokens[0] === 'COMMIT') return 'COMMIT'
   if (tokens[0] === 'ROLLBACK' && !tokens.includes('TO')) return 'ROLLBACK'
   return null
+}
+
+export function isSessionQuery(sql) {
+  const tokens = sqlTokens(sql)
+  return tokens && (tokens.includes(';')
+    || ['SET', 'USE', 'PREPARE', 'DECLARE', 'LISTEN'].includes(tokens[0]))
 }

@@ -55,6 +55,7 @@ pub mod connect;
 pub mod connector;
 pub mod error;
 pub mod params;
+mod remote_routing;
 pub mod routing_cache;
 pub mod topology;
 mod transport;
@@ -66,7 +67,6 @@ pub mod embedded;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 
-#[cfg(feature = "grpc")]
 pub mod router;
 
 pub mod redwire;
@@ -111,8 +111,7 @@ impl std::fmt::Debug for Reddb {
 impl Reddb {
     /// Open a connection. The backend is selected from the URI scheme.
     pub async fn connect(uri: &str) -> Result<Self> {
-        let target = connect::parse(uri)?;
-        Ok(Self::from_transport(transport::connect(target).await?))
+        Ok(Self::from_transport(remote_routing::connect(uri).await?))
     }
 
     fn from_transport(transport: transport::DynTransport) -> Self {

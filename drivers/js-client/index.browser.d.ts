@@ -26,6 +26,8 @@ export type AuthOptions =
   | { username: string; password: string; loginUrl?: string }
 
 export interface ConnectOptions {
+  /** Optional WebSocket constructor override. */
+  WebSocketImpl?: typeof globalThis.WebSocket
   /** Authentication credentials for the HTTP transport. */
   auth?: AuthOptions
 }

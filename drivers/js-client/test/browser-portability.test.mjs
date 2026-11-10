@@ -17,7 +17,7 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { dirname, resolve, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -95,15 +95,16 @@ test('portability: browser entry import graph has zero node: built-ins', () => {
 
   // Sanity: the walk actually traversed the core/http/streaming-web graph.
   assert.ok(visited.size > 5, `expected a multi-module graph, walked ${visited.size}`)
-  const names = [...visited].map((f) => f.replace(SRC + '/', ''))
+  const names = [...visited].map((f) => relative(SRC, f).replaceAll('\\', '/'))
   assert.ok(names.includes('http.js'), 'browser entry should reach http.js')
   assert.ok(names.includes('streaming-web.js'), 'browser entry should reach streaming-web.js')
   assert.ok(names.some((n) => n.startsWith('core/')), 'browser entry should reach the core')
+  assert.ok(names.includes('core/routing.js'), 'browser entry should reach the shared router')
 })
 
 test('portability: browser graph excludes the node-only transports', () => {
   const { visited } = walkImportGraph(BROWSER_ENTRY)
-  const names = [...visited].map((f) => f.replace(SRC + '/', ''))
+  const names = [...visited].map((f) => relative(SRC, f).replaceAll('\\', '/'))
   for (const forbidden of FORBIDDEN_MODULES) {
     assert.ok(
       !names.includes(forbidden),

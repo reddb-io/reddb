@@ -2715,10 +2715,12 @@ version = "1.28.10"
 dependencies = [
  "async-trait",
  "csv",
+ "futures-util",
  "getrandom 0.4.2",
  "jsonwebtoken",
  "proptest",
  "prost",
+ "rcgen",
  "reddb-io-grpc-proto",
  "reddb-io-server",
  "reddb-io-tonic",
@@ -2732,7 +2734,9 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-stream",
+ "tokio-tungstenite 0.29.0",
  "ureq",
+ "url",
  "webpki-roots",
 ]
 

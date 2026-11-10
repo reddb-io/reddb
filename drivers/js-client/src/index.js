@@ -82,7 +82,7 @@ export async function connect(uri, options = {}) {
   return connectRouted(uri, options, connectDirect)
 }
 
-async function connectDirect(uri, options = {}) {
+async function connectDirect(uri, options = {}, discovery = false) {
   // Reject embedded shapes upfront with the same wording the Rust
   // binary uses, before the URL parser would map them to kind=embedded.
   rejectEmbeddedUri(uri)
@@ -108,6 +108,7 @@ async function connectDirect(uri, options = {}) {
       url: `${scheme}://${parsed.host}:${parsed.port}${REDWIRE_WS_PATH}`,
       auth: token ? { kind: 'bearer', token } : { kind: 'anonymous' },
       WebSocketImpl: options.WebSocketImpl,
+      signal: options.signal,
     })
     return new RedDB(client)
   }
@@ -124,7 +125,7 @@ async function connectDirect(uri, options = {}) {
       token = session.token
     }
     const client = new HttpRpcClient({ baseUrl, token })
-    await client.call('query', { sql: 'SELECT 1' })
+    if (!discovery) await client.call('query', { sql: 'SELECT 1', signal: options.signal })
     return new RedDB(client)
   }
 
@@ -139,9 +140,10 @@ async function connectDirect(uri, options = {}) {
       token = session.token
     }
     const scheme = parsed.kind === 'grpcs' ? 'https' : 'http'
-    const client = new GrpcRpcClient({
+    const client = await GrpcRpcClient.connect({
       baseUrl: `${scheme}://${parsed.host}:${parsed.port}`,
       token,
+      tls: buildTlsOpts(parsed, options.tls),
     })
     return new RedDB(client)
   }
@@ -162,6 +164,7 @@ async function connectDirect(uri, options = {}) {
       host: parsed.host,
       port: parsed.port,
       auth,
+      signal: options.signal,
       ...(tls ? { tls } : {}),
     })
     return new RedDB(client)

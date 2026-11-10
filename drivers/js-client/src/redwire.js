@@ -85,13 +85,14 @@ export async function connectRedwire(opts) {
       throw new TypeError('connectRedwire: port required (1-65535)')
     }
     socket = opts.tls
-      ? await openTlsSocket(host, port, opts.tls)
-      : await openSocket(host, port)
+      ? await openTlsSocket(host, port, opts.tls, opts.signal)
+      : await openSocket(host, port, opts.signal)
   }
 
   return await connectRedwireOverSocket(socket, {
     auth: opts.auth,
     clientName: opts.clientName,
+    signal: opts.signal,
   })
 }
 
@@ -99,26 +100,31 @@ export async function connectRedwire(opts) {
 // Socket helpers — node:net / node:tls work on Node, Bun, and Deno via shim
 // ---------------------------------------------------------------------------
 
-async function openSocket(host, port) {
+async function openSocket(host, port, signal) {
   const { Socket } = await import('node:net')
   return await new Promise((resolve, reject) => {
     const sock = new Socket()
+    const abort = () => sock.destroy(new Error('topology connection cancelled'))
+    signal?.addEventListener('abort', abort, { once: true })
     const onErr = (err) => {
       sock.removeListener('connect', onOk)
+      signal?.removeEventListener('abort', abort)
       reject(err)
     }
     const onOk = () => {
       sock.removeListener('error', onErr)
+      signal?.removeEventListener('abort', abort)
       sock.setNoDelay(true)
       resolve(sock)
     }
     sock.once('error', onErr)
     sock.once('connect', onOk)
+    if (signal?.aborted) { abort(); return }
     sock.connect(port, host)
   })
 }
 
-async function openTlsSocket(host, port, tlsOpts) {
+async function openTlsSocket(host, port, tlsOpts, signal) {
   const tls = await import('node:tls')
   const fs = await import('node:fs/promises')
   const resolveBytes = async (input) => {
@@ -140,6 +146,7 @@ async function openTlsSocket(host, port, tlsOpts) {
       servername: tlsOpts.servername ?? host,
       rejectUnauthorized: tlsOpts.rejectUnauthorized !== false,
       ALPNProtocols: ['redwire/1'],
+      signal,
     })
     const onErr = (err) => {
       sock.removeListener('secureConnect', onOk)

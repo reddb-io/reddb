@@ -8,6 +8,7 @@
 
 import { connect as connectHttp2 } from 'node:http2'
 import { Buffer } from 'node:buffer'
+import { readFile } from 'node:fs/promises'
 
 import { RedDBError } from './protocol.js'
 import { normalizeQueryResult } from './core/result.js'
@@ -17,13 +18,22 @@ import { decodeTopology } from './core/topology.js'
 const SERVICE = '/reddb.v1.RedDb'
 
 export class GrpcRpcClient {
-  constructor({ baseUrl, token }) {
+  static async connect(options) {
+    const tls = { ...options.tls }
+    for (const key of ['ca', 'cert', 'key']) {
+      const value = tls[key]
+      if (typeof value === 'string' && !value.includes('-----BEGIN')) tls[key] = await readFile(value)
+    }
+    return new GrpcRpcClient({ ...options, tls })
+  }
+
+  constructor({ baseUrl, token, tls }) {
     if (typeof baseUrl !== 'string' || baseUrl.length === 0) {
       throw new TypeError('GrpcRpcClient: baseUrl required')
     }
     this.baseUrl = baseUrl.replace(/\/$/, '')
     this.token = token ?? null
-    this.session = connectHttp2(this.baseUrl)
+    this.session = connectHttp2(this.baseUrl, tls)
     this.session.on('error', () => {})
   }
 
@@ -41,7 +51,7 @@ export class GrpcRpcClient {
         return this.#rpc('Topology', new Uint8Array(), (bytes) => {
           const field = readFields(bytes).find((field) => field.no === 1 && field.wire === 2)
           return field ? decodeTopology(field.value) : null
-        }, { 'x-reddb-topology-transport': params.transport ?? (this.baseUrl.startsWith('https:') ? 'grpcs' : 'grpc') })
+        }, { 'x-reddb-topology-transport': params.transport ?? (this.baseUrl.startsWith('https:') ? 'grpcs' : 'grpc') }, params.signal)
       case 'query':
         return normalizeQueryReply(await this.#rpc(
           'Query',
@@ -77,7 +87,7 @@ export class GrpcRpcClient {
     }
   }
 
-  #rpc(name, payload, decode, metadata = {}) {
+  #rpc(name, payload, decode, metadata = {}, signal) {
     return new Promise((resolve, reject) => {
       const headers = {
         ':method': 'POST',
@@ -89,6 +99,10 @@ export class GrpcRpcClient {
       if (this.token) headers.authorization = `Bearer ${this.token}`
 
       const req = this.session.request(headers)
+      const abort = () => req.destroy(new RedDBError('ETIMEDOUT', 'topology refresh cancelled'))
+      if (signal?.aborted) abort()
+      else signal?.addEventListener('abort', abort, { once: true })
+      req.on('close', () => signal?.removeEventListener('abort', abort))
       const chunks = []
       let responseHeaders = null
       let trailers = null

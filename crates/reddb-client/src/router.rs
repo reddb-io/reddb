@@ -1,6 +1,6 @@
-//! Health-aware routing for the gRPC client (issue #171).
+//! Health-aware routing shared by the remote clients (issue #171).
 //!
-//! Replaces the dumb modulo round-robin in [`crate::grpc`] with a
+//! Replaces modulo round-robin with a
 //! deep module that owns three orthogonal pieces of state per
 //! endpoint:
 //!

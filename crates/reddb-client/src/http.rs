@@ -70,8 +70,28 @@ impl HttpClient {
     /// Callers that must not pay a round-trip up front (one-shot CLI
     /// commands) use this and let the first real request report failure.
     pub fn new(opts: HttpOptions) -> Result<Self> {
+        Self::new_with_pem(opts, None, None)
+    }
+
+    pub(crate) fn new_with_pem(
+        opts: HttpOptions,
+        ca: Option<&[u8]>,
+        identity: Option<&[u8]>,
+    ) -> Result<Self> {
         let mut builder =
             ClientBuilder::new().user_agent(format!("reddb-rs/{}", env!("CARGO_PKG_VERSION")));
+        if let Some(ca) = ca {
+            for certificate in reqwest::Certificate::from_pem_bundle(ca)
+                .map_err(|error| ClientError::new(ErrorCode::InvalidArgument, error.to_string()))?
+            {
+                builder = builder.add_root_certificate(certificate);
+            }
+        }
+        if let Some(identity) = identity {
+            builder = builder.identity(reqwest::Identity::from_pem(identity).map_err(|error| {
+                ClientError::new(ErrorCode::InvalidArgument, error.to_string())
+            })?);
+        }
         if opts.dangerous_accept_invalid_certs {
             builder = builder.danger_accept_invalid_certs(true);
         }

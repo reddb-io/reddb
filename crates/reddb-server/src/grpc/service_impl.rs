@@ -2983,8 +2983,7 @@ impl RedDb for GrpcRuntime {
         })?;
 
         let payload = request.into_inner().payload_json;
-        let routing_endpoints = reddb_wire::routing::routing_payload_endpoints(payload.as_bytes(), "endpoints");
-        let open = reddb_wire::replication::WalStreamOpen::decode_json(payload.as_bytes())
+        let (open, routing_endpoints) = reddb_wire::replication::WalStreamOpen::decode_json_with_endpoints(payload.as_bytes())
         .map_err(|err| Status::invalid_argument(err.to_string()))?;
         let handshake = crate::replication::StreamHandshake::new(
             open.replica_id.as_deref().unwrap_or("<anonymous>"),
@@ -3138,9 +3137,8 @@ impl RedDb for GrpcRuntime {
 
         Ok(Response::new(PayloadReply {
             ok: true,
-            payload: reddb_wire::routing::routing_payload(
-                &chunk.encode_json(), "primary_endpoints", &self.runtime.routing_endpoints(),
-            ).map_err(|error| Status::internal(error.to_string()))?,
+            payload: String::from_utf8(chunk.encode_json_with_endpoints(Some(&self.runtime.routing_endpoints())))
+                .expect("invariant: WAL chunk encoder emits UTF-8 JSON"),
         }))
     }
 

@@ -512,18 +512,17 @@ impl RedDBRuntime {
                     await_timeout_ms: 30_000,
                 };
                 let request = tonic::Request::new(JsonPayloadRequest {
-                    payload_json: reddb_wire::routing::routing_payload(
-                        &payload.encode_json(), "endpoints", &self.routing_endpoints(),
-                    ).expect("invariant: encoded WAL open and endpoints are JSON"),
+                    payload_json: String::from_utf8(payload.encode_json_with_endpoints(Some(&self.routing_endpoints())))
+                        .expect("invariant: WAL open encoder emits UTF-8 JSON"),
                 });
 
                 if let Ok(response) = client.pull_wal_records(request).await {
                     let response = response.into_inner();
-                    self.cache_routing_primary_endpoints(response.payload.as_bytes());
-                    if let Ok(chunk) = reddb_wire::replication::WalStreamChunk::decode_json(
+                    if let Ok((chunk, endpoints)) = reddb_wire::replication::WalStreamChunk::decode_json_with_endpoints(
                         response.payload.as_bytes(),
                     )
                     {
+                        self.cache_routing_primary_endpoints(endpoints);
                         let current_lsn = Some(chunk.current_lsn);
                         let oldest_available_lsn = chunk.oldest_available_lsn;
                         if chunk.needs_rebootstrap {

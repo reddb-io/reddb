@@ -61,7 +61,7 @@ export const MessageKind = Object.freeze({
   StreamCancel: 0x2D,
 })
 
-export const Features = Object.freeze({ PARAMS: 0x0000_0001 })
+export const Features = Object.freeze({ PARAMS: 0x0000_0001, TOPOLOGY: 0x0000_0002 })
 
 export const ValueTag = Object.freeze({
   Null: 0x00, Bool: 0x01, Int: 0x02, Float: 0x03, Text: 0x04,
@@ -136,6 +136,14 @@ export function setZstdProvider(mod) {
  * @returns {Promise<RedWireClient>}
  */
 export async function connectRedwireOverSocket(socket, opts = {}) {
+  const abort = () => socket.end()
+  if (opts.signal?.aborted) { abort(); throw new RedDBError('CLOSED', 'connection cancelled') }
+  opts.signal?.addEventListener('abort', abort, { once: true })
+  try { return await handshakeOverSocket(socket, opts) }
+  finally { opts.signal?.removeEventListener('abort', abort) }
+}
+
+async function handshakeOverSocket(socket, opts) {
   const auth = opts.auth ?? { kind: 'anonymous' }
   const reader = new FrameReader(socket)
 
@@ -247,6 +255,7 @@ export class RedWireClient {
 
   async call(method, params = {}) {
     if (method === 'topology') {
+      if ((this.serverFeatures & Features.TOPOLOGY) === 0) return null
       const corr = this.#corr()
       await writeFrame(this.socket, MessageKind.Topology, corr,
         new TextEncoder().encode(params.transport ?? 'red'))

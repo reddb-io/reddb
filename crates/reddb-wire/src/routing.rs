@@ -6,26 +6,11 @@ use serde_json::{json, Value};
 
 use crate::topology::Topology;
 
-pub const ROUTING_PROTOCOLS: [&str; 8] = [
-    "red", "reds", "grpc", "grpcs", "http", "https", "ws", "wss",
-];
+pub const ROUTING_PROTOCOLS: [&str; 8] =
+    ["red", "reds", "grpc", "grpcs", "http", "https", "ws", "wss"];
+pub const FEATURE_TOPOLOGY: u32 = 0x0000_0002;
 
 pub type RoutingEndpoints = BTreeMap<String, String>;
-
-pub fn routing_payload(
-    payload: &[u8],
-    field: &str,
-    endpoints: &RoutingEndpoints,
-) -> Result<String, serde_json::Error> {
-    let mut value: Value = serde_json::from_slice(payload)?;
-    value[field] = json!(endpoints);
-    serde_json::to_string(&value)
-}
-
-pub fn routing_payload_endpoints(payload: &[u8], field: &str) -> Option<RoutingEndpoints> {
-    let value: Value = serde_json::from_slice(payload).ok()?;
-    value.get(field).map(routing_endpoints)
-}
 
 /// Ignore unknown optional fields, but never advertise credentials or a URI
 /// for a different transport. In particular, TLS routes cannot downgrade.
@@ -82,25 +67,45 @@ pub fn topology_json(topology: &Topology) -> Value {
 
 pub fn topology_from_json(value: &Value) -> Option<Topology> {
     use crate::topology::{Endpoint, ReplicaInfo};
-    if value.get("version")?.as_u64()? != 1 { return None; }
+    if value.get("version")?.as_u64()? != 1 {
+        return None;
+    }
     let integer = |value: &Value| value.as_u64().or_else(|| value.as_str()?.parse().ok());
     let endpoint = value.get("primary")?;
     let replicas = value.get("replicas")?.as_array()?;
-    if replicas.len() > 256 { return None; }
+    if replicas.len() > 256 {
+        return None;
+    }
     Some(Topology {
         epoch: integer(value.get("epoch")?)?,
         primary: Endpoint {
             addr: endpoint.get("addr")?.as_str()?.to_string(),
-            region: endpoint.get("region").and_then(Value::as_str).unwrap_or_default().to_string(),
+            region: endpoint
+                .get("region")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
         },
-        replicas: replicas.iter().map(|replica| Some(ReplicaInfo {
-            addr: replica.get("addr")?.as_str()?.to_string(),
-            region: replica.get("region").and_then(Value::as_str).unwrap_or_default().to_string(),
-            healthy: replica.get("healthy")?.as_bool()?,
-            lag_ms: u32::try_from(replica.get("lag_ms")?.as_u64()?).ok()?,
-            last_applied_lsn: integer(replica.get("last_applied_lsn")?)?,
-            rebootstrapping: replica.get("rebootstrapping").and_then(Value::as_bool).unwrap_or(false),
-        })).collect::<Option<Vec<_>>>()?,
+        replicas: replicas
+            .iter()
+            .map(|replica| {
+                Some(ReplicaInfo {
+                    addr: replica.get("addr")?.as_str()?.to_string(),
+                    region: replica
+                        .get("region")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    healthy: replica.get("healthy")?.as_bool()?,
+                    lag_ms: u32::try_from(replica.get("lag_ms")?.as_u64()?).ok()?,
+                    last_applied_lsn: integer(replica.get("last_applied_lsn")?)?,
+                    rebootstrapping: replica
+                        .get("rebootstrapping")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?,
     })
 }
 
@@ -122,5 +127,41 @@ mod tests {
         assert_eq!(endpoints.len(), 3);
         assert_eq!(endpoints["red"], "red://node:5050");
         assert_eq!(endpoints["wss"], "wss://node:8443/redwire");
+    }
+
+    #[test]
+    fn topology_count_is_validated_before_allocation() {
+        let mut body = vec![0; 20];
+        body[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut bytes = vec![1];
+        bytes.extend_from_slice(&20u32.to_le_bytes());
+        bytes.extend_from_slice(&body);
+        assert_eq!(
+            crate::decode_topology(&bytes),
+            Err(crate::TopologyError::Truncated)
+        );
+    }
+
+    #[test]
+    fn cluster_auth_preserves_distinct_ports_without_embedding_credentials_in_routes() {
+        let spec = crate::parse_with_auth(
+            "grpc://alice:password@primary:55055,replica:55056?route=primary",
+        )
+        .expect("cluster URI");
+        assert_eq!(
+            spec.auth,
+            crate::ConnectionAuth::Basic {
+                user: "alice".into(),
+                pass: "password".into()
+            }
+        );
+        assert_eq!(
+            spec.target,
+            crate::ConnectionTarget::GrpcCluster {
+                primary: "http://primary:55055".into(),
+                replicas: vec!["http://replica:55056".into()],
+                force_primary: true,
+            }
+        );
     }
 }

@@ -5,6 +5,11 @@ Official drivers for talking to a RedDB server (or, where supported, embedding t
 For the wire-level details every driver implements, see
 [Connection Strings](./connection-strings.md), [SDK & Client Compatibility](./sdk-compatibility.md), and [ADR 0001 — RedWire](../../.red/adr/0001-redwire-tcp-protocol.md).
 
+The JS/TS remote client and Rust `Reddb::connect` support
+[topology discovery and replica routing](./topology-routing.md) across their
+remote transports. The guide describes the server advertisements, refresh,
+transaction pinning, consistency options, and the scope of driver support.
+
 ## Driver matrix
 
 | Language | Package / coordinate | Embedded | RedWire (TCP / TLS / mTLS) | HTTP / HTTPS | gRPC | Status | Page |

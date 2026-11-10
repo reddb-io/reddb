@@ -19,6 +19,8 @@ export interface TlsOptions {
 }
 
 export interface ConnectOptions {
+  /** WebSocket constructor for runtimes without a global WebSocket. */
+  WebSocketImpl?: new (url: string, protocols?: string | string[]) => object
   /** Authentication credentials for remote transports. */
   auth?: AuthOptions
   /** TLS options for `reds://` / `grpcs://` connections. */
