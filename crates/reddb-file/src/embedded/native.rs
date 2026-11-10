@@ -75,6 +75,8 @@ pub struct EmbeddedRdbWriterLock {
 }
 
 impl EmbeddedRdbWriterLock {
+    /// Fence the physical file, creating a valid empty embedded artifact if
+    /// missing. Writers must keep this guard until their final checkpoint.
     pub fn acquire(data_path: impl AsRef<Path>) -> RdbFileResult<Self> {
         let data_path = data_path.as_ref();
         let path = crate::layout::embedded_writer_lock_path(data_path);

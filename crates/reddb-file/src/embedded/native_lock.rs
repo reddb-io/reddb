@@ -21,25 +21,7 @@ pub(super) fn try_lock_writer(file: &File) -> io::Result<()> {
         target_os = "ios"
     ))]
     {
-        use std::os::fd::AsRawFd;
-        // OFD locks belong to this open description, not to the process. A
-        // temporary append/read handle closing must never release this lock.
-        // SAFETY: zero initializes all flock padding; the descriptor and
-        // pointer remain valid for the synchronous fcntl call.
-        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-        lock.l_type = libc::F_WRLCK as _;
-        lock.l_whence = libc::SEEK_SET as _;
-        lock.l_start = WRITER_BYTE as _;
-        lock.l_len = 1;
-        let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_SETLK, &lock) };
-        if result == -1 {
-            let error = io::Error::last_os_error();
-            if matches!(error.raw_os_error(), Some(libc::EAGAIN | libc::EACCES)) {
-                return Err(io::ErrorKind::WouldBlock.into());
-            }
-            return Err(error);
-        }
-        Ok(())
+        ofd_lock(file, WRITER_BYTE, 1, libc::F_WRLCK as _, false)
     }
     #[cfg(not(any(
         windows,
@@ -62,7 +44,13 @@ pub(super) fn lock_shared(file: &File) -> io::Result<()> {
     {
         windows_lock(file, 0, WRITER_BYTE, false, false)
     }
-    #[cfg(not(windows))]
+    // Darwin flock and OFD locks share a conflict domain. Keep publication
+    // disjoint from the lifetime byte, just as on Windows.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        ofd_lock(file, 0, WRITER_BYTE, libc::F_RDLCK as _, true)
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
     {
         fs2::FileExt::lock_shared(file)
     }
@@ -73,7 +61,13 @@ pub(super) fn try_lock_shared(file: &File) -> io::Result<()> {
     {
         windows_lock(file, 0, WRITER_BYTE, false, true)
     }
-    #[cfg(not(windows))]
+    // Darwin flock and OFD locks share a conflict domain. Keep publication
+    // disjoint from the lifetime byte, just as on Windows.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        ofd_lock(file, 0, WRITER_BYTE, libc::F_RDLCK as _, false)
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
     {
         fs2::FileExt::try_lock_shared(file)
     }
@@ -84,7 +78,13 @@ pub(super) fn lock_exclusive(file: &File) -> io::Result<()> {
     {
         windows_lock(file, 0, WRITER_BYTE, true, false)
     }
-    #[cfg(not(windows))]
+    // Darwin flock and OFD locks share a conflict domain. Keep publication
+    // disjoint from the lifetime byte, just as on Windows.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        ofd_lock(file, 0, WRITER_BYTE, libc::F_WRLCK as _, true)
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
     {
         fs2::FileExt::lock_exclusive(file)
     }
@@ -113,7 +113,13 @@ pub(super) fn unlock(file: &File) -> io::Result<()> {
         }
         Ok(())
     }
-    #[cfg(not(windows))]
+    // Darwin flock and OFD locks share a conflict domain. Keep publication
+    // disjoint from the lifetime byte, just as on Windows.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        ofd_lock(file, 0, WRITER_BYTE, libc::F_UNLCK as _, false)
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
     {
         fs2::FileExt::unlock(file)
     }
@@ -165,4 +171,48 @@ fn windows_lock(
         return Err(error);
     }
     Ok(())
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+))]
+fn ofd_lock(
+    file: &File,
+    offset: u64,
+    length: u64,
+    kind: libc::c_short,
+    wait: bool,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // OFD ownership survives closing unrelated read/append handles. Never
+    // fall back to process-owned F_SETLK, whose locks disappear on any close.
+    // SAFETY: zero initializes every field and padding byte of flock.
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = kind;
+    lock.l_whence = libc::SEEK_SET as _;
+    lock.l_start = offset as _;
+    lock.l_len = length as _;
+    let command = if wait {
+        libc::F_OFD_SETLKW
+    } else {
+        libc::F_OFD_SETLK
+    };
+    loop {
+        // SAFETY: file and the flock pointer stay live for this synchronous call.
+        let result = unsafe { libc::fcntl(file.as_raw_fd(), command, &lock) };
+        if result != -1 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        if matches!(error.raw_os_error(), Some(libc::EAGAIN | libc::EACCES)) {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        return Err(error);
+    }
 }
