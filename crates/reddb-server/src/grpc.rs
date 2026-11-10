@@ -955,8 +955,11 @@ mod grpc_query_value_tests {
     async fn grpc_query_honors_per_request_commit_policy() {
         let _env_lock = env_lock().lock().expect("env lock");
         let _env = EnvGuard::set(&[("RED_PRIMARY_COMMIT_POLICY", "ack_n=1")]);
-        let runtime =
-            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        let runtime = RedDBRuntime::with_options(
+            crate::api::RedDBOptions::in_memory()
+                .with_replication(crate::replication::ReplicationConfig::primary()),
+        )
+        .expect("runtime");
         runtime
             .execute_query("CREATE TABLE grpc_request_policy (id INTEGER)")
             .expect("create table");

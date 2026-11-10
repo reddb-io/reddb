@@ -100,7 +100,7 @@ impl RedDBServer {
                     object.insert("validation".to_string(), validation.clone());
                     return json_response(422, crate::json::Value::Object(object));
                 }
-                if err.to_string().contains("commit policy timed out") {
+                if matches!(&err, RedDBError::CommitUncertain { .. }) {
                     return json_error(504, err.to_string());
                 }
                 // Issue #769 — an aggregating executor blew its

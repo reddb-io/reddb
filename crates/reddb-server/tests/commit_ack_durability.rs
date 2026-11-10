@@ -343,3 +343,24 @@ fn transaction_cannot_replace_ack_count_with_a_smaller_quorum() {
         1
     );
 }
+
+#[test]
+fn cte_reads_do_not_acquire_a_write_commit_policy() {
+    let _lock = ENV.lock().unwrap();
+    let _policy = EnvGuard::set("RED_PRIMARY_COMMIT_POLICY", None);
+    let runtime = primary();
+    let registry = PreparedRegistry::new();
+    let executor = QueryRequestExecutor::new(&runtime, &registry);
+    let _strict = EnvGuard::set("RED_PRIMARY_COMMIT_POLICY", Some("ack_n=1"));
+    let result = executor
+        .execute(
+            QueryRequest::sql(
+                "WITH q AS (SELECT id FROM commits) SELECT id FROM q",
+                vec![],
+            )
+            .with_commit_policy(CommitPolicy::Local),
+        )
+        .unwrap();
+    assert!(result.result.records.is_empty());
+    assert_eq!(runtime.primary_logical_head_lsn(), 0);
+}

@@ -717,10 +717,14 @@ fn commit_statement_kind(sql: &str, prepared: Option<&QueryExpr>) -> RedDBResult
     {
         inner = statement;
     }
-    let parsed = if prepared.is_none() {
-        parse_multi(inner).ok()
-    } else {
+    let parsed = if prepared.is_some() {
         None
+    } else if super::impl_core::has_with_prefix(inner) {
+        reddb_rql::parser::parse(inner)
+            .ok()
+            .and_then(|query| crate::storage::query::executors::inline_ctes(query).ok())
+    } else {
+        parse_multi(inner).ok()
     };
     let expr = prepared.or(parsed.as_ref());
     let write = matches!(expr, Some(QueryExpr::Insert(_) | QueryExpr::Update(_) | QueryExpr::Delete(_)))
