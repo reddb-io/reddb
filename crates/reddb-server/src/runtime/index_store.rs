@@ -1097,6 +1097,7 @@ pub(crate) enum MutationTestPhase {
     DmlPostImageCandidate,
     StoragePublished,
     BeforeResultCacheInvalidation,
+    TransactionWalCommitted,
     BeforeEvents,
     BeforeUndoTopology,
     UndoIndexRemoved,

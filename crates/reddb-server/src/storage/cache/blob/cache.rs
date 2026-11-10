@@ -677,6 +677,7 @@ pub struct BlobCache {
     shards: Vec<RwLock<Shard>>,
     namespaces: RwLock<HashSet<String>>,
     namespace_generations: RwLock<HashMap<String, u64>>,
+    pending_namespace_fences: RwLock<HashSet<String>>,
     tag_index: RwLock<HashMap<ScopedLabel, HashSet<BlobCacheKey>>>,
     dependency_index: RwLock<HashMap<ScopedLabel, HashSet<BlobCacheKey>>>,
     l2: Option<Arc<dyn BlobCacheL2Backend>>,
@@ -756,6 +757,7 @@ impl BlobCache {
             shards,
             namespaces: RwLock::new(HashSet::new()),
             namespace_generations: RwLock::new(HashMap::new()),
+            pending_namespace_fences: RwLock::new(HashSet::new()),
             tag_index: RwLock::new(HashMap::new()),
             dependency_index: RwLock::new(HashMap::new()),
             l2,
@@ -1258,8 +1260,26 @@ impl BlobCache {
         }
     }
 
-    pub(crate) fn try_invalidate_namespace(&self, namespace: &str) -> Result<bool, CacheError> {
+    /// Fence existing entries without publishing to L2. The caller must
+    /// persist the namespace invalidation after its WAL capture ends.
+    pub(crate) fn invalidate_namespace_in_memory(&self, namespace: &str) {
         if !self.namespace_exists(namespace) {
+            return;
+        }
+        let current = self.current_generation(namespace);
+        let mut generations = self.namespace_generations.write();
+        let generation = generations.entry(namespace.to_string()).or_insert(current);
+        *generation = generation.saturating_add(1);
+        self.pending_namespace_fences
+            .write()
+            .insert(namespace.to_string());
+        self.namespace_flush_epoch.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn try_invalidate_namespace(&self, namespace: &str) -> Result<bool, CacheError> {
+        if !self.namespace_exists(namespace)
+            && !self.pending_namespace_fences.read().contains(namespace)
+        {
             return Ok(false);
         }
         let current = self.current_generation(namespace);
@@ -1272,6 +1292,9 @@ impl BlobCache {
         } else {
             Ok(())
         };
+        if persisted.is_ok() {
+            self.pending_namespace_fences.write().remove(namespace);
+        }
         self.stats.namespace_flushes.fetch_add(1, Ordering::Relaxed);
         persisted.map(|()| true)
     }

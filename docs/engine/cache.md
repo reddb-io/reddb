@@ -88,7 +88,10 @@ after at least one second without a matching invalidation.
 A restart before promotion recomputes the result. Persisted results carry a
 data epoch recorded with the data's WAL commit; a result from an older epoch
 is recomputed after recovery. This can also discard an unrelated result after
-a write. Results saved in the previous payload format are recomputed once on
+a write. Within one process, tracked table and join results can remain usable
+across unrelated writes when the bounded publication history proves that none
+of their dependencies changed. A missing history or an uncertain publication
+causes a cache miss. Results saved in the previous payload format are recomputed once on
 upgrade. Statements rejected by the normal safety gate
 still do not persist: volatile builtins, active-transaction reads,
 oversized result sets, system-collection and vault results, and pre-serialized fast paths are

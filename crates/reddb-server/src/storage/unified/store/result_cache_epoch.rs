@@ -1,6 +1,7 @@
 use super::commit::StoreWalAction;
 use super::*;
 use std::cell::Cell;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 thread_local! {
@@ -9,6 +10,7 @@ thread_local! {
 
 const CACHE_COLLECTION: &str = "red.cache.blob_l2";
 const EPOCH_KEY: &str = "__result_data_epoch_v1";
+const HISTORY_LIMIT: usize = 256;
 
 #[derive(Default)]
 pub(super) struct ResultCacheEpochState {
@@ -16,6 +18,10 @@ pub(super) struct ResultCacheEpochState {
     id: AtomicU64,
     pending: AtomicUsize,
     poisoned: AtomicBool,
+    // None means a publication whose effects cannot be limited to collections.
+    history: parking_lot::Mutex<VecDeque<(u64, Option<HashSet<String>>)>>,
+    #[cfg(test)]
+    on_pending: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 pub(super) struct ResultCacheEpochGuard {
@@ -39,6 +45,11 @@ impl Drop for ResultCacheEpochGuard {
 }
 
 impl UnifiedStore {
+    #[cfg(test)]
+    pub(crate) fn set_result_cache_pending_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self.result_cache_epoch.on_pending.lock() = hook;
+    }
+
     // Boot-only process telemetry changes on every restart but cannot affect
     // persisted user-table results. System-collection results are not saved.
     pub(crate) fn with_boot_system_info_update<T>(&self, f: impl FnOnce() -> T) -> T {
@@ -79,6 +90,7 @@ impl UnifiedStore {
     /// Load only after WAL replay, before any caller can mutate the store.
     pub(crate) fn load_result_cache_epoch(&self) -> Result<(), StoreError> {
         let _publication = self.vault_publication_lock.lock();
+        self.result_cache_epoch.history.lock().clear();
         if let Some((id, epoch)) = self.read_result_cache_epoch_marker()? {
             self.result_cache_epoch.id.store(id.raw(), Ordering::SeqCst);
             self.result_cache_epoch.epoch.store(epoch, Ordering::SeqCst);
@@ -103,6 +115,62 @@ impl UnifiedStore {
             return None;
         }
         (epoch != 0).then_some(epoch)
+    }
+
+    /// A pending publication can be read across only after checking an
+    /// individual result's dependencies with `result_cache_unchanged_since`.
+    pub(crate) fn result_cache_read_epoch(&self) -> Option<u64> {
+        let state = &self.result_cache_epoch;
+        let _history = state.history.lock();
+        if state.poisoned.load(Ordering::SeqCst) {
+            return None;
+        }
+        let epoch = state.epoch.load(Ordering::SeqCst);
+        (epoch != 0).then_some(epoch)
+    }
+
+    pub(crate) fn result_cache_unchanged_since(
+        &self,
+        epoch: u64,
+        scopes: &HashSet<String>,
+    ) -> bool {
+        let state = &self.result_cache_epoch;
+        let history = state.history.lock();
+        if state.poisoned.load(Ordering::SeqCst) {
+            return false;
+        }
+        let current = state.epoch.load(Ordering::SeqCst);
+        if epoch == 0 || epoch > current {
+            return false;
+        }
+        if epoch == current {
+            return true;
+        }
+        if scopes.is_empty() {
+            return false;
+        }
+        let mut next = epoch + 1;
+        for (version, changed) in history.iter().filter(|(version, _)| *version > epoch) {
+            if *version != next
+                || changed.as_ref().is_none_or(|changed| {
+                    changed.iter().any(|collection| {
+                        scopes.iter().any(|scope| {
+                            scope.eq_ignore_ascii_case(collection)
+                                || scope.rsplit('.').next().is_some_and(|name| {
+                                    collection
+                                        .rsplit('.')
+                                        .next()
+                                        .is_some_and(|other| name.eq_ignore_ascii_case(other))
+                                })
+                        })
+                    })
+                })
+            {
+                return false;
+            }
+            next = version.saturating_add(1);
+        }
+        next == current.saturating_add(1)
     }
 
     pub(crate) fn result_cache_epoch_uninitialized(&self) -> bool {
@@ -181,8 +249,9 @@ impl UnifiedStore {
             return Ok(());
         }
         let _publication = self.vault_publication_lock.lock();
-        let mut actions = vec![StoreWalAction::CreateCollection {
-            name: collection.to_string(),
+        let mut actions = vec![StoreWalAction::DeleteEntityRecord {
+            collection: collection.to_string(),
+            entity_id: 0,
         }];
         if let Some(guard) = self.append_result_cache_epoch_action(&mut actions)? {
             guard.commit();
@@ -214,6 +283,7 @@ impl UnifiedStore {
         {
             return Ok(None);
         }
+        let mut history = state.history.lock();
         state.pending.fetch_add(1, Ordering::SeqCst);
         let guard = ResultCacheEpochGuard {
             state: Arc::clone(state),
@@ -235,8 +305,41 @@ impl UnifiedStore {
         let action =
             StoreWalAction::upsert_entity(CACHE_COLLECTION, &entity, None, self.format_version());
         self.apply_replayed_action(&action, true)?;
+        let mut changed = HashSet::new();
+        let scoped = actions.iter().all(|action| {
+            let collection = match action {
+                StoreWalAction::UpsertEntityRecord { collection, .. }
+                | StoreWalAction::DeleteEntityRecord { collection, .. }
+                | StoreWalAction::BulkUpsertEntityRecords { collection, .. }
+                | StoreWalAction::RefreshCollection { collection, .. } => collection,
+                StoreWalAction::CreateCollection { .. }
+                | StoreWalAction::DropCollection { .. }
+                | StoreWalAction::SetAuxMetadata { .. } => return false,
+            };
+            if collection == CACHE_COLLECTION {
+                return true;
+            }
+            let canonical =
+                reddb_engine::storage::system_collection_names::canonical_or_self(collection);
+            if canonical.starts_with("red.") || collection.len() > 256 || changed.len() >= 16 {
+                return false;
+            }
+            changed.insert(collection.clone());
+            true
+        });
+        history.push_back((next, scoped.then_some(changed)));
+        while history.len() > HISTORY_LIMIT {
+            history.pop_front();
+        }
         state.epoch.store(next, Ordering::SeqCst);
         actions.push(action);
+        drop(history);
+        #[cfg(test)]
+        let hook = state.on_pending.lock().clone();
+        #[cfg(test)]
+        if let Some(hook) = hook {
+            hook();
+        }
         Ok(Some(guard))
     }
 }
@@ -244,6 +347,72 @@ impl UnifiedStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_publication_only_fences_results_with_matching_dependencies() {
+        let store = UnifiedStore::new();
+        assert_eq!(store.ensure_result_cache_epoch().expect("initial epoch"), 1);
+        let _publication = store.vault_publication_lock.lock();
+        let mut actions = vec![StoreWalAction::DeleteEntityRecord {
+            collection: "noise".into(),
+            entity_id: 7,
+        }];
+        let guard = store
+            .append_result_cache_epoch_action(&mut actions)
+            .unwrap()
+            .unwrap();
+        assert_eq!(store.result_cache_epoch(), None);
+        assert_eq!(store.result_cache_read_epoch(), Some(2));
+        assert!(store.result_cache_unchanged_since(1, &HashSet::from(["items".into()])));
+        assert!(!store.result_cache_unchanged_since(1, &HashSet::from(["noise".into()])));
+        guard.commit();
+        let mut actions = vec![StoreWalAction::SetAuxMetadata { bytes: vec![] }];
+        let guard = store
+            .append_result_cache_epoch_action(&mut actions)
+            .unwrap()
+            .unwrap();
+        assert!(!store.result_cache_unchanged_since(1, &HashSet::from(["items".into()])));
+        drop(guard);
+        assert_eq!(store.result_cache_read_epoch(), None);
+        assert!(!store.result_cache_unchanged_since(3, &HashSet::from(["items".into()])));
+    }
+
+    #[test]
+    fn missing_history_fails_closed_and_mixed_batches_fence_each_dependency() {
+        let store = UnifiedStore::new();
+        store.ensure_result_cache_epoch().unwrap();
+        let _publication = store.vault_publication_lock.lock();
+        for _ in 0..=HISTORY_LIMIT {
+            let mut actions = vec![StoreWalAction::DeleteEntityRecord {
+                collection: "noise".into(),
+                entity_id: 7,
+            }];
+            store
+                .append_result_cache_epoch_action(&mut actions)
+                .unwrap()
+                .unwrap()
+                .commit();
+        }
+        assert!(!store.result_cache_unchanged_since(1, &HashSet::from(["items".into()])));
+        let epoch = store.result_cache_epoch().unwrap();
+        let mut actions = vec![
+            StoreWalAction::DeleteEntityRecord {
+                collection: "noise".into(),
+                entity_id: 1,
+            },
+            StoreWalAction::DeleteEntityRecord {
+                collection: "items".into(),
+                entity_id: 2,
+            },
+        ];
+        let guard = store
+            .append_result_cache_epoch_action(&mut actions)
+            .unwrap()
+            .unwrap();
+        assert!(!store.result_cache_unchanged_since(epoch, &HashSet::from(["items".into()])));
+        assert!(store.result_cache_unchanged_since(epoch, &HashSet::from(["other".into()])));
+        guard.commit();
+    }
 
     #[test]
     fn pending_or_failed_epoch_publication_disables_result_cache() {

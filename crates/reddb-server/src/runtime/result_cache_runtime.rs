@@ -1,6 +1,10 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+thread_local! {
+    static DEFERRED_CACHE_INVALIDATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 use super::{RedDBRuntime, RuntimeQueryResult, RuntimeResultCacheEntry};
 
 const RESULT_CACHE_BACKEND_KEY: &str = "runtime.result_cache.backend";
@@ -304,6 +308,36 @@ fn decode_result_cache_payload(
 }
 
 impl RedDBRuntime {
+    fn invalidate_result_cache_during_wal_capture(&self) {
+        DEFERRED_CACHE_INVALIDATION.with(|pending| pending.set(true));
+        let _promotion = self.inner.result_blob_promotion.lock();
+        let mut cache = self.inner.result_cache.write();
+        cache.0.clear();
+        cache.1.clear();
+        let mut entries = self.inner.result_blob_entries.write();
+        entries.0.clear();
+        entries.1.clear();
+        entries.2 = true;
+        entries.3 = entries.3.wrapping_add(1);
+        entries.4.clear();
+        entries.5 = None;
+        let mut ask = self.inner.ask_answer_cache_entries.write();
+        ask.0.clear();
+        ask.1.clear();
+        self.inner
+            .result_blob_cache
+            .invalidate_namespace_in_memory(RESULT_CACHE_BLOB_NAMESPACE);
+        self.inner
+            .result_blob_cache
+            .invalidate_namespace_in_memory(super::ASK_ANSWER_CACHE_NAMESPACE);
+    }
+
+    pub(super) fn flush_deferred_cache_invalidation(&self) {
+        if DEFERRED_CACHE_INVALIDATION.with(|pending| pending.replace(false)) {
+            self.invalidate_result_cache();
+        }
+    }
+
     fn result_cache_backend(&self) -> RuntimeResultCacheBackend {
         match self
             .config_string(RESULT_CACHE_BACKEND_KEY, RESULT_CACHE_DEFAULT_BACKEND)
@@ -347,7 +381,7 @@ impl RedDBRuntime {
                 }
                 store.ensure_result_cache_epoch().ok()
             } else {
-                store.result_cache_epoch()
+                store.result_cache_read_epoch()
             }
         } else {
             Some(0)
@@ -410,11 +444,8 @@ impl RedDBRuntime {
                 epoch.and_then(|epoch| self.get_blob_result_cache_entry(key, epoch))
             }
             RuntimeResultCacheBackend::Shadow => {
-                let legacy = epoch.and_then(|epoch| {
-                    (self.inner.db.store().result_cache_epoch() == Some(epoch))
-                        .then(|| self.get_legacy_result_cache_entry(key, Some(epoch)))
-                        .flatten()
-                });
+                let legacy =
+                    epoch.and_then(|epoch| self.get_legacy_result_cache_entry(key, Some(epoch)));
                 let blob = epoch.and_then(|epoch| self.get_blob_result_cache_entry(key, epoch));
                 if let (Some(ref legacy), Some(ref blob)) = (&legacy, &blob) {
                     if result_cache_fingerprint(legacy) != result_cache_fingerprint(blob) {
@@ -442,7 +473,7 @@ impl RedDBRuntime {
         let cache = self.inner.result_cache.read();
         cache.0.get(key).and_then(|entry| {
             if entry.cached_at.elapsed().as_secs() < ttl
-                && epoch.is_none_or(|epoch| entry.data_epoch == epoch)
+                && epoch.is_none_or(|_| self.result_cache_entry_reusable(entry))
             {
                 Some(entry.result.clone())
             } else {
@@ -451,10 +482,23 @@ impl RedDBRuntime {
         })
     }
 
-    fn get_blob_result_cache_entry(&self, key: &str, epoch: u64) -> Option<RuntimeQueryResult> {
-        if self.inner.db.store().result_cache_epoch() != Some(epoch) {
-            return None;
+    fn result_cache_entry_reusable(&self, entry: &RuntimeResultCacheEntry) -> bool {
+        let store = self.inner.db.store();
+        if !matches!(
+            entry.result.engine,
+            "runtime-table" | "runtime-table-rls" | "runtime-join" | "runtime-join-rls"
+        ) || entry.scopes.is_empty()
+            || entry
+                .scopes
+                .iter()
+                .any(|scope| store.get_collection(scope).is_none())
+        {
+            return store.result_cache_epoch() == Some(entry.data_epoch);
         }
+        store.result_cache_unchanged_since(entry.data_epoch, &entry.scopes)
+    }
+
+    fn get_blob_result_cache_entry(&self, key: &str, epoch: u64) -> Option<RuntimeQueryResult> {
         self.get_blob_result_cache_entry_from_blob_cache(key, epoch)
     }
 
@@ -467,7 +511,7 @@ impl RedDBRuntime {
             let cache = self.inner.result_blob_entries.read();
             if cache.4.contains(key) {
                 let entry = cache.0.get(key)?;
-                return (entry.data_epoch == epoch
+                return (self.result_cache_entry_reusable(entry)
                     && entry.cached_at.elapsed().as_secs() < self.result_cache_ttl_secs())
                 .then(|| entry.result.clone());
             }
@@ -479,7 +523,9 @@ impl RedDBRuntime {
                 .result_blob_cache
                 .get(RESULT_CACHE_BLOB_NAMESPACE, key)?;
             if let Some(entry) = cache.0.get(key) {
-                return (entry.data_epoch == epoch).then(|| entry.result.clone());
+                return self
+                    .result_cache_entry_reusable(entry)
+                    .then(|| entry.result.clone());
             }
             (hit, cache.3)
         };
@@ -783,6 +829,10 @@ impl RedDBRuntime {
     }
 
     fn invalidate_result_cache_inner(&self, clear_embedded: bool) {
+        if crate::storage::UnifiedStore::deferred_store_wal_capture_active() {
+            self.invalidate_result_cache_during_wal_capture();
+            return;
+        }
         let _promotion = self.inner.result_blob_promotion.lock();
         let mut cache = self.inner.result_cache.write();
         cache.0.clear();
@@ -814,6 +864,10 @@ impl RedDBRuntime {
             table,
             super::index_store::MutationTestPhase::BeforeResultCacheInvalidation,
         );
+        if crate::storage::UnifiedStore::deferred_store_wal_capture_active() {
+            self.invalidate_result_cache_during_wal_capture();
+            return;
+        }
         let _promotion = self.inner.result_blob_promotion.lock();
         let previous_epoch = self.inner.result_blob_entries.read().6;
         let current_epoch = self.inner.db.store().result_cache_epoch();
@@ -1075,6 +1129,81 @@ mod crash_tests {
     }
 
     #[test]
+    fn unrelated_pending_write_keeps_a_cached_read_available() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(
+            directory.path().join("pending-unrelated.rdb"),
+        ))
+        .expect("runtime");
+        for sql in [
+            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
+            "CREATE TABLE cached_items (id INT)",
+            "CREATE TABLE unrelated_items (id INT)",
+            "INSERT INTO cached_items (id) VALUES (1)",
+            "INSERT INTO unrelated_items (id) VALUES (1)",
+            "SELECT id FROM cached_items ORDER BY id",
+            "SELECT id FROM cached_items ORDER BY id",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        let before = runtime.result_cache_metrics();
+        runtime
+            .execute_query("SELECT id FROM cached_items ORDER BY id")
+            .expect("warm hit");
+        assert_eq!(runtime.result_cache_metrics().0 - before.0, 1);
+        let (pending_tx, pending_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let resume_rx = Arc::new(parking_lot::Mutex::new(resume_rx));
+        runtime
+            .db()
+            .store()
+            .set_result_cache_pending_hook(Some(Arc::new(move || {
+                pending_tx.send(()).expect("report pending");
+                resume_rx
+                    .lock()
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("resume");
+            })));
+        let writer = runtime.clone();
+        let writer_thread = std::thread::spawn(move || {
+            writer.execute_query("UPDATE unrelated_items SET id = 2 WHERE id = 1")
+        });
+        pending_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("publication pending");
+        let before = runtime.result_cache_metrics();
+        let reader = runtime.clone();
+        let (read_tx, read_rx) = mpsc::channel();
+        let reader_thread = std::thread::spawn(move || {
+            read_tx
+                .send(reader.execute_query("SELECT id FROM cached_items ORDER BY id"))
+                .unwrap();
+        });
+        let result = read_rx.recv_timeout(Duration::from_secs(3));
+        runtime.db().store().set_result_cache_pending_hook(None);
+        resume_tx.send(()).expect("resume writer");
+        writer_thread.join().unwrap().expect("write");
+        reader_thread.join().unwrap();
+        assert_eq!(
+            result
+                .expect("cached read must not wait")
+                .expect("read")
+                .result
+                .records
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime.result_cache_metrics().0 - before.0,
+            1,
+            "unrelated pending write must preserve the hit"
+        );
+    }
+
+    #[test]
     fn committed_insert_before_cache_invalidation_does_not_recover_stale_result() {
         if let Some(path) = std::env::var_os(CHILD_PATH) {
             let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(path))
@@ -1087,17 +1216,67 @@ mod crash_tests {
             ] {
                 runtime.execute_query(sql).expect("prepare cache");
             }
-            runtime.checkpoint().expect("persist cached result");
+            let operation = std::env::var(CHILD_OPERATION).expect("child operation");
+            if operation == "transaction" {
+                let (key, mut old_entry) = {
+                    let cache = runtime.inner.result_blob_entries.read();
+                    let (key, entry) = cache.0.iter().next().expect("warm original result");
+                    (key.clone(), entry.clone())
+                };
+                super::super::execution_context::set_current_connection_id(901);
+                runtime.execute_query("BEGIN").expect("begin transaction");
+                runtime
+                    .execute_query("INSERT INTO cache_gap (id) VALUES (2)")
+                    .expect("stage insert");
+                let reader = runtime.clone();
+                std::thread::spawn(move || {
+                    super::super::execution_context::set_current_connection_id(902);
+                    let read = reader
+                        .execute_query("SELECT id FROM cache_gap ORDER BY id")
+                        .expect("cache committed view");
+                    assert_eq!(
+                        read.result.records.len(),
+                        1,
+                        "uncommitted row must not be visible"
+                    );
+                    // Fault-inject an old durable result after transaction DML.
+                    // Normal queries bypass the cache while any xid is active.
+                    old_entry.data_epoch = reader.db().store().result_cache_epoch().expect("epoch");
+                    let payload =
+                        super::encode_result_cache_payload(&old_entry).expect("encode old result");
+                    reader
+                        .inner
+                        .result_blob_cache
+                        .put(
+                            super::RESULT_CACHE_BLOB_NAMESPACE,
+                            &key,
+                            crate::storage::cache::BlobCachePut::new(payload),
+                        )
+                        .expect("persist old result");
+                    reader.checkpoint().expect("persist cached result");
+                    let hit = reader
+                        .inner
+                        .result_blob_cache
+                        .get(super::RESULT_CACHE_BLOB_NAMESPACE, &key)
+                        .expect("old entry remains");
+                    assert!(super::decode_result_cache_payload(hit.value()).is_some());
+                })
+                .join()
+                .expect("pre-commit reader");
+            } else {
+                runtime.checkpoint().expect("persist cached result");
+            }
+            let transaction = operation == "transaction";
             *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(
-                |collection, phase| {
-                    if collection == "cache_gap"
-                        && phase == super::super::index_store::MutationTestPhase::BeforeResultCacheInvalidation
+                move |collection, phase| {
+                    if (transaction && phase == super::super::index_store::MutationTestPhase::TransactionWalCommitted)
+                        || (!transaction && collection == "cache_gap"
+                            && phase == super::super::index_store::MutationTestPhase::BeforeResultCacheInvalidation)
                     {
                         std::process::exit(86);
                     }
                 },
             ));
-            let operation = std::env::var(CHILD_OPERATION).expect("child operation");
             if operation.starts_with("wal_") {
                 std::env::set_var("REDDB_EMBEDDED_RDB_CRASH_AT", &operation);
             }
@@ -1108,6 +1287,7 @@ mod crash_tests {
                 | "wal_after_superblock_write" => "INSERT INTO cache_gap (id) VALUES (2)",
                 "update" => "UPDATE cache_gap SET id = 2 WHERE id = 1",
                 "delete" => "DELETE FROM cache_gap WHERE id = 1",
+                "transaction" => "COMMIT",
                 _ => panic!("unknown operation"),
             };
             runtime
@@ -1121,6 +1301,7 @@ mod crash_tests {
             ("insert", Some(vec![1, 2])),
             ("update", Some(vec![2])),
             ("delete", Some(vec![])),
+            ("transaction", Some(vec![1, 2])),
             ("wal_after_frame_write", None),
             ("wal_after_frame_sync", None),
             ("wal_after_superblock_write", None),

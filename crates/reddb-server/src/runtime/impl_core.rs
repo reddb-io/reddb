@@ -1535,6 +1535,11 @@ impl RedDBRuntime {
                                 undo?;
                                 return Err(err);
                             }
+                            #[cfg(test)]
+                            self.index_store_ref().mutation_test_hook(
+                                "",
+                                super::index_store::MutationTestPhase::TransactionWalCommitted,
+                            );
                             Ok(publication)
                         });
                         if context.is_err() {

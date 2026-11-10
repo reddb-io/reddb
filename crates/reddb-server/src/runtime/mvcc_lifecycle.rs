@@ -146,6 +146,7 @@ impl RedDBRuntime {
         let capture = DmlWalCapture::begin();
         let result = f();
         let captured = capture.finish();
+        self.flush_deferred_cache_invalidation();
         match result {
             Ok(value) => {
                 self.record_pending_store_wal_actions(conn_id, captured);
@@ -179,15 +180,18 @@ impl RedDBRuntime {
         let result = f();
         let captured = capture.finish();
         if result.is_err() && deletions.has_pending() {
+            self.flush_deferred_cache_invalidation();
             return result;
         }
-        deletions.publish(self, || {
+        let published = deletions.publish(self, || {
             self.inner
                 .db
                 .store()
                 .append_deferred_store_wal_actions(captured)
                 .map_err(|err| RedDBError::Internal(err.to_string()))
-        })?;
+        });
+        self.flush_deferred_cache_invalidation();
+        published?;
         result
     }
 
