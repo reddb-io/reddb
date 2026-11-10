@@ -34,19 +34,23 @@ Blob Cache Interface
         +-- L1 memory cache
         |     hot blobs, byte-bounded, sharded
         |
+        +-- L2 internal collection
+        |     durable blobs in the same .rdb file
+        |
         +-- bounded maintenance worker
               rotating TTL and namespace-generation sweep
 ```
 
-The normal server runtime is process-local and memory-only. Its dedicated
-maintenance worker reclaims expired and namespace-flushed entries in small,
-rotating batches without using query workers. Cache state and invalidation are
-node-local; the HTTP API does not add replication or cluster-wide coherence.
+The normal server runtime keeps hot values in process-local L1 and durable cache
+rows in the hidden `red.cache.blob_l2` collection inside the primary `.rdb`.
+Its dedicated maintenance worker reclaims expired and namespace-flushed L1
+entries in small, rotating batches without using query workers; L2 expiry is
+also enforced on reads. Cache state and invalidation are node-local; the HTTP
+API does not add replication or cluster-wide coherence.
 
-The engine crate also contains an opt-in file-backed L2 implementation. It is
-not enabled by the server because it currently needs a separate pager file,
-which is incompatible with RedDB's single-file packaging requirement. A server
-restart therefore starts this cache cold.
+Direct engine callers can still opt into the legacy standalone file backend,
+but the server uses the internal backend so restart recovery preserves the
+single-file packaging contract.
 
 ## TTL Policy
 
@@ -78,7 +82,7 @@ Blob Cache should make "does this key exist?" cheap without trusting
 probabilistic data as truth.
 
 1. Check L1 for a hot exact entry.
-2. If an embedded caller explicitly enabled L2, check its namespace synopsis.
+2. If L2 is enabled, check its namespace synopsis.
 3. If the synopsis says absent, skip L2.
 4. If the synopsis says maybe, verify against L2 metadata for an exact answer.
 

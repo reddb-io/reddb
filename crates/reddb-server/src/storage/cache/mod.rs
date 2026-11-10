@@ -60,14 +60,13 @@ pub use sweeper::{
 };
 
 // ---------------------------------------------------------------------------
-// L2 Blob Cache backup helpers (issue #148 follow-up)
+// Legacy standalone L2 Blob Cache backup helpers (issue #148 follow-up)
 // ---------------------------------------------------------------------------
 //
-// `BlobCache` writes the L2 metadata B+ tree and blob chains into a
-// single pager file at `cache.blob.l2_path` plus the reddb-file control
-// sidecar. Both files are required for a usable restore — the pager file
-// holds the data, the control file holds the root-page pointer +
-// bytes-in-use.
+// The normal server L2 lives in `red.cache.blob_l2` inside the primary
+// `.rdb`, so ordinary database backup and restore already cover it. These
+// helpers remain for direct engine callers that explicitly use the legacy
+// `cache.blob.l2_path` pager plus its reddb-file control sidecar.
 //
 // When the operator opts into `include_blob_cache=true` on a backup
 // (`red.config.backup.include_blob_cache`), we upload both files to

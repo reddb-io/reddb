@@ -17,9 +17,9 @@ The metric source of truth is
 the source disagree, the source wins — file an issue and update this
 page.
 
-Backup and restore concerns for the L2 spill directory are tracked
-separately in [`blob-cache-backup-restore.md`](./blob-cache-backup-restore.md)
-(in flight via Lane #187).
+The server's L2 lives in the primary `.rdb`; backup and compatibility
+standalone-pager details are in
+[`blob-cache-backup-restore.md`](./blob-cache-backup-restore.md).
 
 ---
 
@@ -77,7 +77,7 @@ sum(cache_blob_l1_bytes_in_use) / scalar(max(cache_blob_l1_bytes_max))
 ```
 
 `cache_blob_l1_bytes_max` is reported as a gauge so the panel adapts
-when operators bump `RED_BLOB_L1_BYTES_MAX` without redeploying the
+when operators bump `REDDB_CACHE_BLOB_L1_BYTES_MAX` without redeploying the
 dashboard.
 
 ### 2.3 L2 saturation
@@ -167,7 +167,7 @@ groups:
           summary: "Blob Cache L1 above 95%"
           description: |
             L1 sustained >95% for 15m. Eviction pressure will dominate
-            and tail latency will rise. Consider raising RED_BLOB_L1_BYTES_MAX.
+            and tail latency will rise. Consider raising REDDB_CACHE_BLOB_L1_BYTES_MAX.
 
       - alert: BlobCacheHitRateLow
         expr: |

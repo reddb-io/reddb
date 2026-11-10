@@ -1,13 +1,14 @@
 //! Byte-oriented Blob Cache.
 //!
-//! This is the first internal tracer for RedDB's exact-key blob cache. It is
-//! intentionally L1-only: a sharded, byte-bounded, in-process cache with SIEVE
-//! eviction, namespace caps, and opaque content metadata. Durable L2 storage,
-//! dependency invalidation, and public APIs land in follow-up slices.
+//! L1 is a sharded, byte-bounded in-process cache with SIEVE eviction. L2 can
+//! use either the legacy standalone pager or RedDB's internal single-file
+//! collection backend.
 
 use super::config::{BlobCacheConfig, L2Compression, L2PromotionPolicy};
 use super::entry::{effective_expires_at_unix_ms, jitter_seed, Entry};
 use super::l2::BlobCacheL2;
+use super::l2_backend::BlobCacheL2Backend;
+use super::l2_store::StoreBlobCacheL2;
 use super::shard::{InsertOutcome, Lookup, Shard, ShardSweep};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -678,7 +679,7 @@ pub struct BlobCache {
     namespace_generations: RwLock<HashMap<String, u64>>,
     tag_index: RwLock<HashMap<ScopedLabel, HashSet<BlobCacheKey>>>,
     dependency_index: RwLock<HashMap<ScopedLabel, HashSet<BlobCacheKey>>>,
-    l2: Option<Arc<BlobCacheL2>>,
+    l2: Option<Arc<dyn BlobCacheL2Backend>>,
     bytes_in_use: AtomicUsize,
     namespace_bytes_in_use: RwLock<HashMap<String, usize>>,
     sweep_shard_cursor: AtomicUsize,
@@ -716,16 +717,37 @@ impl BlobCache {
         Self::try_new(config)
     }
 
+    /// Open L2 inside the owning RedDB store. The cache rows, byte counter,
+    /// WAL records, and checkpoints remain in the same `.rdb` artifact.
+    pub fn open_with_internal_l2(
+        config: BlobCacheConfig,
+        store: Arc<crate::storage::UnifiedStore>,
+    ) -> Result<Self, CacheError> {
+        let l2 = (config.l2_bytes_max > 0)
+            .then(|| StoreBlobCacheL2::open(store, config.l2_bytes_max))
+            .transpose()?
+            .map(|backend| Arc::new(backend) as Arc<dyn BlobCacheL2Backend>);
+        Self::with_backend(config, l2)
+    }
+
     fn try_new(config: BlobCacheConfig) -> Result<Self, CacheError> {
-        let config = BlobCacheConfig {
-            shard_count: config.shard_count.max(1),
-            ..config
-        };
         let l2 = config
             .l2_path
             .clone()
             .map(|path| BlobCacheL2::open(path, config.l2_bytes_max))
-            .transpose()?;
+            .transpose()?
+            .map(|backend| Arc::new(backend) as Arc<dyn BlobCacheL2Backend>);
+        Self::with_backend(config, l2)
+    }
+
+    fn with_backend(
+        config: BlobCacheConfig,
+        l2: Option<Arc<dyn BlobCacheL2Backend>>,
+    ) -> Result<Self, CacheError> {
+        let config = BlobCacheConfig {
+            shard_count: config.shard_count.max(1),
+            ..config
+        };
         let shards = (0..config.shard_count)
             .map(|_| RwLock::new(Shard::new()))
             .collect();
@@ -736,7 +758,7 @@ impl BlobCache {
             namespace_generations: RwLock::new(HashMap::new()),
             tag_index: RwLock::new(HashMap::new()),
             dependency_index: RwLock::new(HashMap::new()),
-            l2: l2.map(Arc::new),
+            l2,
             bytes_in_use: AtomicUsize::new(0),
             namespace_bytes_in_use: RwLock::new(HashMap::new()),
             sweep_shard_cursor: AtomicUsize::new(0),
@@ -751,13 +773,11 @@ impl BlobCache {
         Self::new(BlobCacheConfig::default())
     }
 
-    /// Path to the L2 metadata B+ tree directory, when L2 is enabled.
+    /// Path to the legacy standalone L2 pager, when that backend is enabled.
     ///
-    /// Used by the backup orchestrator (`include_blob_cache=true`) so it
-    /// can locate the on-disk L2 tree for tarball / per-file upload, and
-    /// by the runbook procedures in
-    /// `docs/operations/blob-cache-backup-restore.md` §2 / §3 to confirm
-    /// where on disk the cache lives.
+    /// The server's internal L2 is part of the owning `.rdb` and therefore
+    /// returns `None` here. The backup orchestrator only needs this path for
+    /// callers that explicitly selected the compatibility file backend.
     pub fn l2_path(&self) -> Option<&std::path::Path> {
         self.config.l2_path.as_deref()
     }
@@ -1791,10 +1811,6 @@ impl BlobCache {
             }
         }
 
-        if candidates.is_empty() {
-            return 0;
-        }
-
         // Group candidates by shard so each shard lock is taken at most
         // once per call.
         let mut by_shard: HashMap<usize, Vec<(BlobCacheKey, HashSet<String>)>> = HashMap::new();
@@ -1824,7 +1840,20 @@ impl BlobCache {
                 }
             }
         }
-        count
+        // L2's stable record format predates tag/dependency metadata. Never
+        // allow an L2-only entry to survive a label invalidation and later
+        // resurrect. Until that format grows label indexes, conservatively
+        // flush the remaining L2 namespace while retaining unrelated L1 hits.
+        let l2_count = self
+            .l2
+            .as_ref()
+            .map_or(0, |l2| l2.delete_namespace(namespace));
+        if l2_count > 0 {
+            self.stats
+                .invalidations
+                .fetch_add(l2_count as u64, Ordering::Relaxed);
+        }
+        count.saturating_add(l2_count)
     }
 
     fn shard_index(&self, key: &BlobCacheKey) -> usize {

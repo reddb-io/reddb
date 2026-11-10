@@ -1,14 +1,15 @@
 //! Byte-oriented Blob Cache.
 //!
-//! This is the first internal tracer for RedDB's exact-key blob cache. It is
-//! intentionally L1-only: a sharded, byte-bounded, in-process cache with SIEVE
-//! eviction, namespace caps, and opaque content metadata. Durable L2 storage,
-//! dependency invalidation, and public APIs land in follow-up slices.
+//! L1 is a sharded, byte-bounded in-process cache with SIEVE eviction. L2 can
+//! use either the legacy standalone pager or RedDB's internal single-file
+//! collection backend.
 
 pub mod cache;
 pub mod config;
 pub mod entry;
 pub mod l2;
+mod l2_backend;
+mod l2_store;
 pub mod shard;
 
 pub use cache::{

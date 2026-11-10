@@ -69,7 +69,7 @@ tenant and auth identity, so scoped callers do not share cached rows.
 | Max entries | 1 000 |
 | Eviction | Oldest entry removed when full |
 | Scope | SELECT queries only |
-| Blob backend L2 | `<data-path>.result-cache.l2` plus `<data-path>.result-cache.blob-cache.ctl` |
+| Blob backend L2 | hidden `red.cache.blob_l2` collection in the same `.rdb` |
 
 ### How It Works
 

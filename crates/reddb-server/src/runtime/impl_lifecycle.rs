@@ -271,6 +271,12 @@ impl RedDBRuntime {
             cache_l1_default,
         ))
         .map_err(|_| RedDBError::InvalidConfig("cache.blob.l1_bytes_max is too large".into()))?;
+        let configured_l2 = boot_cache_u64(
+            db.store().as_ref(),
+            &env_config_overrides,
+            "cache.blob.l2_bytes_max",
+            crate::storage::cache::DEFAULT_BLOB_L2_BYTES_MAX,
+        );
         let configured_namespaces = usize::try_from(boot_cache_u64(
             db.store().as_ref(),
             &env_config_overrides,
@@ -306,11 +312,19 @@ impl RedDBRuntime {
                     .min(configured_l1)
                     .min(cache_l1_share),
             )
+            // Zero is the explicit off switch. Read-only runtimes cannot
+            // maintain expiry/invalidation state in the internal collection.
+            .with_l2_bytes_max(if options.read_only { 0 } else { configured_l2 })
             .with_max_namespaces(configured_namespaces);
-        let result_blob_cache = crate::storage::cache::BlobCache::open_with_l2(
+        let result_blob_cache = crate::storage::cache::BlobCache::open_with_internal_l2(
             result_blob_cache_config,
+            db.store(),
         )
-        .map_err(|err| RedDBError::Internal(format!("open result Blob Cache failed: {err:?}")))?;
+        .map_err(|err| {
+            RedDBError::Internal(format!(
+                "open single-file result Blob Cache failed: {err:?}"
+            ))
+        })?;
         let storage_ready_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -1516,6 +1530,7 @@ mod cache_boot_tests {
             "cache.blob",
             &crate::json!({
                 "l1_bytes_max": 1024 * 1024,
+                "l2_bytes_max": 2 * 1024 * 1024,
                 "namespace_bytes_max": 256 * 1024,
                 "max_namespaces": 7
             }),
@@ -1526,8 +1541,49 @@ mod cache_boot_tests {
         let reopened = RedDBRuntime::with_options(options).expect("configured runtime");
         let stats = reopened.result_blob_cache().stats();
         assert_eq!(stats.l1_bytes_max(), 1024 * 1024);
+        assert_eq!(stats.l2_bytes_max(), 2 * 1024 * 1024);
         assert_eq!(stats.namespace_bytes_max(), 256 * 1024);
         assert_eq!(stats.max_namespaces(), 7);
+    }
+
+    #[test]
+    fn single_file_l2_survives_runtime_restart_without_sidecar() {
+        let directory = tempfile::tempdir().expect("single-file L2 fixture");
+        let path = directory.path().join("cache-l2.rdb");
+        let options = RedDBOptions::persistent(&path);
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("initial runtime");
+        runtime
+            .result_blob_cache()
+            .put(
+                "tenant",
+                "key",
+                crate::storage::cache::BlobCachePut::new(b"durable".to_vec()).with_policy(
+                    crate::storage::cache::BlobCachePolicy::default()
+                        .l1_admission(crate::storage::cache::L1Admission::Never),
+                ),
+            )
+            .expect("write internal L2");
+        assert!(runtime.result_blob_cache().l2_path().is_none());
+        runtime.flush().expect("checkpoint internal L2");
+        drop(runtime);
+
+        let reopened = RedDBRuntime::with_options(options).expect("reopen runtime");
+        assert_eq!(
+            reopened
+                .result_blob_cache()
+                .get("tenant", "key")
+                .expect("L2 hit after restart")
+                .bytes()
+                .as_ref(),
+            b"durable"
+        );
+        drop(reopened);
+        let siblings: Vec<_> = std::fs::read_dir(directory.path())
+            .expect("list fixture")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(siblings, vec!["cache-l2.rdb"]);
     }
 
     #[test]

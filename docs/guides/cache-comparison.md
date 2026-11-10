@@ -60,7 +60,7 @@ ADR 0006 in flight it becomes an adapter over Blob Cache when
 application SQL callers see does not change; the storage underneath does.
 Tenant and auth identity stay part of the key, and table writes
 conservatively flush the result-cache namespace. The normal runtime cache is
-memory-only and starts cold after restart.
+backed by the single-file L2 and can rehydrate eligible entries after restart.
 
 Page Cache and Entity Cache are internal acceleration structures.
 They are listed here only so readers stop trying to use them as
@@ -79,7 +79,7 @@ workloads.
 | Need                                                                   | Pick           |
 |------------------------------------------------------------------------|----------------|
 | Sub-ms tail latency, memory-only                                       | Redis          |
-| Survive cache-process restart with warm data                            | Redis          |
+| Survive cache-process restart with warm data                            | Both           |
 | Database-aware invalidation tied to writes                             | RedDB          |
 | Pub/sub, sorted sets, streams, modules                                 | Redis          |
 | Single operational engine for app + cache                              | RedDB          |
@@ -97,10 +97,11 @@ base64 for bytes. If you need consistent sub-millisecond
 p99 against a memory-resident hot set with no durability requirement,
 Redis is already optimized for that and RedDB is not chasing it.
 
-The normal RedDB server cache starts cold after restart. The engine crate has
-an opt-in file-backed L2, but it uses a separate pager file and is deliberately
-not wired into the server because RedDB's packaging contract is single-file.
-Treat every cache value as regenerable.
+The normal RedDB server cache stores L2 values in a hidden internal collection
+inside the primary `.rdb`, so eligible entries survive a clean restart without
+an extra cache file. Redis can also preserve warm data with its persistence
+options. In either product, treat cache values as regenerable rather than as
+the authoritative copy.
 
 "Database-aware invalidation tied to writes" is the killer feature for
 read-heavy SQL apps. The same write that mutates a table can invalidate
@@ -131,15 +132,18 @@ cache — protecting database pages and protecting user-visible cached
 bytes are different jobs and the two tiers stay separate so neither
 Interface goes shallow. Hits clone a handle, not the payload.
 
-**L2** is an opt-in engine-level cache store in a separate pager file. It
-holds entry metadata (expiry, tags, dependencies, version, blob pointer)
-in a metadata B-tree and stores blob bytes in page-aligned chunks
-through the existing native blob direction. WAL ordering is
-metadata-last: bytes are written first, then the metadata commit makes
-the value visible. After restart, hot entries hydrate from L2 instead
-of missing to the origin.
+**L2** is a durable cache store. The server stores its rows and byte counter in
+the hidden `red.cache.blob_l2` collection in the same `.rdb`; each value change
+and quota-counter change share one WAL publication. The record carries expiry,
+namespace generation, priority, version and checksum metadata. Tag and
+dependency invalidation conservatively clears the affected L2 namespace so an
+unrehydrated entry cannot reappear after a write. After restart, eligible
+entries hydrate from L2 instead of missing to the origin.
 
-When an embedded caller explicitly configures L2, the tiers are connected by a *membership synopsis* — a per-namespace
+Direct engine callers can still select the legacy standalone pager backend for
+compatibility, but the normal server does not create that sidecar.
+
+When L2 is enabled, the tiers are connected by a *membership synopsis* — a per-namespace
 filter that lets the cache cheaply say "definitely absent" and skip the
 L2 metadata read entirely on a miss. See "Existence checks" below.
 
@@ -242,9 +246,10 @@ node. In a multi-writer or split-brain-tolerant topology, you should
 treat each node's Blob Cache as a separate cache for correctness
 purposes until the cluster invalidation ADR lands.
 
-**Backup and restore.** The public server cache is memory-only and excluded
-from backups. The separate-file engine L2 has internal opt-in backup helpers,
-but it is not part of the normal single-file server runtime.
+**Backup and restore.** The server L2 is an internal collection in the primary
+`.rdb`, so normal single-file snapshots and restores carry it with the database.
+The separate-file compatibility backend retains opt-in backup helpers for
+direct engine callers.
 
 ---
 

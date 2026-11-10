@@ -88,14 +88,17 @@ namespace count with environment variables before start:
 
 ```sh
 REDDB_CACHE_BLOB_L1_BYTES_MAX=536870912
+REDDB_CACHE_BLOB_L2_BYTES_MAX=4294967296
 REDDB_CACHE_BLOB_NAMESPACE_BYTES_MAX=67108864
 REDDB_CACHE_BLOB_MAX_NAMESPACES=1024
 ```
 
 The equivalent persisted keys are `cache.blob.l1_bytes_max`,
-`cache.blob.namespace_bytes_max`, and `cache.blob.max_namespaces`; they apply on
-the next boot. Both memory limits are capped by RedDB's process-wide memory
-budget, and the namespace limit cannot exceed the effective global limit.
+`cache.blob.l2_bytes_max`, `cache.blob.namespace_bytes_max`, and
+`cache.blob.max_namespaces`; they apply on the next boot. Set
+`cache.blob.l2_bytes_max` (or its environment variable) to `0` to disable L2.
+Both memory limits are capped by RedDB's process-wide memory budget, and the
+namespace limit cannot exceed the effective global limit.
 Expired entries are selected from per-shard deadline indexes, so a pass costs
 in proportion to due TTL records rather than total cache size. Namespace flush
 reclamation uses a separate bounded generation scan only while a flush is
@@ -112,11 +115,12 @@ The memory estimate is intentionally conservative and stable; it is not an
 allocator-specific RSS measurement. Keep normal process headroom for allocator
 fragmentation and temporary request buffers.
 
-The normal server runtime is currently an in-memory, process-local cache. It
-starts cold after restart. The engine crate has an opt-in file-backed L2 API,
-but the server does not enable it because that implementation uses a separate
-pager file and would violate RedDB's single-file packaging contract. Do not use
-Blob Cache as the authoritative copy of data.
+The server uses a process-local L1 and a durable L2 stored in the hidden
+`red.cache.blob_l2` collection inside the same `.rdb` file. Eligible values can
+therefore be rehydrated after restart without an L2 sidecar. L2 defaults to a
+4 GiB payload budget; L1 remains the latency tier. Expired L2 values are never
+returned and are reclaimed on access or when L2 capacity eviction needs space.
+Cache data is still derived and must not be the authoritative copy of data.
 
 The cache and its invalidations are local to the addressed server. Use a
 single cache endpoint or explicit sticky routing when deploying multiple nodes;
