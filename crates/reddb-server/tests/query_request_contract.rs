@@ -270,12 +270,8 @@ fn request_commit_policy_uses_global_default_and_honors_override() {
                 let lsn = runtime.primary_logical_head_lsn();
                 if lsn > 0 {
                     runtime
-                        .db()
-                        .replication
-                        .as_ref()
-                        .unwrap()
-                        .commit_waiter
-                        .record_replica_ack("replica-a", lsn);
+                        .ack_primary_replica_lsn_and_prune("replica-a", lsn, lsn, 0, 0)
+                        .expect("durable ACK");
                     break;
                 }
                 assert!(

@@ -598,14 +598,8 @@ impl<'a> QueryRequestExecutor<'a> {
         let sql = match &bound.statement {
             BoundStatement::Sql { sql, .. } | BoundStatement::Prepared { sql, .. } => sql,
         };
-        let is_write = super::statement_frame::statement_is_write(sql);
-        let is_commit = in_transaction
-            && matches!(
-                parse_multi(sql),
-                Ok(QueryExpr::TransactionControl(
-                    reddb_rql::ast::TxnControl::Commit
-                ))
-            );
+        let (is_write, is_commit) = commit_statement_kind(sql, bound.prepared_expr())?;
+        let is_commit = in_transaction && is_commit;
         let mut effective = None;
         if is_write || is_commit {
             let mut policy = self
@@ -619,6 +613,9 @@ impl<'a> QueryRequestExecutor<'a> {
                 .get(&connection)
                 .copied();
             if let Some(pinned) = pinned {
+                super::impl_replication_commit::reject_incomparable_commit_policies(
+                    pinned, policy,
+                )?;
                 let floor = crate::cluster::CommitPolicyResolution {
                     effective: pinned,
                     source: crate::cluster::ResolutionSource::ClusterDefault,
@@ -675,9 +672,13 @@ impl<'a> QueryRequestExecutor<'a> {
                         .commit_lsn()
                 })
                 .unwrap_or(0);
-            if let Some(policy) = effective {
-                self.runtime.enforce_commit_policy_for_policy(lsn, policy)?;
-            }
+            let policy = match effective {
+                Some(policy) => policy,
+                None => self
+                    .runtime
+                    .validated_request_commit_policy(bound.commit_policy)?,
+            };
+            self.runtime.enforce_commit_policy_for_policy(lsn, policy)?;
         }
         self.runtime.own_query_result(result)
     }
@@ -698,13 +699,42 @@ impl<'a> QueryRequestExecutor<'a> {
         sql: &str,
         commit_policy: Option<crate::replication::CommitPolicy>,
     ) -> RedDBResult<()> {
-        if !super::statement_frame::statement_is_write(sql) {
+        if !commit_statement_kind(sql, None)?.0 {
             return Ok(());
         }
         self.runtime
             .validated_request_commit_policy(commit_policy)
             .map(|_| ())
     }
+}
+
+// Durability cannot rely on the first token: comments and WITHIN wrappers
+// must have the same contract as the statement that the runtime executes.
+fn commit_statement_kind(sql: &str, prepared: Option<&QueryExpr>) -> RedDBResult<(bool, bool)> {
+    let mut inner = sql;
+    while let Some((_, statement)) =
+        super::within_clause::try_strip_within_prefix(inner).map_err(RedDBError::Query)?
+    {
+        inner = statement;
+    }
+    let parsed = if prepared.is_none() {
+        parse_multi(inner).ok()
+    } else {
+        None
+    };
+    let expr = prepared.or(parsed.as_ref());
+    let write = matches!(expr, Some(QueryExpr::Insert(_) | QueryExpr::Update(_) | QueryExpr::Delete(_)))
+        || super::statement_frame::statement_is_write(inner)
+        // Extension dispatch may accept a statement absent from parse_multi.
+        // Validate conservatively before such a statement can mutate data.
+        || expr.is_none();
+    let commit = matches!(
+        expr,
+        Some(QueryExpr::TransactionControl(
+            reddb_rql::ast::TxnControl::Commit
+        ))
+    );
+    Ok((write, commit))
 }
 
 #[cfg(test)]

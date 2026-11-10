@@ -388,7 +388,14 @@ impl RedDBRuntime {
                     Some(format!("replication:lsn:{post_lsn}")),
                     None,
                     fields,
-                )?;
+                ).map_err(|error| {
+                    if matches!(outcome, crate::replication::AwaitOutcome::TimedOut { .. }) {
+                        RedDBError::CommitUncertain {
+                            lsn: post_lsn,
+                            detail: format!("replica ACK threshold missed; recording the outcome also failed: {error}"),
+                        }
+                    } else { error }
+                })?;
             }
         }
         if let crate::replication::AwaitOutcome::TimedOut { observed, required } = &outcome {
@@ -439,6 +446,9 @@ impl RedDBRuntime {
     ) -> RedDBResult<crate::replication::CommitPolicy> {
         let configured = crate::replication::CommitPolicy::from_env_strict()
             .map_err(RedDBError::InvalidConfig)?;
+        if let Some(request) = request {
+            reject_incomparable_commit_policies(configured, request)?;
+        }
         let floor = crate::cluster::CommitPolicyResolution {
             effective: configured,
             source: crate::cluster::ResolutionSource::ClusterDefault,
@@ -470,4 +480,20 @@ pub(crate) fn commit_policy_violation_error(
         message: format!("{code}: {detail}"),
         validation: crate::json::Value::Object(validation),
     }
+}
+
+// Quorum membership/threshold and an absolute ACK count are different
+// requirements. Until both can be retained, reject a switch between them.
+pub(super) fn reject_incomparable_commit_policies(
+    prior: crate::replication::CommitPolicy,
+    next: crate::replication::CommitPolicy,
+) -> RedDBResult<()> {
+    use crate::replication::CommitPolicy;
+    if matches!((prior, next), (CommitPolicy::AckN(n), CommitPolicy::Quorum) | (CommitPolicy::Quorum, CommitPolicy::AckN(n)) if n > 0)
+    {
+        return Err(RedDBError::InvalidConfig(
+            "cannot mix AckN and Quorum commit requirements".into(),
+        ));
+    }
+    Ok(())
 }

@@ -414,3 +414,53 @@ fn replication_crash_point(point: &str) {
     }
     let _ = point;
 }
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    #[test]
+    fn commit_receipt_ignores_other_connections_and_other_runtimes() {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory()
+                .with_replication(crate::replication::ReplicationConfig::primary()),
+        )
+        .unwrap();
+        runtime
+            .execute_query("CREATE TABLE receipts (id INT)")
+            .unwrap();
+        let outer = CommitReceiptScope::begin(&runtime);
+        let first = runtime
+            .execute_query("INSERT INTO receipts (id) VALUES (1)")
+            .unwrap();
+        let first_lsn =
+            crate::replication::CausalBookmark::decode(first.bookmark.as_deref().unwrap())
+                .unwrap()
+                .commit_lsn();
+        assert_eq!(outer.lsn(), Some(first_lsn));
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    runtime
+                        .execute_query("INSERT INTO receipts (id) VALUES (2)")
+                        .unwrap();
+                })
+                .join()
+                .unwrap();
+        });
+        assert!(runtime.primary_logical_head_lsn() > first_lsn);
+        assert_eq!(outer.lsn(), Some(first_lsn));
+        let other = RedDBRuntime::with_options(
+            RedDBOptions::in_memory()
+                .with_replication(crate::replication::ReplicationConfig::primary()),
+        )
+        .unwrap();
+        other
+            .execute_query("CREATE TABLE unrelated (id INT)")
+            .unwrap();
+        other
+            .execute_query("INSERT INTO unrelated (id) VALUES (1), (2), (3)")
+            .unwrap();
+        assert_eq!(outer.lsn(), Some(first_lsn));
+    }
+}

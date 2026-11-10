@@ -80,15 +80,21 @@ fn distinct_replicas_must_ack_the_actual_commit_position() {
         .execute_query("INSERT INTO commits (id) VALUES (2)")
         .unwrap();
     let lsn = runtime.primary_logical_head_lsn();
-    let db = runtime.db();
-    let waiter = &db.replication.as_ref().unwrap().commit_waiter;
-    waiter.record_replica_ack("replica-a", lsn);
-    waiter.record_replica_ack("replica-a", lsn);
-    waiter.record_replica_ack("replica-b", lsn - 1);
+    runtime
+        .ack_primary_replica_lsn_and_prune("replica-a", lsn, lsn, 0, 0)
+        .unwrap();
+    runtime
+        .ack_primary_replica_lsn_and_prune("replica-a", lsn, lsn, 0, 0)
+        .unwrap();
+    runtime
+        .ack_primary_replica_lsn_and_prune("replica-b", lsn - 1, lsn - 1, 0, 0)
+        .unwrap();
     assert!(runtime
         .enforce_commit_policy_for_request(lsn, Some(CommitPolicy::AckN(2)))
         .is_err());
-    waiter.record_replica_ack("replica-b", lsn);
+    runtime
+        .ack_primary_replica_lsn_and_prune("replica-b", lsn, lsn, 0, 0)
+        .unwrap();
     assert!(matches!(
         runtime
             .enforce_commit_policy_for_request(lsn, Some(CommitPolicy::AckN(2)))
@@ -202,4 +208,138 @@ fn unsupported_or_invalid_durability_is_rejected_before_mutation() {
         .records
         .is_empty());
     assert_eq!(runtime.primary_logical_head_lsn(), 0);
+}
+
+#[test]
+fn sql_prefixes_and_prepared_writes_cannot_skip_ack_policy() {
+    let _lock = ENV.lock().unwrap();
+    let _policy = EnvGuard::set("RED_PRIMARY_COMMIT_POLICY", None);
+    let _timeout = EnvGuard::set("RED_REPLICATION_ACK_TIMEOUT_MS", Some("1"));
+    let runtime = primary();
+    let registry = PreparedRegistry::new();
+    let executor = QueryRequestExecutor::new(&runtime, &registry);
+    for sql in [
+        "WITHIN TENANT 'acme' INSERT INTO commits (id) VALUES (1)",
+        "WITHIN TENANT 'acme' INSERT INTO commits (id) VALUES (2)",
+    ] {
+        let error = executor
+            .execute(QueryRequest::sql(sql, vec![]).with_commit_policy(CommitPolicy::AckN(1)))
+            .unwrap_err();
+        assert!(
+            matches!(error, RedDBError::CommitUncertain { .. }),
+            "{error}"
+        );
+        assert!(executor
+            .execute(QueryRequest::sql(sql, vec![]).with_commit_policy(CommitPolicy::RemoteWal))
+            .is_err());
+    }
+    let prepared = registry
+        .prepare(&runtime, "INSERT INTO commits (id) VALUES ($1)")
+        .unwrap();
+    let error = executor
+        .execute(
+            QueryRequest::prepared(
+                prepared.id,
+                vec![reddb_server::runtime::query_request::ParamValue::Int64(3)],
+            )
+            .with_commit_policy(CommitPolicy::AckN(1)),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, RedDBError::CommitUncertain { .. }),
+        "{error}"
+    );
+    assert_eq!(
+        runtime
+            .execute_query("SELECT id FROM commits")
+            .unwrap()
+            .result
+            .records
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn commit_cannot_downgrade_the_transaction_policy() {
+    let _lock = ENV.lock().unwrap();
+    let _policy = EnvGuard::set("RED_PRIMARY_COMMIT_POLICY", None);
+    let runtime = primary();
+    let registry = PreparedRegistry::new();
+    let executor = QueryRequestExecutor::new(&runtime, &registry);
+    set_current_connection_id(9103);
+    executor
+        .execute(QueryRequest::sql("BEGIN", vec![]))
+        .unwrap();
+    executor
+        .execute(
+            QueryRequest::sql(
+                "WITHIN TENANT 'acme' INSERT INTO commits (id) VALUES (1)",
+                vec![],
+            )
+            .with_commit_policy(CommitPolicy::AckN(1)),
+        )
+        .unwrap();
+    assert!(executor
+        .execute(QueryRequest::sql("COMMIT", vec![]).with_commit_policy(CommitPolicy::Local))
+        .is_err());
+    assert!(runtime.connection_in_transaction(9103));
+    assert_eq!(runtime.primary_logical_head_lsn(), 0);
+    executor
+        .execute(QueryRequest::sql("ROLLBACK", vec![]))
+        .unwrap();
+}
+
+#[test]
+fn transaction_cannot_replace_ack_count_with_a_smaller_quorum() {
+    let _lock = ENV.lock().unwrap();
+    let _policy = EnvGuard::set("RED_PRIMARY_COMMIT_POLICY", None);
+    let _timeout = EnvGuard::set("RED_REPLICATION_ACK_TIMEOUT_MS", Some("1"));
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory().with_replication(
+        ReplicationConfig::primary().with_quorum(reddb_server::replication::QuorumConfig::sync(1)),
+    ))
+    .unwrap();
+    runtime
+        .execute_query("CREATE TABLE commits (id INT)")
+        .unwrap();
+    let registry = PreparedRegistry::new();
+    let executor = QueryRequestExecutor::new(&runtime, &registry);
+    set_current_connection_id(9104);
+    executor
+        .execute(QueryRequest::sql("BEGIN", vec![]))
+        .unwrap();
+    executor
+        .execute(
+            QueryRequest::sql("INSERT INTO commits (id) VALUES (1)", vec![])
+                .with_commit_policy(CommitPolicy::AckN(2)),
+        )
+        .unwrap();
+    for sql in ["INSERT INTO commits (id) VALUES (2)", "COMMIT"] {
+        let error = executor
+            .execute(QueryRequest::sql(sql, vec![]).with_commit_policy(CommitPolicy::Quorum))
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot mix"), "{error}");
+        assert!(runtime.connection_in_transaction(9104));
+        assert_eq!(runtime.primary_logical_head_lsn(), 0);
+    }
+    // One durable replica cannot satisfy the retained AckN(2) requirement.
+    runtime
+        .ack_primary_replica_lsn_and_prune("replica-a", 1, 1, 0, 0)
+        .unwrap();
+    let error = executor
+        .execute(QueryRequest::sql("WITHIN TENANT 'acme' COMMIT", vec![]))
+        .unwrap_err();
+    assert!(
+        matches!(error, RedDBError::CommitUncertain { lsn: 1, .. }),
+        "{error}"
+    );
+    assert_eq!(
+        runtime
+            .execute_query("SELECT id FROM commits")
+            .unwrap()
+            .result
+            .records
+            .len(),
+        1
+    );
 }
