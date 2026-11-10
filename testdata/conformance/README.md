@@ -45,6 +45,8 @@ Current authorities:
 | RQL result rendering | `crates/reddb-rql/src/conformance.rs` |
 | RedWire param/value fixtures | `testdata/conformance/redwire/params/manifest.json` |
 | RedWire SCRAM fixtures | `testdata/conformance/redwire/scram/exchanges.json` |
+| Topology fixtures | `testdata/conformance/topology/manifest.json` |
+| Replica SQL policy fixtures | `testdata/conformance/topology/sql-policy.json` |
 | RedWire protocol fence | `crates/reddb-wire/tests/protocol_authority.rs` |
 | File layout fence | `crates/reddb-file/tests/layout_authority.rs` |
 | File layout fence modules | `crates/reddb-file/tests/layout_authority` |

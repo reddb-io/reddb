@@ -9,6 +9,12 @@
       "owns": "reddb-wire topology encoding and transport selector conformance"
     },
     {
+      "id": "replica-sql-policy-fixtures",
+      "type": "file",
+      "path": "testdata/conformance/topology/sql-policy.json",
+      "owns": "reddb-wire conservative replica-read SQL classification conformance"
+    },
+    {
       "id": "public-surface-contract-matrix",
       "type": "file",
       "path": "docs/conformance/public-surface-contract-matrix.json",
