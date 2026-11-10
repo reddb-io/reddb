@@ -6,6 +6,11 @@ use crate::storage::cache::compressor::Compressed;
 pub(super) trait BlobCacheL2Backend: Send + Sync {
     fn namespace_generation(&self, namespace: &str) -> Option<u64>;
     fn set_namespace_generation(&self, namespace: &str, generation: u64) -> Result<(), CacheError>;
+    fn invalidate_namespace(&self, namespace: &str, generation: u64) -> Result<(), CacheError> {
+        self.set_namespace_generation(namespace, generation)?;
+        self.delete_namespace(namespace);
+        Ok(())
+    }
     fn get(&self, key: &BlobCacheKey, now_ms: u64, generation: u64) -> Option<Entry>;
 
     fn put(

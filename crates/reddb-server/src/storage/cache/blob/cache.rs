@@ -1268,9 +1268,7 @@ impl BlobCache {
         *generation = generation.saturating_add(1);
         self.namespace_flush_epoch.fetch_add(1, Ordering::Release);
         let persisted = if let Some(l2) = &self.l2 {
-            let persisted = l2.set_namespace_generation(namespace, *generation);
-            l2.delete_namespace(namespace);
-            persisted
+            l2.invalidate_namespace(namespace, *generation)
         } else {
             Ok(())
         };
