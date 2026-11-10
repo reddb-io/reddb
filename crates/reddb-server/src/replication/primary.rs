@@ -909,10 +909,10 @@ impl PrimaryReplication {
     /// its `replica_id` on a pull, the primary registers it so it is no
     /// longer blind to that replica's existence; subsequent pulls are
     /// idempotent no-ops. Returns `true` when a new registration was
-    /// created. A fresh slot starts at the replica's requested cursor rather
-    /// than the primary's current LSN, so an empty replica does not skip WAL
-    /// that was written before its first pull. Reconnects preserve existing
-    /// progress and do not bump the topology epoch.
+    /// created. A fresh slot starts at the replica's requested cursor, bounded
+    /// by the primary's current LSN, so an empty replica does not skip WAL and
+    /// a cursor from a different primary cannot publish future progress.
+    /// Reconnects preserve existing progress and do not bump the topology epoch.
     pub fn ensure_replica_registered(&self, id: &str, requested_since_lsn: u64) -> bool {
         let already = self
             .replicas
@@ -923,7 +923,8 @@ impl PrimaryReplication {
         if already {
             return false;
         }
-        self.register_replica_with_region_at(id.to_string(), None, requested_since_lsn);
+        let initial_lsn = requested_since_lsn.min(self.current_logical_lsn());
+        self.register_replica_with_region_at(id.to_string(), None, initial_lsn);
         true
     }
 

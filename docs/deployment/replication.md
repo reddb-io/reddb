@@ -89,8 +89,13 @@ durable LSN before requesting more. During rolling upgrades it falls back to
 the legacy JSON pull only when the primary reports `UNIMPLEMENTED`; permission,
 authentication, corruption, and size failures never trigger a downgrade. WAL
 acknowledgments and control messages retain their existing JSON contracts.
-The reproducible encoding benchmark and its qualification boundary are recorded
-in [Binary WAL stream microbenchmark](../perf/binary-wal-stream-2026-11-10.md).
+The [native process-cycle integration test][native-cycle-test] automatically
+verifies bounded batches, relay and cursor durability, a crash before
+acknowledgment, restart reconciliation, and catch-up after offline update,
+delete, and insert mutations. It also verifies that a replica refuses to
+publish a durable cursor beyond the connected primary's current WAL head.
+
+[native-cycle-test]: ../../crates/reddb-server/tests/binary_wal_replication_cycles.rs
 
 ## How It Works
 
