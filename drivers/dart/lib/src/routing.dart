@@ -72,10 +72,11 @@ Map<String, dynamic>? decodeTopology(Uint8List bytes) {
       'rebootstrapping': false
     });
   }
-  if (end - offset >= count)
+  if (end - offset >= count) {
     for (final replica in replicas) {
       replica['rebootstrapping'] = take(1)[0] != 0;
     }
+  }
   return {
     'version': 1,
     'epoch': epoch,
@@ -168,8 +169,9 @@ List<String>? _tokens(String sql) {
         } else if (sql.startsWith('*/', index)) {
           depth--;
           index += 2;
-        } else
+        } else {
           index++;
+        }
         if (depth > 64) return null;
       }
       if (depth != 0) return null;

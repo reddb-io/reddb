@@ -186,7 +186,6 @@ pub const HttpClient = struct {
                 "HTTP {d} {s} {s}: {s}",
                 .{ @intFromEnum(req.response.status), @tagName(method), path, out.items },
             );
-            out.deinit();
             return error.HttpStatus;
         }
         return out.toOwnedSlice();

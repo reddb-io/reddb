@@ -2,9 +2,16 @@ const std = @import("std");
 const reddb = @import("reddb");
 const t = std.testing;
 fn fixtures(name: []const u8) ![]u8 {
-    const path = try std.fmt.allocPrint(t.allocator, "../../testdata/conformance/topology/{s}", .{name});
-    defer t.allocator.free(path);
-    return std.fs.cwd().readFileAlloc(t.allocator, path, 1024 * 1024);
+    for ([_][]const u8{ "../../", "", "../../../" }) |prefix| {
+        const path = try std.fmt.allocPrint(t.allocator, "{s}testdata/conformance/topology/{s}", .{ prefix, name });
+        defer t.allocator.free(path);
+        const bytes = std.fs.cwd().readFileAlloc(t.allocator, path, 1024 * 1024) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        return bytes;
+    }
+    return error.FixtureManifestNotFound;
 }
 test "shared topology fixtures and exact u64" {
     const contents = try fixtures("manifest.json");
@@ -56,6 +63,7 @@ const HttpPeer = struct {
     listener: std.net.Server,
     membership: *[]const u8,
     label: []const u8,
+    topology_status: u16 = 200,
     stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     thread: ?std.Thread = null,
     fn start(membership: *[]const u8, label: []const u8) !*HttpPeer {
@@ -103,7 +111,7 @@ const HttpPeer = struct {
             }
             const input = buffer[0..length];
             const body = if (std.mem.indexOf(u8, input, "/v1/topology?") != null) self.membership.* else if (std.mem.startsWith(u8, input, "GET")) "{}" else self.label;
-            const response = std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body }) catch return;
+            const response = std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 {d} Test\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {d}\r\n\r\n{s}", .{ if (std.mem.indexOf(u8, input, "/v1/topology?") != null) self.topology_status else @as(u16, 200), body.len, body }) catch return;
             defer std.heap.page_allocator.free(response);
             peer.stream.writeAll(response) catch {};
         }
@@ -137,4 +145,21 @@ test "HTTP facade discovers and pins actual connections" {
     const pinned = try client.queryWithOptions("SELECT 1", .{ .consistency = .local }, .{});
     defer t.allocator.free(pinned);
     try t.expect(std.mem.indexOf(u8, pinned, "writer") != null);
+}
+
+test "legacy HTTP topology error retains the seed without leaking the response buffer" {
+    var membership: []const u8 = "{\"error\":\"old server\"}";
+    const peer = try HttpPeer.start(&membership, "{\"rows\":[]}");
+    defer peer.close();
+    peer.topology_status = 404;
+    const uri = try std.fmt.allocPrint(t.allocator, "http://127.0.0.1:{d}", .{peer.listener.listen_address.getPort()});
+    defer t.allocator.free(uri);
+    const client = try reddb.connect(t.allocator, uri, null);
+    defer {
+        client.deinit();
+        t.allocator.destroy(client);
+    }
+    const result = try client.query("SELECT 1", .{});
+    defer t.allocator.free(result);
+    try t.expect(std.mem.indexOf(u8, result, "rows") != null);
 }

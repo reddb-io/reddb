@@ -43,6 +43,7 @@ public:
     std::optional<Topology> topology(const std::string&) override {return membership;}
     std::string query(const std::string& sql) override {
         calls.push_back(address+" "+sql);
+        if (sql == "SELECT tls_failure" && address.find("replica") != std::string::npos) throw RedDBError(ErrorCode::Tls,"lost TLS reply");
         if(sql.find("lost")!=std::string::npos || sql.find("effectful")!=std::string::npos) throw RedDBError(ErrorCode::Network,"lost reply");
         return address;
     }
@@ -60,6 +61,7 @@ TEST(Routing, RoutesPinsAndNeverReplaysEffects) {
     auto client=routing::connect(primary,dial(primary),"https",false,dial);
     EXPECT_EQ(client->query("SELECT 1"),primary);
     EXPECT_EQ(client->query_with_options("SELECT 1",{ReadConsistency::Local}),replica);
+    EXPECT_EQ(client->query_with_options("SELECT tls_failure",{ReadConsistency::Local}),primary);
     client->query("BEGIN");EXPECT_EQ(client->query_with_options("SELECT 1",{ReadConsistency::Local}),primary);client->query("ROLLBACK");
     for(const std::string sql:{"UPDATE lost","SELECT \"effectful\"()"}) {
         auto before=calls.size();EXPECT_THROW(client->query_with_options(sql,{ReadConsistency::Local}),RedDBError);EXPECT_EQ(calls.size(),before+1);EXPECT_TRUE(calls.back().starts_with(primary));

@@ -10,7 +10,7 @@ pub const Socket = struct {
     fn wait(self: Socket, events: i16) !void {
         if (windows) {
             var descriptor = std.os.windows.ws2_32.pollfd{ .fd = self.handle, .events = events, .revents = 0 };
-            const result = std.os.windows.ws2_32.WSAPoll(@ptrCast(&descriptor), 1, @intCast(self.timeout_ms));
+            const result = std.os.windows.ws2_32.WSAPoll(@ptrCast(&descriptor), 1, if (self.timeout_ms == 0) -1 else @intCast(self.timeout_ms));
             if (result == 0) return error.ConnectionTimedOut;
             if (result < 0) return error.SocketNotConnected;
         }
@@ -26,7 +26,7 @@ pub const Socket = struct {
                 else => error.SocketNotConnected,
             };
         }
-        return std.posix.recv(self.handle, bytes, 0);
+        return std.posix.recv(self.handle, bytes, 0) catch |err| return if (err == error.WouldBlock) error.ConnectionTimedOut else err;
     }
     pub fn readAtLeast(self: Socket, bytes: []u8, minimum: usize) !usize {
         var offset: usize = 0;
@@ -44,7 +44,7 @@ pub const Socket = struct {
             if (count >= 0) return @intCast(count);
             return error.BrokenPipe;
         }
-        return std.posix.send(self.handle, bytes, 0);
+        return std.posix.send(self.handle, bytes, 0) catch |err| return if (err == error.WouldBlock) error.ConnectionTimedOut else err;
     }
     pub fn readv(self: Socket, vectors: []const std.posix.iovec) !usize {
         for (vectors) |vector| if (vector.len > 0) return self.read(vector.base[0..vector.len]);

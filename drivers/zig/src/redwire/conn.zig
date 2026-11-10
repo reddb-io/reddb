@@ -119,6 +119,37 @@ pub const Conn = struct {
         self.stream.close();
     }
 
+    fn poison(self: *Conn) void {
+        if (self.closed) return;
+        self.closed = true;
+        switch (self.stream) {
+            .plain => |socket| socket.close(),
+            .tls => |tls| tls.sock.close(),
+        }
+    }
+    pub fn setIoTimeout(self: *Conn, milliseconds: u32) !void {
+        if (self.closed) return error.ConnectionClosed;
+        self.io_timeout_ms = milliseconds;
+        switch (self.stream) {
+            .plain => |*socket| {
+                socket.timeout_ms = milliseconds;
+                try @import("../network.zig").setTimeout(socket.*, milliseconds);
+            },
+            .tls => |*tls| {
+                tls.sock.timeout_ms = milliseconds;
+                try @import("../network.zig").setTimeout(tls.sock, milliseconds);
+            },
+        }
+    }
+    fn recvResponse(self: *Conn, correlation: u64) !codec.Decoded {
+        errdefer self.poison();
+        var response = try self.recvFrame();
+        if (response.frame.correlation_id != correlation) {
+            response.deinit(self.allocator);
+            return error.UnexpectedFrame;
+        }
+        return response;
+    }
     pub fn nextCorr(self: *Conn) u64 {
         return self.next_corr.fetchAdd(1, .monotonic);
     }
@@ -126,6 +157,8 @@ pub const Conn = struct {
     /// Send a frame. Allocator usage is internal; this never holds
     /// memory across the lock boundary.
     pub fn sendFrame(self: *Conn, f: frame.Frame) !void {
+        if (self.closed) return error.ConnectionClosed;
+        errdefer self.poison();
         const bytes = try codec.encodeFrame(self.allocator, f);
         defer self.allocator.free(bytes);
         try self.stream.writeAll(bytes);
@@ -134,6 +167,7 @@ pub const Conn = struct {
     /// Read one frame. Returned `Decoded` may own a payload buffer
     /// (compressed frames) — caller must `deinit` to free it.
     pub fn recvFrame(self: *Conn) !codec.Decoded {
+        if (self.closed) return error.ConnectionClosed;
         var header_buf: [frame.FRAME_HEADER_SIZE]u8 = undefined;
         try readExact(&self.stream, &header_buf);
         const header = try frame.readHeader(&header_buf);
@@ -164,7 +198,7 @@ pub const Conn = struct {
         if ((self.server_features & @import("../topology.zig").feature) == 0) return null;
         const correlation = self.nextCorr();
         try self.sendFrame(frame.Frame.init(.topology, correlation, protocol));
-        var response = try self.recvFrame();
+        var response = try self.recvResponse(correlation);
         defer response.deinit(self.allocator);
         if (response.frame.kind != .result or response.frame.correlation_id != correlation) return error.UnexpectedFrame;
         return try takeOwned(self.allocator, &response);
@@ -216,16 +250,14 @@ pub const Conn = struct {
         defer self.mutex.unlock();
         const corr = self.nextCorr();
         try self.sendFrame(frame.Frame.init(.query, corr, sql));
-        var resp = try self.recvFrame();
+        var resp = try self.recvResponse(corr);
         errdefer resp.deinit(self.allocator);
         switch (resp.frame.kind) {
             .result => return takeOwned(self.allocator, &resp),
             .err => {
-                resp.deinit(self.allocator);
                 return error.ProtocolError;
             },
             else => {
-                resp.deinit(self.allocator);
                 return error.UnexpectedFrame;
             },
         }
@@ -252,16 +284,14 @@ pub const Conn = struct {
 
         const corr = self.nextCorr();
         try self.sendFrame(frame.Frame.init(.query_with_params, corr, payload));
-        var resp = try self.recvFrame();
+        var resp = try self.recvResponse(corr);
         errdefer resp.deinit(self.allocator);
         switch (resp.frame.kind) {
             .result => return takeOwned(self.allocator, &resp),
             .err => {
-                resp.deinit(self.allocator);
                 return error.ProtocolError;
             },
             else => {
-                resp.deinit(self.allocator);
                 return error.UnexpectedFrame;
             },
         }
@@ -270,9 +300,12 @@ pub const Conn = struct {
     pub fn ping(self: *Conn) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
+        const prior_timeout = self.io_timeout_ms;
+        try self.setIoTimeout(5000);
+        defer self.setIoTimeout(prior_timeout) catch {};
         const corr = self.nextCorr();
         try self.sendFrame(frame.Frame.init(.ping, corr, &.{}));
-        var resp = try self.recvFrame();
+        var resp = try self.recvResponse(corr);
         defer resp.deinit(self.allocator);
         if (resp.frame.kind != .pong) return error.UnexpectedFrame;
     }

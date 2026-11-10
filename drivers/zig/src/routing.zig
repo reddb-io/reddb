@@ -68,7 +68,7 @@ pub const Router = struct {
         try self.refresh();
         return self;
     }
-    fn dial(self: *Router, address: []const u8) !*root.Conn {
+    fn dial(self: *Router, address: []const u8, control: bool) !*root.Conn {
         var target = try root.url.parse(self.allocator, address);
         defer target.deinit(self.allocator);
         var original = try root.url.parse(self.allocator, self.seed_uri);
@@ -81,7 +81,8 @@ pub const Router = struct {
         options.port = target.port orelse root.url.defaultPortFor(target.kind);
         options.tls = std.mem.eql(u8, self.protocol, "reds");
         options.connect_timeout_ms = @min(options.connect_timeout_ms, 5000);
-        options.io_timeout_ms = @min(options.io_timeout_ms, 5000);
+        const application_timeout = options.io_timeout_ms;
+        options.io_timeout_ms = 5000;
         if (self.override == null) {
             if (original.token orelse original.api_key) |token| {
                 options.auth = .{ .bearer = token };
@@ -89,11 +90,17 @@ pub const Router = struct {
                 if (original.password) |password| options.auth = .{ .scram_sha_256 = .{ .username = username, .password = password } };
             }
         }
-        return root.connectDirect(self.allocator, address, options);
+        const client = try root.connectDirect(self.allocator, address, options);
+        errdefer {
+            client.deinit();
+            self.allocator.destroy(client);
+        }
+        if (!control) try client.setIoTimeout(application_timeout);
+        return client;
     }
     fn endpoint(self: *Router, address: []const u8) !*root.Conn {
         if (self.clients.get(address)) |client| return client;
-        const client = try self.dial(address);
+        const client = try self.dial(address, false);
         errdefer {
             client.deinit();
             self.allocator.destroy(client);
@@ -127,7 +134,7 @@ pub const Router = struct {
         var index: usize = 0;
         while (index < candidates.items.len and index < 258 and std.time.milliTimestamp() < deadline) : (index += 1) {
             const candidate = candidates.items[index];
-            const control = self.dial(candidate) catch continue;
+            const control = self.dial(candidate, true) catch continue;
             defer {
                 control.deinit();
                 self.allocator.destroy(control);
@@ -180,6 +187,9 @@ pub const Router = struct {
             else => false,
         };
     }
+    fn queryAt(self: *Router, address: []const u8, sql: []const u8, params: anytype) anyerror![]const u8 {
+        return (try self.endpoint(address)).query(sql, params);
+    }
     pub fn query(self: *Router, sql: []const u8, params: anytype, options: ?ReadOptions) anyerror![]const u8 {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -203,15 +213,14 @@ pub const Router = struct {
             self.pinned = address;
             self.session = self.session or policy.state == .session;
         }
-        const client = try self.endpoint(address);
-        const result = client.query(sql, params) catch |err| {
+        const result = self.queryAt(address, sql, params) catch |err| {
             if (!network(err)) return err;
             self.refresh_at = 0;
             self.remove(address);
             if (self.pinned != null) self.broken = true;
             if (self.pinned != null or !read) return err;
             try self.refresh();
-            return (try self.endpoint(self.primary)).query(sql, params);
+            return self.queryAt(self.primary, sql, params);
         };
         if (policy.state == .end and !self.session) self.pinned = null;
         return result;
@@ -221,7 +230,16 @@ pub const Router = struct {
         defer self.mutex.unlock();
         if (self.closed or self.broken) return error.ConnectionClosed;
         if (self.pinned == null and std.time.milliTimestamp() >= self.refresh_at) try self.refresh();
-        return (try self.endpoint(self.pinned orelse self.primary)).ping();
+        const address = self.pinned orelse self.primary;
+        const client = try self.endpoint(address);
+        return client.ping() catch |err| {
+            if (network(err)) {
+                self.refresh_at = 0;
+                self.remove(address);
+                if (self.pinned != null) self.broken = true;
+            }
+            return err;
+        };
     }
     pub fn close(self: *Router) void {
         self.mutex.lock();

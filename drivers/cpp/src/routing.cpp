@@ -241,7 +241,7 @@ class RoutedConn final : public Conn {
             if (state == "end" && !session_) pinned_.clear();
             return result;
         } catch (const RedDBError& error) {
-            if (error.code() != ErrorCode::Network) throw;
+            if (error.code() != ErrorCode::Network && error.code() != ErrorCode::Tls) throw;
             refresh_at_ = {};
             if (auto found = clients_.find(address); found != clients_.end()) { found->second->close(); clients_.erase(found); }
             if (!pinned_.empty()) broken_ = true;

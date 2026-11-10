@@ -169,6 +169,15 @@ impl RedDb for MockServer {
                 .fetch_add(1, Ordering::Relaxed);
         }
         self.counters.query.fetch_add(1, Ordering::Relaxed);
+        if request.get_ref().query == "UPDATE raw_metadata" {
+            return Ok(Response::new(QueryReply {
+                ok: true,
+                result_json: "{}".into(),
+                affected_rows: 7,
+                statement: "update".into(),
+                ..Default::default()
+            }));
+        }
         Ok(Response::new(QueryReply {
             ok: true,
             mode: "select".into(),
@@ -513,6 +522,13 @@ async fn high_level_grpc_and_grpcs_discover_without_manual_refresh() {
             1,
             "{protocol}"
         );
+        let raw = db
+            .query_json("UPDATE raw_metadata", &[], None)
+            .await
+            .expect("raw binding envelope");
+        assert_eq!(raw["affected"], 7, "{protocol}");
+        assert_eq!(raw["statement"], "update", "{protocol}");
+        assert_eq!(primary_count.query.load(Ordering::Relaxed), 6, "{protocol}");
         db.close().await.expect("close");
         let query = uri.query().expect("test query parameters");
         let bootstrap = format!("{protocol}://{primary},{replica}?{query}");

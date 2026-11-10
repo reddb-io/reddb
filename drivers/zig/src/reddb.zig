@@ -92,6 +92,13 @@ pub const Conn = struct {
         }
     }
 
+    /// Internal pool preparation restores the application's configured I/O deadline.
+    pub fn setIoTimeout(self: *Conn, milliseconds: u32) !void {
+        switch (self.backend) {
+            .redwire => |conn| try conn.setIoTimeout(milliseconds),
+            else => {},
+        }
+    }
     pub fn ping(self: *Conn) anyerror!void {
         return switch (self.backend) {
             .redwire => |conn| conn.ping(),
