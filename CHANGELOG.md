@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.30.1
+
+### Patch Changes
+
+- [#2763](https://github.com/reddb-io/reddb/pull/2763) [`1b45427`](https://github.com/reddb-io/reddb/commit/1b45427fd10c0bdd82b6097ebd3a54ebf295507b) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix topology discovery and read-replica routing across the language drivers, preserving credentials, transaction pinning, query deadlines, and protection against replaying ambiguous writes.
+
 ## 1.30.0
 
 ### Minor Changes
