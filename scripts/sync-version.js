@@ -263,12 +263,22 @@ syncCargoLock(path.join(root, 'drivers', 'python', 'Cargo.lock'), [
   'reddb-io-python',
 ])
 
+// Bun's exact workspace dependency must also match in the pnpm importer.
+const pnpmLockPath = path.join(root, 'pnpm-lock.yaml')
+const pnpmLock = fs.readFileSync(pnpmLockPath, 'utf8')
+const updatedPnpmLock = pnpmLock.replace(
+  /(  drivers\/bun:\r?\n    dependencies:\r?\n      '@reddb-io\/client':\r?\n        specifier: )[^\r\n]+/,
+  `$1${version}`,
+)
+if (updatedPnpmLock !== pnpmLock) fs.writeFileSync(pnpmLockPath, updatedPnpmLock)
+
 // Stage every file that the version bump touches so pnpm's
 // version commit picks them up in one atomic commit.
 const stageList = [
   'package.json',
   'Cargo.toml',
   'Cargo.lock',
+  'pnpm-lock.yaml',
   'crates/reddb-types/Cargo.toml',
   'crates/reddb-crypto/Cargo.toml',
   'crates/reddb-file/Cargo.toml',
