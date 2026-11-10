@@ -210,6 +210,13 @@ impl RedDBRuntime {
             if remaining == 0 {
                 break;
             }
+            // Blob Cache owns this collection's byte counter and must delete
+            // the cache row plus its counter update in one WAL publication.
+            // The dedicated cache sweeper consumes the same persisted
+            // deadline projection without routing through SQL DELETE.
+            if collection == crate::storage::cache::blob::INTERNAL_L2_COLLECTION {
+                continue;
+            }
             let Some(manager) = store.get_collection(collection) else {
                 continue;
             };

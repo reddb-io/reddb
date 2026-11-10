@@ -53,7 +53,7 @@ impl Drop for RuntimeBackgroundTasks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::cache::{BlobCachePolicy, BlobCachePut};
+    use crate::storage::cache::{BlobCachePolicy, BlobCachePut, L1Admission};
     use crate::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
     use std::sync::mpsc;
     use std::time::Duration;
@@ -165,14 +165,18 @@ mod tests {
             .put(
                 "sessions",
                 "expired",
-                BlobCachePut::new(b"payload".to_vec())
-                    .with_policy(BlobCachePolicy::default().expires_at_unix_ms(1)),
+                BlobCachePut::new(b"payload".to_vec()).with_policy(
+                    BlobCachePolicy::default()
+                        .expires_at_unix_ms(1)
+                        .l1_admission(L1Admission::Never),
+                ),
             )
             .expect("cache put");
-        assert_eq!(runtime.result_blob_cache().stats().entries(), 1);
+        assert_eq!(runtime.result_blob_cache().stats().entries(), 0);
+        assert!(runtime.result_blob_cache().stats().l2_bytes_in_use() > 0);
 
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while runtime.result_blob_cache().stats().entries() != 0
+        while runtime.result_blob_cache().stats().l2_bytes_in_use() != 0
             && std::time::Instant::now() < deadline
         {
             std::thread::sleep(Duration::from_millis(10));
@@ -182,9 +186,10 @@ mod tests {
         assert_eq!(
             stats.entries(),
             0,
-            "background sweep must physically remove the entry"
+            "background sweep must leave no L1 entry"
         );
         assert_eq!(stats.bytes_in_use(), 0);
+        assert_eq!(stats.l2_bytes_in_use(), 0);
         assert_eq!(stats.expirations(), 1);
     }
 }

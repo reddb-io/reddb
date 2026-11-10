@@ -1587,6 +1587,154 @@ mod cache_boot_tests {
     }
 
     #[test]
+    fn single_file_l2_deadline_survives_restart_and_sweeps_atomically() {
+        let directory = tempfile::tempdir().expect("single-file L2 TTL fixture");
+        let path = directory.path().join("cache-l2-ttl.rdb");
+        let options = RedDBOptions::persistent(&path);
+        let mut runtime = RedDBRuntime::with_options(options.clone()).expect("initial runtime");
+        drop(runtime.background_tasks.take());
+        runtime
+            .result_blob_cache()
+            .put(
+                "tenant",
+                "expired",
+                crate::storage::cache::BlobCachePut::new(b"expired".to_vec()).with_policy(
+                    crate::storage::cache::BlobCachePolicy::default()
+                        .expires_at_unix_ms(1)
+                        .l1_admission(crate::storage::cache::L1Admission::Never),
+                ),
+            )
+            .expect("write expiring L2 entry");
+        runtime.flush().expect("checkpoint L2 deadline");
+        drop(runtime);
+
+        let mut reopened = RedDBRuntime::with_options(options).expect("reopen runtime");
+        drop(reopened.background_tasks.take());
+        let manager = reopened
+            .db()
+            .store()
+            .get_collection(crate::storage::cache::blob::INTERNAL_L2_COLLECTION)
+            .expect("L2 collection");
+        assert_eq!(manager.scheduled_metadata_expiry_count(), 1);
+        let bytes_before = reopened.result_blob_cache().stats().l2_bytes_in_use();
+        assert!(bytes_before > 0);
+
+        // Generic row TTL must not bypass the cache's atomic byte-counter
+        // update. The dedicated cache sweeper owns this collection.
+        assert_eq!(reopened.sweep_individual_ttl_tick_at(64, u64::MAX), 0);
+        assert_eq!(
+            reopened.result_blob_cache().stats().l2_bytes_in_use(),
+            bytes_before
+        );
+        let report = crate::storage::cache::BlobCacheSweeper::sweep_expired(
+            reopened.result_blob_cache(),
+            crate::storage::cache::SweepLimit::Entries(1),
+        );
+        assert_eq!(report.entries_evicted, 1);
+        assert_eq!(reopened.result_blob_cache().stats().l2_bytes_in_use(), 0);
+        assert_eq!(manager.scheduled_metadata_expiry_count(), 0);
+    }
+
+    #[test]
+    fn expired_l2_payload_pages_are_reused() {
+        let directory = tempfile::tempdir().expect("L2 page reuse fixture");
+        let path = directory.path().join("cache-l2-reuse.rdb");
+        let options = RedDBOptions::persistent(&path)
+            .with_memory_budget(32 * 1024 * 1024)
+            .with_bounded_disk_residency(true);
+        let mut runtime = RedDBRuntime::with_options(options.clone()).expect("runtime");
+        drop(runtime.background_tasks.take());
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let payload: Vec<u8> = std::iter::repeat_with(|| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[0]
+        })
+        .take(64 * 1024)
+        .collect();
+        for id in 0..8 {
+            runtime
+                .result_blob_cache()
+                .put(
+                    "reuse",
+                    format!("expired-{id}"),
+                    crate::storage::cache::BlobCachePut::new(payload.clone()).with_policy(
+                        crate::storage::cache::BlobCachePolicy::default()
+                            .expires_at_unix_ms(1)
+                            .l1_admission(crate::storage::cache::L1Admission::Never),
+                    ),
+                )
+                .expect("expired L2 payload");
+        }
+        runtime.checkpoint().expect("initial L2 checkpoint");
+        let initial_pages = runtime
+            .db()
+            .store()
+            .pager()
+            .expect("pager")
+            .page_count()
+            .expect("initial page count");
+        drop(runtime);
+
+        let mut runtime = RedDBRuntime::with_options(options).expect("reopened runtime");
+        drop(runtime.background_tasks.take());
+        let store = runtime.db().store();
+        let pager = store.pager().expect("pager");
+        let report = crate::storage::cache::BlobCacheSweeper::sweep_expired(
+            runtime.result_blob_cache(),
+            crate::storage::cache::SweepLimit::Entries(64),
+        );
+        assert_eq!(report.entries_evicted, 8);
+        runtime.checkpoint().expect("expired L2 checkpoint");
+
+        let mut cursor = store
+            .mvcc_reclaim_cursor(crate::storage::cache::blob::INTERNAL_L2_COLLECTION.to_string())
+            .expect("L2 reclaim cursor");
+        for _ in 0..64 {
+            store
+                .reclaim_mvcc_tick(
+                    &mut cursor,
+                    &runtime.snapshot_manager(),
+                    runtime.mvcc_vacuum_cutoff_xid(),
+                    64,
+                    8,
+                )
+                .expect("L2 MVCC reclaim");
+            if cursor.finished() {
+                break;
+            }
+        }
+        assert!(cursor.finished());
+        drop(cursor);
+        for _ in 0..3 {
+            runtime.checkpoint().expect("publish reusable L2 pages");
+        }
+        let free_before_reuse = pager.free_page_count().expect("free pages");
+
+        for id in 0..8 {
+            runtime
+                .result_blob_cache()
+                .put(
+                    "reuse",
+                    format!("replacement-{id}"),
+                    crate::storage::cache::BlobCachePut::new(payload.clone()).with_policy(
+                        crate::storage::cache::BlobCachePolicy::default()
+                            .expires_at_unix_ms(u64::MAX)
+                            .l1_admission(crate::storage::cache::L1Admission::Never),
+                    ),
+                )
+                .expect("replacement L2 payload");
+        }
+        runtime.checkpoint().expect("replacement L2 checkpoint");
+        let pages_after_reuse = pager.page_count().expect("page count after reuse");
+        assert!(
+            pages_after_reuse <= initial_pages.saturating_add(16),
+            "expired L2 pages were not reused: initial={initial_pages}, free_before={free_before_reuse}, after={pages_after_reuse}"
+        );
+    }
+
+    #[test]
     fn zero_cache_namespace_limit_is_rejected_on_boot() {
         let directory = tempfile::tempdir().expect("cache config fixture");
         let options = RedDBOptions::persistent(directory.path().join("cache-config-zero.rdb"));

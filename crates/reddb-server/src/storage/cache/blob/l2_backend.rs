@@ -1,4 +1,4 @@
-use super::cache::{BlobCacheKey, CacheError};
+use super::cache::{BlobCacheKey, BlobCacheSweepOutcome, CacheError};
 use super::entry::Entry;
 use super::l2::BlobCacheL2;
 use crate::storage::cache::compressor::Compressed;
@@ -28,6 +28,12 @@ pub(super) trait BlobCacheL2Backend: Send + Sync {
     fn delete_namespace(&self, namespace: &str) -> usize;
     fn has_namespace(&self, namespace: &str) -> bool;
     fn delete_prefix(&self, namespace: &str, prefix: &str) -> usize;
+    fn sweep_expired(
+        &self,
+        now_ms: u64,
+        entries_limit: usize,
+        millis_limit: Option<u32>,
+    ) -> BlobCacheSweepOutcome;
     fn stats_bytes_in_use(&self) -> u64;
     fn stats_metadata_reads(&self) -> u64;
     fn stats_negative_skips(&self) -> u64;
@@ -93,6 +99,21 @@ impl BlobCacheL2Backend for BlobCacheL2 {
 
     fn delete_prefix(&self, namespace: &str, prefix: &str) -> usize {
         self.delete_prefix(namespace, prefix)
+    }
+
+    fn sweep_expired(
+        &self,
+        _now_ms: u64,
+        _entries_limit: usize,
+        _millis_limit: Option<u32>,
+    ) -> BlobCacheSweepOutcome {
+        // The standalone pager is a compatibility backend. The server uses
+        // StoreBlobCacheL2, whose persisted deadline projection provides the
+        // automatic no-scan sweep.
+        BlobCacheSweepOutcome {
+            completed: true,
+            ..BlobCacheSweepOutcome::default()
+        }
     }
 
     fn stats_bytes_in_use(&self) -> u64 {

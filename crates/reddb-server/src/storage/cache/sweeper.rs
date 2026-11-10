@@ -1,14 +1,15 @@
 //! Bounded Blob Cache maintenance for L1 expiry and namespace flushing.
 //!
-//! `sweep_expired` consumes due records from per-shard deadline indexes, so
-//! ordinary TTL work depends on the number of deadlines due rather than the
-//! total cache size. A separate rotating scan runs only while a namespace
-//! generation flush needs physical reclamation.
+//! `sweep_expired` consumes due records from per-shard L1 indexes and the
+//! store's persisted ordered L2 deadline projection, so ordinary TTL work
+//! depends on the number of deadlines due rather than the total cache size. A
+//! separate rotating scan runs only while a namespace generation flush needs
+//! physical reclamation.
 //! The runtime invokes it every 250 ms on a dedicated maintenance thread.
 //!
 //! # Operations
 //!
-//! - [`BlobCacheSweeper::sweep_expired`] — bounded sweep of expired L1 entries.
+//! - [`BlobCacheSweeper::sweep_expired`] — bounded sweep of expired L1/L2 entries.
 //! - [`BlobCacheSweeper::reclaim_orphans`] — bounded reclamation of L2 blob
 //!   chains. This operation remains scaffolding until the L2 allocation walk
 //!   is exposed; it reports zero work rather than claiming reclamation.
@@ -136,7 +137,7 @@ pub struct NamespaceFlushReport {
 pub struct BlobCacheSweeper;
 
 impl BlobCacheSweeper {
-    /// Bounded sweep of expired L1 entries.
+    /// Bounded sweep of expired L1 and L2 entries.
     ///
     /// Pops due L1 deadlines across shards, revalidates them against the
     /// current entry, and evicts only entries whose effective expiry elapsed.
@@ -145,10 +146,39 @@ impl BlobCacheSweeper {
     /// # Concurrency
     ///
     /// One shard write lock is held at a time. A read on that shard may wait
-    /// briefly; readers on other shards continue unimpeded.
+    /// briefly; readers on other shards continue unimpeded. Persistent L2
+    /// deletion is published as one bounded WAL batch after the L1 locks are
+    /// released.
     ///
     pub fn sweep_expired(cache: &BlobCache, limit: SweepLimit) -> SweepReport {
-        let outcome = cache.sweep_expired_l1(limit.entries_cap(), limit.millis_cap());
+        let started = Instant::now();
+        let mut outcome = cache.sweep_expired_l1(limit.entries_cap(), limit.millis_cap());
+        let entries_remaining = limit.entries_cap().map_or(usize::MAX, |cap| {
+            cap.saturating_sub(outcome.entries_scanned)
+        });
+        let millis_remaining = limit.millis_cap().map(|cap| {
+            let elapsed = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+            cap.saturating_sub(elapsed)
+        });
+        let l2 = cache.sweep_expired_l2(entries_remaining, millis_remaining);
+        outcome.entries_scanned = outcome.entries_scanned.saturating_add(l2.entries_scanned);
+        outcome.entries_evicted = outcome.entries_evicted.saturating_add(l2.entries_evicted);
+        outcome.expirations = outcome.expirations.saturating_add(l2.expirations);
+        outcome.bytes_reclaimed = outcome.bytes_reclaimed.saturating_add(l2.bytes_reclaimed);
+        outcome.completed &= l2.completed;
+        outcome.elapsed_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        for (namespace, stats) in l2.by_namespace {
+            let aggregate = outcome.by_namespace.entry(namespace).or_default();
+            aggregate.entries_scanned = aggregate
+                .entries_scanned
+                .saturating_add(stats.entries_scanned);
+            aggregate.entries_evicted = aggregate
+                .entries_evicted
+                .saturating_add(stats.entries_evicted);
+            aggregate.bytes_reclaimed = aggregate
+                .bytes_reclaimed
+                .saturating_add(stats.bytes_reclaimed);
+        }
         SweepReport {
             entries_scanned: outcome.entries_scanned,
             entries_evicted: outcome.entries_evicted,

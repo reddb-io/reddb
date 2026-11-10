@@ -44,9 +44,12 @@ Blob Cache Interface
 The normal server runtime keeps hot values in process-local L1 and durable cache
 rows in the hidden `red.cache.blob_l2` collection inside the primary `.rdb`.
 Its dedicated maintenance worker reclaims expired and namespace-flushed L1
-entries in small, rotating batches without using query workers; L2 expiry is
-also enforced on reads. Cache state and invalidation are node-local; the HTTP
-API does not add replication or cluster-wide coherence.
+entries in small, rotating batches without using query workers. L2 deadlines
+are persisted in the store's ordered expiry projection, so the same worker can
+delete unread expired rows in bounded WAL batches without scanning the cache in
+steady state. A missing projection from an older checkpoint is rebuilt in
+bounded ticks. Cache state and invalidation are node-local; the HTTP API does
+not add replication or cluster-wide coherence.
 
 Direct engine callers can still opt into the legacy standalone file backend,
 but the server uses the internal backend so restart recovery preserves the

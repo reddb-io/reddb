@@ -140,6 +140,11 @@ dependency invalidation conservatively clears the affected L2 namespace so an
 unrehydrated entry cannot reappear after a write. After restart, eligible
 entries hydrate from L2 instead of missing to the origin.
 
+Expiry deadlines also enter the store's persisted ordered projection. A
+dedicated cache worker deletes due L2 rows in bounded batches, with the byte
+counter in the same WAL publication, and the normal MVCC reclamation path makes
+their pages reusable.
+
 Direct engine callers can still select the legacy standalone pager backend for
 compatibility, but the normal server does not create that sidecar.
 

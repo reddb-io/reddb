@@ -119,8 +119,11 @@ The server uses a process-local L1 and a durable L2 stored in the hidden
 `red.cache.blob_l2` collection inside the same `.rdb` file. Eligible values can
 therefore be rehydrated after restart without an L2 sidecar. L2 defaults to a
 4 GiB payload budget; L1 remains the latency tier. Expired L2 values are never
-returned and are reclaimed on access or when L2 capacity eviction needs space.
-Cache data is still derived and must not be the authoritative copy of data.
+returned. Their persisted deadlines feed the same bounded maintenance worker,
+so unread expired values are deleted without a steady-state collection scan;
+older checkpoints rebuild a missing deadline projection in bounded ticks.
+Reclaimed pages become available for later database writes. Cache data is
+still derived and must not be the authoritative copy of data.
 
 The cache and its invalidations are local to the addressed server. Use a
 single cache endpoint or explicit sticky routing when deploying multiple nodes;

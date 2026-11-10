@@ -12,6 +12,8 @@ mod l2_backend;
 mod l2_store;
 pub mod shard;
 
+pub(crate) use l2_store::COLLECTION as INTERNAL_L2_COLLECTION;
+
 pub use cache::{
     BlobCache, BlobCacheHit, BlobCachePolicy, BlobCachePut, BlobCacheStats, CacheError,
     CachePresence, L1Admission,

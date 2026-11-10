@@ -1424,6 +1424,30 @@ impl BlobCache {
         outcome
     }
 
+    /// Remove a bounded set of due L2-only entries from the persistent
+    /// deadline projection. The internal backend resolves due ids without a
+    /// collection scan; the compatibility file backend reports no work.
+    pub(crate) fn sweep_expired_l2(
+        &self,
+        entries_limit: usize,
+        millis_limit: Option<u32>,
+    ) -> BlobCacheSweepOutcome {
+        let Some(l2) = &self.l2 else {
+            return BlobCacheSweepOutcome {
+                completed: true,
+                ..BlobCacheSweepOutcome::default()
+            };
+        };
+        let outcome = l2.sweep_expired(unix_now_ms(), entries_limit, millis_limit);
+        if outcome.expirations > 0 {
+            self.stats.expirations.fetch_add(
+                u64::try_from(outcome.expirations).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+        }
+        outcome
+    }
+
     fn record_sweep(&self, sweep: ShardSweep, outcome: &mut BlobCacheSweepOutcome) {
         for (key, entry, _) in &sweep.removed {
             self.record_removed_entry(key, entry);
