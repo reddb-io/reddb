@@ -28,6 +28,100 @@ fn rebootstrap_ready_message(
     )
 }
 
+fn should_fallback_to_legacy_wal(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::Unimplemented
+}
+
+async fn pull_wal_chunk(
+    client: &mut crate::grpc::proto::red_db_client::RedDbClient<tonic::transport::Channel>,
+    request_auth: &crate::replication::request_auth::ReplicaRequestAuth,
+    open: &reddb_wire::replication::WalStreamOpen,
+    routing_endpoints: &reddb_wire::routing::RoutingEndpoints,
+    binary_stream_supported: &mut Option<bool>,
+) -> Result<
+    (
+        reddb_wire::replication::WalStreamChunk,
+        Option<reddb_wire::routing::RoutingEndpoints>,
+    ),
+    tonic::Status,
+> {
+    if *binary_stream_supported != Some(false) {
+        let request = crate::grpc::proto::WalStreamRequest {
+            version: 1,
+            since_lsn: open.since_lsn,
+            max_count: u32::try_from(open.max_count).unwrap_or(u32::MAX),
+            replica_id: open.replica_id.clone(),
+            term: open.term,
+            await_data: open.await_data,
+            await_timeout_ms: open.await_timeout_ms,
+            routing_endpoints: routing_endpoints
+                .iter()
+                .map(|(protocol, address)| (protocol.clone(), address.clone()))
+                .collect(),
+            max_chunk_bytes: 1024 * 1024,
+        };
+        match client
+            .stream_wal_records(request_auth.request(request))
+            .await
+        {
+            Ok(response) => {
+                *binary_stream_supported = Some(true);
+                let mut stream = response.into_inner();
+                // Consume one bounded chunk per apply/relay/cursor/ACK cycle.
+                // Dropping the remaining stream applies backpressure to the
+                // capacity-one producer; the next request resumes from the
+                // newly durable LSN instead of accumulating a whole catch-up
+                // response in replica memory.
+                let chunk = stream.message().await?.ok_or_else(|| {
+                    tonic::Status::data_loss("primary returned an empty WAL stream")
+                })?;
+                if chunk.version != 1 {
+                    return Err(tonic::Status::data_loss(format!(
+                        "primary returned unsupported WAL stream version {}",
+                        chunk.version
+                    )));
+                }
+                let endpoints = crate::grpc::validated_routing_endpoints(chunk.primary_endpoints);
+                let endpoints = (!endpoints.is_empty()).then_some(endpoints);
+                return Ok((
+                    reddb_wire::replication::WalStreamChunk {
+                        records: chunk
+                            .records
+                            .into_iter()
+                            .map(|record| reddb_wire::replication::WalStreamRecord {
+                                lsn: record.lsn,
+                                data: record.data.to_vec(),
+                            })
+                            .collect(),
+                        current_lsn: chunk.current_lsn,
+                        oldest_available_lsn: chunk.oldest_available_lsn,
+                        partial_resync: chunk.partial_resync,
+                        partial_resync_count: chunk.partial_resync_count,
+                        needs_rebootstrap: chunk.needs_rebootstrap,
+                        invalidation_reason: chunk.invalidation_reason,
+                        catchup: crate::grpc::wire_wal_catchup(chunk.catchup)?,
+                    },
+                    endpoints,
+                ));
+            }
+            Err(status) if should_fallback_to_legacy_wal(&status) => {
+                *binary_stream_supported = Some(false);
+            }
+            Err(status) => return Err(status),
+        }
+    }
+
+    let request = request_auth.request(crate::grpc::proto::JsonPayloadRequest {
+        payload_json: String::from_utf8(open.encode_json_with_endpoints(Some(routing_endpoints)))
+            .expect("invariant: WAL open encoder emits UTF-8 JSON"),
+    });
+    let response = client.pull_wal_records(request).await?;
+    reddb_wire::replication::WalStreamChunk::decode_json_with_endpoints(
+        response.into_inner().payload.as_bytes(),
+    )
+    .map_err(|error| tonic::Status::data_loss(error.to_string()))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReplicaRejoinStartup {
     Continue {
@@ -44,6 +138,24 @@ enum ReplicaRejoinStartup {
 mod tests {
     use super::*;
     use crate::RedDBOptions;
+
+    #[test]
+    fn legacy_wal_fallback_is_only_for_old_servers() {
+        assert!(should_fallback_to_legacy_wal(
+            &tonic::Status::unimplemented("old primary")
+        ));
+        for status in [
+            tonic::Status::unauthenticated("bad credential"),
+            tonic::Status::permission_denied("missing capability"),
+            tonic::Status::resource_exhausted("record too large"),
+            tonic::Status::data_loss("invalid chunk"),
+        ] {
+            assert!(
+                !should_fallback_to_legacy_wal(&status),
+                "must not downgrade after {status}"
+            );
+        }
+    }
 
     #[test]
     fn catchup_mode_from_wire_defaults_to_basebackup_then_wal() {
@@ -594,9 +706,10 @@ impl RedDBRuntime {
             // entering the 30-second tail-follow wait on an empty primary.
             // Every subsequent pull keeps the efficient await-data behavior.
             let mut await_data = false;
+            let mut binary_stream_supported = None;
 
             loop {
-                let payload = reddb_wire::replication::WalStreamOpen {
+                let open = reddb_wire::replication::WalStreamOpen {
                     since_lsn,
                     max_count,
                     replica_id: Some(replica_id.clone()),
@@ -604,25 +717,25 @@ impl RedDBRuntime {
                     await_data,
                     await_timeout_ms: 30_000,
                 };
-                let request = request_auth.request(JsonPayloadRequest {
-                    payload_json: String::from_utf8(payload.encode_json_with_endpoints(Some(&self.routing_endpoints())))
-                        .expect("invariant: WAL open encoder emits UTF-8 JSON"),
-                });
-
-                let pull_result = client.pull_wal_records(request).await;
+                let routing_endpoints = self.routing_endpoints();
+                let pull_result = pull_wal_chunk(
+                    &mut client,
+                    &request_auth,
+                    &open,
+                    &routing_endpoints,
+                    &mut binary_stream_supported,
+                )
+                .await;
                 if let Err(error) = &pull_result {
                     self.persist_replication_health(
                         "connecting",
-                        &format!("primary pull_wal_records request failed: {error}"),
+                        &format!("primary WAL stream request failed: {error}"),
                         None,
                         None,
                     );
                 }
-                if let Ok(response) = pull_result {
-                    if let Ok((chunk, endpoints)) = reddb_wire::replication::WalStreamChunk::decode_json_with_endpoints(
-                        response.into_inner().payload.as_bytes(),
-                    )
-                    {
+                match pull_result {
+                    Ok((chunk, endpoints)) => {
                         await_data = true;
                         self.cache_routing_primary_endpoints(endpoints);
                         let current_lsn = Some(chunk.current_lsn);
@@ -928,16 +1041,10 @@ impl RedDBRuntime {
                             current_lsn,
                             oldest_available_lsn,
                         );
-                    } else {
-                        self.persist_replication_health(
-                            "apply_error",
-                            "failed to parse pull_wal_records response",
-                            None,
-                            None,
-                        );
                     }
-                } else {
-                    std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(250)));
+                    Err(_) => {
+                        std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(250)));
+                    }
                 }
             }
         });

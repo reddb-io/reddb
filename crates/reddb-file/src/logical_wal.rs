@@ -215,6 +215,48 @@ pub fn read_logical_wal_entries_from(
     Ok(entries)
 }
 
+/// Read a bounded suffix of a logical WAL spool.
+///
+/// The first matching entry is always returned, even when it exceeds
+/// `max_payload_bytes`, so the caller can reject an indivisible oversized
+/// record explicitly. Subsequent entries are included only while both limits
+/// remain satisfied. At most one record beyond the returned byte budget is
+/// decoded while determining the boundary.
+pub fn read_logical_wal_entries_from_bounded(
+    path: &Path,
+    start_offset: u64,
+    since_lsn: u64,
+    max_count: usize,
+    max_payload_bytes: usize,
+) -> io::Result<Vec<LogicalWalEntry>> {
+    if !path.exists() || max_count == 0 {
+        return Ok(Vec::new());
+    }
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    file.seek(SeekFrom::Start(start_offset))?;
+    let mut entries = Vec::new();
+    let mut payload_bytes = 0usize;
+    while entries.len() < max_count {
+        let record_start = file.stream_position()?;
+        let Some(entry) = read_logical_wal_frame(&mut file, record_start)? else {
+            break;
+        };
+        if entry.lsn <= since_lsn {
+            continue;
+        }
+        let next_payload_bytes = payload_bytes.saturating_add(entry.data.len());
+        if !entries.is_empty() && next_payload_bytes > max_payload_bytes {
+            break;
+        }
+        payload_bytes = next_payload_bytes;
+        entries.push(entry);
+        if payload_bytes >= max_payload_bytes {
+            break;
+        }
+    }
+    Ok(entries)
+}
+
 #[allow(clippy::type_complexity)]
 pub fn build_logical_wal_seek_index(path: &Path) -> io::Result<(Vec<(u64, u64)>, u64, u64)> {
     if !path.exists() {
@@ -451,6 +493,37 @@ mod tests {
         assert_eq!(entries[0].timestamp_ms, 99);
         assert_eq!(entries[0].data, b"payload");
         assert_eq!(entries[0].version, LOGICAL_WAL_SPOOL_VERSION_V3);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn bounded_reader_stops_at_payload_budget_and_surfaces_oversized_first_record() {
+        let path = temp_path("bounded");
+        let mut bytes = Vec::new();
+        for lsn in 1..=3 {
+            bytes.extend_from_slice(
+                &encode_logical_wal_v3(
+                    1,
+                    None,
+                    lsn,
+                    lsn,
+                    &vec![u8::try_from(lsn).expect("fixture LSN fits in u8"); 600],
+                )
+                .expect("encode"),
+            );
+        }
+        std::fs::write(&path, bytes).expect("write");
+
+        let first =
+            read_logical_wal_entries_from_bounded(&path, 0, 0, 10, 1000).expect("bounded read");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].lsn, 1);
+        let second =
+            read_logical_wal_entries_from_bounded(&path, 0, 1, 10, 500).expect("oversized read");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].lsn, 2);
+        assert!(second[0].data.len() > 500);
 
         let _ = std::fs::remove_file(path);
     }
