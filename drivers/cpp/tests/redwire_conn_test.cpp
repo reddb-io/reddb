@@ -4,6 +4,7 @@
 
 #include "reddb/errors.hpp"
 #include "reddb/redwire/codec.hpp"
+#include "reddb/redwire/value_codec.hpp"
 #include "reddb/redwire/conn.hpp"
 #include "reddb/redwire/frame.hpp"
 #include "reddb/value.hpp"
@@ -443,7 +444,7 @@ TEST(RedWireConn, QueryWithParamsRequiresFeatureParams) {
     }
 }
 
-TEST(RedWireConn, EmptyParamsEmitLegacyQueryFrame) {
+TEST(RedWireConn, EmptyParamsEmitFullResultFrame) {
     auto fs = FakeServer::make();
     fs->th = std::thread([fd = fs->server_fd]() {
         uint8_t magic[2];
@@ -468,9 +469,8 @@ TEST(RedWireConn, EmptyParamsEmitLegacyQueryFrame) {
 
         Frame qf;
         ASSERT_TRUE(read_frame_fd(fd, qf));
-        ASSERT_EQ(qf.kind, MessageKind::Query);
-        std::string sql(qf.payload.begin(), qf.payload.end());
-        ASSERT_EQ(sql, "SELECT 1");
+        ASSERT_EQ(qf.kind, MessageKind::QueryWithParams);
+        ASSERT_EQ(qf.payload, reddb::redwire::encode_query_with_params("SELECT 1", {}));
 
         Frame result;
         result.kind = MessageKind::Result;

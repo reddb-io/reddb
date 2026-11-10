@@ -598,7 +598,27 @@ fn auth_from_uri_userinfo(uri: &str) -> Result<ConnectionAuth, ParseError> {
     if uri == "memory://" || uri == "memory:" || uri.starts_with("file://") {
         return Ok(ConnectionAuth::Anonymous);
     }
-    let parsed = Url::parse(uri)
+    // URL parsers cannot parse multiple independently ported authorities.
+    // Authentication belongs to the entire seed list, not its first host.
+    let mut auth_seed = uri.to_string();
+    if uri.starts_with("grpc://") || uri.starts_with("grpcs://") {
+        if let Some((scheme, rest)) = uri.split_once("://") {
+            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let authority = &rest[..end];
+            let (userinfo, hosts) = authority
+                .rsplit_once('@')
+                .map(|(userinfo, hosts)| (format!("{userinfo}@"), hosts))
+                .unwrap_or_else(|| (String::new(), authority));
+            if hosts.contains(',') {
+                auth_seed = format!(
+                    "{scheme}://{userinfo}{}{}",
+                    hosts.split(',').next().unwrap_or_default(),
+                    &rest[end..]
+                );
+            }
+        }
+    }
+    let parsed = Url::parse(&auth_seed)
         .map_err(|e| ParseError::new(ParseErrorKind::InvalidUri, format!("{e}: {uri}")))?;
     let username = parsed.username();
     if username.is_empty() {
@@ -757,6 +777,10 @@ fn try_parse_grpc_cluster(
         Some(i) => (&rest[..i], Some(&rest[i + 1..])),
         None => (rest, None),
     };
+    let host_part = host_part
+        .rsplit_once('@')
+        .map(|(_, hosts)| hosts)
+        .unwrap_or(host_part);
 
     if !host_part.contains(',') {
         return Ok(None);

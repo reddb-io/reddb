@@ -41,6 +41,28 @@ public final class Reddb {
         if (url.isEmbedded()) {
             return EmbeddedConn.open(url.path());
         }
+        String protocol = switch (url.kind()) {
+            case REDWIRE -> "red"; case REDWIRE_TLS -> "reds"; case HTTP -> "http"; case HTTPS -> "https";
+            default -> throw new IllegalArgumentException("unsupported remote transport");
+        };
+        URI original = URI.create(url.original());
+        String host = url.host().contains(":") && !url.host().startsWith("[") ? "[" + url.host() + "]" : url.host();
+        String seed = TopologyCodec.address(protocol + "://" + host + ":" + url.port() + (url.path() == null ? "" : url.path()), protocol);
+        Options bounded = Options.builder().username(opts.username()).password(opts.password()).token(opts.token())
+            .apiKey(opts.apiKey()).clientName(opts.clientName()).timeout(java.time.Duration.ofSeconds(5)).build();
+        RoutedConn.Dial dial = (address, control) -> {
+            String target = address;
+            if (original.getRawUserInfo() != null) target = target.replace("://", "://" + original.getRawUserInfo() + "@");
+            if (original.getRawQuery() != null) target += "?" + original.getRawQuery();
+            return connectDirect(Url.parse(target), control ? bounded : opts);
+        };
+        RoutedConn routed = new RoutedConn(seed, connectDirect(url, opts), protocol,
+            "primary".equalsIgnoreCase(url.params().get("route")), dial);
+        try { routed.refresh(); return routed; }
+        catch (RuntimeException error) { routed.close(); throw error; }
+    }
+
+    private static Conn connectDirect(Url url, Options opts) {
         switch (url.kind()) {
             case REDWIRE:
             case REDWIRE_TLS:

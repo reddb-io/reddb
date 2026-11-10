@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import '../conn.dart';
+import '../routing.dart' show TopologySource, topologyFeature, topologyKind, decodeTopology;
 import '../errors.dart';
 import '../options.dart';
 import 'codec.dart';
@@ -19,7 +20,7 @@ typedef _Stream = Socket;
 /// Operations are serialised internally — callers may invoke methods
 /// concurrently but each request waits in line for the previous one
 /// to finish receiving its response. Correlation ids are monotonic.
-class RedwireConn implements Conn {
+class RedwireConn implements Conn, TopologySource {
   RedwireConn._(this._socket, this._zstd) {
     _subscription = _socket.listen(
       _onData,
@@ -183,8 +184,8 @@ class RedwireConn implements Conn {
         'server did not advertise FEATURE_PARAMS; upgrade the server to use parameterized queries',
       );
     }
-    final kind = hasParams ? MessageKind.queryWithParams : MessageKind.query;
-    final payload = hasParams
+    final kind = supportsParams ? MessageKind.queryWithParams : MessageKind.query;
+    final payload = supportsParams
         ? ValueCodec.encodeQueryWithParams(sql, queryParams)
         : Uint8List.fromList(utf8.encode(sql));
     final resp = await _request(kind, payload);
@@ -276,6 +277,14 @@ class RedwireConn implements Conn {
     final c = _nextCorr;
     _nextCorr = (_nextCorr + 1) & 0x7FFFFFFFFFFFFFFF;
     return c;
+  }
+
+  @override
+  Future<Map<String, dynamic>?> topology(String protocol) async {
+    if ((_serverFeatures & topologyFeature) == 0) return null;
+    final response = await _request(topologyKind, Uint8List.fromList(protocol.codeUnits));
+    if (response.kind != MessageKind.result) throw ProtocolError('invalid topology reply');
+    return decodeTopology(response.payload);
   }
 
   Future<Frame> _request(int kind, Uint8List payload) async {

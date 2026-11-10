@@ -19,6 +19,8 @@ export interface TlsOptions {
 }
 
 export interface ConnectOptions {
+  /** WebSocket constructor for runtimes without a global WebSocket. */
+  WebSocketImpl?: new (url: string, protocols?: string | string[]) => object
   /** Authentication credentials for remote transports. */
   auth?: AuthOptions
   /** TLS options for `reds://` / `grpcs://` connections. */
@@ -372,7 +374,12 @@ export interface RedDBTransaction {
   ): Promise<T>
 }
 
+export type ReadOptions = { consistency: 'strong' | 'local' }
+  | { consistency: 'bounded_staleness'; maxLagMs: number }
+
 export class RedDB {
+  queryWithOptions(sql: string, options: ReadOptions, params: QueryParam[]): Promise<QueryResult>
+  queryWithOptions(sql: string, options: ReadOptions, ...params: QueryParam[]): Promise<QueryResult>
   readonly cache: CacheClient
   readonly queue: QueueClient
   readonly documents: DocumentClient

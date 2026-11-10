@@ -63,14 +63,15 @@ test('actual Bun TCP preserves a large query result', async () => {
 })
 
 for (const sql of ['peer-close', 'partial', 'malformed']) {
-  test(`actual Bun TCP rejects ${sql} and future queries`, async () => {
+  test(`actual Bun TCP rejects ${sql} without replay`, async () => {
     const server = await peer()
     let db: Awaited<ReturnType<typeof connect>> | undefined
     try {
       db = await connect(server.endpoint)
       const code = sql === 'malformed' ? 'FRAME_INVALID_LENGTH' : 'CONNECTION_CLOSED'
       await assert.rejects(db.query(sql), { code })
-      await assert.rejects(db.query('later'), { code })
+      if (sql === 'malformed') await assert.rejects(db.query('later'), { code })
+      else assert.equal(JSON.parse(await db.query('later')).data.length, 512 * 1024)
     } finally { db?.close(); await server.close() }
   })
 }

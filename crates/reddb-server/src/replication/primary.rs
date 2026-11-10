@@ -461,6 +461,7 @@ pub struct PrimaryReplication {
     pub wal_buffer: Arc<WalBuffer>,
     pub logical_wal_spool: Option<Arc<LogicalWalSpool>>,
     pub replicas: RwLock<Vec<ReplicaState>>,
+    pub(crate) routing_endpoints: RwLock<BTreeMap<String, reddb_wire::routing::RoutingEndpoints>>,
     wal_appended: (Mutex<u64>, Condvar),
     metadata_store: Option<Arc<crate::storage::unified::UnifiedStore>>,
     metadata_error: Mutex<Option<String>>,
@@ -581,6 +582,7 @@ impl PrimaryReplication {
             wal_buffer: Arc::new(WalBuffer::new(100_000)),
             logical_wal_spool,
             replicas: RwLock::new(Vec::new()),
+            routing_endpoints: RwLock::new(BTreeMap::new()),
             wal_appended: (Mutex::new(current_lsn), Condvar::new()),
             metadata_store: None,
             metadata_error: Mutex::new(None),
@@ -862,6 +864,10 @@ impl PrimaryReplication {
         let removed = replicas.len() != before;
         drop(replicas);
         if removed {
+            self.routing_endpoints
+                .write()
+                .expect("replica routing endpoint map lock must not be poisoned")
+                .remove(id);
             self.commit_waiter.drop_replica(id);
             self.bump_topology_epoch();
         }

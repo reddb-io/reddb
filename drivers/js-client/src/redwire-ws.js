@@ -162,8 +162,12 @@ export async function connectRedwireWs(opts = {}) {
 
   const ws = new WS(url, subprotocol)
   if ('binaryType' in ws) ws.binaryType = 'arraybuffer'
-  await waitOpen(ws)
+  const abort = () => ws.close()
+  if (opts.signal?.aborted) { abort(); throw new RedDBError('CLOSED', 'connection cancelled') }
+  opts.signal?.addEventListener('abort', abort, { once: true })
+  try { await waitOpen(ws) }
+  finally { opts.signal?.removeEventListener('abort', abort) }
 
   const duplex = new WebSocketDuplex(ws)
-  return await connectRedwireOverSocket(duplex, { auth, clientName })
+  return await connectRedwireOverSocket(duplex, { auth, clientName, signal: opts.signal })
 }

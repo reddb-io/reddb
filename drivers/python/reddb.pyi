@@ -111,6 +111,7 @@ class TxClient:
 
 
 class RedDb:
+    def query_with_options(self, sql: str, consistency: str = "strong", max_lag_ms: int = 0, *, params: Optional[Sequence[ParamValue]] = None) -> QueryResult: ...
     @overload
     def query(self, sql: str) -> QueryResult: ...
     @overload

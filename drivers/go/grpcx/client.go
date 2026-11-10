@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	contract "github.com/reddb-io/reddb-go/internal/routing"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 	"time"
 
 	pb "github.com/reddb-io/reddb-go/grpcx/proto"
@@ -99,6 +101,14 @@ func (c *Client) Ping(ctx context.Context) error {
 	ctx = c.authContext(ctx)
 	_, err := c.client.Health(ctx, &pb.Empty{})
 	return err
+}
+
+func (c *Client) Topology(ctx context.Context, protocol string) ([]byte, error) {
+	ctx = metadata.AppendToOutgoingContext(c.authContext(ctx), contract.MetadataKey, protocol)
+	// Canonical TopologyReply is one bytes field (1), identical to BytesValue.
+	reply := new(wrapperspb.BytesValue)
+	err := c.conn.Invoke(ctx, "/reddb.v1.RedDb/Topology", &pb.Empty{}, reply)
+	return reply.Value, err
 }
 
 func (c *Client) authContext(ctx context.Context) context.Context {

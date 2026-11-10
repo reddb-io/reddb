@@ -16,6 +16,7 @@ const char* error_code_name(ErrorCode code) noexcept {
         case ErrorCode::ParamsUnsupported: return "PARAMS_UNSUPPORTED";
         case ErrorCode::Tls: return "TLS";
         case ErrorCode::Unknown: return "UNKNOWN";
+        case ErrorCode::ConsistencyUnsupported: return "CONSISTENCY_UNSUPPORTED";
     }
     return "UNKNOWN";
 }

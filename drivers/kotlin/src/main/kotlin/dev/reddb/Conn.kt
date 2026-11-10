@@ -10,6 +10,8 @@ package dev.reddb
  * prefer (Jackson, kotlinx-serialization, etc.).
  */
 public interface Conn : AutoCloseable {
+    public suspend fun queryWithOptions(sql: String, options: ReadOptions, vararg params: Any?): ByteArray =
+        throw UnsupportedOperationException("CONSISTENCY_UNSUPPORTED")
     /** Run a SQL query. Returns the engine's JSON envelope as bytes. */
     public suspend fun query(sql: String): ByteArray
 

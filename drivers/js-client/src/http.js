@@ -76,7 +76,7 @@ export class HttpRpcClient {
       )
     }
     const { url, init } = route(this.baseUrl, params)
-    const response = await fetch(url, this.attachAuth(init))
+    const response = await fetch(url, this.attachAuth({ ...init, signal: params.signal ?? init.signal }))
     if (method === 'query') {
       // Keep the whole envelope: `statement` and `affected_rows` sit next to
       // `result`, which is all the generic unwrap below would return.
@@ -319,6 +319,10 @@ async function parseResponse(response, { envelope = false } = {}) {
 // ---------------------------------------------------------------------------
 
 const ROUTES = {
+  topology: (base, { transport = new URL(base).protocol.slice(0, -1) }) => ({
+    url: `${base}/v1/topology?transport=${encodeURIComponent(transport)}`,
+    init: { method: 'GET' },
+  }),
   health: (base) => ({ url: `${base}/health`, init: { method: 'GET' } }),
   version: (base) => ({ url: `${base}/admin/version`, init: { method: 'GET' } }),
   query: (base, { sql, params }) => ({

@@ -1,7 +1,7 @@
 {
   "name": "@reddb-io/client",
   "version": "1.30.0",
-  "description": "Thin remote-only RedDB driver. Pure JavaScript — no install scripts, no native binary. Speaks RedWire/gRPC/HTTP. Embedded URIs (memory://, file://, red:///path) are rejected — use @reddb-io/sdk for those.",
+  "description": "Thin remote-only RedDB driver. Pure JavaScript \u00e2\u20ac\u201d no install scripts, no native binary. Speaks RedWire/gRPC/HTTP. Embedded URIs (memory://, file://, red:///path) are rejected \u00e2\u20ac\u201d use @reddb-io/sdk for those.",
   "type": "module",
   "main": "src/index.js",
   "browser": "./src/index.browser.js",
@@ -44,6 +44,14 @@
       "types": "./index.d.ts",
       "import": "./src/index.js"
     },
+    "./routing": {
+      "types": "./routing.d.ts",
+      "import": "./src/core/routing.js"
+    },
+    "./topology": {
+      "types": "./topology.d.ts",
+      "import": "./src/core/topology.js"
+    },
     "./package.json": "./package.json"
   },
   "types": "./index.d.ts",
@@ -52,7 +60,9 @@
     "index.d.ts",
     "index.browser.d.ts",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "routing.d.ts",
+    "topology.d.ts"
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs"

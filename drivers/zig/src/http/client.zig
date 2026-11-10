@@ -13,6 +13,7 @@ pub const HttpClient = struct {
     base_url: []const u8,
     token: ?[]const u8,
     client: std.http.Client,
+    timeout_ms: u32 = 0,
 
     pub fn init(allocator: Allocator, base_url: []const u8, token: ?[]const u8) !HttpClient {
         // Strip a trailing slash so endpoint helpers can `++` paths.
@@ -49,12 +50,11 @@ pub const HttpClient = struct {
     /// POST /auth/login {username,password} → response body
     /// (typically `{ "token": "..." }`).
     pub fn login(self: *HttpClient, username: []const u8, password: []const u8) ![]u8 {
-        const body = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"username\":\"{s}\",\"password\":\"{s}\"}}",
-            .{ username, password },
-        );
+        const body = try std.json.stringifyAlloc(self.allocator, .{ .username = username, .password = password }, .{});
         defer self.allocator.free(body);
+        const prior_timeout = self.timeout_ms;
+        self.timeout_ms = 5000;
+        defer self.timeout_ms = prior_timeout;
         return self.request(.POST, "/auth/login", body);
     }
 
@@ -128,13 +128,14 @@ pub const HttpClient = struct {
         const url_buf = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.base_url, path });
         defer self.allocator.free(url_buf);
         const uri = try std.Uri.parse(url_buf);
+        if (@import("builtin").os.tag == .windows) return @import("windows.zig").request(self.allocator, uri, url_buf, method, self.token, body, self.timeout_ms);
 
         var server_header_buffer: [16 * 1024]u8 = undefined;
-        var auth_header_buf: [1024]u8 = undefined;
         const auth_header: ?[]const u8 = if (self.token) |t|
-            std.fmt.bufPrint(&auth_header_buf, "Bearer {s}", .{t}) catch null
+            try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{t})
         else
             null;
+        defer if (auth_header) |header| self.allocator.free(header);
         var extra_headers_storage: [2]std.http.Header = undefined;
         var extra_count: usize = 0;
         if (auth_header) |h| {
@@ -146,7 +147,14 @@ pub const HttpClient = struct {
             extra_count += 1;
         }
 
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const host = try uri.host.?.toRawMaybeAlloc(arena.allocator());
+        const tls = std.mem.eql(u8, uri.scheme, "https");
+        const connection = try @import("../network.zig").httpConnection(&self.client, host, uri.port orelse (if (tls) @as(u16, 443) else @as(u16, 80)), tls, self.timeout_ms);
         var req = try self.client.open(method, uri, .{
+            .connection = connection,
+            .redirect_behavior = .not_allowed,
             .server_header_buffer = &server_header_buffer,
             .extra_headers = extra_headers_storage[0..extra_count],
         });
@@ -178,7 +186,6 @@ pub const HttpClient = struct {
                 "HTTP {d} {s} {s}: {s}",
                 .{ @intFromEnum(req.response.status), @tagName(method), path, out.items },
             );
-            out.deinit();
             return error.HttpStatus;
         }
         return out.toOwnedSlice();

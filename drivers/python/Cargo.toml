@@ -32,6 +32,7 @@ tonic-prost = { package = "reddb-io-tonic-prost", version = "1.0", path = "../..
 prost = "0.14"
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros"] }
 serde_json = "1"
+reddb-client = { package = "reddb-io-client", path = "../../crates/reddb-client", default-features = false, features = ["grpc", "http", "redwire-websocket"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
 webpki-roots = "1.0"

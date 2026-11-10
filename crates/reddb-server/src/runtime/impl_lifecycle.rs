@@ -454,6 +454,7 @@ impl RedDBRuntime {
                     options.query_audit.clone(),
                 )),
                 lease_lifecycle: std::sync::OnceLock::new(),
+                routing_primary_endpoints: parking_lot::RwLock::new(Default::default()),
                 replica_apply_metrics: std::sync::Arc::new(
                     crate::replication::logical::ReplicaApplyMetrics::default(),
                 ),

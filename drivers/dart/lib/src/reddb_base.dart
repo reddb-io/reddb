@@ -9,6 +9,7 @@ import 'http/client.dart';
 import 'options.dart';
 import 'redwire/conn.dart';
 import 'url.dart';
+import 'routing.dart';
 
 /// Top-level entry point. Pass any RedDB connection URI; the right
 /// transport is picked up automatically.
@@ -23,6 +24,29 @@ Future<Reddb> connect(
   ConnectOptions options = const ConnectOptions(),
 }) async {
   final parsed = parseUri(uri);
+  if (parsed.isEmbedded) return _connectDirect(uri, options: options);
+  final protocol = parsed.isRedwire ? (parsed.isTls || options.tls != null ? 'reds' : 'red') : parsed.kind;
+  final host = parsed.host?.contains(':') == true ? '[${parsed.host}]' : parsed.host;
+  final seed = topologyAddress('$protocol://$host:${parsed.port ?? defaultPortFor(parsed.kind)}${parsed.path ?? ""}', protocol);
+  if (seed == null) throw InvalidUri('invalid remote endpoint');
+  final original = Uri.parse(uri);
+  Future<Conn> dial(String address) async {
+    var target = address;
+    if (original.userInfo.isNotEmpty) target = target.replaceFirst('://', '://${original.userInfo}@');
+    if (original.hasQuery) target += '?${original.query}';
+    return (await _connectDirect(target, options: options))._conn;
+  }
+  final router = RoutedConn(seed, (await _connectDirect(uri, options: options))._conn,
+      protocol, parsed.params['route']?.toLowerCase() == 'primary', dial);
+  try { await router.refresh(); return Reddb._(router); }
+  catch (_) { await router.close(); rethrow; }
+}
+
+Future<Reddb> _connectDirect(
+  String uri, {
+  ConnectOptions options = const ConnectOptions(),
+}) async {
+  final parsed = parseUri(uri);
   if (parsed.isEmbedded) {
     return Reddb._(await openEmbedded(parsed));
   }
@@ -33,7 +57,8 @@ Future<Reddb> connect(
   if (parsed.isHttp) {
     final scheme = parsed.kind; // 'http' or 'https'
     final port = parsed.port ?? defaultPortFor(parsed.kind);
-    final base = '$scheme://${parsed.host}:$port';
+    final host = parsed.host!.contains(':') ? '[${parsed.host}]' : parsed.host;
+    final base = '$scheme://$host:$port${parsed.path ?? ""}';
     final http = HttpConn(
       baseUrl: base,
       token: options.token ?? parsed.token,
@@ -72,6 +97,12 @@ class Reddb implements Querier {
   Reddb._(this._conn);
 
   final Conn _conn;
+
+  Future<Uint8List> queryWithOptions(String sql, ReadOptions options, {List<Object?>? params}) {
+    final client = _conn;
+    if (client is RoutedConn) return client.queryWithOptions(sql, options, params: params);
+    throw RedDBError('CONSISTENCY_UNSUPPORTED', 'connection does not support read consistency');
+  }
 
   /// Rich SDK Helper namespaces (`documents`, `kv`, `queue`).
   /// See `docs/clients/sdk-helper-spec.md`.

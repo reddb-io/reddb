@@ -10,6 +10,7 @@ URI.
 from __future__ import annotations
 
 from typing import Any
+from dataclasses import replace
 
 from .documents import DocumentClient
 from .errors import RedDBError, UnsupportedScheme
@@ -26,6 +27,7 @@ from .params import normalize_params
 from .queue import QueueClient
 from .redwire import RedwireClient, RedwireOptions
 from .url import ParsedUri, parse_uri
+from .routing import RoutingClient, endpoint
 
 __all__ = ["connect", "Reddb", "KvClient", "DocumentClient", "QueueClient"]
 
@@ -57,6 +59,28 @@ async def connect(uri: str, **opts: Any) -> "Reddb":
             "maturin `reddb` package for in-process databases."
         )
 
+    protocol = {"redwire": "red", "redwire-tls": "reds"}.get(parsed.kind, parsed.kind)
+    host = f"[{parsed.host}]" if ":" in (parsed.host or "") else parsed.host
+    seed = endpoint(f"{protocol}://{host}:{parsed.port}{parsed.path or ''}", protocol)
+    if not seed:
+        raise UnsupportedScheme(f"unhandled URI kind: {parsed.kind!r}")
+
+    async def dial(address: str) -> Any:
+        target = parse_uri(address)
+        target = replace(parsed, host=target.host, port=target.port, path=target.path)
+        return (await _connect_direct(target, **opts)).transport
+
+    initial = await dial(seed)
+    router = RoutingClient(seed, initial, dial, protocol,
+                           parsed.params.get("route", "").lower() == "primary")
+    try:
+        return Reddb(await router.initialize())
+    except BaseException:
+        await router.close()
+        raise
+
+
+async def _connect_direct(parsed: ParsedUri, **opts: Any) -> "Reddb":
     if parsed.kind in ("redwire", "redwire-tls"):
         return await _connect_redwire(parsed, **opts)
     if parsed.kind in ("http", "https"):
@@ -86,7 +110,8 @@ async def _connect_redwire(parsed: ParsedUri, **opts: Any) -> "Reddb":
 
 
 async def _connect_http(parsed: ParsedUri, **opts: Any) -> "Reddb":
-    base = f"{parsed.kind}://{parsed.host}:{parsed.port}"
+    host = f"[{parsed.host}]" if ":" in (parsed.host or "") else parsed.host
+    base = f"{parsed.kind}://{host}:{parsed.port}{parsed.path or ''}"
     timeout = opts.get("timeout") or (
         parsed.timeout_ms / 1000.0 if parsed.timeout_ms else 30.0
     )
@@ -129,6 +154,9 @@ class _RedwireAdapter:
 
     def __init__(self, client: RedwireClient) -> None:
         self._client = client
+
+    async def topology(self, protocol: str) -> Any:
+        return await self._client.topology(protocol)
 
     async def query(self, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
         return await self._client.query(sql, params)
@@ -198,6 +226,13 @@ class Reddb:
         params: list[Any] | tuple[Any, ...] | None = None,
     ) -> dict[str, Any]:
         return await self.query(sql, params)
+
+    async def query_with_options(self, sql: str, options: dict[str, Any],
+                                 params: list[Any] | tuple[Any, ...] | None = None) -> dict[str, Any]:
+        method = getattr(self._t, "query_with_options", None)
+        if method is None:
+            raise RedDBError("unsupported read consistency", code="CONSISTENCY_UNSUPPORTED")
+        return await method(sql, options, normalize_params(params) or None)
 
     async def insert(self, collection: str, payload: dict[str, Any]) -> dict[str, Any]:
         result = await self._t.insert(collection, payload)

@@ -86,6 +86,7 @@ type TopologyBytes = Arc<Mutex<Vec<u8>>>;
 #[derive(Debug, Default)]
 struct Counters {
     query: AtomicU64,
+    authenticated_queries: AtomicU64,
     insert: AtomicU64,
     topology: AtomicU64,
 }
@@ -157,8 +158,26 @@ impl RedDb for MockServer {
         ))))
     }
 
-    async fn query(&self, _request: Request<QueryRequest>) -> Result<Response<QueryReply>, Status> {
+    async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryReply>, Status> {
+        if request
+            .metadata()
+            .get("authorization")
+            .is_some_and(|value| value == "Bearer test-token")
+        {
+            self.counters
+                .authenticated_queries
+                .fetch_add(1, Ordering::Relaxed);
+        }
         self.counters.query.fetch_add(1, Ordering::Relaxed);
+        if request.get_ref().query == "UPDATE raw_metadata" {
+            return Ok(Response::new(QueryReply {
+                ok: true,
+                result_json: "{}".into(),
+                affected_rows: 7,
+                statement: "update".into(),
+                ..Default::default()
+            }));
+        }
         Ok(Response::new(QueryReply {
             ok: true,
             mode: "select".into(),
@@ -368,6 +387,14 @@ async fn spawn_mock(
     role: Role,
     topology_bytes: TopologyBytes,
 ) -> (SocketAddr, Arc<Counters>, oneshot::Sender<()>) {
+    spawn_mock_with_tls(role, topology_bytes, None).await
+}
+
+async fn spawn_mock_with_tls(
+    role: Role,
+    topology_bytes: TopologyBytes,
+    tls: Option<tonic::transport::ServerTlsConfig>,
+) -> (SocketAddr, Arc<Counters>, oneshot::Sender<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let incoming = TcpListenerStream::new(listener);
@@ -379,7 +406,11 @@ async fn spawn_mock(
     };
     let (tx, rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
-        Server::builder()
+        let mut server = Server::builder();
+        if let Some(tls) = tls {
+            server = server.tls_config(tls).expect("mock TLS");
+        }
+        server
             .add_service(RedDbServer::new(mock))
             .serve_with_incoming_shutdown(incoming, async {
                 let _ = rx.await;
@@ -417,6 +448,106 @@ fn make_topology_bytes(primary: &SocketAddr, replicas: &[SocketAddr]) -> Vec<u8>
 }
 
 const N_READS: usize = 300;
+
+#[tokio::test]
+async fn high_level_grpc_and_grpcs_discover_without_manual_refresh() {
+    let rcgen::CertifiedKey { cert, signing_key } =
+        rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).expect("test certificate");
+    let directory = tempfile::tempdir().expect("certificate directory");
+    let certificate = directory.path().join("ca.pem");
+    std::fs::write(&certificate, cert.pem()).expect("test CA");
+    for protocol in ["grpc", "grpcs"] {
+        let tls = || {
+            if protocol == "grpcs" {
+                Some(tonic::transport::ServerTlsConfig::new().identity(
+                    tonic::transport::Identity::from_pem(cert.pem(), signing_key.serialize_pem()),
+                ))
+            } else {
+                None
+            }
+        };
+        let bytes: TopologyBytes = Arc::new(Mutex::new(Vec::new()));
+        let (primary, primary_count, primary_shutdown) =
+            spawn_mock_with_tls(Role::Primary, Arc::clone(&bytes), tls()).await;
+        let (replica, replica_count, replica_shutdown) =
+            spawn_mock_with_tls(Role::Replica, Arc::clone(&bytes), tls()).await;
+        let topology = Topology {
+            epoch: 1,
+            primary: Endpoint {
+                addr: format!("{protocol}://{primary}"),
+                region: String::new(),
+            },
+            replicas: vec![ReplicaInfo {
+                addr: format!("{protocol}://{replica}"),
+                region: String::new(),
+                healthy: true,
+                lag_ms: 0,
+                last_applied_lsn: 100,
+                rebootstrapping: false,
+            }],
+        };
+        *bytes.lock().expect("topology bytes") = encode_topology(&topology);
+        let mut uri = url::Url::parse(&format!("{protocol}://{primary}")).expect("test URI");
+        uri.query_pairs_mut()
+            .append_pair("ca", &certificate.to_string_lossy());
+        uri.query_pairs_mut().append_pair("token", "test-token");
+        let db = reddb_client::Reddb::connect(uri.as_str())
+            .await
+            .expect(protocol);
+        db.query_with_options("SELECT * FROM users", QueryOptions::local())
+            .await
+            .expect("replica read");
+        assert_eq!(replica_count.query.load(Ordering::Relaxed), 1, "{protocol}");
+        assert_eq!(primary_count.query.load(Ordering::Relaxed), 0, "{protocol}");
+        db.query("UPDATE users SET name = 'updated'")
+            .await
+            .expect("SQL mutation");
+        db.query("/* pin */ BEGIN").await.expect("begin");
+        db.query("SELECT * FROM users")
+            .await
+            .expect("transaction read");
+        db.query("ROLLBACK").await.expect("rollback");
+        assert_eq!(primary_count.query.load(Ordering::Relaxed), 4, "{protocol}");
+        db.query_with_options("SELECT * FROM users", reddb_client::QueryOptions::strong())
+            .await
+            .expect("strong read");
+        assert_eq!(primary_count.query.load(Ordering::Relaxed), 5, "{protocol}");
+        assert_eq!(
+            primary_count.authenticated_queries.load(Ordering::Relaxed),
+            5,
+            "{protocol}"
+        );
+        assert_eq!(
+            replica_count.authenticated_queries.load(Ordering::Relaxed),
+            1,
+            "{protocol}"
+        );
+        let raw = db
+            .query_json("UPDATE raw_metadata", &[], None)
+            .await
+            .expect("raw binding envelope");
+        assert_eq!(raw["affected"], 7, "{protocol}");
+        assert_eq!(raw["statement"], "update", "{protocol}");
+        assert_eq!(primary_count.query.load(Ordering::Relaxed), 6, "{protocol}");
+        db.close().await.expect("close");
+        let query = uri.query().expect("test query parameters");
+        let bootstrap = format!("{protocol}://{primary},{replica}?{query}");
+        let db = reddb_client::Reddb::connect(&bootstrap)
+            .await
+            .expect("multi-host seed with distinct ports");
+        db.query_with_options("SELECT * FROM users", QueryOptions::local())
+            .await
+            .expect("multi-host read");
+        assert_eq!(
+            replica_count.authenticated_queries.load(Ordering::Relaxed),
+            2,
+            "{protocol}"
+        );
+        db.close().await.expect("close multi-host");
+        let _ = primary_shutdown.send(());
+        let _ = replica_shutdown.send(());
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn topology_e2e_distributes_reads_across_discovered_replicas() {

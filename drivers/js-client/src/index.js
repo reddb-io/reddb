@@ -42,6 +42,8 @@ import {
 import { HttpRpcClient } from './http.js'
 import { GrpcRpcClient } from './grpc.js'
 import { connectRedwire } from './redwire.js'
+import { connectRedwireWs, REDWIRE_WS_PATH } from './redwire-ws.js'
+import { connectRouted } from './core/routing.js'
 import { createSelectStream, createInputStream } from './streaming.js'
 
 export { RedDBError, EmbeddedNotSupported, EMBEDDED_REJECTION_MESSAGE, isEmbeddedUri }
@@ -77,6 +79,10 @@ const NODE_STREAMING = { createSelectStream, createInputStream }
  * @returns {Promise<RedDB>}
  */
 export async function connect(uri, options = {}) {
+  return connectRouted(uri, options, connectDirect)
+}
+
+async function connectDirect(uri, options = {}, discovery = false) {
   // Reject embedded shapes upfront with the same wording the Rust
   // binary uses, before the URL parser would map them to kind=embedded.
   rejectEmbeddedUri(uri)
@@ -91,8 +97,24 @@ export async function connect(uri, options = {}) {
 
   const merged = mergeAuthFromUri(parsed, options.auth)
 
+  if (parsed.kind === 'redws' || parsed.kind === 'redwss') {
+    const scheme = parsed.kind === 'redws' ? 'ws' : 'wss'
+    let token = merged.token
+    if (!token && merged.username && merged.password) {
+      const loginUrl = merged.loginUrl ?? `${scheme === 'ws' ? 'http' : 'https'}://${parsed.host}:${parsed.port}/auth/login`
+      token = (await login(loginUrl, { username: merged.username, password: merged.password })).token
+    }
+    const client = await connectRedwireWs({
+      url: `${scheme}://${parsed.host}:${parsed.port}${parsed.path ?? REDWIRE_WS_PATH}`,
+      auth: token ? { kind: 'bearer', token } : { kind: 'anonymous' },
+      WebSocketImpl: options.WebSocketImpl,
+      signal: options.signal,
+    })
+    return new RedDB(client)
+  }
+
   if (parsed.kind === 'http' || parsed.kind === 'https') {
-    const baseUrl = `${parsed.kind}://${parsed.host}:${parsed.port}`
+    const baseUrl = `${parsed.kind}://${parsed.host}:${parsed.port}${parsed.path ?? ''}`
     let token = merged.token
     if (!token && merged.username && merged.password) {
       const loginUrl = merged.loginUrl ?? `${baseUrl}/auth/login`
@@ -103,7 +125,7 @@ export async function connect(uri, options = {}) {
       token = session.token
     }
     const client = new HttpRpcClient({ baseUrl, token })
-    await client.call('query', { sql: 'SELECT 1' })
+    if (!discovery) await client.call('query', { sql: 'SELECT 1', signal: options.signal })
     return new RedDB(client)
   }
 
@@ -118,9 +140,10 @@ export async function connect(uri, options = {}) {
       token = session.token
     }
     const scheme = parsed.kind === 'grpcs' ? 'https' : 'http'
-    const client = new GrpcRpcClient({
+    const client = await GrpcRpcClient.connect({
       baseUrl: `${scheme}://${parsed.host}:${parsed.port}`,
       token,
+      tls: buildTlsOpts(parsed, options.tls),
     })
     return new RedDB(client)
   }
@@ -141,6 +164,7 @@ export async function connect(uri, options = {}) {
       host: parsed.host,
       port: parsed.port,
       auth,
+      signal: options.signal,
       ...(tls ? { tls } : {}),
     })
     return new RedDB(client)

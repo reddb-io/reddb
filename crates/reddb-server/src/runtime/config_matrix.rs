@@ -118,6 +118,48 @@ pub const MATRIX: &[ConfigDefault] = &[
         tier: Tier::Critical,
         default: || num(crate::storage::cache::DEFAULT_BLOB_MAX_NAMESPACES as f64),
     },
+    // Protocol-specific public addresses. Environment overlays keep each
+    // node's listeners separate from replicated application configuration.
+    ConfigDefault {
+        key: "routing.red.advertise_addr",
+        tier: Tier::Optional,
+        default: || text(""),
+    },
+    ConfigDefault {
+        key: "routing.reds.advertise_addr",
+        tier: Tier::Optional,
+        default: || text(""),
+    },
+    ConfigDefault {
+        key: "routing.grpc.advertise_addr",
+        tier: Tier::Optional,
+        default: || text(""),
+    },
+    ConfigDefault {
+        key: "routing.grpcs.advertise_addr",
+        tier: Tier::Optional,
+        default: || text(""),
+    },
+    ConfigDefault {
+        key: "routing.http.advertise_addr",
+        tier: Tier::Optional,
+        default: || text(""),
+    },
+    ConfigDefault {
+        key: "routing.https.advertise_addr",
+        tier: Tier::Optional,
+        default: || text(""),
+    },
+    ConfigDefault {
+        key: "routing.ws.advertise_addr",
+        tier: Tier::Optional,
+        default: || text(""),
+    },
+    ConfigDefault {
+        key: "routing.wss.advertise_addr",
+        tier: Tier::Optional,
+        default: || text(""),
+    },
     // storage.binary_document_body — DOCUMENT native binary body container
     // (PRD-1398, ADR-0063). Production cutover default: document writes store
     // the body as the native binary container; reads decode it back to JSON

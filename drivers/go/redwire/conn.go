@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	contract "github.com/reddb-io/reddb-go/internal/routing"
 	"io"
 	"net"
 	"strconv"
@@ -519,6 +520,38 @@ func parseReason(payload []byte) string {
 }
 
 // --- Operations ------------------------------------------------------
+
+// Topology returns the canonical reddb-wire payload on a negotiated control connection.
+func (c *Conn) Topology(ctx context.Context, protocol string) (data []byte, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed.Load() {
+		return nil, errors.New("redwire: connection closed")
+	}
+	if c.features&contract.TopologyFeature == 0 {
+		return nil, nil
+	}
+	cleanup := c.applyDeadline(ctx)
+	defer cleanup()
+	defer func() {
+		if err != nil {
+			c.closed.Store(true)
+			_ = c.raw.Close()
+		}
+	}()
+	request := NewFrame(MessageKind(contract.TopologyKind), c.nextCorr(), []byte(protocol))
+	if err = c.writeFrame(request); err != nil {
+		return nil, err
+	}
+	reply, err := c.readFrame()
+	if err != nil {
+		return nil, err
+	}
+	if reply.CorrelationID != request.CorrelationID || reply.Kind != KindResult {
+		return nil, errors.New("invalid topology reply")
+	}
+	return reply.Payload, nil
+}
 
 // Query returns the full result envelope through QueryWithParams (0x28)
 // whenever FeatureParams is advertised, including zero-parameter queries.

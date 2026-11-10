@@ -25,7 +25,7 @@ import java.util.List;
  * carrying a bearer token in {@code Authorization}. Login is
  * automatic when {@link Options} carries username + password.
  */
-public final class HttpConn implements Conn {
+public final class HttpConn implements Conn, dev.reddb.TopologySource {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final HttpClient client;
@@ -44,7 +44,8 @@ public final class HttpConn implements Conn {
     /** Open a fresh client, log in if credentials were supplied, and return a ready connection. */
     public static HttpConn connect(Url url, Options opts) {
         String scheme = url.kind() == Url.Kind.HTTPS ? "https" : "http";
-        String baseUrl = scheme + "://" + url.host() + ":" + url.port();
+        String host = url.host().contains(":") && !url.host().startsWith("[") ? "[" + url.host() + "]" : url.host();
+        String baseUrl = scheme + "://" + host + ":" + url.port() + (url.path() == null ? "" : url.path());
         HttpClient.Builder b = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
             .connectTimeout(opts.timeout());
@@ -171,6 +172,19 @@ public final class HttpConn implements Conn {
 
     public String token() { return token; }
     public boolean isClosed() { return closed; }
+
+    @Override public ObjectNode topology(String protocol) {
+        try {
+            HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(baseUrl + "/v1/topology?transport=" + protocol))
+                .timeout(timeout).GET();
+            if (token != null) request.header("authorization", "Bearer " + token);
+            HttpResponse<byte[]> response = client.send(request.build(), HttpResponse.BodyHandlers.ofByteArray());
+            if (response.statusCode() == 401 || response.statusCode() == 403) throw new RedDBException.AuthRefused("topology authorization refused");
+            if (response.statusCode() / 100 != 2) throw new RedDBException.EngineError("topology HTTP " + response.statusCode());
+            return (ObjectNode)MAPPER.readTree(response.body());
+        } catch (IOException error) { throw new RedDBException.ProtocolError("topology I/O", error); }
+        catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new RedDBException.ProtocolError("topology interrupted", error); }
+    }
 
     /** POST a JSON body and return the raw response bytes. */
     private byte[] post(String path, ObjectNode body, boolean requireAuthHeader) {

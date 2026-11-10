@@ -26,6 +26,8 @@ export type AuthOptions =
   | { username: string; password: string; loginUrl?: string }
 
 export interface ConnectOptions {
+  /** Optional WebSocket constructor override. */
+  WebSocketImpl?: typeof globalThis.WebSocket
   /** Authentication credentials for the HTTP transport. */
   auth?: AuthOptions
 }
@@ -376,7 +378,12 @@ export interface RedDBTransaction {
   ): Promise<T>
 }
 
+export type ReadOptions = { consistency: 'strong' | 'local' }
+  | { consistency: 'bounded_staleness'; maxLagMs: number }
+
 export class RedDB {
+  queryWithOptions(sql: string, options: ReadOptions, params: QueryParam[]): Promise<QueryResult>
+  queryWithOptions(sql: string, options: ReadOptions, ...params: QueryParam[]): Promise<QueryResult>
   readonly cache: CacheClient
   readonly queue: QueueClient
   readonly documents: DocumentClient

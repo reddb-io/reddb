@@ -27,6 +27,7 @@ const FakeServer = struct {
         auth_fail_at_authok,
         bad_magic,
         params_ok,
+        params_slow,
     };
 
     pub fn start(behaviour: Behaviour) !*FakeServer {
@@ -82,8 +83,8 @@ const FakeServer = struct {
                 try writeJsonFrame(conn_inst.stream, .auth_fail, 1, "{\"reason\":\"locked\"}");
                 return;
             },
-            .anonymous_ok, .auth_fail_at_authok, .params_ok => {
-                const hello_ack = if (self.behaviour == .params_ok)
+            .anonymous_ok, .auth_fail_at_authok, .params_ok, .params_slow => {
+                const hello_ack = if (self.behaviour == .params_ok or self.behaviour == .params_slow)
                     "{\"auth\":\"anonymous\",\"features\":1}"
                 else
                     "{\"auth\":\"anonymous\"}";
@@ -105,8 +106,8 @@ const FakeServer = struct {
             .auth_fail_at_authok => {
                 try writeJsonFrame(conn_inst.stream, .auth_fail, 2, "{\"reason\":\"bad token\"}");
             },
-            .anonymous_ok, .bearer_ok, .params_ok => {
-                const auth_ok = if (self.behaviour == .params_ok)
+            .anonymous_ok, .bearer_ok, .params_ok, .params_slow => {
+                const auth_ok = if (self.behaviour == .params_ok or self.behaviour == .params_slow)
                     "{\"session_id\":\"sess-1\",\"features\":1}"
                 else
                     "{\"session_id\":\"sess-1\",\"features\":0}";
@@ -119,11 +120,12 @@ const FakeServer = struct {
                         .ping => try writeJsonFrame(conn_inst.stream, .pong, next_frame.frame.correlation_id, ""),
                         .bye => return,
                         .query => {
+                            if (self.behaviour == .params_slow) std.Thread.sleep(200 * std.time.ns_per_ms);
                             // Echo a trivial Result envelope back.
                             try writeJsonFrame(conn_inst.stream, .result, next_frame.frame.correlation_id, "{\"ok\":true}");
                         },
                         .query_with_params => {
-                            try expectParamsPayload(allocator, next_frame.frame.payload);
+                            if (self.behaviour == .params_slow) std.Thread.sleep(200 * std.time.ns_per_ms) else try expectParamsPayload(allocator, next_frame.frame.payload);
                             try writeJsonFrame(conn_inst.stream, .result, next_frame.frame.correlation_id, "{\"params\":true}");
                         },
                         else => return,
@@ -182,7 +184,7 @@ const FakeServer = struct {
         const params = [_]value_codec.Value{
             .{ .int = 7 },
             .{ .text = "zig" },
-            .{ .@"null" = {} },
+            .{ .null = {} },
             .{ .vector = &vector },
         };
         const expected = try value_codec.encodeQueryWithParams(
@@ -320,4 +322,31 @@ test "empty params use legacy Query frame" {
     const result = try c.queryWithParams("SELECT 1", &.{});
     defer t.allocator.free(result);
     try t.expect(std.mem.indexOf(u8, result, "ok") != null);
+}
+
+test "socket deadline failure retires RedWire before a late reply" {
+    const server = try FakeServer.start(.params_slow);
+    defer server.stop();
+    const client = try conn.connect(t.allocator, .{ .host = "127.0.0.1", .port = server.addr.getPort() });
+    defer {
+        client.deinit();
+        t.allocator.destroy(client);
+    }
+    try client.setIoTimeout(50);
+    try t.expectError(error.ConnectionTimedOut, client.queryWithParams("SELECT 1", &.{}));
+    try t.expectError(error.ConnectionClosed, client.queryWithParams("SELECT 2", &.{}));
+}
+test "application I/O timeout is restored after short preparation" {
+    const server = try FakeServer.start(.params_slow);
+    defer server.stop();
+    const client = try conn.connect(t.allocator, .{ .host = "127.0.0.1", .port = server.addr.getPort() });
+    defer {
+        client.deinit();
+        t.allocator.destroy(client);
+    }
+    try client.setIoTimeout(50);
+    try client.setIoTimeout(1000);
+    const result = try client.queryWithParams("SELECT 1", &.{});
+    defer t.allocator.free(result);
+    try t.expect(std.mem.indexOf(u8, result, "params") != null);
 }

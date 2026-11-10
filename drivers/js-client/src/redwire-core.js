@@ -18,6 +18,7 @@
 
 import { RedDBError } from './protocol.js'
 import { normalizeQueryResult } from './core/result.js'
+import { decodeTopology } from './core/topology.js'
 
 const MAGIC = 0xfe
 const SUPPORTED_VERSION = 0x01
@@ -26,6 +27,7 @@ const MAX_FRAME_SIZE = 16 * 1024 * 1024
 const KNOWN_FLAGS = 0b00000011
 
 export const MessageKind = Object.freeze({
+  Topology: 0x32,
   Query: 0x01,
   Result: 0x02,
   Error: 0x03,
@@ -59,7 +61,7 @@ export const MessageKind = Object.freeze({
   StreamCancel: 0x2D,
 })
 
-export const Features = Object.freeze({ PARAMS: 0x0000_0001 })
+export const Features = Object.freeze({ PARAMS: 0x0000_0001, TOPOLOGY: 0x0000_0002 })
 
 export const ValueTag = Object.freeze({
   Null: 0x00, Bool: 0x01, Int: 0x02, Float: 0x03, Text: 0x04,
@@ -134,6 +136,14 @@ export function setZstdProvider(mod) {
  * @returns {Promise<RedWireClient>}
  */
 export async function connectRedwireOverSocket(socket, opts = {}) {
+  const abort = () => socket.end()
+  if (opts.signal?.aborted) { abort(); throw new RedDBError('CLOSED', 'connection cancelled') }
+  opts.signal?.addEventListener('abort', abort, { once: true })
+  try { return await handshakeOverSocket(socket, opts) }
+  finally { opts.signal?.removeEventListener('abort', abort) }
+}
+
+async function handshakeOverSocket(socket, opts) {
   const auth = opts.auth ?? { kind: 'anonymous' }
   const reader = new FrameReader(socket)
 
@@ -244,6 +254,18 @@ export class RedWireClient {
   }
 
   async call(method, params = {}) {
+    if (method === 'topology') {
+      if ((this.serverFeatures & Features.TOPOLOGY) === 0) return null
+      const corr = this.#corr()
+      await writeFrame(this.socket, MessageKind.Topology, corr,
+        new TextEncoder().encode(params.transport ?? 'red'))
+      const response = await this.reader.next()
+      if (response.kind === MessageKind.Error) {
+        throw new RedDBError('ENGINE', new TextDecoder().decode(response.payload))
+      }
+      if (response.kind !== MessageKind.Result) throw new RedDBError('PROTOCOL', 'expected topology Result')
+      return decodeTopology(response.payload)
+    }
     if (method === 'query') return this.#query(params.sql ?? '', params.params)
     if (method === 'insert') return this.#insert({ collection: params.collection, payload: params.payload })
     if (method === 'bulk_insert') return this.#insert({ collection: params.collection, payloads: params.payloads })

@@ -43,6 +43,7 @@ import {
 import { HttpRpcClient } from './http.js'
 import { connectRedwireWs, REDWIRE_WS_PATH } from './redwire-ws.js'
 import { createSelectStream, createInputStream } from './streaming-web.js'
+import { connectRouted } from './core/routing.js'
 
 export { RedDBError, EmbeddedNotSupported, EMBEDDED_REJECTION_MESSAGE, isEmbeddedUri }
 export { RowReadable, RowWritable } from './streaming-web.js'
@@ -96,6 +97,10 @@ function browserTransportError(scheme) {
  * @returns {Promise<RedDB>}
  */
 export async function connect(uri, options = {}) {
+  return connectRouted(uri, options, connectDirect)
+}
+
+async function connectDirect(uri, options = {}, discovery = false) {
   // Reject embedded shapes upfront with the same wording the Node entry and
   // the Rust binary use, before the URL parser would map them to kind=embedded.
   rejectEmbeddedUri(uri)
@@ -109,7 +114,7 @@ export async function connect(uri, options = {}) {
 
   if (parsed.kind === 'http' || parsed.kind === 'https') {
     const merged = mergeAuthFromUri(parsed, options.auth)
-    const baseUrl = `${parsed.kind}://${parsed.host}:${parsed.port}`
+    const baseUrl = `${parsed.kind}://${parsed.host}:${parsed.port}${parsed.path ?? ''}`
     let token = merged.token
     if (!token && merged.username && merged.password) {
       const loginUrl = merged.loginUrl ?? `${baseUrl}/auth/login`
@@ -120,7 +125,7 @@ export async function connect(uri, options = {}) {
       token = session.token
     }
     const client = new HttpRpcClient({ baseUrl, token })
-    await client.call('query', { sql: 'SELECT 1' })
+    if (!discovery) await client.call('query', { sql: 'SELECT 1', signal: options.signal })
     return new RedDB(client)
   }
 
@@ -143,8 +148,8 @@ export async function connect(uri, options = {}) {
     }
     const auth = token ? { kind: 'bearer', token } : { kind: 'anonymous' }
     const wsScheme = parsed.tls === false ? 'ws' : 'wss'
-    const url = `${wsScheme}://${parsed.host}:${parsed.port}${REDWIRE_WS_PATH}`
-    const client = await connectRedwireWs({ url, auth })
+    const url = `${wsScheme}://${parsed.host}:${parsed.port}${parsed.path ?? REDWIRE_WS_PATH}`
+    const client = await connectRedwireWs({ url, auth, signal: options.signal, WebSocketImpl: options.WebSocketImpl })
     return new RedDB(client)
   }
 

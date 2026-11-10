@@ -14,7 +14,18 @@ pub(crate) type DynTransport = Box<dyn Transport>;
 pub(crate) trait Transport: std::fmt::Debug + Send + Sync {
     fn name(&self) -> &'static str;
 
+    async fn topology(
+        &self,
+        _protocol: &str,
+    ) -> Result<Option<crate::topology::ClusterMembership>> {
+        Ok(None)
+    }
+
     async fn query(&self, sql: &str) -> Result<QueryResult>;
+
+    async fn health_json(&self) -> Result<serde_json::Value> {
+        Err(ClientError::feature_disabled("health_json"))
+    }
 
     async fn query_with_options(&self, sql: &str, options: QueryOptions) -> Result<QueryResult> {
         if matches!(options.consistency, ReadConsistency::Local) {
@@ -24,6 +35,24 @@ pub(crate) trait Transport: std::fmt::Debug + Send + Sync {
     }
 
     async fn query_with(&self, sql: &str, params: &[Value]) -> Result<QueryResult>;
+
+    /// Preserve the server envelope for language bindings with richer value types.
+    async fn query_json(
+        &self,
+        _sql: &str,
+        _params: &[Value],
+        _options: Option<QueryOptions>,
+    ) -> Result<serde_json::Value> {
+        Err(ClientError::feature_disabled("query_json"))
+    }
+
+    async fn bulk_insert_json(
+        &self,
+        _collection: &str,
+        _rows: &[serde_json::Value],
+    ) -> Result<BulkInsertResult> {
+        Err(ClientError::feature_disabled("bulk_insert_json"))
+    }
 
     async fn insert(&self, collection: &str, payload: &JsonValue) -> Result<InsertResult>;
 
@@ -212,6 +241,27 @@ struct GrpcAdapter(crate::grpc::GrpcClient);
 #[cfg(feature = "grpc")]
 #[async_trait]
 impl Transport for GrpcAdapter {
+    async fn health_json(&self) -> Result<serde_json::Value> {
+        self.0.health_json().await
+    }
+    async fn bulk_insert_json(
+        &self,
+        collection: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<BulkInsertResult> {
+        self.0.bulk_insert_json(collection, rows).await
+    }
+    async fn query_json(
+        &self,
+        sql: &str,
+        params: &[Value],
+        _options: Option<QueryOptions>,
+    ) -> Result<serde_json::Value> {
+        self.0.query_json(sql, params).await
+    }
+    async fn topology(&self, protocol: &str) -> Result<Option<crate::topology::ClusterMembership>> {
+        self.0.topology_for_transport(protocol).await
+    }
     fn name(&self) -> &'static str {
         "grpc"
     }
@@ -256,6 +306,34 @@ struct HttpAdapter(crate::http::HttpClient);
 #[cfg(feature = "http")]
 #[async_trait]
 impl Transport for HttpAdapter {
+    async fn health_json(&self) -> Result<serde_json::Value> {
+        self.0.health().await
+    }
+    async fn bulk_insert_json(
+        &self,
+        collection: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<BulkInsertResult> {
+        self.0.bulk_insert_json(collection, rows).await
+    }
+    async fn query_json(
+        &self,
+        sql: &str,
+        params: &[Value],
+        _options: Option<QueryOptions>,
+    ) -> Result<serde_json::Value> {
+        self.0.query_json(sql, params).await
+    }
+    async fn topology(&self, protocol: &str) -> Result<Option<crate::topology::ClusterMembership>> {
+        let text = self
+            .0
+            .get_text(&format!("/v1/topology?transport={protocol}"))
+            .await?;
+        let value = serde_json::from_str(&text)
+            .map_err(|error| ClientError::new(ErrorCode::Protocol, error.to_string()))?;
+        Ok(reddb_wire::routing::topology_from_json(&value)
+            .map(|topology| crate::topology::TopologyConsumer::consume(topology, None)))
+    }
     fn name(&self) -> &'static str {
         "http"
     }
@@ -303,6 +381,34 @@ struct RedWireAdapter(Mutex<Option<RedWireClient>>);
 
 #[async_trait]
 impl Transport for RedWireAdapter {
+    async fn health_json(&self) -> Result<serde_json::Value> {
+        redwire_client(&mut *self.0.lock().await)?.ping().await?;
+        Ok(serde_json::json!({"healthy": true, "state": "connected"}))
+    }
+    async fn bulk_insert_json(
+        &self,
+        collection: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<BulkInsertResult> {
+        redwire_client(&mut *self.0.lock().await)?
+            .bulk_insert(collection, rows.to_vec())
+            .await
+    }
+    async fn query_json(
+        &self,
+        sql: &str,
+        params: &[Value],
+        _options: Option<QueryOptions>,
+    ) -> Result<serde_json::Value> {
+        redwire_client(&mut *self.0.lock().await)?
+            .query_envelope_json(sql, params)
+            .await
+    }
+    async fn topology(&self, protocol: &str) -> Result<Option<crate::topology::ClusterMembership>> {
+        redwire_client(&mut *self.0.lock().await)?
+            .topology(protocol)
+            .await
+    }
     fn name(&self) -> &'static str {
         "redwire"
     }

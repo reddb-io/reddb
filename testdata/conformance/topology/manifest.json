@@ -1,0 +1,88 @@
+{
+  "owner": "reddb-wire::topology / reddb-wire::routing",
+  "metadata_key": "x-reddb-topology-transport",
+  "cases": [
+    {
+      "name": "v1-u64-and-optional-rebootstrap",
+      "hex": "0162000000feffffffffffffff1500000067727063733a2f2f7072696d6172793a35353035350700000073612d65617374010000001500000067727063733a2f2f7265706c6963613a35353035350700000073612d65617374010c000000fdffffffffffffff01",
+      "expected": {
+        "version": 1,
+        "epoch": "18446744073709551614",
+        "primary": {
+          "addr": "grpcs://primary:55055",
+          "region": "sa-east"
+        },
+        "replicas": [
+          {
+            "addr": "grpcs://replica:55055",
+            "region": "sa-east",
+            "healthy": true,
+            "lag_ms": 12,
+            "last_applied_lsn": "18446744073709551613",
+            "rebootstrapping": true
+          }
+        ]
+      },
+      "canonical": true
+    },
+    {
+      "name": "v1-without-optional-fields",
+      "hex": "0161000000feffffffffffffff1500000067727063733a2f2f7072696d6172793a35353035350700000073612d65617374010000001500000067727063733a2f2f7265706c6963613a35353035350700000073612d65617374010c000000fdffffffffffffff",
+      "expected": {
+        "version": 1,
+        "epoch": "18446744073709551614",
+        "primary": {
+          "addr": "grpcs://primary:55055",
+          "region": "sa-east"
+        },
+        "replicas": [
+          {
+            "addr": "grpcs://replica:55055",
+            "region": "sa-east",
+            "healthy": true,
+            "lag_ms": 12,
+            "last_applied_lsn": "18446744073709551613",
+            "rebootstrapping": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "v1-unknown-trailing-field",
+      "hex": "0164000000feffffffffffffff1500000067727063733a2f2f7072696d6172793a35353035350700000073612d65617374010000001500000067727063733a2f2f7265706c6963613a35353035350700000073612d65617374010c000000fdffffffffffffff01abcd",
+      "expected": {
+        "version": 1,
+        "epoch": "18446744073709551614",
+        "primary": {
+          "addr": "grpcs://primary:55055",
+          "region": "sa-east"
+        },
+        "replicas": [
+          {
+            "addr": "grpcs://replica:55055",
+            "region": "sa-east",
+            "healthy": true,
+            "lag_ms": 12,
+            "last_applied_lsn": "18446744073709551613",
+            "rebootstrapping": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "future-version",
+      "hex": "0200000000",
+      "expected": null
+    },
+    {
+      "name": "truncated-header",
+      "hex": "0100",
+      "error": true
+    },
+    {
+      "name": "truncated-body",
+      "hex": "0162000000feffffffffffffff1500000067727063733a2f2f7072696d6172793a35353035350700000073612d65617374010000001500000067727063733a2f2f7265706c6963613a35353035350700000073612d65617374010c000000fdffffffffffffff",
+      "error": true
+    }
+  ]
+}

@@ -44,7 +44,7 @@ public class RedwireConn internal constructor(
     private val owner: Closeable,
     public val sessionId: String,
     public val serverFeatures: Int = 0,
-) : Conn {
+) : Conn, dev.reddb.TopologySource {
 
     private val mutex = Mutex()
     private val nextCorrelation = AtomicLong(1L)
@@ -350,7 +350,8 @@ public class RedwireConn internal constructor(
     // ---------------------------------------------------------------
 
     override suspend fun query(sql: String): ByteArray =
-        sendQuery(MessageKind.Query, sql.toByteArray(StandardCharsets.UTF_8), "query")
+        if (supportsParams()) sendQuery(MessageKind.QueryWithParams, ValueCodec.encodeQueryWithParams(sql, emptyArray()), "query")
+        else sendQuery(MessageKind.Query, sql.toByteArray(StandardCharsets.UTF_8), "query")
 
     override suspend fun query(sql: String, vararg params: Any?): ByteArray {
         if (params.isEmpty()) {
@@ -362,6 +363,11 @@ public class RedwireConn internal constructor(
             )
         }
         return sendQuery(MessageKind.QueryWithParams, ValueCodec.encodeQueryWithParams(sql, params), "query")
+    }
+
+    override suspend fun topology(protocol: String): ObjectNode? {
+        if ((serverFeatures and dev.reddb.TopologyCodec.FEATURE) == 0) return null
+        return dev.reddb.TopologyCodec.decode(sendQuery(dev.reddb.TopologyCodec.KIND, protocol.toByteArray(StandardCharsets.US_ASCII), "topology"))
     }
 
     private suspend fun sendQuery(kind: Int, payload: ByteArray, label: String): ByteArray = withContext(Dispatchers.IO) {

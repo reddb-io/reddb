@@ -14,6 +14,12 @@ repositories {
     mavenCentral()
 }
 
+// Both JVM adapters consume one translation of the canonical wire/SQL contract.
+sourceSets.main {
+    java.srcDir("../java/src/main/java")
+    java.include("dev/reddb/TopologyCodec.java", "dev/reddb/RoutingSql.java")
+}
+
 val ktorVersion = "2.3.12"
 val coroutinesVersion = "1.8.1"
 

@@ -76,6 +76,7 @@ set(REDDB_SOURCES
     src/errors.cpp
     src/value.cpp
     src/reddb.cpp
+    src/routing.cpp
     src/redwire/frame.cpp
     src/redwire/codec.cpp
     src/redwire/value_codec.cpp
@@ -147,6 +148,7 @@ reddb_add_test(value_codec_test)
 reddb_add_test(redwire_conn_test)
 reddb_add_test(smoke_test)
 reddb_add_test(helpers_test)
+reddb_add_test(routing_test)
 if(REDDB_HAS_EMBEDDED)
     reddb_add_test(embedded_test)
 endif()

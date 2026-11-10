@@ -94,13 +94,32 @@ struct Endpoint {
 
 impl Endpoint {
     async fn connect(url: String, pool_size: usize) -> Result<Self> {
+        Self::connect_with_tls(url, pool_size, None).await
+    }
+
+    async fn connect_with_tls(
+        url: String,
+        pool_size: usize,
+        tls: Option<tonic::transport::ClientTlsConfig>,
+    ) -> Result<Self> {
         // `pool_size == 0` is a misconfiguration; clamp to 1 so we
         // still return a working client (matches the legacy single-
         // mutex path).
         let n = pool_size.max(1);
-        let head = RedDBClient::connect(&url, None)
-            .await
-            .map_err(|e| ClientError::new(ErrorCode::IoError, format!("connect {url}: {e}")))?;
+        let head = if let Some(tls) = tls {
+            let endpoint = tonic::transport::Endpoint::from_shared(url.clone())
+                .and_then(|endpoint| endpoint.tls_config(tls))
+                .map_err(|error| ClientError::new(ErrorCode::IoError, error.to_string()))?;
+            let channel = endpoint
+                .connect()
+                .await
+                .map_err(|error| ClientError::new(ErrorCode::IoError, error.to_string()))?;
+            RedDBClient::from_channel(url.clone(), None, channel)
+        } else {
+            RedDBClient::connect(&url, None).await.map_err(|error| {
+                ClientError::new(ErrorCode::IoError, format!("connect {url}: {error}"))
+            })?
+        };
         let mut pool = Vec::with_capacity(n);
         for _ in 0..(n - 1) {
             pool.push(head.clone());
@@ -148,6 +167,51 @@ impl std::fmt::Debug for GrpcClient {
 }
 
 impl GrpcClient {
+    pub(crate) async fn authenticate(&mut self, auth: &reddb_wire::ConnectionAuth) -> Result<()> {
+        use reddb_wire::ConnectionAuth;
+        let token = match auth {
+            ConnectionAuth::Anonymous => return Ok(()),
+            ConnectionAuth::Bearer(token) | ConnectionAuth::ApiKey(token) => token.clone(),
+            ConnectionAuth::Basic { user, pass } => {
+                let result = self.topology.get_mut().unwrap().primary.pool[0]
+                    .login(user, pass)
+                    .await
+                    .map_err(|error| ClientError::new(ErrorCode::AuthRefused, error.to_string()))?;
+                serde_json::from_str::<serde_json::Value>(&result)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("token")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .ok_or_else(|| {
+                        ClientError::new(ErrorCode::AuthRefused, "login omitted token")
+                    })?
+            }
+        };
+        for client in &mut self.topology.get_mut().unwrap().primary.pool {
+            client.set_token(token.clone());
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn topology_for_transport(
+        &self,
+        protocol: &str,
+    ) -> Result<Option<ClusterMembership>> {
+        let bytes = self
+            .primary_client()
+            .topology_for_transport(protocol)
+            .await
+            .map_err(|error| ClientError::new(ErrorCode::Network, error.to_string()))?;
+        reddb_wire::decode_topology(&bytes)
+            .map(|topology| {
+                topology.map(|topology| crate::topology::TopologyConsumer::consume(topology, None))
+            })
+            .map_err(|error| ClientError::new(ErrorCode::Protocol, error.to_string()))
+    }
+
     /// Single-host gRPC client. Equivalent to
     /// `connect_cluster(endpoint, &[], false)` with the default pool
     /// size.
@@ -162,7 +226,15 @@ impl GrpcClient {
     /// requests, so it behaves like the legacy single-channel path
     /// without the legacy `Mutex` serialization.
     pub async fn connect_with_pool_size(endpoint: String, pool_size: usize) -> Result<Self> {
-        let primary = Endpoint::connect(endpoint, pool_size).await?;
+        Self::connect_with_tls(endpoint, pool_size, None).await
+    }
+
+    pub(crate) async fn connect_with_tls(
+        endpoint: String,
+        pool_size: usize,
+        tls: Option<tonic::transport::ClientTlsConfig>,
+    ) -> Result<Self> {
+        let primary = Endpoint::connect_with_tls(endpoint, pool_size, tls).await?;
         let membership = ClusterMembership::from_uri_addresses(primary.url.clone(), Vec::new());
         let seed_endpoint = primary.url.clone();
         let router = RwLock::new(HealthAwareRouter::with_force_primary(
@@ -468,7 +540,7 @@ impl GrpcClient {
                 // tolerates the occasional false positive (a
                 // QueryError that happens to be application-level).
                 self.observe(idx, Outcome::Timeout);
-                return Err(ClientError::new(ErrorCode::QueryError, e.to_string()));
+                return Err(query_rpc_error(e));
             }
         };
         let mut result = parse_query_json(&reply.result_json)?;
@@ -500,7 +572,7 @@ impl GrpcClient {
             }
             Err(e) => {
                 self.observe(0, Outcome::Timeout);
-                return Err(ClientError::new(ErrorCode::QueryError, e.to_string()));
+                return Err(query_rpc_error(e));
             }
         };
         let mut result = parse_query_json(&reply.result_json)?;
@@ -508,6 +580,45 @@ impl GrpcClient {
             result.affected = reply.affected_rows;
         }
         Ok(result)
+    }
+
+    pub async fn query_json(&self, sql: &str, params: &[ParamValue]) -> Result<serde_json::Value> {
+        let reply = self
+            .primary_client()
+            .query_reply_with_params(sql, params_to_grpc_values(params))
+            .await
+            .map_err(query_rpc_error)?;
+        let mut value: serde_json::Value = serde_json::from_str(&reply.result_json)
+            .map_err(|error| ClientError::new(ErrorCode::Protocol, error.to_string()))?;
+        if let Some(object) = value.as_object_mut() {
+            if object
+                .get("affected")
+                .or_else(|| object.get("affected_rows"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                == 0
+            {
+                object.insert("affected".into(), reply.affected_rows.into());
+            }
+            object
+                .entry("statement")
+                .or_insert_with(|| reply.statement.into());
+            object
+                .entry("columns")
+                .or_insert_with(|| serde_json::json!(reply.columns));
+        }
+        Ok(value)
+    }
+
+    pub async fn health_json(&self) -> Result<serde_json::Value> {
+        let reply = self
+            .primary_client()
+            .health_status()
+            .await
+            .map_err(query_rpc_error)?;
+        Ok(
+            serde_json::json!({"healthy": reply.healthy, "state": reply.state, "checked_at_unix_ms": reply.checked_at_unix_ms}),
+        )
     }
 
     pub async fn insert(&self, collection: &str, payload: &JsonValue) -> Result<InsertResult> {
@@ -528,7 +639,7 @@ impl GrpcClient {
         let reply = client
             .create_row_entity(collection, &json_payload)
             .await
-            .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
+            .map_err(query_rpc_error)?;
         Ok(InsertResult {
             affected: 1,
             rid: Some(reply.id.to_string()),
@@ -566,7 +677,7 @@ impl GrpcClient {
         let reply = client
             .bulk_create_rows(collection, encoded)
             .await
-            .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
+            .map_err(query_rpc_error)?;
         let rids = reply
             .items
             .into_iter()
@@ -576,6 +687,32 @@ impl GrpcClient {
             affected: reply.count,
             rids: rids.clone(),
             ids: rids,
+        })
+    }
+
+    pub async fn bulk_insert_json(
+        &self,
+        collection: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<BulkInsertResult> {
+        let encoded = rows
+            .iter()
+            .map(|row| serde_json::json!({"fields": row}).to_string())
+            .collect();
+        let reply = self
+            .primary_client()
+            .bulk_create_rows(collection, encoded)
+            .await
+            .map_err(query_rpc_error)?;
+        let ids: Vec<_> = reply
+            .items
+            .into_iter()
+            .map(|row| row.id.to_string())
+            .collect();
+        Ok(BulkInsertResult {
+            affected: reply.count,
+            rids: ids.clone(),
+            ids,
         })
     }
 
@@ -590,7 +727,7 @@ impl GrpcClient {
         client
             .delete_entity(collection, id)
             .await
-            .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
+            .map_err(query_rpc_error)?;
         Ok(1)
     }
 
@@ -657,6 +794,20 @@ impl BookmarkWaiter for MembershipFrontierWaiter<'_> {
             .map(|replica| replica.last_applied_lsn)
             .unwrap_or(0)
     }
+}
+
+fn query_rpc_error(error: Box<dyn std::error::Error>) -> ClientError {
+    let code = match error
+        .downcast_ref::<tonic::Status>()
+        .map(tonic::Status::code)
+    {
+        Some(tonic::Code::Unavailable | tonic::Code::DeadlineExceeded) => ErrorCode::Network,
+        Some(tonic::Code::Unauthenticated | tonic::Code::PermissionDenied) => {
+            ErrorCode::AuthRefused
+        }
+        _ => ErrorCode::QueryError,
+    };
+    ClientError::new(code, error.to_string())
 }
 
 fn parse_query_json(s: &str) -> Result<QueryResult> {

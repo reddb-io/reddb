@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * monotonic correlation id. All public methods are blocking; the
  * caller can serialise them with normal Java locks.
  */
-public final class RedWireConn implements Conn {
+public final class RedWireConn implements Conn, dev.reddb.TopologySource {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final InputStream in;
@@ -305,7 +305,8 @@ public final class RedWireConn implements Conn {
 
     @Override
     public byte[] query(String sql) {
-        return sendQuery(Frame.Kind.Query, sql.getBytes(StandardCharsets.UTF_8), "query");
+        return supportsParams() ? sendQuery(Frame.Kind.QueryWithParams, ValueCodec.encodeQueryWithParams(sql, new Object[0]), "query")
+            : sendQuery(Frame.Kind.Query, sql.getBytes(StandardCharsets.UTF_8), "query");
     }
 
     @Override
@@ -318,6 +319,11 @@ public final class RedWireConn implements Conn {
                 "server did not advertise FEATURE_PARAMS — upgrade the server to use parameterized queries");
         }
         return sendQuery(Frame.Kind.QueryWithParams, ValueCodec.encodeQueryWithParams(sql, params), "query");
+    }
+
+    @Override public com.fasterxml.jackson.databind.node.ObjectNode topology(String protocol) {
+        if ((serverFeatures & dev.reddb.TopologyCodec.FEATURE) == 0) return null;
+        return dev.reddb.TopologyCodec.decode(sendQuery(dev.reddb.TopologyCodec.KIND, protocol.getBytes(StandardCharsets.US_ASCII), "topology"));
     }
 
     private byte[] sendQuery(int kind, byte[] payload, String label) {

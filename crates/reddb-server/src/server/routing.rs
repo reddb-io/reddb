@@ -1241,6 +1241,56 @@ mod tests {
     }
 
     #[test]
+    fn client_topology_is_available_to_readers_and_preserves_protocol_projection() {
+        let (server, store) = server_with_open_store();
+        server.runtime.db().store().set_config_tree(
+            "routing.http",
+            &crate::json!({ "advertise_addr": "http://primary:5000" }),
+        );
+        server.runtime.db().store().set_config_tree(
+            "routing.https",
+            &crate::json!({ "advertise_addr": "https://primary:8443" }),
+        );
+        store
+            .create_user_in_tenant(None, "topology-reader", "pw", crate::auth::Role::Read)
+            .expect("reader");
+        let token = store
+            .create_api_key_in_tenant(None, "topology-reader", "topology", crate::auth::Role::Read)
+            .expect("reader key")
+            .key;
+        for bearer in [None, Some(token.as_str())] {
+            let mut query = match bearer {
+                Some(token) => request_with_bearer("GET", "/v1/topology", Vec::new(), token),
+                None => request("/v1/topology"),
+            };
+            query
+                .query
+                .insert("transport".to_string(), "https".to_string());
+            let response = server.route(query);
+            assert_eq!(response.status, 200);
+            let body: JsonValue = crate::json::from_slice(&response.body).expect("topology JSON");
+            assert_eq!(
+                body.get("primary")
+                    .and_then(|primary| primary.get("addr"))
+                    .and_then(JsonValue::as_str),
+                Some("https://primary:8443")
+            );
+            assert!(body
+                .get("replicas")
+                .and_then(JsonValue::as_array)
+                .expect("replicas")
+                .is_empty());
+        }
+        let response = server.route(request_with_bearer(
+            "GET",
+            "/v1/topology",
+            Vec::new(),
+            "invalid-token",
+        ));
+        assert_eq!(response.status, 401);
+    }
+
+    #[test]
     fn operator_read_surfaces_never_answer_anonymous_callers() {
         let (server, store) = server_with_open_store();
         // `require_auth = false` opens the data plane; the operator plane

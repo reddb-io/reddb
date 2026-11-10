@@ -1,4 +1,5 @@
 #include "reddb/redwire/conn.hpp"
+#include "../routing.hpp"
 #include "reddb/redwire/codec.hpp"
 #include "reddb/redwire/scram.hpp"
 #include "reddb/redwire/value_codec.hpp"
@@ -15,6 +16,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <poll.h>
 
 #include <cerrno>
 #include <cstring>
@@ -143,6 +145,17 @@ static std::optional<uint64_t> find_u64_field(const std::string& s, const std::s
 
 namespace {
 
+void set_socket_timeout(int fd, uint32_t milliseconds) noexcept {
+    timeval timeout{static_cast<time_t>(milliseconds / 1000), static_cast<suseconds_t>((milliseconds % 1000) * 1000)};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+}
+struct DiscoveryTimeout {
+    IoStream& stream;
+    explicit DiscoveryTimeout(IoStream& stream) : stream(stream) { stream.set_timeout(5000); }
+    ~DiscoveryTimeout() { stream.set_timeout(0); }
+};
+
 class FdStream final : public IoStream {
 public:
     explicit FdStream(int fd) : fd_(fd) {}
@@ -183,6 +196,8 @@ public:
             sent += static_cast<size_t>(r);
         }
     }
+
+    void set_timeout(uint32_t milliseconds) noexcept override { set_socket_timeout(fd_, milliseconds); }
 
     void close() noexcept override {
         if (fd_ >= 0) {
@@ -233,6 +248,8 @@ public:
         }
     }
 
+    void set_timeout(uint32_t milliseconds) noexcept override { set_socket_timeout(fd_, milliseconds); }
+
     void close() noexcept override {
         if (ssl_) {
             SSL_shutdown(ssl_);
@@ -255,7 +272,7 @@ private:
     SSL* ssl_;
 };
 
-int open_tcp_socket(const std::string& host, uint16_t port) {
+int open_tcp_socket(const std::string& host, uint16_t port, uint32_t timeout_ms) {
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -270,7 +287,23 @@ int open_tcp_socket(const std::string& host, uint16_t port) {
     for (addrinfo* p = res; p; p = p->ai_next) {
         fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (fd < 0) continue;
-        if (::connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
+        const int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        int connected = ::connect(fd, p->ai_addr, p->ai_addrlen);
+        if (connected < 0 && errno == EINPROGRESS) {
+            pollfd wait{fd, POLLOUT, 0};
+            if (::poll(&wait, 1, static_cast<int>(timeout_ms)) > 0) {
+                int error = 0; socklen_t size = sizeof(error);
+                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &size) == 0 && error == 0) connected = 0;
+            }
+        }
+        fcntl(fd, F_SETFL, flags);
+        if (connected == 0) {
+            timeval timeout{static_cast<time_t>(timeout_ms / 1000), static_cast<suseconds_t>((timeout_ms % 1000) * 1000)};
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+            break;
+        }
         ::close(fd);
         fd = -1;
     }
@@ -290,13 +323,13 @@ std::unique_ptr<IoStream> wrap_fd(int fd) {
     return std::unique_ptr<IoStream>(new FdStream(fd));
 }
 
-std::unique_ptr<IoStream> dial_tcp(const std::string& host, uint16_t port) {
-    return wrap_fd(open_tcp_socket(host, port));
+std::unique_ptr<IoStream> dial_tcp(const std::string& host, uint16_t port, uint32_t timeout_ms) {
+    return wrap_fd(open_tcp_socket(host, port, timeout_ms));
 }
 
 std::unique_ptr<IoStream> dial_tls(const std::string& host, uint16_t port,
-                                   bool dangerous_accept_invalid_certs) {
-    int fd = open_tcp_socket(host, port);
+                                   bool dangerous_accept_invalid_certs, uint32_t timeout_ms) {
+    int fd = open_tcp_socket(host, port, timeout_ms);
     SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) {
         ::close(fd);
@@ -346,13 +379,14 @@ RedWireConn::~RedWireConn() {
 std::unique_ptr<RedWireConn> RedWireConn::connect(const ConnectOpts& opts) {
     std::unique_ptr<IoStream> stream;
     if (opts.tls) {
-        stream = dial_tls(opts.host, opts.port, opts.dangerous_accept_invalid_certs);
+        stream = dial_tls(opts.host, opts.port, opts.dangerous_accept_invalid_certs, opts.timeout_ms);
     } else {
-        stream = dial_tcp(opts.host, opts.port);
+        stream = dial_tcp(opts.host, opts.port, opts.timeout_ms);
     }
     auto conn = std::unique_ptr<RedWireConn>(new RedWireConn(std::move(stream)));
     conn->send_magic_and_version();
     conn->run_handshake(opts);
+    conn->stream_->set_timeout(0);
     return conn;
 }
 
@@ -361,6 +395,7 @@ std::unique_ptr<RedWireConn> RedWireConn::from_stream(std::unique_ptr<IoStream> 
     auto conn = std::unique_ptr<RedWireConn>(new RedWireConn(std::move(stream)));
     conn->send_magic_and_version();
     conn->run_handshake(opts);
+    conn->stream_->set_timeout(0);
     return conn;
 }
 
@@ -604,7 +639,23 @@ void RedWireConn::run_scram(const ConnectOpts& opts, uint32_t fallback_features)
 // Public ops.
 // ---------------------------------------------------------------------------
 
+std::vector<uint8_t> RedWireConn::topology(const std::string& protocol) {
+    std::lock_guard<std::mutex> guard(io_);
+    if ((server_features_ & routing::topology_feature) == 0) return {};
+    DiscoveryTimeout deadline(*stream_);
+    Frame request;
+    request.kind = static_cast<MessageKind>(routing::topology_kind);
+    request.correlation_id = next_corr();
+    request.payload.assign(protocol.begin(), protocol.end());
+    write_frame(request);
+    auto response = read_frame();
+    if (response.kind != MessageKind::Result || response.correlation_id != request.correlation_id)
+        throw RedDBError(ErrorCode::Protocol, "invalid topology response");
+    return response.payload;
+}
+
 std::string RedWireConn::query(const std::string& sql) {
+    if ((server_features_ & FEATURE_PARAMS) == FEATURE_PARAMS) return query(sql, std::span<const reddb::Value>{});
     std::lock_guard<std::mutex> g(io_);
     Frame req;
     req.kind = MessageKind::Query;
@@ -623,7 +674,7 @@ std::string RedWireConn::query(const std::string& sql) {
 }
 
 std::string RedWireConn::query(std::string_view sql, std::span<const reddb::Value> params) {
-    if (params.empty()) {
+    if (params.empty() && (server_features_ & FEATURE_PARAMS) != FEATURE_PARAMS) {
         return query(std::string(sql));
     }
     if ((server_features_ & FEATURE_PARAMS) != FEATURE_PARAMS) {
@@ -749,6 +800,7 @@ std::string RedWireConn::del(const std::string& collection, const std::string& i
 
 void RedWireConn::ping() {
     std::lock_guard<std::mutex> g(io_);
+    DiscoveryTimeout deadline(*stream_);
     Frame req;
     req.kind = MessageKind::Ping;
     req.correlation_id = next_corr();

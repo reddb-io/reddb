@@ -98,6 +98,7 @@ private:
 };
 
 // --- Envelopes --------------------------------------------------------------
+JsonValue parse_json_bounded(const std::string& text);
 
 struct InsertResult {
     int64_t affected = 0;

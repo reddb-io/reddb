@@ -479,7 +479,7 @@ const GRPC_COMMAND_BINDINGS: &[GrpcCommandBinding] = &[
         GrpcAuthClass::Write
     ),
     binding!("Checkpoint", "physical.checkpoint", GrpcAuthClass::Write),
-    binding!("Topology", "ops.topology.graph", GrpcAuthClass::Open),
+    binding!("Topology", "client.topology", GrpcAuthClass::Open),
     binding!(
         "ReplicationStatus",
         "ops.replication.status",

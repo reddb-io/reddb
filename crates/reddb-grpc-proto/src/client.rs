@@ -34,6 +34,16 @@ impl RedDBClient {
         })
     }
 
+    /// Build on a caller-configured channel without enabling TLS in the
+    /// generated-protocol crate's otherwise transport-neutral feature set.
+    pub fn from_channel(addr: String, token: Option<String>, channel: Channel) -> Self {
+        Self {
+            inner: RedDbClient::new(channel),
+            token,
+            addr,
+        }
+    }
+
     fn auth_request<T>(&self, inner: T) -> Request<T> {
         let mut request = Request::new(inner);
         if let Some(token) = &self.token {
@@ -168,6 +178,23 @@ impl RedDBClient {
     /// Fetch the canonical topology envelope bytes.
     pub async fn topology(&mut self) -> Result<Vec<u8>, Box<dyn Error>> {
         let request = self.auth_request(TopologyRequest {});
+        Ok(self
+            .inner
+            .topology(request)
+            .await?
+            .into_inner()
+            .topology_bytes)
+    }
+
+    pub async fn topology_for_transport(
+        &mut self,
+        protocol: &str,
+    ) -> Result<Vec<u8>, Box<dyn Error>> {
+        let mut request = self.auth_request(TopologyRequest {});
+        request.metadata_mut().insert(
+            reddb_wire::routing::TOPOLOGY_TRANSPORT_METADATA_KEY,
+            protocol.parse()?,
+        );
         Ok(self
             .inner
             .topology(request)

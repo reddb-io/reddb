@@ -136,7 +136,14 @@ red server \
 Full flag / env-var reference:
 [`docs/security/transport-tls.md`](../security/transport-tls.md#grpc-agent-b-this-round).
 
-### gRPC cluster (primary + read replicas)
+### Topology discovery (primary + read replicas)
+
+The JS/TS remote client and Rust `Reddb::connect` discover protocol-specific
+membership and route reads over RedWire, gRPC, HTTP, and WebSocket, including
+their TLS variants. See [Topology discovery and replica routing](./topology-routing.md)
+for server address configuration, authentication, refresh, and consistency.
+
+The Rust gRPC URI also accepts explicit bootstrap hosts:
 
 The `reddb-io-client` Rust driver accepts a comma-separated host list
 in the URI authority. The first entry is the primary; subsequent
@@ -180,8 +187,8 @@ cannot enforce the option fails closed instead of silently weakening it.
 
 ### gRPC (legacy bridge — explicit opt-out)
 
-The `grpc://` scheme defaults to RedWire because it shares port
-5050. To force the legacy stdio→gRPC bridge:
+The `grpc://` scheme uses native gRPC. To explicitly select the legacy
+stdio→gRPC bridge in the Node client:
 
 ```js
 const db = await connect('grpc://reddb.example.com:5051?proto=spawn-grpc')

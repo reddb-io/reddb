@@ -18,6 +18,13 @@ pub struct WalStreamOpen {
 
 impl WalStreamOpen {
     pub fn encode_json(&self) -> Vec<u8> {
+        self.encode_json_with_endpoints(None)
+    }
+
+    pub fn encode_json_with_endpoints(
+        &self,
+        endpoints: Option<&crate::routing::RoutingEndpoints>,
+    ) -> Vec<u8> {
         let mut obj = serde_json::Map::new();
         obj.insert(
             "since_lsn".to_string(),
@@ -39,13 +46,23 @@ impl WalStreamOpen {
             "await_timeout_ms".to_string(),
             JsonValue::Number(self.await_timeout_ms.into()),
         );
+        if let Some(endpoints) = endpoints {
+            obj.insert("endpoints".to_string(), serde_json::json!(endpoints));
+        }
         serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
     }
 
     pub fn decode_json(bytes: &[u8]) -> Result<Self> {
+        Self::decode_json_with_endpoints(bytes).map(|(open, _)| open)
+    }
+
+    pub fn decode_json_with_endpoints(
+        bytes: &[u8],
+    ) -> Result<(Self, Option<crate::routing::RoutingEndpoints>)> {
         let obj = object_from_slice(bytes)?;
+        let endpoints = obj.get("endpoints").map(crate::routing::routing_endpoints);
         let max_count = get_opt_u64(&obj, "max_count").unwrap_or(1000);
-        Ok(Self {
+        let open = Self {
             since_lsn: get_opt_u64(&obj, "since_lsn").unwrap_or(0),
             max_count: usize::try_from(max_count)
                 .map_err(|_| ReplicationPayloadError::InvalidField("max_count"))?,
@@ -53,7 +70,8 @@ impl WalStreamOpen {
             term: get_opt_u64(&obj, "term").unwrap_or(DEFAULT_REPLICATION_TERM),
             await_data: get_bool_default(&obj, "await_data", false),
             await_timeout_ms: get_opt_u64(&obj, "await_timeout_ms").unwrap_or(30_000),
-        })
+        };
+        Ok((open, endpoints))
     }
 }
 
@@ -100,6 +118,13 @@ pub struct WalStreamChunk {
 
 impl WalStreamChunk {
     pub fn encode_json(&self) -> Vec<u8> {
+        self.encode_json_with_endpoints(None)
+    }
+
+    pub fn encode_json_with_endpoints(
+        &self,
+        endpoints: Option<&crate::routing::RoutingEndpoints>,
+    ) -> Vec<u8> {
         let mut obj = serde_json::Map::new();
         obj.insert(
             "records".to_string(),
@@ -140,11 +165,26 @@ impl WalStreamChunk {
                 obj.insert(key, value);
             }
         }
+        if let Some(endpoints) = endpoints {
+            obj.insert(
+                "primary_endpoints".to_string(),
+                serde_json::json!(endpoints),
+            );
+        }
         serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default()
     }
 
     pub fn decode_json(bytes: &[u8]) -> Result<Self> {
+        Self::decode_json_with_endpoints(bytes).map(|(chunk, _)| chunk)
+    }
+
+    pub fn decode_json_with_endpoints(
+        bytes: &[u8],
+    ) -> Result<(Self, Option<crate::routing::RoutingEndpoints>)> {
         let obj = object_from_slice(bytes)?;
+        let endpoints = obj
+            .get("primary_endpoints")
+            .map(crate::routing::routing_endpoints);
         let records = match obj.get("records") {
             Some(JsonValue::Array(values)) => values
                 .iter()
@@ -153,7 +193,7 @@ impl WalStreamChunk {
             Some(_) => return Err(ReplicationPayloadError::InvalidField("records")),
             None => Vec::new(),
         };
-        Ok(Self {
+        let chunk = Self {
             records,
             current_lsn: get_u64(&obj, "current_lsn")?,
             oldest_available_lsn: get_opt_u64(&obj, "oldest_available_lsn"),
@@ -162,7 +202,8 @@ impl WalStreamChunk {
             needs_rebootstrap: get_bool_default(&obj, "needs_rebootstrap", false),
             invalidation_reason: get_opt_string(&obj, "invalidation_reason"),
             catchup: CatchupModeReply::from_wal_rebootstrap_object(&obj)?,
-        })
+        };
+        Ok((chunk, endpoints))
     }
 }
 
@@ -294,6 +335,25 @@ mod tests {
             WalStreamOpen::decode_json(&open.encode_json()).unwrap(),
             open
         );
+        let endpoints = crate::routing::RoutingEndpoints::from([(
+            "https".to_string(),
+            "https://replica:8443".to_string(),
+        )]);
+        let advertised = open.encode_json_with_endpoints(Some(&endpoints));
+        assert_eq!(
+            WalStreamOpen::decode_json(&advertised).expect("legacy fields"),
+            open
+        );
+        assert_eq!(
+            WalStreamOpen::decode_json_with_endpoints(&advertised).expect("endpoint metadata"),
+            (open.clone(), Some(endpoints))
+        );
+        assert_eq!(
+            WalStreamOpen::decode_json_with_endpoints(&open.encode_json())
+                .expect("old peer")
+                .1,
+            None
+        );
     }
 
     #[test]
@@ -328,6 +388,25 @@ mod tests {
         assert_eq!(
             WalStreamChunk::decode_json(&chunk.encode_json()).unwrap(),
             chunk
+        );
+        let endpoints = crate::routing::RoutingEndpoints::from([(
+            "grpc".to_string(),
+            "grpc://primary:55055".to_string(),
+        )]);
+        let advertised = chunk.encode_json_with_endpoints(Some(&endpoints));
+        assert_eq!(
+            WalStreamChunk::decode_json(&advertised).expect("legacy fields"),
+            chunk
+        );
+        assert_eq!(
+            WalStreamChunk::decode_json_with_endpoints(&advertised).expect("endpoint metadata"),
+            (chunk.clone(), Some(endpoints))
+        );
+        assert_eq!(
+            WalStreamChunk::decode_json_with_endpoints(&chunk.encode_json())
+                .expect("old peer")
+                .1,
+            None
         );
     }
 

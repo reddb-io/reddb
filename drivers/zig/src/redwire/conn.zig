@@ -46,7 +46,7 @@ pub const ConnectOptions = struct {
 /// Internal trait-ish wrapper so the same `Conn` code can drive a
 /// plain TCP socket or a `std.crypto.tls.Client`-wrapped one.
 pub const Stream = union(enum) {
-    plain: std.net.Stream,
+    plain: @import("../network.zig").Socket,
     tls: TlsStream,
 
     pub fn read(self: *Stream, buf: []u8) !usize {
@@ -73,7 +73,7 @@ pub const Stream = union(enum) {
 
 pub const TlsStream = struct {
     client: std.crypto.tls.Client,
-    sock: std.net.Stream,
+    sock: @import("../network.zig").Socket,
 
     pub fn read(self: *TlsStream, buf: []u8) !usize {
         return self.client.read(self.sock, buf);
@@ -99,6 +99,7 @@ pub const Conn = struct {
     session_id: []u8 = &.{},
     server_features: u32 = 0,
     closed: bool = false,
+    io_timeout_ms: u32 = 30_000,
 
     pub fn deinit(self: *Conn) void {
         if (!self.closed) self.close();
@@ -118,6 +119,37 @@ pub const Conn = struct {
         self.stream.close();
     }
 
+    fn poison(self: *Conn) void {
+        if (self.closed) return;
+        self.closed = true;
+        switch (self.stream) {
+            .plain => |socket| socket.close(),
+            .tls => |tls| tls.sock.close(),
+        }
+    }
+    pub fn setIoTimeout(self: *Conn, milliseconds: u32) !void {
+        if (self.closed) return error.ConnectionClosed;
+        self.io_timeout_ms = milliseconds;
+        switch (self.stream) {
+            .plain => |*socket| {
+                socket.timeout_ms = milliseconds;
+                try @import("../network.zig").setTimeout(socket.*, milliseconds);
+            },
+            .tls => |*tls| {
+                tls.sock.timeout_ms = milliseconds;
+                try @import("../network.zig").setTimeout(tls.sock, milliseconds);
+            },
+        }
+    }
+    fn recvResponse(self: *Conn, correlation: u64) !codec.Decoded {
+        errdefer self.poison();
+        var response = try self.recvFrame();
+        if (response.frame.correlation_id != correlation) {
+            response.deinit(self.allocator);
+            return error.UnexpectedFrame;
+        }
+        return response;
+    }
     pub fn nextCorr(self: *Conn) u64 {
         return self.next_corr.fetchAdd(1, .monotonic);
     }
@@ -125,6 +157,8 @@ pub const Conn = struct {
     /// Send a frame. Allocator usage is internal; this never holds
     /// memory across the lock boundary.
     pub fn sendFrame(self: *Conn, f: frame.Frame) !void {
+        if (self.closed) return error.ConnectionClosed;
+        errdefer self.poison();
         const bytes = try codec.encodeFrame(self.allocator, f);
         defer self.allocator.free(bytes);
         try self.stream.writeAll(bytes);
@@ -133,6 +167,7 @@ pub const Conn = struct {
     /// Read one frame. Returned `Decoded` may own a payload buffer
     /// (compressed frames) — caller must `deinit` to free it.
     pub fn recvFrame(self: *Conn) !codec.Decoded {
+        if (self.closed) return error.ConnectionClosed;
         var header_buf: [frame.FRAME_HEADER_SIZE]u8 = undefined;
         try readExact(&self.stream, &header_buf);
         const header = try frame.readHeader(&header_buf);
@@ -156,6 +191,18 @@ pub const Conn = struct {
     }
 
     // ---- High level operations ----
+    pub fn topology(self: *Conn, protocol: []const u8) !?[]const u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.closed) return error.ConnectionClosed;
+        if ((self.server_features & @import("../topology.zig").feature) == 0) return null;
+        const correlation = self.nextCorr();
+        try self.sendFrame(frame.Frame.init(.topology, correlation, protocol));
+        var response = try self.recvResponse(correlation);
+        defer response.deinit(self.allocator);
+        if (response.frame.kind != .result or response.frame.correlation_id != correlation) return error.UnexpectedFrame;
+        return try takeOwned(self.allocator, &response);
+    }
 
     /// Run a SQL query with an idiomatic tuple of params:
     /// `try conn.query("SELECT $1", .{42})`. Empty tuples preserve the
@@ -203,16 +250,14 @@ pub const Conn = struct {
         defer self.mutex.unlock();
         const corr = self.nextCorr();
         try self.sendFrame(frame.Frame.init(.query, corr, sql));
-        var resp = try self.recvFrame();
+        var resp = try self.recvResponse(corr);
         errdefer resp.deinit(self.allocator);
         switch (resp.frame.kind) {
             .result => return takeOwned(self.allocator, &resp),
             .err => {
-                resp.deinit(self.allocator);
                 return error.ProtocolError;
             },
             else => {
-                resp.deinit(self.allocator);
                 return error.UnexpectedFrame;
             },
         }
@@ -229,7 +274,7 @@ pub const Conn = struct {
         sql: []const u8,
         params: []const value_codec.Value,
     ) ![]const u8 {
-        if (params.len == 0) return self.queryRaw(sql);
+        if (params.len == 0 and !self.supportsParams()) return self.queryRaw(sql);
         self.mutex.lock();
         defer self.mutex.unlock();
         if (!self.supportsParams()) return error.ParamsUnsupported;
@@ -239,16 +284,14 @@ pub const Conn = struct {
 
         const corr = self.nextCorr();
         try self.sendFrame(frame.Frame.init(.query_with_params, corr, payload));
-        var resp = try self.recvFrame();
+        var resp = try self.recvResponse(corr);
         errdefer resp.deinit(self.allocator);
         switch (resp.frame.kind) {
             .result => return takeOwned(self.allocator, &resp),
             .err => {
-                resp.deinit(self.allocator);
                 return error.ProtocolError;
             },
             else => {
-                resp.deinit(self.allocator);
                 return error.UnexpectedFrame;
             },
         }
@@ -257,9 +300,12 @@ pub const Conn = struct {
     pub fn ping(self: *Conn) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
+        const prior_timeout = self.io_timeout_ms;
+        try self.setIoTimeout(5000);
+        defer self.setIoTimeout(prior_timeout) catch {};
         const corr = self.nextCorr();
         try self.sendFrame(frame.Frame.init(.ping, corr, &.{}));
-        var resp = try self.recvFrame();
+        var resp = try self.recvResponse(corr);
         defer resp.deinit(self.allocator);
         if (resp.frame.kind != .pong) return error.UnexpectedFrame;
     }
@@ -321,7 +367,9 @@ fn readExact(stream: *Stream, buf: []u8) !void {
 
 /// Open a connection and run the handshake.
 pub fn connect(allocator: Allocator, opts: ConnectOptions) !*Conn {
-    const sock = try std.net.tcpConnectToHost(allocator, opts.host, opts.port);
+    var sock = try @import("../network.zig").connect(allocator, opts.host, opts.port, if (opts.connect_timeout_ms == 0) 5000 else opts.connect_timeout_ms);
+    sock.timeout_ms = if (opts.io_timeout_ms == 0) 5000 else opts.io_timeout_ms;
+    try @import("../network.zig").setTimeout(sock, if (opts.io_timeout_ms == 0) 5000 else opts.io_timeout_ms);
     var stream: Stream = .{ .plain = sock };
     var stream_owned = true;
     errdefer if (stream_owned) stream.close();
@@ -351,6 +399,7 @@ pub fn connect(allocator: Allocator, opts: ConnectOptions) !*Conn {
     conn.* = .{
         .allocator = allocator,
         .stream = stream,
+        .io_timeout_ms = if (opts.io_timeout_ms == 0) 30000 else opts.io_timeout_ms,
     };
     // Once the Conn owns the stream, the conn's `close` is the only
     // path that touches the socket — don't double-close from the

@@ -17,7 +17,7 @@ namespace Reddb.Http;
 /// <c>Authorization</c>. Login is automatic when
 /// <see cref="ConnectOptions"/> / the URI carry username + password.
 /// </summary>
-public sealed class HttpConn : IConn
+public sealed class HttpConn : IConn, ITopologySource
 {
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -47,7 +47,8 @@ public sealed class HttpConn : IConn
     {
         opts ??= ConnectOptions.Defaults;
         string scheme = url.Scheme == RedUrl.Kind.Https ? "https" : "http";
-        string baseUrl = $"{scheme}://{url.Host}:{url.Port}";
+        string host = url.Host!.Contains(':') ? $"[{url.Host}]" : url.Host;
+        string baseUrl = $"{scheme}://{host}:{url.Port}{url.Path}";
 
         var handler = new SocketsHttpHandler
         {
@@ -166,6 +167,16 @@ public sealed class HttpConn : IConn
             string body = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             throw new RedDBException.EngineError($"ping: HTTP {(int)resp.StatusCode}: {body}");
         }
+    }
+
+    async ValueTask<JsonObject?> ITopologySource.TopologyAsync(string protocol, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, _baseUrl + "/v1/topology?transport=" + Uri.EscapeDataString(protocol));
+        if (_token is not null) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
+        using var response = await _client.SendAsync(request, cancellationToken);
+        if ((int)response.StatusCode is 401 or 403) throw new RedDBException.AuthRefused("topology authorization refused");
+        response.EnsureSuccessStatusCode();
+        return JsonNode.Parse(await response.Content.ReadAsByteArrayAsync(cancellationToken))?.AsObject();
     }
 
     public ValueTask DisposeAsync()

@@ -26,7 +26,9 @@ pub mod moved;
 pub mod query_with_params;
 pub mod redwire;
 pub mod replication;
+pub mod routing;
 pub mod sanitizer;
+pub mod sql_routing;
 pub mod topology;
 
 pub use conn_string::{

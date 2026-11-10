@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "enable_zstd", enable_zstd);
     build_options.addOption(bool, "enable_embedded", enable_embedded);
     reddb_mod.addOptions("build_options", build_options);
+    if (target.result.os.tag == .windows) reddb_mod.linkSystemLibrary("winhttp", .{});
 
     if (enable_zstd) {
         reddb_mod.linkSystemLibrary("zstd", .{});
@@ -58,6 +59,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     lib.root_module.addOptions("build_options", build_options);
+    if (target.result.os.tag == .windows) lib.root_module.linkSystemLibrary("winhttp", .{});
     if (enable_zstd) {
         lib.root_module.linkSystemLibrary("zstd", .{});
         lib.root_module.link_libc = true;
@@ -98,6 +100,7 @@ pub fn build(b: *std.Build) void {
         "tests/redwire_conn_test.zig",
         "tests/smoke_test.zig",
         "tests/helpers_test.zig",
+        "tests/routing_test.zig",
     };
 
     for (test_files) |path| {

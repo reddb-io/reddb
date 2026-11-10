@@ -28,6 +28,7 @@ grpc = []
 # RedWire native TCP client. No engine dep — speaks the wire
 # protocol directly. See ADR 0001.
 redwire = []
+redwire-websocket = ["redwire", "redwire-tls", "dep:tokio-tungstenite", "dep:futures-util"]
 # HTTP / HTTPS transport using reqwest. Parity with the JS
 # driver's HttpRpcClient — talks REST endpoints directly.
 http = ["dep:reqwest"]
@@ -57,6 +58,8 @@ tokio = { version = "1.53.3", default-features = false, features = ["rt", "rt-mu
 # JSON-encoded.
 serde_json = "1"
 async-trait = "0.1"
+futures-util = { version = "0.3", optional = true, features = ["sink"] }
+tokio-tungstenite = { version = "0.29", optional = true, default-features = false, features = ["handshake"] }
 # Lightweight sync HTTP client for the `red_client` bin's
 # http(s) transport. Skips the platform native TLS in favour of
 # rustls, matching the rest of the workspace's TLS stack.
@@ -89,6 +92,7 @@ webpki-roots = { version = "1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json", "stream"], optional = true }
 
 [dev-dependencies]
+url = "2"
 tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "time", "sync"] }
 # OAuth-JWT smoke (`tests/redwire_oauth_smoke.rs`). Mints + decodes
 # RS256 tokens against an in-process JWKS server. Pulled only when
@@ -110,6 +114,7 @@ tokio-stream = { version = "0.1", features = ["net"] }
 proptest = "1"
 prost = "0.14"
 tempfile = "3"
+rcgen = "0.14"
 csv = "1"
 
 [[bin]]

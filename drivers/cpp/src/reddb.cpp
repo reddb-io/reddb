@@ -1,5 +1,6 @@
 #include "reddb/reddb.hpp"
 #include "reddb/errors.hpp"
+#include "routing.hpp"
 
 #if REDDB_HAS_EMBEDDED
 #include "embedded/conn.hpp"
@@ -26,6 +27,10 @@ public:
     std::string del(const std::string& col, const std::string& id) override { return c_->del(col, id); }
     void ping() override { c_->ping(); }
     void close() override { c_->close(); }
+    std::optional<Topology> topology(const std::string& protocol) override {
+        auto bytes = c_->topology(protocol);
+        return bytes.empty() ? std::nullopt : routing::decode_topology(bytes);
+    }
 
 private:
     std::unique_ptr<redwire::RedWireConn> c_;
@@ -58,6 +63,12 @@ public:
         (void)c_->health();
     }
     void close() override { /* HTTP is stateless */ }
+    std::optional<Topology> topology(const std::string& protocol) override {
+        auto response = c_->request("GET", "/v1/topology?transport=" + http::url_encode(protocol), "", {}, 5);
+        if (response.status == 401 || response.status == 403) throw RedDBError(ErrorCode::AuthRefused, "topology authorization refused");
+        if (response.status / 100 != 2) return {};
+        return routing::decode_topology_json(response.body);
+    }
 
 private:
     std::unique_ptr<http::HttpClient> c_;
@@ -65,8 +76,7 @@ private:
 
 } // namespace
 
-std::unique_ptr<Conn> connect(const std::string& uri, const ConnectOptions& opts) {
-    auto parsed = parse_uri(uri);
+static std::unique_ptr<Conn> connect_direct(const ParsedUri& parsed, const ConnectOptions& opts) {
 
     if (parsed.kind == UrlKind::Embedded) {
 #if REDDB_HAS_EMBEDDED
@@ -81,7 +91,7 @@ std::unique_ptr<Conn> connect(const std::string& uri, const ConnectOptions& opts
 #if REDDB_HAS_CURL
         http::HttpOpts hopts;
         hopts.base_url = (parsed.kind == UrlKind::Https ? "https://" : "http://") +
-                         parsed.host + ":" + std::to_string(parsed.port);
+                         parsed.host + ":" + std::to_string(parsed.port) + parsed.path;
         if (opts.token) hopts.bearer_token = *opts.token;
         else if (parsed.token) hopts.bearer_token = *parsed.token;
         else if (parsed.api_key) hopts.bearer_token = *parsed.api_key;
@@ -140,6 +150,21 @@ std::unique_ptr<Conn> connect(const std::string& uri, const ConnectOptions& opts
 
     auto rw = redwire::RedWireConn::connect(rwopts);
     return std::unique_ptr<Conn>(new RedWireConnAdapter(std::move(rw)));
+}
+
+std::unique_ptr<Conn> connect(const std::string& uri, const ConnectOptions& opts) {
+    auto parsed = parse_uri(uri);
+    if (parsed.kind == UrlKind::Embedded) return connect_direct(parsed, opts);
+    std::string protocol = parsed.kind == UrlKind::Http ? "http" : parsed.kind == UrlKind::Https ? "https" : parsed.kind == UrlKind::Reds ? "reds" : "red";
+    std::string host = parsed.host.find(':') != std::string::npos && !parsed.host.starts_with('[') ? "[" + parsed.host + "]" : parsed.host;
+    auto seed = routing::endpoint(protocol + "://" + host + ":" + std::to_string(parsed.port) + parsed.path, protocol);
+    auto dial = [parsed, opts](const std::string& address) {
+        auto target = parse_uri(address), clone = parsed;
+        clone.host = target.host; clone.port = target.port; clone.path = target.path;
+        return connect_direct(clone, opts);
+    };
+    bool force_primary = parsed.params.contains("route") && parsed.params.at("route") == "primary";
+    return routing::connect(seed, connect_direct(parsed, opts), protocol, force_primary, dial);
 }
 
 } // namespace reddb

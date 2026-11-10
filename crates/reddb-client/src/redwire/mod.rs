@@ -17,6 +17,8 @@ mod io;
 pub mod scram;
 #[cfg(feature = "redwire-tls")]
 mod tls;
+#[cfg(feature = "redwire-websocket")]
+mod websocket;
 
 pub use reddb_wire::redwire::{Flags, Frame, FrameError, MessageKind};
 #[cfg(feature = "redwire-tls")]
@@ -192,6 +194,53 @@ impl std::fmt::Debug for RedWireClient {
 }
 
 impl RedWireClient {
+    #[cfg(feature = "redwire-websocket")]
+    pub(crate) async fn connect_websocket(url: &str, opts: ConnectOptions) -> Result<Self> {
+        let mut stream = websocket::connect(url, &opts).await?;
+        stream
+            .write_all(&supported_client_preface())
+            .await
+            .map_err(|error| ClientError::new(ErrorCode::Network, error.to_string()))?;
+        match handshake::run(&mut stream, &opts).await? {
+            HandshakeOutcome::Authenticated {
+                session_id,
+                server_features,
+            } => Ok(Self {
+                usable: true,
+                stream,
+                next_correlation_id: 1,
+                session_id,
+                server_features,
+            }),
+            HandshakeOutcome::Refused(reason) => {
+                Err(ClientError::new(ErrorCode::AuthRefused, reason))
+            }
+        }
+    }
+
+    pub async fn topology(
+        &mut self,
+        protocol: &str,
+    ) -> Result<Option<crate::topology::ClusterMembership>> {
+        if self.server_features & reddb_wire::routing::FEATURE_TOPOLOGY == 0 {
+            return Ok(None);
+        }
+        let request = reddb_wire::redwire::build_request_frame(
+            self.next_corr(),
+            MessageKind::Topology,
+            protocol.as_bytes().to_vec(),
+        )
+        .map_err(frame_build_err)?;
+        let response = self.exchange(&request).await?;
+        let payload =
+            expect_result_or_error(response.kind, &response.payload).map_err(reply_err)?;
+        reddb_wire::decode_topology(payload)
+            .map(|topology| {
+                topology.map(|topology| crate::topology::TopologyConsumer::consume(topology, None))
+            })
+            .map_err(|error| ClientError::new(ErrorCode::Protocol, error.to_string()))
+    }
+
     pub async fn connect(opts: ConnectOptions) -> Result<Self> {
         let addr = format!("{}:{}", opts.host, opts.port);
         let tcp = TcpStream::connect(&addr)
@@ -289,6 +338,11 @@ impl RedWireClient {
         params: &[crate::params::Value],
     ) -> Result<serde_json::Value> {
         if self.server_features & FEATURE_PARAMS == 0 {
+            if params.is_empty() {
+                let payload = self.query_raw(sql).await?;
+                return serde_json::from_str(&payload)
+                    .map_err(|error| ClientError::new(ErrorCode::Protocol, error.to_string()));
+            }
             return Err(ClientError::new(
                 ErrorCode::ParamsUnsupported,
                 "server did not advertise RedWire query-envelope support",
@@ -498,6 +552,37 @@ mod tests {
     use reddb_wire::query_with_params::ParamValue as WireValue;
 
     #[tokio::test]
+    async fn legacy_json_query_allows_no_binds() {
+        use super::*;
+        let (client, server) = tokio::io::duplex(1024);
+        let mut client = RedWireClient {
+            stream: Box::pin(client),
+            next_correlation_id: 1,
+            usable: true,
+            session_id: String::new(),
+            server_features: 0,
+        };
+        let peer = tokio::spawn(async move {
+            let mut server: Stream = Box::pin(server);
+            let request = io::read_frame(&mut server).await.unwrap();
+            assert_eq!(request.kind, MessageKind::Query);
+            let reply = reddb_wire::redwire::build_reply_frame(
+                request.correlation_id,
+                MessageKind::Result,
+                br#"{"affected":4,"rows":[]}"#.to_vec(),
+            )
+            .unwrap();
+            io::write_frame(&mut server, &reply).await.unwrap();
+        });
+        let result = client
+            .query_envelope_json("UPDATE users SET id=1", &[])
+            .await
+            .unwrap();
+        assert_eq!(result["affected"], 4);
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn mismatched_response_poisoning_prevents_another_request() {
         use super::*;
         let (client, server) = tokio::io::duplex(1024);
@@ -606,7 +691,12 @@ mod tests {
         let peer = tokio::spawn(async move {
             let request = io::read_frame(&mut server).await.expect("query request");
             assert_eq!(request.kind, MessageKind::QueryWithParams);
-            let reply = Frame::new(MessageKind::Result, request.correlation_id, response);
+            let reply = reddb_wire::redwire::build_reply_frame(
+                request.correlation_id,
+                MessageKind::Result,
+                response,
+            )
+            .expect("query reply frame");
             io::write_frame(&mut server, &reply)
                 .await
                 .expect("query reply");

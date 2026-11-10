@@ -362,7 +362,7 @@ void main() {
       }
     });
 
-    test('empty params keep emitting legacy Query frame', () async {
+    test('empty params use full-result envelope on capable servers', () async {
       final server = await _FakeServer.start((sock, reader) async {
         await reader.readPreamble();
         final hello = await reader.readFrame();
@@ -389,8 +389,8 @@ void main() {
         );
 
         final req = await reader.readFrame();
-        expect(req.kind, MessageKind.query);
-        expect(utf8.decode(req.payload), 'SELECT 1');
+        expect(req.kind, MessageKind.queryWithParams);
+        expect(req.payload, ValueCodec.encodeQueryWithParams('SELECT 1', []));
         await _writeFrameOnSocket(
           sock,
           MessageKind.result,

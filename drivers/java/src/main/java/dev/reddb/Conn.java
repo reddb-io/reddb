@@ -8,6 +8,9 @@ import java.util.List;
  * can deserialise with whatever object mapper they prefer.
  */
 public interface Conn extends AutoCloseable {
+    default byte[] queryWithOptions(String sql, ReadOptions options, Object... params) {
+        throw new UnsupportedOperationException("CONSISTENCY_UNSUPPORTED");
+    }
     /** Run a SQL query. Returns the engine's JSON envelope as bytes. */
     byte[] query(String sql);
 

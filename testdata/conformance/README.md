@@ -13,6 +13,10 @@ them.
 
 Current shared fixtures:
 
+- `topology/manifest.json` — `reddb-wire` topology bytes and gRPC transport
+  selector, consumed by Rust and JS. Includes u64 precision, optional fields,
+  future-version fallback, and malformed payloads.
+
 - `redwire/params/manifest.json` — RedWire query-parameter value and query
   encoding fixtures. `reddb-wire` validates the canonical RedWire bytes,
   `reddb-grpc-proto` consumers validate the gRPC bytes, and language drivers
@@ -44,3 +48,5 @@ Current authorities:
 | RedWire protocol fence | `crates/reddb-wire/tests/protocol_authority.rs` |
 | File layout fence | `crates/reddb-file/tests/layout_authority.rs` |
 | File layout fence modules | `crates/reddb-file/tests/layout_authority` |
+
+`topology/sql-policy.json` pins conservative replica-read classification in `reddb-wire::sql_routing`; every port consumes the same effectful and quoted SQL cases.

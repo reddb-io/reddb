@@ -48,6 +48,7 @@ struct ConnectOpts {
     std::string host;
     uint16_t port = 5050;
     bool tls = false;
+    uint32_t timeout_ms = 5000;
     std::string client_name = "reddb-cpp/0.1";
     AuthOpts auth;
     bool dangerous_accept_invalid_certs = false;
@@ -62,15 +63,16 @@ public:
     virtual void read_exact(uint8_t* out, size_t n) = 0;
     virtual void write_all(const uint8_t* data, size_t n) = 0;
     virtual void close() noexcept = 0;
+    virtual void set_timeout(uint32_t) noexcept {}
 };
 
 // TCP-only stream (POSIX). Used by RedWireConn::connect() when
 // `opts.tls == false`.
-std::unique_ptr<IoStream> dial_tcp(const std::string& host, uint16_t port);
+std::unique_ptr<IoStream> dial_tcp(const std::string& host, uint16_t port, uint32_t timeout_ms = 5000);
 
 // TCP+TLS stream. ALPN advertises "redwire/1".
 std::unique_ptr<IoStream> dial_tls(const std::string& host, uint16_t port,
-                                   bool dangerous_accept_invalid_certs);
+                                   bool dangerous_accept_invalid_certs, uint32_t timeout_ms = 5000);
 
 // Wrap an existing socket fd in a plain TCP IoStream. Takes
 // ownership — closes the fd on destruction. Used by tests.
@@ -103,6 +105,7 @@ public:
     std::string del(const std::string& collection, const std::string& id);
     void ping();
     void close();
+    std::vector<uint8_t> topology(const std::string& protocol);
 
     // Server features bitmask returned in AuthOk.
     uint32_t server_features() const noexcept { return server_features_; }

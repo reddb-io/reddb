@@ -92,6 +92,7 @@ function parseRedWebSocketUrl(uri, scheme) {
   const params = parsed.searchParams
   return {
     kind: tls ? 'redwss' : 'redws',
+    path: parsed.pathname !== '/' ? parsed.pathname : undefined,
     host: parsed.hostname,
     port: parsed.port ? Number(parsed.port) : (tls ? 443 : 80),
     tls,

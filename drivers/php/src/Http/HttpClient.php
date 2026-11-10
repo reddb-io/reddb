@@ -29,7 +29,7 @@ use Reddb\RedDBException\EngineError;
 use Reddb\RedDBException\ProtocolError;
 use Reddb\Url;
 
-final class HttpClient implements Conn
+final class HttpClient implements Conn, \Reddb\TopologySource
 {
     private readonly string $baseUrl;
     private ?string $token;
@@ -55,7 +55,8 @@ final class HttpClient implements Conn
             );
         }
         $scheme = $url->kind === Url::KIND_HTTPS ? 'https' : 'http';
-        $baseUrl = "{$scheme}://{$url->host}:{$url->port}";
+        $host = str_contains($url->host ?? '', ':') && !str_starts_with($url->host, '[') ? "[{$url->host}]" : $url->host;
+        $baseUrl = "{$scheme}://{$host}:{$url->port}{$url->path}";
 
         $token = $opts->token ?? $url->token;
         $client = new self($baseUrl, $token, $opts->timeout);
@@ -166,6 +167,12 @@ final class HttpClient implements Conn
         $this->request('GET', '/admin/health', null);
     }
 
+    public function topology(string $protocol): ?array
+    {
+        return json_decode($this->request('GET', '/v1/topology?transport=' . rawurlencode($protocol), null),
+            true, 32, JSON_THROW_ON_ERROR);
+    }
+
     public function close(): void
     {
         if ($this->closed) {
@@ -209,7 +216,7 @@ final class HttpClient implements Conn
         }
         $respBody = curl_exec($ch);
         if ($respBody === false) {
-            throw new ProtocolError("HTTP {$method} {$path}: " . curl_error($ch));
+            throw new \Reddb\RedDBException\NetworkError("HTTP {$method} {$path}: " . curl_error($ch));
         }
         if (!is_string($respBody)) {
             // CURLOPT_RETURNTRANSFER guarantees a string on success.
