@@ -1242,24 +1242,40 @@ impl BlobCache {
         self.invalidate_indexed_many(namespace, &[dependency], IndexedKind::Dependency)
     }
 
-    /// O(1) foreground namespace flush.
-    ///
-    /// The foreground path only bumps a namespace generation. Old entries become
-    /// invisible immediately and are physically removed by later cache access or
-    /// a future sweeper.
+    /// Flush a namespace by advancing its generation and removing L2 entries.
+    /// L1 entries become invisible immediately and are reclaimed lazily.
     pub fn invalidate_namespace(&self, namespace: &str) -> bool {
-        if !self.namespace_exists(namespace) {
-            return false;
+        match self.try_invalidate_namespace(namespace) {
+            Ok(flushed) => flushed,
+            Err(error) => {
+                tracing::error!(
+                    namespace,
+                    ?error,
+                    "failed to persist cache namespace generation"
+                );
+                false
+            }
         }
+    }
+
+    pub(crate) fn try_invalidate_namespace(&self, namespace: &str) -> Result<bool, CacheError> {
+        if !self.namespace_exists(namespace) {
+            return Ok(false);
+        }
+        let current = self.current_generation(namespace);
         let mut generations = self.namespace_generations.write();
-        let generation = generations.entry(namespace.to_string()).or_insert(0);
+        let generation = generations.entry(namespace.to_string()).or_insert(current);
         *generation = generation.saturating_add(1);
         self.namespace_flush_epoch.fetch_add(1, Ordering::Release);
-        if let Some(l2) = &self.l2 {
+        let persisted = if let Some(l2) = &self.l2 {
+            let persisted = l2.set_namespace_generation(namespace, *generation);
             l2.delete_namespace(namespace);
-        }
+            persisted
+        } else {
+            Ok(())
+        };
         self.stats.namespace_flushes.fetch_add(1, Ordering::Relaxed);
-        true
+        persisted.map(|()| true)
     }
 
     /// RAM this cache occupies right now (ADR 0073 §2, the `blob_cache_l1`
@@ -1693,6 +1709,7 @@ impl BlobCache {
                 return Ok(());
             }
         }
+        let generation = self.current_generation(namespace);
         let mut namespaces = self.namespaces.write();
         if namespaces.contains(namespace) {
             return Ok(());
@@ -1706,7 +1723,7 @@ impl BlobCache {
         self.namespace_generations
             .write()
             .entry(namespace.to_string())
-            .or_insert(0);
+            .or_insert(generation);
         self.namespace_bytes_in_use
             .write()
             .entry(namespace.to_string())
@@ -1723,11 +1740,31 @@ impl BlobCache {
     }
 
     pub(crate) fn current_generation(&self, namespace: &str) -> u64 {
-        self.namespace_generations
-            .read()
-            .get(namespace)
-            .copied()
-            .unwrap_or(0)
+        if let Some(generation) = self.namespace_generations.read().get(namespace).copied() {
+            return generation;
+        }
+        let Some(generation) = self
+            .l2
+            .as_ref()
+            .and_then(|l2| l2.namespace_generation(namespace))
+        else {
+            return self
+                .namespace_generations
+                .read()
+                .get(namespace)
+                .copied()
+                .unwrap_or(0);
+        };
+        let mut generations = self.namespace_generations.write();
+        if let Some(current) = generations.get(namespace) {
+            *current
+        } else if generations.len() < self.config.max_namespaces {
+            *generations
+                .entry(namespace.to_string())
+                .or_insert(generation)
+        } else {
+            generation
+        }
     }
 
     fn index_entry(

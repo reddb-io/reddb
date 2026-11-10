@@ -4,6 +4,8 @@ use super::l2::BlobCacheL2;
 use crate::storage::cache::compressor::Compressed;
 
 pub(super) trait BlobCacheL2Backend: Send + Sync {
+    fn namespace_generation(&self, namespace: &str) -> Option<u64>;
+    fn set_namespace_generation(&self, namespace: &str, generation: u64) -> Result<(), CacheError>;
     fn get(&self, key: &BlobCacheKey, now_ms: u64, generation: u64) -> Option<Entry>;
 
     fn put(
@@ -57,6 +59,14 @@ pub(super) trait BlobCacheL2Backend: Send + Sync {
 }
 
 impl BlobCacheL2Backend for BlobCacheL2 {
+    fn namespace_generation(&self, namespace: &str) -> Option<u64> {
+        self.namespace_generation(namespace)
+    }
+
+    fn set_namespace_generation(&self, namespace: &str, generation: u64) -> Result<(), CacheError> {
+        self.set_namespace_generation(namespace, generation)
+    }
+
     fn get(&self, key: &BlobCacheKey, now_ms: u64, generation: u64) -> Option<Entry> {
         self.get(key, now_ms, generation)
     }

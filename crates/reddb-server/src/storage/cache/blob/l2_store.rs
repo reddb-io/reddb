@@ -316,6 +316,30 @@ impl StoreBlobCacheL2 {
 }
 
 impl BlobCacheL2Backend for StoreBlobCacheL2 {
+    fn namespace_generation(&self, namespace: &str) -> Option<u64> {
+        let _operation = self.operation.lock();
+        match find_value(&self.store, &generation_key(namespace)) {
+            Some((_, Value::UnsignedInteger(generation))) => Some(generation),
+            _ => None,
+        }
+    }
+
+    fn set_namespace_generation(&self, namespace: &str, generation: u64) -> Result<(), CacheError> {
+        let _operation = self.operation.lock();
+        let key = generation_key(namespace);
+        let previous = find_value(&self.store, &key).map(|(id, _)| (COLLECTION.to_string(), id));
+        self.store
+            .publish_rows(RowPublication {
+                inserts: vec![(
+                    COLLECTION.to_string(),
+                    cache_row(&key, Value::UnsignedInteger(generation)),
+                    None,
+                )],
+                deletes: previous.into_iter().collect(),
+            })
+            .map_err(store_error)
+    }
+
     fn get(&self, key: &BlobCacheKey, now_ms: u64, generation: u64) -> Option<Entry> {
         if !self.synopsis_may_contain(&key.namespace, &key.key) {
             self.negative_skips.fetch_add(1, Ordering::Relaxed);
@@ -709,6 +733,10 @@ fn find_value(store: &UnifiedStore, key: &str) -> Option<(EntityId, Value)> {
 
 fn storage_key(key: &BlobCacheKey) -> String {
     hex::encode(encode_l2_key(&key.namespace, &key.key))
+}
+
+fn generation_key(namespace: &str) -> String {
+    format!("__generation:{}", hex::encode(namespace.as_bytes()))
 }
 
 fn encode_store_record(record: &L2Record, framed: &[u8]) -> Vec<u8> {

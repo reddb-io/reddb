@@ -1166,6 +1166,10 @@ struct RuntimeInner {
     result_blob_entries: parking_lot::RwLock<(
         HashMap<String, RuntimeResultCacheEntry>,
         std::collections::VecDeque<String>,
+        // L2 may contain entries whose dependencies are not in the map.
+        bool,
+        // Detect writes or invalidations while decoding an L2 hit.
+        u64,
     )>,
     ask_answer_cache_entries:
         parking_lot::RwLock<(HashSet<String>, std::collections::VecDeque<String>)>,

@@ -79,6 +79,8 @@ fn mode_from_byte(byte: u8) -> Option<reddb_rql::modes::QueryMode> {
 fn result_cache_static_str(value: &str) -> Option<&'static str> {
     match value {
         "select" => Some("select"),
+        "table" => Some("table"),
+        "join" => Some("join"),
         "materialized-graph" => Some("materialized-graph"),
         "runtime-red-schema" => Some("runtime-red-schema"),
         "runtime-fdw" => Some("runtime-fdw"),
@@ -392,17 +394,21 @@ impl RedDBRuntime {
         // single-file L2 existed. A hit is promoted into the new backend; new
         // writes never duplicate payloads in this legacy collection.
         if self.inner.embedded_single_file {
+            let mut cache = self.inner.result_blob_entries.write();
             if let Some(bytes) = self.get_embedded_result_cache_payload(key) {
                 let policy = crate::storage::cache::BlobCachePolicy::default()
                     .ttl_ms(self.result_cache_ttl_secs() * 1000)
                     .priority(200);
                 let put = crate::storage::cache::BlobCachePut::new(bytes).with_policy(policy);
-                if self
+                cache.2 = true;
+                cache.3 = cache.3.wrapping_add(1);
+                let inserted = self
                     .inner
                     .result_blob_cache
                     .put(RESULT_CACHE_BLOB_NAMESPACE, key, put)
-                    .is_err()
-                {
+                    .is_ok();
+                drop(cache);
+                if !inserted {
                     return None;
                 }
                 return self.get_blob_result_cache_entry_from_blob_cache(key);
@@ -412,20 +418,24 @@ impl RedDBRuntime {
     }
 
     fn get_blob_result_cache_entry_from_blob_cache(&self, key: &str) -> Option<RuntimeQueryResult> {
-        let hit = self
-            .inner
-            .result_blob_cache
-            .get(RESULT_CACHE_BLOB_NAMESPACE, key)?;
-        {
+        let (hit, revision) = {
             let cache = self.inner.result_blob_entries.read();
+            let hit = self
+                .inner
+                .result_blob_cache
+                .get(RESULT_CACHE_BLOB_NAMESPACE, key)?;
             if let Some(entry) = cache.0.get(key) {
                 return Some(entry.result.clone());
             }
-        }
+            (hit, cache.3)
+        };
 
         let (result, scopes) = decode_result_cache_payload(hit.value())?;
         let mut cache = self.inner.result_blob_entries.write();
-        let (ref mut map, ref mut order) = *cache;
+        if cache.3 != revision {
+            return None;
+        }
+        let (ref mut map, ref mut order, ref mut untracked, _) = *cache;
         let new_entry = RuntimeResultCacheEntry {
             result: result.clone(),
             cached_at: std::time::Instant::now(),
@@ -442,6 +452,7 @@ impl RedDBRuntime {
             }
         }
         let evicted = trim_result_cache(map, order, self.result_cache_capacity());
+        *untracked |= evicted > 0;
         drop(cache);
         self.record_result_cache_evictions(evicted);
         Some(result)
@@ -525,18 +536,21 @@ impl RedDBRuntime {
         let put = crate::storage::cache::BlobCachePut::new(bytes)
             .with_dependencies(dependencies)
             .with_policy(policy);
+        let mut cache = self.inner.result_blob_entries.write();
         if self
             .inner
             .result_blob_cache
             .put(RESULT_CACHE_BLOB_NAMESPACE, key, put)
             .is_err()
         {
+            // An unsuccessful L2 publication may have left an entry behind.
+            cache.2 = true;
+            cache.3 = cache.3.wrapping_add(1);
             return;
         }
 
         let capacity = self.result_cache_capacity();
-        let mut cache = self.inner.result_blob_entries.write();
-        let (ref mut map, ref mut order) = *cache;
+        let (ref mut map, ref mut order, ref mut untracked, ref mut revision) = *cache;
         // Single hash lookup: drive the LRU-order push_back only on Vacant.
         match map.entry(key.to_string()) {
             Entry::Occupied(mut slot) => {
@@ -548,6 +562,8 @@ impl RedDBRuntime {
             }
         }
         let evicted = trim_result_cache(map, order, capacity);
+        *untracked |= evicted > 0;
+        *revision = revision.wrapping_add(1);
         drop(cache);
         self.record_result_cache_evictions(evicted);
     }
@@ -615,22 +631,39 @@ impl RedDBRuntime {
     }
 
     pub fn invalidate_result_cache(&self) {
-        self.invalidate_result_cache_process_only();
-        if self.inner.embedded_single_file {
-            self.invalidate_embedded_result_cache();
+        self.invalidate_result_cache_inner(self.inner.embedded_single_file);
+    }
+
+    fn invalidate_blob_result_namespace(&self) -> bool {
+        match self
+            .inner
+            .result_blob_cache
+            .try_invalidate_namespace(RESULT_CACHE_BLOB_NAMESPACE)
+        {
+            Ok(_) => false,
+            Err(error) => {
+                tracing::error!(?error, "failed to persist result-cache invalidation");
+                true
+            }
         }
     }
 
     pub(crate) fn invalidate_result_cache_process_only(&self) {
+        self.invalidate_result_cache_inner(false);
+    }
+
+    fn invalidate_result_cache_inner(&self, clear_embedded: bool) {
         let mut cache = self.inner.result_cache.write();
         cache.0.clear();
         cache.1.clear();
         let mut blob_entries = self.inner.result_blob_entries.write();
         blob_entries.0.clear();
         blob_entries.1.clear();
-        self.inner
-            .result_blob_cache
-            .invalidate_namespace(RESULT_CACHE_BLOB_NAMESPACE);
+        blob_entries.2 = self.invalidate_blob_result_namespace();
+        blob_entries.3 = blob_entries.3.wrapping_add(1);
+        if clear_embedded {
+            self.invalidate_embedded_result_cache();
+        }
         let mut ask_entries = self.inner.ask_answer_cache_entries.write();
         ask_entries.0.clear();
         ask_entries.1.clear();
@@ -642,11 +675,6 @@ impl RedDBRuntime {
     pub(crate) fn invalidate_result_cache_for_table(&self, table: &str) {
         let legacy_has_match = {
             let cache = self.inner.result_cache.read();
-            let (ref map, _) = *cache;
-            !map.is_empty() && map.values().any(|entry| entry.scopes.contains(table))
-        };
-        let blob_has_match = {
-            let cache = self.inner.result_blob_entries.read();
             let (ref map, _) = *cache;
             !map.is_empty() && map.values().any(|entry| entry.scopes.contains(table))
         };
@@ -662,22 +690,31 @@ impl RedDBRuntime {
             RuntimeResultCacheBackend::BlobCache | RuntimeResultCacheBackend::Shadow
         ) {
             let mut blob_entries = self.inner.result_blob_entries.write();
-            let (ref mut blob_map, ref mut blob_order) = *blob_entries;
-            blob_map.clear();
-            blob_order.clear();
-            self.inner
-                .result_blob_cache
-                .invalidate_namespace(RESULT_CACHE_BLOB_NAMESPACE);
-            if self.inner.embedded_single_file {
-                self.invalidate_embedded_result_cache();
+            let has_match = blob_entries
+                .0
+                .values()
+                .any(|entry| entry.scopes.contains(table));
+            if blob_entries.2 || has_match {
+                blob_entries.0.clear();
+                blob_entries.1.clear();
+                blob_entries.2 = self.invalidate_blob_result_namespace();
+                blob_entries.3 = blob_entries.3.wrapping_add(1);
+                if self.inner.embedded_single_file {
+                    self.invalidate_embedded_result_cache();
+                }
             }
-        } else if blob_has_match {
+        } else {
             let mut blob_entries = self.inner.result_blob_entries.write();
-            let (ref mut blob_map, ref mut blob_order) = *blob_entries;
-            blob_map.retain(|_, entry| !entry.scopes.contains(table));
-            blob_order.retain(|key| blob_map.contains_key(key));
-            if self.inner.embedded_single_file {
-                self.invalidate_embedded_result_cache_for_scope(table);
+            let (ref mut blob_map, ref mut blob_order, ref mut untracked, ref mut revision) =
+                *blob_entries;
+            if blob_map.values().any(|entry| entry.scopes.contains(table)) {
+                blob_map.retain(|_, entry| !entry.scopes.contains(table));
+                blob_order.retain(|key| blob_map.contains_key(key));
+                *untracked = true;
+                *revision = revision.wrapping_add(1);
+                if self.inner.embedded_single_file {
+                    self.invalidate_embedded_result_cache_for_scope(table);
+                }
             }
         }
         let mut ask_entries = self.inner.ask_answer_cache_entries.write();

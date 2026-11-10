@@ -76,9 +76,9 @@ tenant and auth identity, so scoped callers do not share cached rows.
 1. Before parsing a query, the runtime checks the result cache
 2. On cache hit with a valid TTL, the cached result is returned immediately (no parse, no plan, no scan)
 3. On cache miss, the query executes normally and the result is stored
-4. Writes invalidate affected result-cache entries. The Blob Cache
-   backend uses a conservative namespace flush for table writes so
-   unrehydrated L2 entries from a previous process cannot become stale.
+4. Writes invalidate affected result-cache entries. The Blob Cache backend
+   preserves unrelated results when every L2 entry is tracked; otherwise it
+   flushes the namespace to protect untracked durable entries.
 
 When `runtime.result_cache.backend = 'blob_cache'`, cacheable results
 are written as Blob Cache payloads, not only in-memory sidecars. A clean
@@ -103,10 +103,10 @@ The legacy backend is cleared or narrowed by dependency on write paths:
 - Retention policy sweep
 - Any operation that calls the runtime cache invalidation hooks
 
-The Blob Cache backend deliberately chooses a broader namespace
-invalidation on table writes. That costs occasional misses after
-unrelated writes, but preserves correctness for durable entries that
-exist only in L2 after restart.
+The Blob Cache backend flushes the namespace when a tracked result depends on
+the written table, or when L2 may contain untracked results (such as after a
+restart or tracking eviction). It skips the flush for unrelated writes when
+all entries are tracked.
 
 ---
 

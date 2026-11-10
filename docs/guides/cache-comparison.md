@@ -58,8 +58,9 @@ statement shape and scope, invalidated through table dependencies. With
 ADR 0006 in flight it becomes an adapter over Blob Cache when
 `runtime.result_cache.backend = blob_cache`. The Interface that
 application SQL callers see does not change; the storage underneath does.
-Tenant and auth identity stay part of the key, and table writes
-conservatively flush the result-cache namespace. The normal runtime cache is
+Tenant and auth identity stay part of the key. Table writes flush the
+result-cache namespace when a dependency matches or L2 entries are untracked;
+otherwise unrelated results stay cached. The normal runtime cache is
 backed by the single-file L2 and can rehydrate eligible entries after restart.
 
 Page Cache and Entity Cache are internal acceleration structures.

@@ -560,6 +560,189 @@ fn blob_result_cache_write_after_restart_invalidates_unrehydrated_l2_entries() {
 }
 
 #[test]
+fn blob_result_cache_recovers_table_result_after_restart() {
+    let path = temp_db_path("result-cache-table-rehydrate");
+    let query = "SELECT id FROM items ORDER BY id";
+    let expected = {
+        let rt = persistent_runtime(&path);
+        exec(
+            &rt,
+            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
+        );
+        exec(&rt, "CREATE TABLE items (id INT)");
+        exec(&rt, "INSERT INTO items (id) VALUES (1)");
+        assert_eq!(selected_ids(&rt, query), vec![1]);
+        let result = rt.execute_query(query).expect("cached result");
+        let fields = result.result.records[0]
+            .iter_fields()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        rt.checkpoint().expect("checkpoint result cache");
+        fields
+    };
+    {
+        let rt = persistent_runtime(&path);
+        let before = rt.result_cache_metrics();
+        let result = rt.execute_query(query).expect("rehydrated result");
+        let fields = result.result.records[0]
+            .iter_fields()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(fields, expected);
+        let after = rt.result_cache_metrics();
+        assert_eq!(after.0 - before.0, 1, "the result must rehydrate from L2");
+        assert_eq!(after.1 - before.1, 0);
+    }
+}
+
+#[test]
+fn blob_result_cache_recovers_join_result_after_restart() {
+    let path = temp_db_path("result-cache-join-rehydrate");
+    let query = "SELECT a.id AS id FROM items a JOIN items b ON a.id = b.id";
+    {
+        let rt = persistent_runtime(&path);
+        exec(
+            &rt,
+            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
+        );
+        exec(&rt, "CREATE TABLE items (id INT)");
+        exec(&rt, "INSERT INTO items (id) VALUES (1)");
+        assert_eq!(selected_ids(&rt, query), vec![1]);
+        let before = rt.result_cache_metrics();
+        assert_eq!(selected_ids(&rt, query), vec![1]);
+        assert_eq!(rt.result_cache_metrics().0 - before.0, 1);
+        rt.checkpoint().expect("checkpoint join result");
+    }
+    {
+        let rt = persistent_runtime(&path);
+        let before = rt.result_cache_metrics();
+        assert_eq!(selected_ids(&rt, query), vec![1]);
+        let after = rt.result_cache_metrics();
+        assert_eq!(after.0 - before.0, 1, "the join result must rehydrate");
+    }
+}
+
+#[test]
+fn blob_cache_recovers_new_entry_after_namespace_flush() {
+    use reddb::storage::cache::{BlobCachePolicy, BlobCachePut, L1Admission};
+    let path = temp_db_path("blob-cache-flush-rehydrate");
+    {
+        let rt = persistent_runtime(&path);
+        let cache = rt.result_blob_cache();
+        let put = || {
+            BlobCachePut::new(b"new value".to_vec())
+                .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never))
+        };
+        cache.put("ns", "old", put()).expect("old entry");
+        cache.put("ns", "key", put()).expect("initial entry");
+        assert!(cache.invalidate_namespace("ns"));
+        cache.put("ns", "key", put()).expect("replacement entry");
+        assert_eq!(
+            cache
+                .get("ns", "key")
+                .expect("entry before restart")
+                .value(),
+            b"new value"
+        );
+        assert!(cache.get("ns", "old").is_none());
+        rt.checkpoint().expect("checkpoint blob cache");
+    }
+    {
+        let rt = persistent_runtime(&path);
+        assert_eq!(
+            rt.result_blob_cache()
+                .get("ns", "key")
+                .expect("entry after restart")
+                .value(),
+            b"new value"
+        );
+        assert!(rt.result_blob_cache().get("ns", "old").is_none());
+    }
+}
+
+#[test]
+fn blob_cache_standalone_l2_recovers_after_namespace_flush() {
+    use reddb::storage::cache::{BlobCache, BlobCacheConfig, BlobCachePut};
+    let path = temp_db_path("blob-cache-standalone-flush");
+    let open = || {
+        BlobCache::open_with_l2(BlobCacheConfig::default().with_l2_path(path.path()))
+            .expect("standalone blob cache")
+    };
+    {
+        let cache = open();
+        cache
+            .put("ns", "old", BlobCachePut::new(b"old".to_vec()))
+            .expect("old entry");
+        assert!(cache.invalidate_namespace("ns"));
+        cache
+            .put("ns", "new", BlobCachePut::new(b"new".to_vec()))
+            .expect("new entry");
+    }
+    let cache = open();
+    assert!(cache.get("ns", "old").is_none());
+    assert_eq!(
+        cache
+            .get("ns", "new")
+            .expect("new entry after restart")
+            .value(),
+        b"new"
+    );
+}
+
+#[test]
+fn blob_result_cache_keeps_unrelated_entries_after_table_write() {
+    for backend in ["blob_cache", "shadow"] {
+        let rt = runtime();
+        exec(
+            &rt,
+            &format!("SET CONFIG runtime.result_cache.backend = '{backend}'"),
+        );
+        exec(&rt, "CREATE TABLE items (id INT)");
+        exec(&rt, "CREATE TABLE noise (id INT)");
+        exec(&rt, "INSERT INTO items (id) VALUES (1)");
+        exec(&rt, "INSERT INTO noise (id) VALUES (1)");
+        let query = "SELECT id FROM items ORDER BY id";
+        assert_eq!(selected_ids(&rt, query), vec![1]);
+        exec(&rt, "UPDATE noise SET id = 2 WHERE id = 1");
+        let before = rt.result_cache_metrics();
+        let blob_hits = rt.result_blob_cache().stats().hits();
+        assert_eq!(selected_ids(&rt, query), vec![1]);
+        let after = rt.result_cache_metrics();
+        assert_eq!(
+            after.0 - before.0,
+            1,
+            "unrelated writes should preserve the result"
+        );
+        assert_eq!(after.1 - before.1, 0);
+        assert_eq!(rt.result_blob_cache().stats().hits() - blob_hits, 1);
+        exec(&rt, "INSERT INTO items (id) VALUES (2)");
+        assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+    }
+}
+
+#[test]
+fn blob_result_cache_invalidates_entries_evicted_from_tracking() {
+    let rt = runtime();
+    exec(
+        &rt,
+        "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
+    );
+    exec(&rt, "SET CONFIG runtime.result_cache.capacity_entries = 1");
+    exec(&rt, "CREATE TABLE items (id INT)");
+    exec(&rt, "CREATE TABLE other (id INT)");
+    exec(&rt, "INSERT INTO items (id) VALUES (1)");
+    exec(&rt, "INSERT INTO other (id) VALUES (1)");
+    let query = "SELECT id FROM items ORDER BY id";
+    assert_eq!(selected_ids(&rt, query), vec![1]);
+    assert_eq!(
+        selected_ids(&rt, "SELECT id FROM other ORDER BY id"),
+        vec![1]
+    );
+    exec(&rt, "INSERT INTO items (id) VALUES (2)");
+    assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+}
+
+#[test]
 fn collection_contract_enforces_insert_and_mutation_paths_through_application_api() {
     let rt = runtime();
     let q = &rt;

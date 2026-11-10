@@ -172,6 +172,15 @@ fn missing_key_updates_miss_counter() {
 }
 
 #[test]
+fn missing_namespaces_do_not_allocate_generations() {
+    let cache = small_cache(128);
+    for index in 0..1000 {
+        assert!(cache.get(&format!("missing-{index}"), "key").is_none());
+    }
+    assert!(cache.namespace_generations.read().is_empty());
+}
+
+#[test]
 fn namespace_isolation_keeps_same_key_separate() {
     let cache = small_cache(128);
     cache
