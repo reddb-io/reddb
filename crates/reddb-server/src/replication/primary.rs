@@ -461,6 +461,8 @@ pub struct PrimaryReplication {
     pub wal_buffer: Arc<WalBuffer>,
     pub logical_wal_spool: Option<Arc<LogicalWalSpool>>,
     pub replicas: RwLock<Vec<ReplicaState>>,
+    pub(crate) routing_endpoints:
+        RwLock<BTreeMap<String, reddb_wire::routing::RoutingEndpoints>>,
     wal_appended: (Mutex<u64>, Condvar),
     slot_path: Option<PathBuf>,
     slot_catalog_path: Option<PathBuf>,
@@ -579,6 +581,7 @@ impl PrimaryReplication {
             wal_buffer: Arc::new(WalBuffer::new(100_000)),
             logical_wal_spool,
             replicas: RwLock::new(Vec::new()),
+            routing_endpoints: RwLock::new(BTreeMap::new()),
             wal_appended: (Mutex::new(current_lsn), Condvar::new()),
             slot_path,
             slot_catalog_path,

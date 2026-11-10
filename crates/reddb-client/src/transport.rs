@@ -14,6 +14,10 @@ pub(crate) type DynTransport = Box<dyn Transport>;
 pub(crate) trait Transport: std::fmt::Debug + Send + Sync {
     fn name(&self) -> &'static str;
 
+    async fn topology(&self, _protocol: &str) -> Result<Option<crate::topology::ClusterMembership>> {
+        Ok(None)
+    }
+
     async fn query(&self, sql: &str) -> Result<QueryResult>;
 
     async fn query_with_options(&self, sql: &str, options: QueryOptions) -> Result<QueryResult> {
@@ -199,6 +203,9 @@ struct GrpcAdapter(crate::grpc::GrpcClient);
 #[cfg(feature = "grpc")]
 #[async_trait]
 impl Transport for GrpcAdapter {
+    async fn topology(&self, protocol: &str) -> Result<Option<crate::topology::ClusterMembership>> {
+        self.0.topology_for_transport(protocol).await
+    }
     fn name(&self) -> &'static str {
         "grpc"
     }
@@ -243,6 +250,13 @@ struct HttpAdapter(crate::http::HttpClient);
 #[cfg(feature = "http")]
 #[async_trait]
 impl Transport for HttpAdapter {
+    async fn topology(&self, protocol: &str) -> Result<Option<crate::topology::ClusterMembership>> {
+        let text = self.0.get_text(&format!("/v1/topology?transport={protocol}")).await?;
+        let value = serde_json::from_str(&text)
+            .map_err(|error| ClientError::new(ErrorCode::Protocol, error.to_string()))?;
+        Ok(reddb_wire::routing::topology_from_json(&value)
+            .map(|topology| crate::topology::TopologyConsumer::consume(topology, None)))
+    }
     fn name(&self) -> &'static str {
         "http"
     }
@@ -290,6 +304,9 @@ struct RedWireAdapter(Mutex<Option<RedWireClient>>);
 
 #[async_trait]
 impl Transport for RedWireAdapter {
+    async fn topology(&self, protocol: &str) -> Result<Option<crate::topology::ClusterMembership>> {
+        redwire_client(&mut *self.0.lock().await)?.topology(protocol).await
+    }
     fn name(&self) -> &'static str {
         "redwire"
     }

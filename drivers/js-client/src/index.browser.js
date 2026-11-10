@@ -43,6 +43,7 @@ import {
 import { HttpRpcClient } from './http.js'
 import { connectRedwireWs, REDWIRE_WS_PATH } from './redwire-ws.js'
 import { createSelectStream, createInputStream } from './streaming-web.js'
+import { connectRouted } from './core/routing.js'
 
 export { RedDBError, EmbeddedNotSupported, EMBEDDED_REJECTION_MESSAGE, isEmbeddedUri }
 export { RowReadable, RowWritable } from './streaming-web.js'
@@ -96,6 +97,10 @@ function browserTransportError(scheme) {
  * @returns {Promise<RedDB>}
  */
 export async function connect(uri, options = {}) {
+  return connectRouted(uri, options, connectDirect)
+}
+
+async function connectDirect(uri, options = {}) {
   // Reject embedded shapes upfront with the same wording the Node entry and
   // the Rust binary use, before the URL parser would map them to kind=embedded.
   rejectEmbeddedUri(uri)

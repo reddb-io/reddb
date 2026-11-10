@@ -28,6 +28,8 @@ pub mod redwire;
 pub mod replication;
 pub mod sanitizer;
 pub mod topology;
+pub mod routing;
+pub mod sql_routing;
 
 pub use conn_string::{
     is_embedded_connection_uri, parse, parse_with_auth, parse_with_limits, ConnStringLimits,

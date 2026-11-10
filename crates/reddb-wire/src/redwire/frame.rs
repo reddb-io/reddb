@@ -131,6 +131,8 @@ pub enum MessageKind {
     // Stale-ownership redirect. Carries a MOVED payload naming the current
     // range owner, ownership epoch, and catalog version.
     MovedRedirect = 0x31,
+    /// Authenticated topology refresh. Reply: Result with canonical topology bytes.
+    Topology = 0x32,
 }
 
 /// Coarse routing class for a `MessageKind`.
@@ -226,7 +228,7 @@ impl MessageKind {
             | Self::Pong => MessageClass::Handshake,
 
             // 0x20..0x3F — control plane.
-            Self::Cancel | Self::Compress | Self::SetSession | Self::Notice => {
+            Self::Cancel | Self::Compress | Self::SetSession | Self::Notice | Self::Topology => {
                 MessageClass::ControlPlane
             }
         }
@@ -302,6 +304,7 @@ impl MessageKind {
             | Self::VectorSearch
             | Self::GraphTraverse
             | Self::QueryWithParams
+            | Self::Topology
             | Self::OpenStream
             | Self::StreamCancel
             // Client opens a live queue wait (issue #917).
@@ -390,6 +393,7 @@ impl MessageKind {
             0x2F => Some(Self::QueueEventPush),
             0x30 => Some(Self::QueueWaitTimeout),
             0x31 => Some(Self::MovedRedirect),
+            0x32 => Some(Self::Topology),
             _ => None,
         }
     }
@@ -483,6 +487,7 @@ mod catalog_tests {
         MessageKind::QueueEventPush,
         MessageKind::QueueWaitTimeout,
         MessageKind::MovedRedirect,
+        MessageKind::Topology,
     ];
 
     #[test]

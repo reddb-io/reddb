@@ -148,6 +148,7 @@ pub(crate) const fn redwire_command_id(kind: MessageKind) -> Option<&'static str
         | MessageKind::AuthFail => Some("auth.login"),
 
         MessageKind::Bye | MessageKind::Ping | MessageKind::Pong => Some("health.live"),
+        MessageKind::Topology => Some("client.topology"),
 
         MessageKind::Query
         | MessageKind::Result
@@ -487,6 +488,24 @@ where
         }
 
         match frame.kind {
+            MessageKind::Topology => {
+                let protocol = std::str::from_utf8(&frame.payload).unwrap_or("");
+                if !reddb_wire::routing::ROUTING_PROTOCOLS.contains(&protocol) {
+                    queue_send(&out_tx, build_error_frame_lossy(frame.correlation_id, "unsupported topology transport")).await?;
+                    continue;
+                }
+                let auth = if session.username == "anonymous" {
+                    crate::auth::middleware::AuthResult::Anonymous
+                } else {
+                    crate::auth::middleware::AuthResult::password_principal(
+                        crate::auth::UserId::from_parts(session.tenant.as_deref(), &session.username), session.role,
+                    )
+                };
+                let topology = runtime.client_topology(protocol, &auth);
+                let response = reply_frame_or_io_error(frame.correlation_id, MessageKind::Result,
+                    reddb_wire::encode_topology(&topology))?;
+                queue_send(&out_tx, response).await?;
+            }
             MessageKind::Bye => {
                 let bye = reply_frame_or_io_error(frame.correlation_id, MessageKind::Bye, vec![])?;
                 let _ = out_tx.send_frame(bye).await;

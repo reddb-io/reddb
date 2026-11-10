@@ -191,6 +191,18 @@ impl std::fmt::Debug for RedWireClient {
 }
 
 impl RedWireClient {
+    pub async fn topology(&mut self, protocol: &str) -> Result<Option<crate::topology::ClusterMembership>> {
+        let request = reddb_wire::redwire::build_request_frame(
+            self.next_corr(), MessageKind::Topology, protocol.as_bytes().to_vec(),
+        ).map_err(frame_build_err)?;
+        io::write_frame(&mut self.stream, &request).await?;
+        let response = self.read_frame().await?;
+        let payload = expect_result_or_error(response.kind, &response.payload).map_err(reply_err)?;
+        reddb_wire::decode_topology(payload)
+            .map(|topology| topology.map(|topology| crate::topology::TopologyConsumer::consume(topology, None)))
+            .map_err(|error| ClientError::new(ErrorCode::Protocol, error.to_string()))
+    }
+
     pub async fn connect(opts: ConnectOptions) -> Result<Self> {
         let addr = format!("{}:{}", opts.host, opts.port);
         let tcp = TcpStream::connect(&addr)

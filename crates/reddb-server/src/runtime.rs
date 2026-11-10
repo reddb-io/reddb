@@ -1378,6 +1378,8 @@ struct RuntimeInner {
     /// loop on `Gap` / `Divergence` / `Apply` errors so /metrics
     /// surfaces them as `reddb_replica_apply_errors_total{kind}`.
     replica_apply_metrics: Arc<crate::replication::logical::ReplicaApplyMetrics>,
+    routing_primary_endpoints:
+        parking_lot::RwLock<reddb_wire::routing::RoutingEndpoints>,
     /// Issue #1243 (PRD #1237 Phase B) — primary↔replica reconnect counter
     /// bumped by the replica loop's health-persist chokepoint when the link
     /// drops and restores. Surfaced as `reddb_replication_reconnects_total`
@@ -1635,6 +1637,7 @@ pub mod impl_queue;
 mod impl_ranking;
 mod impl_replica_loop;
 mod impl_replication_commit;
+mod impl_routing_topology;
 mod impl_runtime_index_registry;
 mod impl_telemetry_accessors;
 mod impl_tenant_registry;

@@ -2745,6 +2745,15 @@ impl RedDb for GrpcRuntime {
         // is enforced inside `TopologyAdvertiser::advertise`; we don't
         // duplicate it here.
         let auth = self.resolve_auth(request.metadata());
+        if let Some(protocol) = request.metadata().get("x-reddb-topology-transport") {
+            let protocol = protocol.to_str().map_err(|_| Status::invalid_argument("invalid topology transport"))?;
+            if !reddb_wire::routing::ROUTING_PROTOCOLS.contains(&protocol) {
+                return Err(Status::invalid_argument("unsupported topology transport"));
+            }
+            return Ok(Response::new(TopologyReply {
+                topology_bytes: reddb_wire::encode_topology(&self.runtime.client_topology(protocol, &auth)),
+            }));
+        }
         let primary_endpoint = reddb_wire::topology::Endpoint {
             addr: self.runtime.config_string("red.grpc.advertise_addr", ""),
             region: self.runtime.db().options().replication.region.clone(),
@@ -2973,9 +2982,9 @@ impl RedDb for GrpcRuntime {
             Status::failed_precondition("this instance is not a replication primary")
         })?;
 
-        let open = reddb_wire::replication::WalStreamOpen::decode_json(
-            request.into_inner().payload_json.as_bytes(),
-        )
+        let payload = request.into_inner().payload_json;
+        let routing_endpoints = reddb_wire::routing::routing_payload_endpoints(payload.as_bytes(), "endpoints");
+        let open = reddb_wire::replication::WalStreamOpen::decode_json(payload.as_bytes())
         .map_err(|err| Status::invalid_argument(err.to_string()))?;
         let handshake = crate::replication::StreamHandshake::new(
             open.replica_id.as_deref().unwrap_or("<anonymous>"),
@@ -3023,6 +3032,9 @@ impl RedDb for GrpcRuntime {
         let mut partial_resync = false;
         if let Some(id) = &replica_id {
             repl.ensure_replica_registered(id);
+            if let Some(endpoints) = routing_endpoints {
+                self.runtime.register_routing_endpoints(id, endpoints);
+            }
             match repl.plan_replica_resume(id, since_lsn, oldest_available_lsn) {
                 crate::replication::primary::ResumeMode::FullRebootstrap { cause } => {
                     let available_from_lsn = oldest_available_lsn.unwrap_or(current_lsn);
@@ -3126,7 +3138,9 @@ impl RedDb for GrpcRuntime {
 
         Ok(Response::new(PayloadReply {
             ok: true,
-            payload: String::from_utf8(chunk.encode_json()).unwrap_or_else(|_| "{}".to_string()),
+            payload: reddb_wire::routing::routing_payload(
+                &chunk.encode_json(), "primary_endpoints", &self.runtime.routing_endpoints(),
+            ).map_err(|error| Status::internal(error.to_string()))?,
         }))
     }
 

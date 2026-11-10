@@ -176,6 +176,12 @@ impl RedDBClient {
             .topology_bytes)
     }
 
+    pub async fn topology_for_transport(&mut self, protocol: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+        let mut request = self.auth_request(TopologyRequest {});
+        request.metadata_mut().insert("x-reddb-topology-transport", protocol.parse()?);
+        Ok(self.inner.topology(request).await?.into_inner().topology_bytes)
+    }
+
     pub async fn delete_entity(
         &mut self,
         collection: &str,

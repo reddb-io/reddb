@@ -319,6 +319,10 @@ async function parseResponse(response, { envelope = false } = {}) {
 // ---------------------------------------------------------------------------
 
 const ROUTES = {
+  topology: (base, { transport = new URL(base).protocol.slice(0, -1) }) => ({
+    url: `${base}/v1/topology?transport=${encodeURIComponent(transport)}`,
+    init: { method: 'GET' },
+  }),
   health: (base) => ({ url: `${base}/health`, init: { method: 'GET' } }),
   version: (base) => ({ url: `${base}/admin/version`, init: { method: 'GET' } }),
   query: (base, { sql, params }) => ({

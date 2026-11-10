@@ -127,6 +127,31 @@ impl std::fmt::Debug for GrpcClient {
 }
 
 impl GrpcClient {
+    pub(crate) async fn authenticate(&mut self, auth: &reddb_wire::ConnectionAuth) -> Result<()> {
+        use reddb_wire::ConnectionAuth;
+        let token = match auth {
+            ConnectionAuth::Anonymous => return Ok(()),
+            ConnectionAuth::Bearer(token) | ConnectionAuth::ApiKey(token) => token.clone(),
+            ConnectionAuth::Basic { user, pass } => {
+                let result = self.primary.pool[0].login(user, pass).await
+                    .map_err(|error| ClientError::new(ErrorCode::AuthRefused, error.to_string()))?;
+                serde_json::from_str::<serde_json::Value>(&result).ok()
+                    .and_then(|value| value.get("token").and_then(serde_json::Value::as_str).map(str::to_string))
+                    .ok_or_else(|| ClientError::new(ErrorCode::AuthRefused, "login omitted token"))?
+            }
+        };
+        for client in &mut self.primary.pool { client.set_token(token.clone()); }
+        Ok(())
+    }
+
+    pub(crate) async fn topology_for_transport(&self, protocol: &str) -> Result<Option<ClusterMembership>> {
+        let bytes = self.primary.pick().topology_for_transport(protocol).await
+            .map_err(|error| ClientError::new(ErrorCode::Network, error.to_string()))?;
+        reddb_wire::decode_topology(&bytes)
+            .map(|topology| topology.map(|topology| crate::topology::TopologyConsumer::consume(topology, None)))
+            .map_err(|error| ClientError::new(ErrorCode::Protocol, error.to_string()))
+    }
+
     /// Single-host gRPC client. Equivalent to
     /// `connect_cluster(endpoint, &[], false)` with the default pool
     /// size.
