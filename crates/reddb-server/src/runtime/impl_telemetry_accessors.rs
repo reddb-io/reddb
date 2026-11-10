@@ -35,7 +35,8 @@ impl RedDBRuntime {
     /// the store directly and never calls this method, so legitimate
     /// replica catch-up still works.
     pub fn check_write(&self, kind: crate::runtime::write_gate::WriteKind) -> RedDBResult<()> {
-        self.inner.write_gate.check(kind)
+        self.inner.write_gate.check(kind)?;
+        self.validated_request_commit_policy(None).map(|_| ())
     }
 
     /// Read-only handle to the gate, useful for transports that want

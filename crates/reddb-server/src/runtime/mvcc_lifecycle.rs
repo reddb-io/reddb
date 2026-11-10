@@ -262,6 +262,7 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn discard_pending_store_wal_actions(&self, conn_id: u64) {
+        self.inner.pending_commit_policies.lock().remove(&conn_id);
         self.inner.pending_logical_records.lock().remove(&conn_id);
         self.inner
             .pending_store_wal_actions

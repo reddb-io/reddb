@@ -1312,6 +1312,7 @@ struct RuntimeInner {
     >,
     pending_logical_records:
         parking_lot::Mutex<HashMap<u64, transactional_replication::PendingLogicalChanges>>,
+    pending_commit_policies: parking_lot::Mutex<HashMap<u64, crate::replication::CommitPolicy>>,
     logical_publication: parking_lot::ReentrantMutex<()>,
     logical_allocated_lsn: std::sync::atomic::AtomicU64,
     /// Transaction-scoped table UPDATE CLAIM ownership.

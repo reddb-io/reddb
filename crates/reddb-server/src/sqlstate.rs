@@ -177,6 +177,7 @@ pub const DATA_CORRUPTED: SqlState = SqlState::new("XX001");
 pub fn sqlstate_for_reddb_error(err: &crate::api::RedDBError) -> SqlState {
     use crate::api::RedDBError as E;
     match err {
+        E::CommitUncertain { .. } => SqlState::new("08007"),
         E::InvalidConfig(_) => SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION,
         E::SchemaVersionMismatch { .. } => DATA_CORRUPTED,
         E::FeatureNotEnabled(_) => SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION,

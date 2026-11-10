@@ -15,6 +15,51 @@ const OUTBOX_KEY: &str = "replication.transaction_outbox";
 const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PENDING_RECORDS: usize = 65_536;
 
+thread_local! {
+    static COMMIT_RECEIPTS: std::cell::RefCell<Vec<(usize, Option<u64>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A synchronous statement owns its receipt even if another connection
+/// commits before its response is built. Nested calls also notify their parent.
+pub(super) struct CommitReceiptScope {
+    index: usize,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl CommitReceiptScope {
+    pub(super) fn begin(runtime: &RedDBRuntime) -> Self {
+        let index = COMMIT_RECEIPTS.with(|frames| {
+            let mut frames = frames.borrow_mut();
+            let index = frames.len();
+            frames.push((Arc::as_ptr(&runtime.inner) as usize, None));
+            index
+        });
+        Self {
+            index,
+            _thread: std::marker::PhantomData,
+        }
+    }
+
+    pub(super) fn lsn(&self) -> Option<u64> {
+        COMMIT_RECEIPTS.with(|frames| frames.borrow()[self.index].1)
+    }
+}
+
+impl Drop for CommitReceiptScope {
+    fn drop(&mut self) {
+        COMMIT_RECEIPTS.with(|frames| {
+            let mut frames = frames.borrow_mut();
+            assert_eq!(
+                frames.len(),
+                self.index + 1,
+                "commit receipt scopes must nest"
+            );
+            frames.pop();
+        });
+    }
+}
+
 #[derive(Default)]
 pub(super) struct PendingLogicalChanges {
     records: Vec<(u64, ChangeRecord)>,
@@ -256,6 +301,13 @@ impl RedDBRuntime {
         self.inner
             .logical_allocated_lsn
             .store(last, Ordering::Release);
+        COMMIT_RECEIPTS.with(|frames| {
+            for (runtime, receipt) in frames.borrow_mut().iter_mut() {
+                if *runtime == Arc::as_ptr(&self.inner) as usize {
+                    *receipt = Some(last);
+                }
+            }
+        });
         replication_crash_point("after_wal");
         // The source transaction's visibility has not been committed yet.
         // Projection and outbox retirement run only after MVCC finalization.
@@ -361,4 +413,58 @@ fn replication_crash_point(point: &str) {
         std::process::exit(173);
     }
     let _ = point;
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    #[test]
+    fn commit_receipt_ignores_other_connections_and_other_runtimes() {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory()
+                .with_replication(crate::replication::ReplicationConfig::primary()),
+        )
+        .expect("valid commit receipt test setup");
+        runtime
+            .execute_query("CREATE TABLE receipts (id INT)")
+            .expect("valid commit receipt test setup");
+        let outer = CommitReceiptScope::begin(&runtime);
+        let first = runtime
+            .execute_query("INSERT INTO receipts (id) VALUES (1)")
+            .expect("valid commit receipt test setup");
+        let first_lsn = crate::replication::CausalBookmark::decode(
+            first
+                .bookmark
+                .as_deref()
+                .expect("valid commit receipt test setup"),
+        )
+        .expect("valid commit receipt test setup")
+        .commit_lsn();
+        assert_eq!(outer.lsn(), Some(first_lsn));
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    runtime
+                        .execute_query("INSERT INTO receipts (id) VALUES (2)")
+                        .expect("valid commit receipt test setup");
+                })
+                .join()
+                .expect("valid commit receipt test setup");
+        });
+        assert!(runtime.primary_logical_head_lsn() > first_lsn);
+        assert_eq!(outer.lsn(), Some(first_lsn));
+        let other = RedDBRuntime::with_options(
+            RedDBOptions::in_memory()
+                .with_replication(crate::replication::ReplicationConfig::primary()),
+        )
+        .expect("valid commit receipt test setup");
+        other
+            .execute_query("CREATE TABLE unrelated (id INT)")
+            .expect("valid commit receipt test setup");
+        other
+            .execute_query("INSERT INTO unrelated (id) VALUES (1), (2), (3)")
+            .expect("valid commit receipt test setup");
+        assert_eq!(outer.lsn(), Some(first_lsn));
+    }
 }

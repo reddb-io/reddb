@@ -627,7 +627,7 @@ pub(crate) fn wire_param_value(
 }
 
 fn enforce_wire_commit_policy_after_write(runtime: &RedDBRuntime) -> Result<(), Vec<u8>> {
-    let post_lsn = runtime.cdc_current_lsn();
+    let post_lsn = runtime.replication_commit_lsn();
     runtime
         .enforce_commit_policy(post_lsn)
         .map(|_| ())
@@ -1064,7 +1064,7 @@ mod tests {
         let _env = EnvGuard::set(&[
             ("RED_PRIMARY_COMMIT_POLICY", "ack_n=1"),
             ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
-            ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+            ("RED_COMMIT_FAIL_ON_TIMEOUT", "false"),
         ]);
         let data_path = temp_data_path("wire_prepared_ack_n_timeout");
         cleanup(&data_path);
@@ -1087,7 +1087,7 @@ mod tests {
         let message = decode_error_message(&response);
         assert!(
             message.contains("commit policy timed out")
-                && message.contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+                && message.contains("local commit is durable"),
             "prepared write should identify commit timeout, got {message}"
         );
         assert!(runtime.cdc_current_lsn() > 0);
@@ -1232,7 +1232,7 @@ mod tests {
         let _env = EnvGuard::set(&[
             ("RED_PRIMARY_COMMIT_POLICY", "ack_n=1"),
             ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
-            ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+            ("RED_COMMIT_FAIL_ON_TIMEOUT", "false"),
         ]);
         let data_path = temp_data_path("wire_query_request_commit_policy");
         cleanup(&data_path);
@@ -1245,7 +1245,7 @@ mod tests {
         let message = decode_error_message(&response);
         assert!(
             message.contains("commit policy timed out")
-                && message.contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+                && message.contains("local commit is durable"),
             "listener write should report the resolved commit policy, got {message}"
         );
 
@@ -1800,7 +1800,7 @@ mod tests {
         let _env = EnvGuard::set(&[
             ("RED_PRIMARY_COMMIT_POLICY", "ack_n=1"),
             ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
-            ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+            ("RED_COMMIT_FAIL_ON_TIMEOUT", "false"),
         ]);
         let data_path = temp_data_path("wire_binary_bulk_ack_n_timeout");
         cleanup(&data_path);
@@ -1822,7 +1822,7 @@ mod tests {
         let message = decode_error_message(&response);
         assert!(
             message.contains("commit policy timed out")
-                && message.contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+                && message.contains("local commit is durable"),
             "binary bulk write should identify commit timeout, got {message}"
         );
         assert!(runtime.cdc_current_lsn() > 0);
@@ -1836,7 +1836,7 @@ mod tests {
         let _env = EnvGuard::set(&[
             ("RED_PRIMARY_COMMIT_POLICY", "ack_n=1"),
             ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
-            ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+            ("RED_COMMIT_FAIL_ON_TIMEOUT", "false"),
         ]);
         let data_path = temp_data_path("wire_prevalidated_bulk_ack_n_timeout");
         cleanup(&data_path);
@@ -1858,7 +1858,7 @@ mod tests {
         let message = decode_error_message(&response);
         assert!(
             message.contains("commit policy timed out")
-                && message.contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+                && message.contains("local commit is durable"),
             "prevalidated bulk write should identify commit timeout, got {message}"
         );
         assert!(runtime.cdc_current_lsn() > 0);

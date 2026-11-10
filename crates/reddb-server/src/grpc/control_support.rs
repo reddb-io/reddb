@@ -153,7 +153,7 @@ impl GrpcRuntime {
     /// just-completed write because the runtime advances it
     /// synchronously inside the storage path.
     pub(crate) fn enforce_commit_policy_after_write(&self) -> Result<(), Status> {
-        let post_lsn = self.runtime.cdc_current_lsn();
+        let post_lsn = self.runtime.replication_commit_lsn();
         self.runtime
             .enforce_commit_policy(post_lsn)
             .map(|_| ())
@@ -203,6 +203,9 @@ impl GrpcRuntime {
 
 pub(crate) fn to_status(err: crate::api::RedDBError) -> Status {
     match err {
+        error @ crate::api::RedDBError::CommitUncertain { .. } => {
+            Status::deadline_exceeded(error.to_string())
+        }
         crate::api::RedDBError::Query(msg) if msg.starts_with("ask_primary_sync_unavailable:") => {
             Status::unavailable(msg)
         }

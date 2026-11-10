@@ -309,8 +309,9 @@ impl RedDBRuntime {
     pub fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
         let started = std::time::Instant::now();
         self.inner.node_load_telemetry.query_start();
+        let receipt = super::transactional_replication::CommitReceiptScope::begin(self);
         let result = self.execute_query_inner(query);
-        self.finish_query_lifecycle(query, started, result)
+        self.finish_query_lifecycle(query, started, result, receipt.lsn())
     }
 
     /// Execute a SQL statement with already-decoded positional bind
@@ -330,8 +331,9 @@ impl RedDBRuntime {
         }
         let started = std::time::Instant::now();
         self.inner.node_load_telemetry.query_start();
+        let receipt = super::transactional_replication::CommitReceiptScope::begin(self);
         let result = self.execute_query_with_params_inner(query, params);
-        self.finish_query_lifecycle(query, started, result)
+        self.finish_query_lifecycle(query, started, result, receipt.lsn())
     }
 
     /// Execute an already-bound prepared statement together with the SQL text
@@ -351,8 +353,9 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         let started = std::time::Instant::now();
         self.inner.node_load_telemetry.query_start();
+        let receipt = super::transactional_replication::CommitReceiptScope::begin(self);
         let result = self.execute_bound_query_expr_in_frame(query, expr);
-        self.finish_query_lifecycle(query, started, result)
+        self.finish_query_lifecycle(query, started, result, receipt.lsn())
     }
 
     fn finish_query_lifecycle(
@@ -360,6 +363,7 @@ impl RedDBRuntime {
         query: &str,
         started: std::time::Instant,
         mut result: RedDBResult<RuntimeQueryResult>,
+        commit_lsn: Option<u64>,
     ) -> RedDBResult<RuntimeQueryResult> {
         // Issue #765 / S6 — filter integrity-tombstoned rows out of SELECT
         // results before they reach any consumer. Fast no-op (one relaxed
@@ -410,12 +414,21 @@ impl RedDBRuntime {
         self.inner.node_load_telemetry.query_finish();
 
         if let Ok(ref mut query_result) = result {
-            if matches!(query_result.statement_type, "insert" | "update" | "delete") {
-                let bookmark = crate::replication::CausalBookmark::new(
-                    self.current_replication_term(),
-                    self.replication_commit_lsn(),
-                );
-                query_result.bookmark = Some(bookmark.encode());
+            if matches!(
+                query_result.statement_type,
+                "insert" | "update" | "delete" | "commit"
+            ) {
+                let lsn = if self.inner.db.replication.is_some() {
+                    commit_lsn
+                } else if self.current_xid().is_none() {
+                    Some(self.cdc_current_lsn())
+                } else {
+                    None
+                };
+                query_result.bookmark = lsn.map(|lsn| {
+                    crate::replication::CausalBookmark::new(self.current_replication_term(), lsn)
+                        .encode()
+                });
             }
         }
 
