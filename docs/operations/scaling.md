@@ -84,9 +84,13 @@ Set via `RED_PRIMARY_COMMIT_POLICY` (default: `local`):
 | Policy | Behavior |
 |--------|----------|
 | `local` | Commit returns after local WAL fsync. Default. No replica blocking. |
-| `remote_wal` | (declared, not yet enforced) Commit returns after WAL segment archived to remote. |
-| `ack_n=N` | Commit returns after N replicas ack. Currently wired in `trigger_backup`; per-DML wiring is in progress. Tune `RED_REPLICATION_ACK_TIMEOUT_MS` (default 5000) and `RED_COMMIT_FAIL_ON_TIMEOUT` (default false → log+continue, true → 504). |
-| `quorum` | (declared, not yet enforced) Future: hooks into `QuorumCoordinator`. |
+| `remote_wal` | Rejected before mutation: remote WAL acknowledgement is not implemented. |
+| `ack_n=N` | Waits for N distinct replicas to acknowledge the committed logical LSN. `RED_REPLICATION_ACK_TIMEOUT_MS` defaults to 5000 ms. A missed threshold always returns an error; `RED_COMMIT_FAIL_ON_TIMEOUT` no longer permits success. `N=0` is equivalent to `local`. |
+| `quorum` | Requires a primary with a synchronous quorum configuration and waits for its commit watermark. An asynchronous configuration is rejected before mutation. |
+
+SQL requests through the shared query executor wait for their own commit position. An explicit transaction retains its requested durability and waits at `COMMIT`; staging DML does not wait. A later request cannot weaken that requirement. `AckN` and `Quorum` are not interchangeable and cannot be mixed within a transaction or used to replace one another as the configured floor.
+
+A timeout returns `commit_uncertain` with the local LSN (HTTP 504, gRPC `DEADLINE_EXCEEDED`, SQLSTATE `08007`). The source commit is already durable; this is not a rollback. Check the committed outcome or use application idempotency before retrying. Rust consumers matching `RedDBError` exhaustively must handle the new `CommitUncertain` variant.
 
 **Don't claim "synchronous replication" in marketing until `ack_n` is wired into every public mutation surface and chaos-tested.**
 

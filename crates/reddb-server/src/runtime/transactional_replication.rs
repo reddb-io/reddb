@@ -425,28 +425,32 @@ mod receipt_tests {
             RedDBOptions::in_memory()
                 .with_replication(crate::replication::ReplicationConfig::primary()),
         )
-        .unwrap();
+        .expect("valid commit receipt test setup");
         runtime
             .execute_query("CREATE TABLE receipts (id INT)")
-            .unwrap();
+            .expect("valid commit receipt test setup");
         let outer = CommitReceiptScope::begin(&runtime);
         let first = runtime
             .execute_query("INSERT INTO receipts (id) VALUES (1)")
-            .unwrap();
-        let first_lsn =
-            crate::replication::CausalBookmark::decode(first.bookmark.as_deref().unwrap())
-                .unwrap()
-                .commit_lsn();
+            .expect("valid commit receipt test setup");
+        let first_lsn = crate::replication::CausalBookmark::decode(
+            first
+                .bookmark
+                .as_deref()
+                .expect("valid commit receipt test setup"),
+        )
+        .expect("valid commit receipt test setup")
+        .commit_lsn();
         assert_eq!(outer.lsn(), Some(first_lsn));
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
                     runtime
                         .execute_query("INSERT INTO receipts (id) VALUES (2)")
-                        .unwrap();
+                        .expect("valid commit receipt test setup");
                 })
                 .join()
-                .unwrap();
+                .expect("valid commit receipt test setup");
         });
         assert!(runtime.primary_logical_head_lsn() > first_lsn);
         assert_eq!(outer.lsn(), Some(first_lsn));
@@ -454,13 +458,13 @@ mod receipt_tests {
             RedDBOptions::in_memory()
                 .with_replication(crate::replication::ReplicationConfig::primary()),
         )
-        .unwrap();
+        .expect("valid commit receipt test setup");
         other
             .execute_query("CREATE TABLE unrelated (id INT)")
-            .unwrap();
+            .expect("valid commit receipt test setup");
         other
             .execute_query("INSERT INTO unrelated (id) VALUES (1), (2), (3)")
-            .unwrap();
+            .expect("valid commit receipt test setup");
         assert_eq!(outer.lsn(), Some(first_lsn));
     }
 }

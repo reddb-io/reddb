@@ -19,8 +19,8 @@
 //!
 //! Public mutation surfaces call `RedDBRuntime::enforce_commit_policy`
 //! after successful writes. That runtime method maps `ack_n` to this
-//! waiter and decides whether a timeout is soft telemetry or a hard
-//! client-visible failure based on `RED_COMMIT_FAIL_ON_TIMEOUT`.
+//! waiter. A timeout always becomes `CommitUncertain`: the local commit is
+//! durable, but the requested replica threshold was not confirmed.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
