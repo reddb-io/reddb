@@ -3097,7 +3097,9 @@ impl RedDb for GrpcRuntime {
             let bytes = data.len().saturating_mul(2).saturating_add(96);
             if bytes > budget.saturating_sub(response_bytes) {
                 if entries.is_empty() {
-                    return Err(Status::resource_exhausted("logical record exceeds replication response limit"));
+                    return Err(Status::resource_exhausted(
+                        "logical record exceeds replication response limit",
+                    ));
                 }
                 break;
             }
