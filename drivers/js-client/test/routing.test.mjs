@@ -117,3 +117,67 @@ test('topology decoder rejects corrupt payloads and tolerates future versions', 
   assert.throws(() => decodeTopology(new Uint8Array([1, 0])))
   assert.equal(decodeTopology(new Uint8Array([2, 0, 0, 0, 0])), null)
 })
+
+test('new streams refresh membership and failed input is never replayed', async () => {
+  let now = 1
+  let primary = 'http://old:5000'
+  let writes = 0
+  const opened = []
+  const dial = async (address) => ({
+    async call() { return { version: 1, primary: { addr: primary }, replicas: [] } },
+    async streamSelect() {
+      opened.push(address)
+      return {
+        async *[Symbol.asyncIterator]() { yield address },
+        async cancel() {},
+      }
+    },
+    async streamInput() {
+      opened.push(address)
+      return {
+        async write() { writes++; throw Object.assign(new Error('lost input'), { code: 'ECONNRESET' }) },
+        async cancel() {},
+      }
+    },
+    async close() {},
+  })
+  const client = await new RoutingClient(primary, await dial(primary), dial, 'http', { now: () => now }).initialize()
+  const original = await client.streamSelect({})
+  primary = 'http://promoted:5000'
+  now += 30_001
+  const input = await client.streamInput({})
+  assert.equal(opened.at(-1), primary)
+  await assert.rejects(input.write({ value: 1 }), /lost input/)
+  assert.equal(writes, 1)
+  primary = 'http://next:5000'
+  const next = await client.streamSelect({})
+  assert.equal(opened.at(-1), primary)
+  assert.deepEqual(await Array.fromAsync(original), ['http://old:5000'])
+  assert.deepEqual(await Array.fromAsync(next), [primary])
+  await client.close()
+})
+
+test('transaction streams hold the pinned binary connection until completion', async () => {
+  const primary = 'red://primary:5050'
+  const transport = {
+    binaryQueryParams: true,
+    async call(method) {
+      if (method === 'topology') return { version: 1, primary: { addr: primary }, replicas: [] }
+      return 'query'
+    },
+    async streamSelect() {
+      return { async *[Symbol.asyncIterator]() { yield 'row' }, async cancel() {} }
+    },
+    async close() {},
+  }
+  const client = await new RoutingClient(primary, transport, async () => transport, 'red').initialize()
+  await client.call('query', { sql: 'BEGIN' })
+  const stream = await client.streamSelect({})
+  let resolved = false
+  const pending = client.call('query', { sql: 'SELECT 1' }).then(() => { resolved = true })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(resolved, false)
+  assert.deepEqual(await Array.fromAsync(stream), ['row'])
+  await pending
+  await client.close()
+})

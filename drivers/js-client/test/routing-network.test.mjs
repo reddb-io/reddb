@@ -118,15 +118,18 @@ async function startNode(protocol, node, membership, calls) {
     })
   } else if (protocol === 'http' || protocol === 'ws') {
     server = httpServer(async (request, response) => {
+      assert.ok(request.url.startsWith('/cluster-a/'), request.url)
+      const path = request.url.slice('/cluster-a'.length)
       assert.equal(request.headers.authorization, 'Bearer test-token')
       const chunks = []
       for await (const chunk of request) chunks.push(chunk)
-      const value = request.url.startsWith('/v1/topology') ? membership() : result(node)
-      if (request.url === '/query') calls.push([node, JSON.parse(Buffer.concat(chunks)).query])
+      const value = path.startsWith('/v1/topology') ? membership() : result(node)
+      if (path === '/query') calls.push([node, JSON.parse(Buffer.concat(chunks)).query])
       response.writeHead(200, { 'content-type': 'application/json' })
       response.end(JSON.stringify(value))
     })
     if (protocol === 'ws') server.on('upgrade', (request, socket) => {
+      assert.equal(request.url, '/cluster-a/socket')
       const accept = createHash('sha1').update(request.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
       socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\nSec-WebSocket-Protocol: ${REDWIRE_WS_SUBPROTOCOL}\r\n\r\n`)
       const feed = wireSession(node, membership, calls, (bytes) => socket.write(wsPacket(Buffer.from(bytes))))
@@ -160,7 +163,7 @@ async function startNode(protocol, node, membership, calls) {
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   return {
-    address: `${protocol}://127.0.0.1:${server.address().port}`,
+    address: `${protocol}://127.0.0.1:${server.address().port}${protocol === 'http' ? '/cluster-a' : protocol === 'ws' ? '/cluster-a/socket' : ''}`,
     async close() {
       for (const socket of sockets) socket.destroy()
       await new Promise((resolve) => server.close(resolve))

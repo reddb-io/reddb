@@ -59,7 +59,7 @@ impl RedDBRuntime {
         let addresses = replication
             .routing_endpoints
             .read()
-            .unwrap_or_else(|error| error.into_inner());
+            .expect("replica routing endpoint map lock must not be poisoned");
         topology.replicas.retain_mut(|replica| {
             let Some(address) = addresses
                 .get(&replica.addr)
@@ -81,7 +81,7 @@ impl RedDBRuntime {
         let mut addresses = replication
             .routing_endpoints
             .write()
-            .unwrap_or_else(|error| error.into_inner());
+            .expect("replica routing endpoint map lock must not be poisoned");
         if addresses.get(replica_id) != Some(&endpoints) {
             addresses.insert(replica_id.to_string(), endpoints);
             replication.bump_topology_epoch();

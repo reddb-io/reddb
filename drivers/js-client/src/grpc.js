@@ -13,7 +13,7 @@ import { readFile } from 'node:fs/promises'
 import { RedDBError } from './protocol.js'
 import { normalizeQueryResult } from './core/result.js'
 import { normalizeExactNumbers, serializeJsonValue } from './core/serialization.js'
-import { decodeTopology } from './core/topology.js'
+import { decodeTopology, TOPOLOGY_TRANSPORT_METADATA_KEY } from './core/topology.js'
 
 const SERVICE = '/reddb.v1.RedDb'
 
@@ -51,7 +51,7 @@ export class GrpcRpcClient {
         return this.#rpc('Topology', new Uint8Array(), (bytes) => {
           const field = readFields(bytes).find((field) => field.no === 1 && field.wire === 2)
           return field ? decodeTopology(field.value) : null
-        }, { 'x-reddb-topology-transport': params.transport ?? (this.baseUrl.startsWith('https:') ? 'grpcs' : 'grpc') }, params.signal)
+        }, { [TOPOLOGY_TRANSPORT_METADATA_KEY]: params.transport ?? (this.baseUrl.startsWith('https:') ? 'grpcs' : 'grpc') }, params.signal)
       case 'query':
         return normalizeQueryReply(await this.#rpc(
           'Query',

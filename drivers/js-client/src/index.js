@@ -105,7 +105,7 @@ async function connectDirect(uri, options = {}, discovery = false) {
       token = (await login(loginUrl, { username: merged.username, password: merged.password })).token
     }
     const client = await connectRedwireWs({
-      url: `${scheme}://${parsed.host}:${parsed.port}${REDWIRE_WS_PATH}`,
+      url: `${scheme}://${parsed.host}:${parsed.port}${parsed.path ?? REDWIRE_WS_PATH}`,
       auth: token ? { kind: 'bearer', token } : { kind: 'anonymous' },
       WebSocketImpl: options.WebSocketImpl,
       signal: options.signal,
@@ -114,7 +114,7 @@ async function connectDirect(uri, options = {}, discovery = false) {
   }
 
   if (parsed.kind === 'http' || parsed.kind === 'https') {
-    const baseUrl = `${parsed.kind}://${parsed.host}:${parsed.port}`
+    const baseUrl = `${parsed.kind}://${parsed.host}:${parsed.port}${parsed.path ?? ''}`
     let token = merged.token
     if (!token && merged.username && merged.password) {
       const loginUrl = merged.loginUrl ?? `${baseUrl}/auth/login`

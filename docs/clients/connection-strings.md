@@ -181,8 +181,8 @@ requires stronger freshness.
 
 ### gRPC (legacy bridge — explicit opt-out)
 
-The `grpc://` scheme defaults to RedWire because it shares port
-5050. To force the legacy stdio→gRPC bridge:
+The `grpc://` scheme uses native gRPC. To explicitly select the legacy
+stdio→gRPC bridge in the Node client:
 
 ```js
 const db = await connect('grpc://reddb.example.com:5051?proto=spawn-grpc')

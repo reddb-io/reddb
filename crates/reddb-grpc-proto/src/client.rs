@@ -191,9 +191,10 @@ impl RedDBClient {
         protocol: &str,
     ) -> Result<Vec<u8>, Box<dyn Error>> {
         let mut request = self.auth_request(TopologyRequest {});
-        request
-            .metadata_mut()
-            .insert("x-reddb-topology-transport", protocol.parse()?);
+        request.metadata_mut().insert(
+            reddb_wire::routing::TOPOLOGY_TRANSPORT_METADATA_KEY,
+            protocol.parse()?,
+        );
         Ok(self
             .inner
             .topology(request)

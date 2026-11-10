@@ -768,7 +768,7 @@ impl PrimaryReplication {
         if removed {
             self.routing_endpoints
                 .write()
-                .unwrap_or_else(|error| error.into_inner())
+                .expect("replica routing endpoint map lock must not be poisoned")
                 .remove(id);
             self.commit_waiter.drop_replica(id);
             self.bump_topology_epoch();

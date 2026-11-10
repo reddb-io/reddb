@@ -60,8 +60,9 @@ where
 {
     let Ok(mut socket) = tokio_tungstenite::accept_hdr_async(
         stream,
-        |_request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+        |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
          mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+            assert_eq!(request.uri().path(), "/cluster-a/socket");
             response.headers_mut().insert(
                 "sec-websocket-protocol",
                 redwire::REDWIRE_WS_SUBPROTOCOL
@@ -115,6 +116,12 @@ where
         request.push(byte[0]);
     }
     let headers = String::from_utf8(request).expect("HTTP headers");
+    assert!(headers
+        .lines()
+        .next()
+        .expect("request line")
+        .contains(" /cluster-a/"));
+    let headers = headers.replace(" /cluster-a/", " /");
     assert!(
         headers
             .to_ascii_lowercase()
@@ -214,10 +221,17 @@ async fn high_level_client_routes_over_tcp_http_websocket_and_tls() {
             },
             replicas: Vec::new(),
         }));
-        let (primary, primary_task) =
+        let (mut primary, primary_task) =
             start_node(protocol, "primary", Arc::clone(&topology), Arc::clone(&tls)).await;
-        let (replica, replica_task) =
+        let (mut replica, replica_task) =
             start_node(protocol, "replica", Arc::clone(&topology), Arc::clone(&tls)).await;
+        let path = match protocol {
+            "http" | "https" => "/cluster-a",
+            "ws" | "wss" => "/cluster-a/socket",
+            _ => "",
+        };
+        primary.push_str(path);
+        replica.push_str(path);
         {
             let mut membership = topology.write().await;
             membership.primary.addr = primary.clone();

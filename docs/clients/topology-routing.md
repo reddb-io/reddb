@@ -62,6 +62,8 @@ replica and does not replace the server's write fencing or promotion policy.
 
 - Conservative, single-statement `SELECT` queries and read helpers can use
   healthy replicas. Replicas undergoing rebootstrap are excluded.
+  Rust additionally uses its existing RTT and circuit-breaker policy; JS uses
+  round-robin selection among eligible replicas and falls back after read errors.
 - SQL mutations, explicit insert/delete helpers, locking reads, unknown
   functions, CTEs, and unclassified statements use the primary. Classification
   does not depend on whether the caller used a method named `query` or `execute`.

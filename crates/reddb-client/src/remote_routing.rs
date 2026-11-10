@@ -76,8 +76,8 @@ impl ConnectionTemplate {
                 Ok(Arc::from(transport::grpc(client)))
             }
             #[cfg(feature = "http")]
-            ConnectionTarget::Http { base_url } => {
-                let mut options = crate::http::HttpOptions::new(base_url);
+            ConnectionTarget::Http { .. } => {
+                let mut options = crate::http::HttpOptions::new(address);
                 match &self.auth {
                     ConnectionAuth::Bearer(token) | ConnectionAuth::ApiKey(token) => {
                         options.token = Some(token.clone())
@@ -136,7 +136,10 @@ impl ConnectionTemplate {
                 if websocket {
                     #[cfg(feature = "redwire-websocket")]
                     {
-                        let url = if address.ends_with("/redwire") {
+                        let parsed = url::Url::parse(address).map_err(|_| {
+                            ClientError::new(ErrorCode::InvalidUri, "invalid WebSocket URI")
+                        })?;
+                        let url = if !matches!(parsed.path(), "" | "/") {
                             address.to_string()
                         } else {
                             format!("{address}{}", reddb_wire::redwire::REDWIRE_WS_PATH)
@@ -214,7 +217,7 @@ pub(crate) async fn connect(uri: &str) -> Result<DynTransport> {
         }
     }
     let mut replicas = Vec::new();
-    let seed = match spec.target {
+    let mut seed = match spec.target {
         ConnectionTarget::Grpc { endpoint } => grpc_address(&endpoint, &protocol),
         ConnectionTarget::GrpcCluster {
             primary,
@@ -232,6 +235,11 @@ pub(crate) async fn connect(uri: &str) -> Result<DynTransport> {
         | ConnectionTarget::WsNative { host, port, .. } => format!("{protocol}://{host}:{port}"),
         _ => unreachable!("embedded targets returned before remote parsing"),
     };
+    if matches!(protocol.as_str(), "http" | "https" | "ws" | "wss")
+        && !matches!(parsed.path(), "" | "/")
+    {
+        seed.push_str(parsed.path());
+    }
     let force_primary = parsed.query_pairs().any(|(key, value)| {
         key.eq_ignore_ascii_case("route") && value.eq_ignore_ascii_case("primary")
     });

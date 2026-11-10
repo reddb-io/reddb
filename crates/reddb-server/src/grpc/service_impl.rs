@@ -2745,7 +2745,10 @@ impl RedDb for GrpcRuntime {
         // is enforced inside `TopologyAdvertiser::advertise`; we don't
         // duplicate it here.
         let auth = self.resolve_auth(request.metadata());
-        if let Some(protocol) = request.metadata().get("x-reddb-topology-transport") {
+        if let Some(protocol) = request
+            .metadata()
+            .get(reddb_wire::routing::TOPOLOGY_TRANSPORT_METADATA_KEY)
+        {
             let protocol = protocol.to_str().map_err(|_| Status::invalid_argument("invalid topology transport"))?;
             if !reddb_wire::routing::ROUTING_PROTOCOLS.contains(&protocol) {
                 return Err(Status::invalid_argument("unsupported topology transport"));

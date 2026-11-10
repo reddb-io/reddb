@@ -1,6 +1,8 @@
 import { RedDBError } from './errors.js'
 
 const MAX_REPLICAS = 256
+// Canonical contract: reddb-wire::routing; checked by shared conformance fixtures.
+export const TOPOLOGY_TRANSPORT_METADATA_KEY = 'x-reddb-topology-transport'
 const decoder = new TextDecoder('utf-8', { fatal: true })
 
 /** Canonical v1 topology shared by gRPC and RedWire, including WS. */

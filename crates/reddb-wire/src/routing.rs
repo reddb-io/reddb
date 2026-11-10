@@ -9,6 +9,7 @@ use crate::topology::Topology;
 pub const ROUTING_PROTOCOLS: [&str; 8] =
     ["red", "reds", "grpc", "grpcs", "http", "https", "ws", "wss"];
 pub const FEATURE_TOPOLOGY: u32 = 0x0000_0002;
+pub const TOPOLOGY_TRANSPORT_METADATA_KEY: &str = "x-reddb-topology-transport";
 
 pub type RoutingEndpoints = BTreeMap<String, String>;
 

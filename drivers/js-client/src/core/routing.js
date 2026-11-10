@@ -8,7 +8,7 @@ export async function connectRouted(uri, options, connectDirect) {
   const parsed = parseUri(uri)
   let protocol = { redws: 'ws', redwss: 'wss' }[parsed.kind] ?? parsed.kind
   if (protocol === 'red' && (options.tls || ['true', '1'].includes(parsed.params?.get('tls')))) protocol = 'reds'
-  const seed = topologyAddress(`${protocol}://${parsed.host}:${parsed.port}`, protocol)
+  const seed = topologyAddress(`${protocol}://${parsed.host}:${parsed.port}${parsed.path ?? ''}`, protocol)
   const auth = mergeAuthFromUri(parsed, options.auth)
   const dial = async (address, signal) => {
     const target = new URL(address)
@@ -46,6 +46,7 @@ export class RoutingClient {
     this.clients = new Map([[seed, Promise.resolve(client)]])
     this.active = new Map()
     this.queues = new Map()
+    this.streams = new Set()
     this.replicas = []
     this.nextReplica = 0
     this.refreshAt = 0
@@ -196,21 +197,97 @@ export class RoutingClient {
   }
 
   async streamSelect(options) {
-    const client = await this.endpoint(this.transactionEndpoint ?? this.sessionEndpoint ?? this.primary)
-    return client.streamSelect(options)
+    const { session, finish } = await this.openStream('streamSelect', options)
+    return {
+      async *[Symbol.asyncIterator]() {
+        try { yield* session }
+        catch (error) { await finish(error); throw error }
+        finally { await finish() }
+      },
+      async cancel(reason) {
+        try { return await session.cancel(reason) }
+        catch (error) { await finish(error); throw error }
+        finally { await finish() }
+      },
+    }
   }
 
   async streamInput(options) {
-    const client = await this.endpoint(this.transactionEndpoint ?? this.sessionEndpoint ?? this.primary)
-    return client.streamInput(options)
+    const { session, finish } = await this.openStream('streamInput', options)
+    return {
+      async write(row) {
+        try { return await session.write(row) }
+        catch (error) { await finish(error); throw error }
+      },
+      async close() {
+        try { return await session.close() }
+        catch (error) { await finish(error); throw error }
+        finally { await finish() }
+      },
+      async cancel(reason) {
+        try { return await session.cancel(reason) }
+        catch (error) { await finish(error); throw error }
+        finally { await finish() }
+      },
+    }
+  }
+
+  async openStream(method, options) {
+    if (this.closed) throw new RedDBError('CLOSED', 'connection is closed')
+    if (this.now() >= this.refreshAt) await this.refresh()
+    const pinned = this.transactionEndpoint ?? this.sessionEndpoint
+    const address = pinned ?? this.primary
+    // Independent streams own a connection until completion. Session streams
+    // must share their pinned connection and hold its binary request queue.
+    let client
+    let unlock
+    let session
+    let finished = false
+    this.active.set(address, (this.active.get(address) ?? 0) + 1)
+    const stop = async () => {
+      try { await session?.cancel() }
+      finally { await finish() }
+    }
+    const finish = async (error) => {
+      if (finished) return
+      finished = true
+      this.streams.delete(stop)
+      if (connectionError(error)) this.refreshAt = 0
+      this.active.set(address, this.active.get(address) - 1)
+      unlock?.()
+      if (!pinned) await client?.close()
+    }
+    this.streams.add(stop)
+    try {
+      client = pinned ? await this.endpoint(address) : await this.dial(address)
+      if (finished || this.closed) {
+        if (!pinned) await client.close()
+        throw new RedDBError('CLOSED', 'connection is closed')
+      }
+      if (pinned && client.binaryQueryParams) {
+        const previous = this.queues.get(address) ?? Promise.resolve()
+        const released = new Promise((resolve) => { unlock = resolve })
+        this.queues.set(address, previous.then(() => released))
+        await previous
+      }
+      session = await client[method](options)
+      if (finished || this.closed) {
+        await session.cancel()
+        throw new RedDBError('CLOSED', 'connection is closed')
+      }
+      return { session, finish }
+    } catch (error) {
+      await finish(error)
+      throw error
+    }
   }
 
   async close() {
     this.closed = true
-    const results = await Promise.allSettled([...this.clients.values()].map(async (pending) => {
+    const results = await Promise.allSettled([...this.streams].map((stop) => stop()).concat([...this.clients.values()].map(async (pending) => {
       const client = await pending
       await client.close()
-    }))
+    })))
     this.clients.clear()
     this.active.clear()
     this.queues.clear()
