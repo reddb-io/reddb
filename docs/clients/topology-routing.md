@@ -9,8 +9,21 @@ open native TCP or gRPC connections. Rust WebSocket support requires the
 Node runtimes without a global `WebSocket` constructor can supply
 `options.WebSocketImpl`.
 
-Other language drivers and low-level, explicitly constructed transport handles
-do not automatically acquire this high-level routing lifecycle.
+The connection facade in each official language driver uses this lifecycle on
+its implemented remote transports. Low-level transport constructors remain
+explicit single-node handles. Transport availability is separate from topology
+routing; this change does not add every protocol to every language:
+
+| Facade | Remote transports with topology routing |
+| --- | --- |
+| JavaScript / TypeScript remote client, Rust, native Python | RedWire TCP/TLS, gRPC(S), HTTP(S), WS(S) |
+| Go | RedWire TCP/TLS, gRPC(S), HTTP(S) |
+| Python asyncio, .NET, Java, Kotlin, PHP, Dart, C++, Zig | RedWire TCP/TLS, HTTP(S) |
+| Bun native TCP client | RedWire TCP/TLS |
+
+All these facades provide explicit strong, local and bounded-staleness reads.
+Only Rust currently exposes causal reads. The embedded-only JS SDK retains its
+existing package boundary; the JS remote facade is `@reddb-io/client`.
 
 ## Server addresses
 
@@ -101,3 +114,29 @@ or silently recreated after an error.
 This is primary/replica client routing. It does not claim complete distributed
 SQL, cross-range transactions, or transport integration for the cluster sharding
 model described in [Cluster Sharding](../architecture/cluster-sharding.md).
+
+## Language read APIs
+
+Generic SQL remains on the primary. Use the language's explicit read entrypoint
+to allow a conservatively classified read to use an eligible replica:
+
+| Driver | Local read example |
+| --- | --- |
+| Bun | `db.queryWithOptions(sql, { consistency: 'local' })` |
+| Python native | `db.query_with_options(sql, "local")` |
+| Python asyncio | `await db.query_with_options(sql, {"consistency": "local"})` |
+| Go | `reddb.QueryWithOptions(ctx, db, sql, reddb.ReadOptions{Consistency: reddb.ReadLocal})` |
+| .NET | `await db.QueryWithOptionsAsync(sql, new(ReadConsistency.Local))` |
+| Java | `db.queryWithOptions(sql, ReadOptions.local())` |
+| Kotlin | `db.queryWithOptions(sql, ReadOptions(ReadConsistency.LOCAL))` |
+| PHP | `$db->queryWithOptions($sql, new ReadOptions('local'))` |
+| Dart | `await db.queryWithOptions(sql, const ReadOptions(ReadConsistency.local))` |
+| C++ | `db->query_with_options(sql, {ReadConsistency::Local})` |
+| Zig | `try db.queryWithOptions(sql, .{ .consistency = .local }, .{})` |
+
+The non-Rust ports use round-robin selection and preserve the seed's credentials,
+TLS settings and HTTP proxy prefix when connecting advertised peers. Bun accepts
+`connect(address, { token })` or `connectTls(address, { token, ...tlsOptions })`;
+authenticated topology can include replicas. The native Python facade delegates
+to the Rust router, preserving nested JSON and integer values in result envelopes.
+Shared binary and SQL-classification cases live in `testdata/conformance/topology`.

@@ -82,11 +82,11 @@ internal static class RoutingSql
             return (tokens.Contains("CHAIN") && !tokens.Contains("NO") ? "begin" : "end", false);
         }
         if (new[] { "SET", "RESET", "USE", "PREPARE", "DEALLOCATE", "DECLARE", "LISTEN" }.Contains(first)) return ("session", false);
-        var forbidden = new HashSet<string> { "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "INTO", "FOR", "LOCK", "CALL", "EXECUTE", "SET", "QUEUE", "COPY" };
+        var forbidden = new HashSet<string> { "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "INTO", "FOR", "LOCK", "CALL", "EXECUTE", "SET", "QUEUE", "COPY", "[", "]" };
         var functions = new HashSet<string> { "COUNT", "SUM", "MIN", "MAX", "AVG", "LOWER", "UPPER", "LENGTH", "COALESCE", "ABS", "ROUND", "CAST", "EXISTS", "IN", "AS", "FROM", "WHERE", "AND", "OR", "NOT", "SELECT" };
         bool read = first == "SELECT" && !tokens.Any(forbidden.Contains);
         for (int index = 0; index + 1 < tokens.Count && read; index++)
-            if (tokens[index + 1] == "(" && (char.IsLetter(tokens[index][0]) || tokens[index][0] == '_') && !functions.Contains(tokens[index])) read = false;
+            if (tokens[index + 1] == "(" && (tokens[index] == "#identifier" || char.IsLetter(tokens[index][0]) || tokens[index][0] == '_') && !functions.Contains(tokens[index])) read = false;
         return ("primary", read);
     }
 
@@ -128,7 +128,7 @@ internal static class RoutingSql
                     }
                 }
                 if (!closed) return null;
-                tokens.Add("#value"); continue;
+                tokens.Add(current == '\'' ? "#value" : "#identifier"); continue;
             }
             int start = index++;
             if (char.IsLetter(current) || current == '_')

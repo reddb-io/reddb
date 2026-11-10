@@ -166,6 +166,11 @@ impl Reddb {
         self.transport()?.query(sql).await
     }
 
+    /// Health reply from the current primary, preserving protocol metadata for bindings.
+    pub async fn health_json(&self) -> Result<serde_json::Value> {
+        self.transport()?.health_json().await
+    }
+
     pub async fn query_with_options(
         &self,
         sql: &str,
@@ -178,6 +183,44 @@ impl Reddb {
             ));
         }
         self.transport()?.query_with_options(sql, options).await
+    }
+
+    /// Server result envelope, preserving nested JSON and integer precision for bindings.
+    pub async fn query_json(
+        &self,
+        sql: &str,
+        params: &[Value],
+        options: Option<QueryOptions>,
+    ) -> Result<serde_json::Value> {
+        if sql.trim().is_empty() {
+            return Err(ClientError::new(
+                ErrorCode::InvalidArgument,
+                "query SQL must not be empty",
+            ));
+        }
+        self.transport()?.query_json(sql, params, options).await
+    }
+
+    /// Insert JSON objects without narrowing integers in native language bindings.
+    pub async fn bulk_insert_json(
+        &self,
+        collection: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<BulkInsertResult> {
+        if rows.iter().any(|row| !row.is_object()) {
+            return Err(ClientError::new(
+                ErrorCode::InvalidArgument,
+                "rows must be JSON objects",
+            ));
+        }
+        if rows.is_empty() {
+            return Ok(BulkInsertResult {
+                affected: 0,
+                rids: vec![],
+                ids: vec![],
+            });
+        }
+        self.transport()?.bulk_insert_json(collection, rows).await
     }
 
     /// Parameterized query — `$N` placeholders in `sql` are bound to

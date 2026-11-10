@@ -58,3 +58,23 @@ func TestCanonicalTopologyFixtures(t *testing.T) {
 		})
 	}
 }
+
+func TestSharedSQLPolicy(t *testing.T) {
+	data, err := os.ReadFile("../../../../testdata/conformance/topology/sql-policy.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		SQL         string `json:"sql"`
+		ReplicaRead bool   `json:"replica_read"`
+	}
+	if err = json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range cases {
+		_, read := SQLPolicy(fixture.SQL)
+		if read != fixture.ReplicaRead {
+			t.Errorf("%s: got %v", fixture.SQL, read)
+		}
+	}
+}

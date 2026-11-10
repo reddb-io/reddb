@@ -274,7 +274,7 @@ class RedwireClient:
         params: list[Any] | tuple[Any, ...] | None = None,
     ) -> dict[str, Any]:
         binds = normalize_params(params)
-        if binds:
+        if binds or self.supports_params():
             if not self.supports_params():
                 raise RedDBError(
                     "server did not advertise FEATURE_PARAMS",

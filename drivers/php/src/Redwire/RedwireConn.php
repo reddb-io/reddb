@@ -26,7 +26,7 @@ use Reddb\RedDBException\ParamsUnsupported;
 use Reddb\RedDBException\ProtocolError;
 use Reddb\Url;
 
-final class RedwireConn implements Conn
+final class RedwireConn implements Conn, \Reddb\TopologySource
 {
     /** @var resource */
     private $stream;
@@ -326,11 +326,23 @@ final class RedwireConn implements Conn
         return ($this->serverFeatures & Frame::FEATURE_PARAMS) === Frame::FEATURE_PARAMS;
     }
 
+    public function topology(string $protocol): ?array
+    {
+        $this->ensureOpen();
+        if (($this->features() & \Reddb\Topology::FEATURE) === 0) return null;
+        $corr = $this->nextCorr();
+        self::writeFrame($this->stream, Frame::make(\Reddb\Topology::KIND, $corr, $protocol));
+        $reply = self::readFrame($this->stream);
+        $this->assertCorr($reply, $corr);
+        if ($reply->kind !== Frame::KIND_RESULT) throw new ProtocolError('invalid topology reply');
+        return \Reddb\Topology::decode($reply->payload);
+    }
+
     public function query(string $sql, array $params = []): string
     {
         $this->ensureOpen();
         $corr = $this->nextCorr();
-        if ($params === []) {
+        if ($params === [] && !$this->supportsParams()) {
             self::writeFrame($this->stream, Frame::make(Frame::KIND_QUERY, $corr, $sql));
         } else {
             if (!$this->supportsParams()) {
@@ -536,9 +548,9 @@ final class RedwireConn implements Conn
             if ($n === false || $n === 0) {
                 $meta = stream_get_meta_data($stream);
                 if (!empty($meta['timed_out'])) {
-                    throw new ProtocolError('redwire: write timed out');
+                    throw new \Reddb\RedDBException\NetworkError('redwire: write timed out');
                 }
-                throw new ProtocolError('redwire: write failed (peer closed?)');
+                throw new \Reddb\RedDBException\NetworkError('redwire: write failed (peer closed?)');
             }
             $offset += $n;
             $remaining -= $n;
@@ -555,12 +567,12 @@ final class RedwireConn implements Conn
             if ($chunk === false || $chunk === '') {
                 $meta = stream_get_meta_data($stream);
                 if (!empty($meta['timed_out'])) {
-                    throw new ProtocolError('redwire: read timed out');
+                    throw new \Reddb\RedDBException\NetworkError('redwire: read timed out');
                 }
                 if (!empty($meta['eof'])) {
-                    throw new ProtocolError('redwire: connection closed by peer');
+                    throw new \Reddb\RedDBException\NetworkError('redwire: connection closed by peer');
                 }
-                throw new ProtocolError('redwire: read failed');
+                throw new \Reddb\RedDBException\NetworkError('redwire: read failed');
             }
             $buf .= $chunk;
             $remaining -= strlen($chunk);

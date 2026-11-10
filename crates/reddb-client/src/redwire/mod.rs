@@ -338,6 +338,11 @@ impl RedWireClient {
         params: &[crate::params::Value],
     ) -> Result<serde_json::Value> {
         if self.server_features & FEATURE_PARAMS == 0 {
+            if params.is_empty() {
+                let payload = self.query_raw(sql).await?;
+                return serde_json::from_str(&payload)
+                    .map_err(|error| ClientError::new(ErrorCode::Protocol, error.to_string()));
+            }
             return Err(ClientError::new(
                 ErrorCode::ParamsUnsupported,
                 "server did not advertise RedWire query-envelope support",
@@ -547,6 +552,37 @@ mod tests {
     use reddb_wire::query_with_params::ParamValue as WireValue;
 
     #[tokio::test]
+    async fn legacy_json_query_allows_no_binds() {
+        use super::*;
+        let (client, server) = tokio::io::duplex(1024);
+        let mut client = RedWireClient {
+            stream: Box::pin(client),
+            next_correlation_id: 1,
+            usable: true,
+            session_id: String::new(),
+            server_features: 0,
+        };
+        let peer = tokio::spawn(async move {
+            let mut server: Stream = Box::pin(server);
+            let request = io::read_frame(&mut server).await.unwrap();
+            assert_eq!(request.kind, MessageKind::Query);
+            let reply = reddb_wire::redwire::build_reply_frame(
+                request.correlation_id,
+                MessageKind::Result,
+                br#"{"affected":4,"rows":[]}"#.to_vec(),
+            )
+            .unwrap();
+            io::write_frame(&mut server, &reply).await.unwrap();
+        });
+        let result = client
+            .query_envelope_json("UPDATE users SET id=1", &[])
+            .await
+            .unwrap();
+        assert_eq!(result["affected"], 4);
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn mismatched_response_poisoning_prevents_another_request() {
         use super::*;
         let (client, server) = tokio::io::duplex(1024);
@@ -655,7 +691,12 @@ mod tests {
         let peer = tokio::spawn(async move {
             let request = io::read_frame(&mut server).await.expect("query request");
             assert_eq!(request.kind, MessageKind::QueryWithParams);
-            let reply = Frame::new(MessageKind::Result, request.correlation_id, response);
+            let reply = reddb_wire::redwire::build_reply_frame(
+                request.correlation_id,
+                MessageKind::Result,
+                response,
+            )
+            .expect("query reply frame");
             io::write_frame(&mut server, &reply)
                 .await
                 .expect("query reply");

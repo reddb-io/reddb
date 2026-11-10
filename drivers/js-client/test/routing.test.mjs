@@ -300,3 +300,9 @@ test('unreachable replica is excluded before publishing routing membership', asy
   assert.equal(await client.queryWithOptions('SELECT 1', { consistency: 'local' }), primary)
   await client.close()
 })
+
+ test('shared conservative SQL policy', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const cases = JSON.parse(await readFile(new URL('../../../testdata/conformance/topology/sql-policy.json', import.meta.url), 'utf8'))
+  for (const fixture of cases) assert.equal(isReplicaQuery(fixture.sql), fixture.replica_read, fixture.sql)
+})

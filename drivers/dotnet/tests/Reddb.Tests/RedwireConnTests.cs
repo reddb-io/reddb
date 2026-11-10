@@ -447,7 +447,7 @@ public class RedwireConnTests
     }
 
     [Fact]
-    public async Task QueryWithEmptyParams_UsesLegacyQueryFrame()
+    public async Task QueryWithEmptyParams_UsesFullResultFrame()
     {
         var (client, server, csock, ssock, listener) = await OpenSocketPairAsync();
         Exception? serverErr = null;
@@ -474,8 +474,8 @@ public class RedwireConnTests
                 await WriteServerFrameAsync(server, Frame.Kind.AuthOk, resp.CorrelationId, Json(ok));
 
                 Frame q = await ReadClientFrameAsync(server);
-                Assert.Equal(Frame.Kind.Query, q.MessageKind);
-                Assert.Equal("SELECT 1", Encoding.UTF8.GetString(q.Payload));
+                Assert.Equal(Frame.Kind.QueryWithParams, q.MessageKind);
+                Assert.Equal(ValueCodec.EncodeQueryWithParams("SELECT 1", []), q.Payload.ToArray());
                 await WriteServerFrameAsync(server, Frame.Kind.Result, q.CorrelationId, Encoding.UTF8.GetBytes("{}"));
 
                 await ReadClientFrameAsync(server);

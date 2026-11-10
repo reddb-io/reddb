@@ -42,7 +42,8 @@ public:
     // Generic request. `body` may be empty.
     HttpResponse request(const std::string& method, const std::string& path,
                          const std::string& body = std::string(),
-                         const std::map<std::string, std::string>& headers = {});
+                         const std::map<std::string, std::string>& headers = {},
+                         long timeout_seconds = 0);
 
     // ---- Convenience wrappers (mirror drivers/js/src/http.js). ----
     HttpResponse health();

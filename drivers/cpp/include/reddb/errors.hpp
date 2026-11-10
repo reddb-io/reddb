@@ -24,6 +24,7 @@ enum class ErrorCode {
     ParamsUnsupported,
     Tls,
     Unknown,
+    ConsistencyUnsupported,
 };
 
 const char* error_code_name(ErrorCode code) noexcept;

@@ -408,7 +408,7 @@ class RedwireConnTest {
     }
 
     @Test
-    void queryWithEmptyParamsUsesLegacyQueryFrame() throws Exception {
+    void queryWithEmptyParamsUsesFullResultFrame() throws Exception {
         Pipes p = new Pipes();
         AtomicReference<Throwable> serverErr = new AtomicReference<>();
 
@@ -428,8 +428,8 @@ class RedwireConnTest {
                 writeServerFrame(p.serverOut, Frame.Kind.AuthOk, resp.correlationId, MAPPER.writeValueAsBytes(ok));
 
                 Frame q = readClientFrame(p.serverIn);
-                assertEquals(Frame.Kind.Query, q.kind);
-                assertEquals("SELECT 1", new String(q.payload, StandardCharsets.UTF_8));
+                assertEquals(Frame.Kind.QueryWithParams, q.kind);
+                assertArrayEquals(dev.reddb.redwire.ValueCodec.encodeQueryWithParams("SELECT 1", new Object[0]), q.payload);
                 writeServerFrame(p.serverOut, Frame.Kind.Result, q.correlationId, "{}".getBytes(StandardCharsets.UTF_8));
 
                 readClientFrame(p.serverIn);

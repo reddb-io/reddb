@@ -136,14 +136,9 @@ impl ConnectionTemplate {
                 if websocket {
                     #[cfg(feature = "redwire-websocket")]
                     {
-                        let parsed = url::Url::parse(address).map_err(|_| {
-                            ClientError::new(ErrorCode::InvalidUri, "invalid WebSocket URI")
-                        })?;
-                        let url = if !matches!(parsed.path(), "" | "/") {
-                            address.to_string()
-                        } else {
-                            format!("{address}{}", reddb_wire::redwire::REDWIRE_WS_PATH)
-                        };
+                        let url = reddb_wire::routing::websocket_routing_url(address).ok_or_else(
+                            || ClientError::new(ErrorCode::InvalidUri, "invalid WebSocket URI"),
+                        )?;
                         return Ok(Arc::from(transport::redwire(
                             RedWireClient::connect_websocket(&url, options).await?,
                         )));
@@ -177,43 +172,16 @@ pub(crate) async fn connect(uri: &str) -> Result<DynTransport> {
     ) {
         return transport::connect(spec.target).await;
     }
-    let mut parsed = url::Url::parse(match &spec.target {
-        ConnectionTarget::GrpcCluster { primary, .. } => primary,
-        _ => uri,
-    })
-    .map_err(|_| ClientError::new(ErrorCode::InvalidUri, "invalid remote URI"))?;
-    if matches!(spec.target, ConnectionTarget::GrpcCluster { .. }) {
-        parsed.set_query(
-            uri.split_once('?')
-                .map(|(_, query)| query.split('#').next().unwrap_or_default()),
-        );
-    }
-    let scheme = uri
-        .trim()
-        .split(':')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let protocol = match scheme.as_str() {
-        "red+ws" => "ws",
-        "red+wss" => "wss",
-        "red"
-            if parsed
-                .query_pairs()
-                .any(|(key, value)| key == "tls" && matches!(value.as_ref(), "true" | "1")) =>
-        {
-            "reds"
-        }
-        other => other,
-    }
-    .to_string();
+    let parsed = reddb_wire::routing::routing_uri(uri, &spec.target)
+        .map_err(|error| ClientError::new(ErrorCode::InvalidUri, error.message))?;
+    let protocol = parsed.protocol.clone();
     let mut auth = spec.auth;
     if matches!(auth, ConnectionAuth::Anonymous) {
         if let Some((_, token)) = parsed
             .query_pairs()
-            .find(|(key, _)| matches!(key.as_ref(), "token" | "apiKey" | "api_key"))
+            .find(|(key, _)| matches!(*key, "token" | "apiKey" | "api_key"))
         {
-            auth = ConnectionAuth::Bearer(token.into_owned());
+            auth = ConnectionAuth::Bearer(token.to_owned());
         }
     }
     let mut replicas = Vec::new();
@@ -248,8 +216,8 @@ pub(crate) async fn connect(uri: &str) -> Result<DynTransport> {
         let parameter = |name: &str| {
             parsed
                 .query_pairs()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.into_owned())
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_owned())
         };
         let ca = parameter("ca");
         let cert = parameter("cert");
@@ -346,22 +314,25 @@ impl RemoteRouter {
             return;
         }
         state.last_refresh = Some(Instant::now());
-        let _ = tokio::time::timeout(Duration::from_secs(5), self.refresh_membership(state)).await;
+        self.refresh_membership(state).await;
     }
 
     async fn refresh_membership(&self, state: &mut RoutingState) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut candidates = vec![state.membership.primary.addr.clone(), state.seed.clone()];
         candidates.extend(state.membership.replica_addrs());
         let mut index = 0;
-        while index < candidates.len().min(258) {
+        while index < candidates.len().min(258) && tokio::time::Instant::now() < deadline {
             let address = candidates[index].clone();
             index += 1;
             // Discovery owns a separate connection: a cancelled refresh must
             // never leave a topology response queued ahead of a user query.
-            let Ok(client) = self.template.open(&address).await else {
-                continue;
+            let discovery = async {
+                let client = self.template.open(&address).await?;
+                client.topology(&self.template.protocol).await
             };
-            let Ok(Some(mut membership)) = client.topology(&self.template.protocol).await else {
+            let Ok(Ok(Some(mut membership))) = tokio::time::timeout_at(deadline, discovery).await
+            else {
                 continue;
             };
             let Some(primary) = routing_endpoint(&self.template.protocol, &membership.primary.addr)
@@ -381,14 +352,24 @@ impl RemoteRouter {
                 candidates.push(primary.clone());
             }
             // Connect the next writer before publishing its membership.
-            if self.endpoint(state, &primary).await.is_err() {
+            if !matches!(
+                tokio::time::timeout_at(deadline, self.endpoint(state, &primary)).await,
+                Ok(Ok(_))
+            ) {
                 continue;
             }
             let mut ready_replicas = Vec::with_capacity(membership.replicas.len());
             for replica in std::mem::take(&mut membership.replicas) {
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
                 if replica.healthy
                     && !replica.rebootstrapping
-                    && self.endpoint(state, &replica.addr).await.is_ok()
+                    && matches!(
+                        tokio::time::timeout_at(deadline, self.endpoint(state, &replica.addr))
+                            .await,
+                        Ok(Ok(_))
+                    )
                 {
                     ready_replicas.push(replica);
                 }
@@ -408,10 +389,17 @@ impl RemoteRouter {
             });
             if primary == address {
                 for probe in state.health.endpoints_due_for_probe() {
-                    let success = match self.template.open(&probe.url).await {
-                        Ok(client) => client.topology(&self.template.protocol).await.is_ok(),
-                        Err(_) => false,
-                    };
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    let success = matches!(
+                        tokio::time::timeout_at(deadline, async {
+                            let client = self.template.open(&probe.url).await?;
+                            client.topology(&self.template.protocol).await
+                        })
+                        .await,
+                        Ok(Ok(_))
+                    );
                     state.health.record_probe_result(probe.index, success);
                 }
                 break;
@@ -542,6 +530,22 @@ impl RemoteRouter {
         params: &[Value],
         options: Option<&QueryOptions>,
     ) -> Result<QueryResult> {
+        self.query_operation(sql, options, |endpoint| async move {
+            endpoint.query_with(sql, params).await
+        })
+        .await
+    }
+
+    async fn query_operation<T, F, Fut>(
+        &self,
+        sql: &str,
+        options: Option<&QueryOptions>,
+        operation: F,
+    ) -> Result<T>
+    where
+        F: Fn(SharedTransport) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
         let route = match sql_route(sql) {
             SqlRoute::Replica if options.is_none() => SqlRoute::Primary,
             route => route,
@@ -551,7 +555,7 @@ impl RemoteRouter {
         }
         let (address, endpoint) = self.select(route, options).await?;
         let started = Instant::now();
-        let result = endpoint.query_with(sql, params).await;
+        let result = operation(endpoint).await;
         match result {
             Ok(result) => {
                 let mut state = self.state.lock().await;
@@ -582,7 +586,7 @@ impl RemoteRouter {
                 let primary = state.membership.primary.addr.clone();
                 let endpoint = self.endpoint(&mut state, &primary).await?;
                 drop(state);
-                endpoint.query_with(sql, params).await
+                operation(endpoint).await
             }
             Err(error) => Err(error),
         }
@@ -637,6 +641,31 @@ impl RemoteRouter {
 
 #[async_trait]
 impl Transport for RemoteRouter {
+    async fn health_json(&self) -> Result<serde_json::Value> {
+        let (address, endpoint) = self.select(SqlRoute::Primary, None).await?;
+        self.write_result(&address, endpoint.health_json().await)
+            .await
+    }
+    async fn bulk_insert_json(
+        &self,
+        collection: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<BulkInsertResult> {
+        let (address, endpoint) = self.select(SqlRoute::Primary, None).await?;
+        self.write_result(&address, endpoint.bulk_insert_json(collection, rows).await)
+            .await
+    }
+    async fn query_json(
+        &self,
+        sql: &str,
+        params: &[Value],
+        options: Option<QueryOptions>,
+    ) -> Result<serde_json::Value> {
+        self.query_operation(sql, options.as_ref(), |endpoint| async move {
+            endpoint.query_json(sql, params, None).await
+        })
+        .await
+    }
     fn name(&self) -> &'static str {
         "remote"
     }

@@ -92,7 +92,7 @@ void HttpClient::set_token(std::string token) {
 
 HttpResponse HttpClient::request(const std::string& method, const std::string& path,
                                  const std::string& body,
-                                 const std::map<std::string, std::string>& headers) {
+                                 const std::map<std::string, std::string>& headers, long timeout_seconds) {
     CURL* h = impl_->easy;
     curl_easy_reset(h);
 
@@ -107,6 +107,7 @@ HttpResponse HttpClient::request(const std::string& method, const std::string& p
     curl_easy_setopt(h, CURLOPT_HEADERDATA, &out.headers);
     curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, impl_->opts.connect_timeout_seconds);
+    curl_easy_setopt(h, CURLOPT_TIMEOUT, timeout_seconds);
     curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
 
     if (impl_->opts.dangerous_accept_invalid_certs) {
@@ -143,7 +144,7 @@ HttpResponse HttpClient::request(const std::string& method, const std::string& p
     return out;
 }
 
-HttpResponse HttpClient::health() { return request("GET", "/admin/health"); }
+HttpResponse HttpClient::health() { return request("GET", "/admin/health", "", {}, 5); }
 
 HttpResponse HttpClient::login(const std::string& username, const std::string& password) {
     std::string body = "{\"username\":\"";
@@ -151,7 +152,7 @@ HttpResponse HttpClient::login(const std::string& username, const std::string& p
     body += "\",\"password\":\"";
     body += password;
     body += "\"}";
-    return request("POST", "/auth/login", body);
+    return request("POST", "/auth/login", body, {}, 5);
 }
 
 HttpResponse HttpClient::query(const std::string& sql) {
@@ -201,10 +202,10 @@ HttpClient::HttpClient(HttpOpts) : impl_(std::make_unique<Impl>()) {
 HttpClient::~HttpClient() = default;
 void HttpClient::set_token(std::string) {}
 HttpResponse HttpClient::request(const std::string&, const std::string&,
-                                 const std::string&, const std::map<std::string, std::string>&) {
+                                 const std::string&, const std::map<std::string, std::string>&, long) {
     throw RedDBError(ErrorCode::Network, "HTTP transport disabled at build time");
 }
-HttpResponse HttpClient::health() { return request("GET", "/admin/health"); }
+HttpResponse HttpClient::health() { return request("GET", "/admin/health", "", {}, 5); }
 HttpResponse HttpClient::login(const std::string&, const std::string&) { return request("POST", ""); }
 HttpResponse HttpClient::query(const std::string&) { return request("POST", ""); }
 HttpResponse HttpClient::query(std::string_view, std::span<const reddb::Value>) { return request("POST", ""); }

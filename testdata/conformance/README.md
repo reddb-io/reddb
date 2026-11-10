@@ -48,3 +48,5 @@ Current authorities:
 | RedWire protocol fence | `crates/reddb-wire/tests/protocol_authority.rs` |
 | File layout fence | `crates/reddb-file/tests/layout_authority.rs` |
 | File layout fence modules | `crates/reddb-file/tests/layout_authority` |
+
+`topology/sql-policy.json` pins conservative replica-read classification in `reddb-wire::sql_routing`; every port consumes the same effectful and quoted SQL cases.

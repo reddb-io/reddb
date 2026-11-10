@@ -184,8 +184,15 @@ func Tokens(sql string) []string {
 			if !closed {
 				return nil
 			}
-			tokens = append(tokens, "#value")
+			if char == '\'' {
+				tokens = append(tokens, "#value")
+			} else {
+				tokens = append(tokens, "#identifier")
+			}
 		default:
+			if sql[index] > 127 {
+				return nil
+			}
 			start := index
 			index++
 			if letter(char) {
@@ -237,14 +244,14 @@ func SQLPolicy(sql string) (string, bool) {
 		}
 	}
 	read := first == "SELECT"
-	for _, word := range strings.Fields("INSERT UPDATE DELETE CREATE ALTER DROP INTO FOR LOCK CALL EXECUTE SET QUEUE COPY") {
+	for _, word := range strings.Fields("INSERT UPDATE DELETE CREATE ALTER DROP INTO FOR LOCK CALL EXECUTE SET QUEUE COPY [ ]") {
 		if contains(tokens, word) {
 			read = false
 		}
 	}
 	functions := strings.Fields("COUNT SUM MIN MAX AVG LOWER UPPER LENGTH COALESCE ABS ROUND CAST EXISTS IN AS FROM WHERE AND OR NOT SELECT")
 	for index, token := range tokens {
-		if index+1 < len(tokens) && tokens[index+1] == "(" && letter(token[0]) && !contains(functions, token) {
+		if index+1 < len(tokens) && tokens[index+1] == "(" && (token == "#identifier" || letter(token[0])) && !contains(functions, token) {
 			read = false
 		}
 	}

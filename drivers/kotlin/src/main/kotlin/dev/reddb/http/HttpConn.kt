@@ -33,7 +33,7 @@ public class HttpConn internal constructor(
     baseUrl: String,
     @Volatile private var token: String?,
     private val timeout: Duration,
-) : Conn {
+) : Conn, dev.reddb.TopologySource {
     private val baseUrl: String = stripTrailingSlash(baseUrl)
     @Volatile private var closed: Boolean = false
 
@@ -44,7 +44,8 @@ public class HttpConn internal constructor(
         public suspend fun connect(url: Url, opts: Options): HttpConn {
             val scheme = if (url.kind == Url.Kind.HTTPS) "https" else "http"
             val host = url.host ?: throw IllegalArgumentException("URL is missing a host")
-            val baseUrl = "$scheme://$host:${url.port}"
+            val authority = if (host.contains(':') && !host.startsWith("[")) "[$host]" else host
+            val baseUrl = "$scheme://$authority:${url.port}${url.path ?: ""}"
             val timeoutMs = opts.timeout.inWholeMilliseconds
 
             val client = HttpClient(CIO) {
@@ -161,6 +162,15 @@ public class HttpConn internal constructor(
         if (closed) return
         closed = true
         try { client.close() } catch (_: Throwable) { /* ignore */ }
+    }
+
+    override suspend fun topology(protocol: String): ObjectNode? {
+        val response = client.get("$baseUrl/v1/topology?transport=$protocol") {
+            if (token != null) header(HttpHeaders.Authorization, "Bearer $token")
+        }
+        if (response.status.value in listOf(401, 403)) throw RedDBException.AuthRefused("topology authorization refused")
+        if (response.status.value / 100 != 2) throw RedDBException.EngineError("topology HTTP ${response.status.value}")
+        return MAPPER.readTree(response.readBytes()) as? ObjectNode
     }
 
     public fun token(): String? = token

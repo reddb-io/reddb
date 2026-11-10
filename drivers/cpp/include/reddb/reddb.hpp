@@ -12,6 +12,7 @@
 #include "reddb/redwire/conn.hpp"
 #include "reddb/url.hpp"
 #include "reddb/value.hpp"
+#include "reddb/topology.hpp"
 
 #include <initializer_list>
 #include <memory>
@@ -59,6 +60,10 @@ public:
     virtual std::string del(const std::string& collection, const std::string& id) = 0;
     virtual void ping() = 0;
     virtual void close() = 0;
+    virtual std::optional<Topology> topology(const std::string&) { return {}; }
+    virtual std::string query_with_options(std::string_view, ReadOptions, std::span<const Value> = {}) {
+        throw RedDBError(ErrorCode::ConsistencyUnsupported, "unsupported read consistency");
+    }
 };
 
 std::unique_ptr<Conn> connect(const std::string& uri,

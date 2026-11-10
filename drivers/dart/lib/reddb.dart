@@ -25,6 +25,7 @@ export 'src/helpers.dart'
         kvPath;
 export 'src/options.dart';
 export 'src/reddb_base.dart' show Reddb, connect;
+export 'src/routing.dart' show ReadOptions, ReadConsistency;
 export 'src/url.dart' show ParsedUri, parseUri, defaultPortFor, deriveLoginUrl;
 export 'src/value.dart' show Value;
 export 'src/redwire/codec.dart' show ZstdCodec;

@@ -46,7 +46,7 @@ pub const ConnectOptions = struct {
 /// Internal trait-ish wrapper so the same `Conn` code can drive a
 /// plain TCP socket or a `std.crypto.tls.Client`-wrapped one.
 pub const Stream = union(enum) {
-    plain: std.net.Stream,
+    plain: @import("../network.zig").Socket,
     tls: TlsStream,
 
     pub fn read(self: *Stream, buf: []u8) !usize {
@@ -73,7 +73,7 @@ pub const Stream = union(enum) {
 
 pub const TlsStream = struct {
     client: std.crypto.tls.Client,
-    sock: std.net.Stream,
+    sock: @import("../network.zig").Socket,
 
     pub fn read(self: *TlsStream, buf: []u8) !usize {
         return self.client.read(self.sock, buf);
@@ -99,6 +99,7 @@ pub const Conn = struct {
     session_id: []u8 = &.{},
     server_features: u32 = 0,
     closed: bool = false,
+    io_timeout_ms: u32 = 30_000,
 
     pub fn deinit(self: *Conn) void {
         if (!self.closed) self.close();
@@ -156,6 +157,18 @@ pub const Conn = struct {
     }
 
     // ---- High level operations ----
+    pub fn topology(self: *Conn, protocol: []const u8) !?[]const u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.closed) return error.ConnectionClosed;
+        if ((self.server_features & @import("../topology.zig").feature) == 0) return null;
+        const correlation = self.nextCorr();
+        try self.sendFrame(frame.Frame.init(.topology, correlation, protocol));
+        var response = try self.recvFrame();
+        defer response.deinit(self.allocator);
+        if (response.frame.kind != .result or response.frame.correlation_id != correlation) return error.UnexpectedFrame;
+        return try takeOwned(self.allocator, &response);
+    }
 
     /// Run a SQL query with an idiomatic tuple of params:
     /// `try conn.query("SELECT $1", .{42})`. Empty tuples preserve the
@@ -229,7 +242,7 @@ pub const Conn = struct {
         sql: []const u8,
         params: []const value_codec.Value,
     ) ![]const u8 {
-        if (params.len == 0) return self.queryRaw(sql);
+        if (params.len == 0 and !self.supportsParams()) return self.queryRaw(sql);
         self.mutex.lock();
         defer self.mutex.unlock();
         if (!self.supportsParams()) return error.ParamsUnsupported;
@@ -321,7 +334,9 @@ fn readExact(stream: *Stream, buf: []u8) !void {
 
 /// Open a connection and run the handshake.
 pub fn connect(allocator: Allocator, opts: ConnectOptions) !*Conn {
-    const sock = try std.net.tcpConnectToHost(allocator, opts.host, opts.port);
+    var sock = try @import("../network.zig").connect(allocator, opts.host, opts.port, if (opts.connect_timeout_ms == 0) 5000 else opts.connect_timeout_ms);
+    sock.timeout_ms = if (opts.io_timeout_ms == 0) 5000 else opts.io_timeout_ms;
+    try @import("../network.zig").setTimeout(sock, if (opts.io_timeout_ms == 0) 5000 else opts.io_timeout_ms);
     var stream: Stream = .{ .plain = sock };
     var stream_owned = true;
     errdefer if (stream_owned) stream.close();
@@ -351,6 +366,7 @@ pub fn connect(allocator: Allocator, opts: ConnectOptions) !*Conn {
     conn.* = .{
         .allocator = allocator,
         .stream = stream,
+        .io_timeout_ms = if (opts.io_timeout_ms == 0) 30000 else opts.io_timeout_ms,
     };
     // Once the Conn owns the stream, the conn's `close` is the only
     // path that touches the socket — don't double-close from the

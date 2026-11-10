@@ -582,6 +582,45 @@ impl GrpcClient {
         Ok(result)
     }
 
+    pub async fn query_json(&self, sql: &str, params: &[ParamValue]) -> Result<serde_json::Value> {
+        let reply = self
+            .primary_client()
+            .query_reply_with_params(sql, params_to_grpc_values(params))
+            .await
+            .map_err(query_rpc_error)?;
+        let mut value: serde_json::Value = serde_json::from_str(&reply.result_json)
+            .map_err(|error| ClientError::new(ErrorCode::Protocol, error.to_string()))?;
+        if let Some(object) = value.as_object_mut() {
+            if object
+                .get("affected")
+                .or_else(|| object.get("affected_rows"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                == 0
+            {
+                object.insert("affected".into(), reply.affected_rows.into());
+            }
+            object
+                .entry("statement")
+                .or_insert_with(|| reply.statement.into());
+            object
+                .entry("columns")
+                .or_insert_with(|| serde_json::json!(reply.columns));
+        }
+        Ok(value)
+    }
+
+    pub async fn health_json(&self) -> Result<serde_json::Value> {
+        let reply = self
+            .primary_client()
+            .health_status()
+            .await
+            .map_err(query_rpc_error)?;
+        Ok(
+            serde_json::json!({"healthy": reply.healthy, "state": reply.state, "checked_at_unix_ms": reply.checked_at_unix_ms}),
+        )
+    }
+
     pub async fn insert(&self, collection: &str, payload: &JsonValue) -> Result<InsertResult> {
         if payload.as_object().is_none() {
             return Err(ClientError::new(
@@ -648,6 +687,32 @@ impl GrpcClient {
             affected: reply.count,
             rids: rids.clone(),
             ids: rids,
+        })
+    }
+
+    pub async fn bulk_insert_json(
+        &self,
+        collection: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<BulkInsertResult> {
+        let encoded = rows
+            .iter()
+            .map(|row| serde_json::json!({"fields": row}).to_string())
+            .collect();
+        let reply = self
+            .primary_client()
+            .bulk_create_rows(collection, encoded)
+            .await
+            .map_err(query_rpc_error)?;
+        let ids: Vec<_> = reply
+            .items
+            .into_iter()
+            .map(|row| row.id.to_string())
+            .collect();
+        Ok(BulkInsertResult {
+            affected: reply.count,
+            rids: ids.clone(),
+            ids,
         })
     }
 

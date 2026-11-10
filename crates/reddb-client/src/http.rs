@@ -228,14 +228,23 @@ impl HttpClient {
         sql: &str,
         params: &[crate::params::Value],
     ) -> Result<QueryResult> {
+        Ok(QueryResult::from_envelope(
+            self.query_json(sql, params).await?,
+        ))
+    }
+
+    pub async fn query_json(
+        &self,
+        sql: &str,
+        params: &[crate::params::Value],
+    ) -> Result<serde_json::Value> {
         let json_params: Vec<serde_json::Value> = params
             .iter()
             .cloned()
             .map(crate::params::Value::into_json_param)
             .collect();
         let body = serde_json::json!({ "query": sql, "params": json_params });
-        let value = self.send_json(Method::POST, "/query", &body).await?;
-        Ok(QueryResult::from_envelope(value))
+        self.send_json(Method::POST, "/query", &body).await
     }
 
     pub async fn insert(&self, collection: &str, payload: &JsonValue) -> Result<InsertResult> {
@@ -276,6 +285,18 @@ impl HttpClient {
             "rows": payloads.iter().map(json_value_to_serde).collect::<Vec<_>>(),
         });
         let value = self.send_json(Method::POST, &url_path, &body).await?;
+        Ok(bulk_insert_result_from_json(value))
+    }
+
+    pub async fn bulk_insert_json(
+        &self,
+        collection: &str,
+        rows: &[serde_json::Value],
+    ) -> Result<BulkInsertResult> {
+        let path = format!("/collections/{}/bulk/rows", urlencoded(collection));
+        let value = self
+            .send_json(Method::POST, &path, &serde_json::json!({"rows": rows}))
+            .await?;
         Ok(bulk_insert_result_from_json(value))
     }
 

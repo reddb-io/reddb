@@ -43,14 +43,16 @@ internal sealed class RoutedConn : IConn
     {
         if (_pinned != null || _closed) return;
         _refreshAt = DateTimeOffset.UtcNow.AddSeconds(30);
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(TimeSpan.FromSeconds(5));
         var candidates = new List<string> { _primary, _seed };
         candidates.AddRange(_replicas.Select(r => r.Address));
-        for (int index = 0; index < candidates.Count && index < 258; index++)
+        for (int index = 0; index < candidates.Count && index < 258 && !budget.IsCancellationRequested; index++)
         {
             IConn? control = null;
             try
             {
-                using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                using var bounded = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
                 bounded.CancelAfter(TimeSpan.FromSeconds(5));
                 control = await _dial(candidates[index], bounded.Token);
                 if (control is not ITopologySource source) continue;
@@ -59,20 +61,22 @@ internal sealed class RoutedConn : IConn
                 string? primary = TopologyCodec.Address(topology["primary"]?["addr"]?.GetValue<string>(), _protocol);
                 if (primary is null) continue;
                 if (!candidates.Contains(primary)) candidates.Add(primary);
-                await EndpointAsync(primary, cancellationToken);
+                await EndpointAsync(primary, budget.Token);
                 var replicas = new List<(string, double)>();
                 foreach (JsonNode? replica in (topology["replicas"]?.AsArray() ?? new JsonArray()).Take(256))
                 {
+                    if (budget.IsCancellationRequested) break;
                     string? address = TopologyCodec.Address(replica?["addr"]?.GetValue<string>(), _protocol);
                     if (address is null || address == primary || replica?["healthy"]?.GetValue<bool>() != true
                         || replica["rebootstrapping"]?.GetValue<bool>() == true) continue;
                     try
                     {
-                        await EndpointAsync(address, cancellationToken);
+                        await EndpointAsync(address, budget.Token);
                         replicas.Add((address, replica["lag_ms"] is JsonNode lag ? lag.GetValue<uint>() : double.PositiveInfinity));
                     }
                     catch (Exception error) when (Network(error) && !cancellationToken.IsCancellationRequested) { }
                 }
+                cancellationToken.ThrowIfCancellationRequested();
                 _primary = primary; _replicas = replicas;
                 var keep = new HashSet<string>(replicas.Select(r => r.Item1)) { _seed, primary };
                 foreach (string retired in _clients.Keys.Where(a => !keep.Contains(a)).ToArray())
@@ -85,7 +89,16 @@ internal sealed class RoutedConn : IConn
         }
     }
 
-    private static bool Network(Exception error) => error is IOException or SocketException or HttpRequestException or OperationCanceledException;
+    private static bool Network(Exception error)
+    {
+        for (int depth = 0; depth < 16; depth++)
+        {
+            if (error is IOException or SocketException or HttpRequestException or OperationCanceledException) return true;
+            if (error.InnerException is null) return false;
+            error = error.InnerException;
+        }
+        return false;
+    }
 
     private async ValueTask<T> InvokeAsync<T>(Func<IConn, ValueTask<T>> operation, string? sql = null,
         bool read = false, ReadOptions? options = null, CancellationToken cancellationToken = default)

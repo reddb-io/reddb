@@ -56,6 +56,8 @@ pub fn sql_route(sql: &str) -> SqlRoute {
                 | "SET"
                 | "QUEUE"
                 | "COPY"
+                | "["
+                | "]"
         ) {
             return SqlRoute::Primary;
         }
@@ -190,6 +192,22 @@ fn sql_tokens(sql: &str) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_replica_sql_policy() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../testdata/conformance/topology/sql-policy.json"
+        ))
+        .unwrap();
+        for case in cases.as_array().unwrap() {
+            let sql = case["sql"].as_str().unwrap();
+            assert_eq!(
+                sql_route(sql) == SqlRoute::Replica,
+                case["replica_read"].as_bool().unwrap(),
+                "{sql}"
+            );
+        }
+    }
 
     #[test]
     fn mutations_locks_and_unknown_functions_stay_on_writer() {

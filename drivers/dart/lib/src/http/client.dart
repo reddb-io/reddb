@@ -7,11 +7,12 @@ import 'package:http/http.dart' as http;
 import '../conn.dart';
 import '../errors.dart';
 import '../redwire/value_codec.dart';
+import '../routing.dart' show TopologySource;
 
 /// HTTP transport. Stateless: every request carries an `Authorization:
 /// Bearer <token>` header (when a token is set). `setToken()` swaps it
 /// in-place — used by the auto-login flow.
-class HttpConn implements Conn {
+class HttpConn implements Conn, TopologySource {
   HttpConn({
     required this.baseUrl,
     String? token,
@@ -27,6 +28,11 @@ class HttpConn implements Conn {
   bool _closed = false;
 
   String? get token => _token;
+  @override
+  Future<Map<String, dynamic>?> topology(String protocol) async {
+    final body = await _request('GET', '/v1/topology?transport=${Uri.encodeQueryComponent(protocol)}');
+    return jsonDecode(utf8.decode(body)) as Map<String, dynamic>;
+  }
   void setToken(String? token) {
     _token = token;
   }

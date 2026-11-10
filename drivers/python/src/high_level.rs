@@ -20,7 +20,123 @@ use reddb::storage::cache::blob::CachePresence;
 #[cfg(feature = "embedded")]
 use reddb::storage::cache::{BlobCachePolicy, BlobCachePut};
 
-use reddb::client::RedDBClient;
+use reddb_client::{QueryOptions, Reddb as RoutedClient, Value as RemoteValue};
+
+struct RemoteClient(RoutedClient);
+struct RemoteCreated {
+    id: String,
+}
+struct RemoteBulk {
+    count: u64,
+    items: Vec<RemoteCreated>,
+}
+struct RemoteHealth {
+    healthy: bool,
+    state: String,
+    checked_at_unix_ms: u64,
+}
+impl RemoteClient {
+    async fn query_with(
+        &self,
+        sql: &str,
+        params: &[RemoteValue],
+        options: Option<QueryOptions>,
+    ) -> reddb_client::Result<String> {
+        Ok(self.0.query_json(sql, params, options).await?.to_string())
+    }
+    async fn query_read(&self, sql: &str) -> reddb_client::Result<String> {
+        self.query_with(sql, &[], Some(QueryOptions::local())).await
+    }
+    async fn create_row_entity(
+        &self,
+        collection: &str,
+        payload: &str,
+    ) -> reddb_client::Result<RemoteCreated> {
+        let reply = self
+            .bulk_create_rows(collection, vec![payload.to_owned()])
+            .await?;
+        reply.items.into_iter().next().ok_or_else(|| {
+            reddb_client::ClientError::new(
+                reddb_client::ErrorCode::Protocol,
+                "insert reply omitted id",
+            )
+        })
+    }
+    async fn bulk_create_rows(
+        &self,
+        collection: &str,
+        payloads: Vec<String>,
+    ) -> reddb_client::Result<RemoteBulk> {
+        let rows = payloads
+            .iter()
+            .map(|row| serde_json::from_str(row))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                reddb_client::ClientError::new(
+                    reddb_client::ErrorCode::InvalidArgument,
+                    error.to_string(),
+                )
+            })?;
+        let reply = self.0.bulk_insert_json(collection, &rows).await?;
+        Ok(RemoteBulk {
+            count: reply.affected,
+            items: reply
+                .ids
+                .into_iter()
+                .map(|id| RemoteCreated { id })
+                .collect(),
+        })
+    }
+    async fn delete_entity(&self, collection: &str, id: u64) -> reddb_client::Result<()> {
+        self.0.delete(collection, &id.to_string()).await.map(|_| ())
+    }
+    async fn health_status(&self) -> reddb_client::Result<RemoteHealth> {
+        let health = self.0.health_json().await?;
+        Ok(RemoteHealth {
+            healthy: health
+                .get("healthy")
+                .or_else(|| health.get("ok"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            state: health
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("connected")
+                .to_owned(),
+            checked_at_unix_ms: health
+                .get("checked_at_unix_ms")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        })
+    }
+}
+
+fn remote_param(value: &Bound<'_, PyAny>) -> PyResult<RemoteValue> {
+    use reddb_types::Value as SV;
+    Ok(match py_to_param_value(value)? {
+        SV::Null => RemoteValue::Null,
+        SV::Boolean(value) => RemoteValue::Bool(value),
+        SV::Integer(value) => RemoteValue::Int(value),
+        SV::UnsignedInteger(value) => RemoteValue::Int(i64::try_from(value).map_err(|_| {
+            err(
+                "INVALID_PARAMS",
+                "integer parameter exceeds signed 64-bit range",
+            )
+        })?),
+        SV::Float(value) => RemoteValue::Float(value),
+        SV::Text(value) => RemoteValue::Text(value.to_string()),
+        SV::Blob(value) => RemoteValue::Bytes(value),
+        SV::Vector(value) => RemoteValue::Vector(value),
+        SV::Timestamp(value) => RemoteValue::Timestamp(value),
+        SV::Uuid(value) => RemoteValue::Uuid(value),
+        _ => {
+            return Err(err(
+                "PARAMS_UNSUPPORTED",
+                "structured remote parameters are not supported",
+            ))
+        }
+    })
+}
 
 /// SDK Helper Spec revision this driver satisfies (spec §14). Exposed both
 /// as the module attribute `reddb.helper_spec_version` and the property
@@ -72,7 +188,7 @@ fn err(code: &str, msg: impl Into<String>) -> PyErr {
 enum Backend {
     #[cfg(feature = "embedded")]
     Embedded(EmbeddedRuntime),
-    Grpc(Mutex<RedDBClient>),
+    Grpc(Mutex<RemoteClient>),
 }
 
 #[pyclass]
@@ -125,22 +241,68 @@ impl RedDb {
                 query_rows_to_pydict(py, qr)
             }
             Backend::Grpc(client) => {
-                if !binds.is_empty() {
-                    return Err(err(
-                        "PARAMS_UNSUPPORTED",
-                        "parameterized queries over grpc:// are not supported yet \
-                         (the gRPC server does not advertise FEATURE_PARAMS). \
-                         Use file:// or memory:// for now.",
-                    ));
-                }
-                let json_str = crate::get_runtime()
-                    .block_on(async {
-                        let mut guard = client.lock().expect("client poisoned");
-                        guard.query(sql).await
+                let values = binds
+                    .iter()
+                    .map(remote_param)
+                    .collect::<PyResult<Vec<_>>>()?;
+                let json_str = py
+                    .detach(|| {
+                        crate::get_runtime().block_on(async {
+                            let guard = client.lock().expect("client poisoned");
+                            guard.query_with(sql, &values, None).await
+                        })
                     })
-                    .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
+                    .map_err(|error| err(error.code.as_str(), error.message))?;
                 grpc_query_json_to_pydict(py, &json_str)
             }
+        }
+    }
+
+    /// Explicit replica reads. Generic query/execute remains on the primary.
+    #[pyo3(signature = (sql, consistency="strong", max_lag_ms=0, *, params=None))]
+    fn query_with_options<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        consistency: &str,
+        max_lag_ms: u64,
+        params: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        self.ensure_open()?;
+        let options = match consistency {
+            "strong" => QueryOptions::strong(),
+            "local" => QueryOptions::local(),
+            "bounded_staleness" => {
+                QueryOptions::bounded_staleness(std::time::Duration::from_millis(max_lag_ms))
+            }
+            _ => {
+                return Err(err(
+                    "CONSISTENCY_UNSUPPORTED",
+                    "unsupported read consistency",
+                ))
+            }
+        };
+        let args = PyTuple::empty(py);
+        match self.backend() {
+            Backend::Grpc(client) => {
+                let values = collect_params(&args, params)?
+                    .iter()
+                    .map(remote_param)
+                    .collect::<PyResult<Vec<_>>>()?;
+                let result = py
+                    .detach(|| {
+                        crate::get_runtime().block_on(
+                            client.lock().expect("client poisoned").query_with(
+                                sql,
+                                &values,
+                                Some(options),
+                            ),
+                        )
+                    })
+                    .map_err(|error| err(error.code.as_str(), error.message))?;
+                grpc_query_json_to_pydict(py, &result)
+            }
+            Backend::Embedded(_) => self.query(py, sql, &args, params),
         }
     }
 
@@ -181,10 +343,12 @@ impl RedDb {
             }
             Backend::Grpc(client) => {
                 let json_payload = pydict_to_json_str(payload)?;
-                let reply = crate::get_runtime()
-                    .block_on(async {
-                        let mut guard = client.lock().expect("client poisoned");
-                        guard.create_row_entity(collection, &json_payload).await
+                let reply = py
+                    .detach(|| {
+                        crate::get_runtime().block_on(async {
+                            let guard = client.lock().expect("client poisoned");
+                            guard.create_row_entity(collection, &json_payload).await
+                        })
                     })
                     .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
                 let out = PyDict::new(py);
@@ -237,10 +401,12 @@ impl RedDb {
                         .map_err(|_| err("INVALID_PARAMS", "bulk_insert payloads must be dicts"))?;
                     encoded.push(pydict_to_json_str(dict)?);
                 }
-                let reply = crate::get_runtime()
-                    .block_on(async {
-                        let mut guard = client.lock().expect("client poisoned");
-                        guard.bulk_create_rows(collection, encoded).await
+                let reply = py
+                    .detach(|| {
+                        crate::get_runtime().block_on(async {
+                            let guard = client.lock().expect("client poisoned");
+                            guard.bulk_create_rows(collection, encoded).await
+                        })
                     })
                     .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
                 let out = PyDict::new(py);
@@ -279,12 +445,13 @@ impl RedDb {
                 let id = id
                     .parse::<u64>()
                     .map_err(|_| err("INVALID_PARAMS", "id must be a numeric string"))?;
-                crate::get_runtime()
-                    .block_on(async {
-                        let mut guard = client.lock().expect("client poisoned");
+                py.detach(|| {
+                    crate::get_runtime().block_on(async {
+                        let guard = client.lock().expect("client poisoned");
                         guard.delete_entity(collection, id).await
                     })
-                    .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
+                })
+                .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
                 let out = PyDict::new(py);
                 out.set_item("affected", 1u64)?;
                 Ok(out)
@@ -313,10 +480,12 @@ impl RedDb {
                 }
             }
             Backend::Grpc(client) => {
-                let json_str = crate::get_runtime()
-                    .block_on(async {
-                        let mut guard = client.lock().expect("client poisoned");
-                        guard.query(&sql).await
+                let json_str = py
+                    .detach(|| {
+                        crate::get_runtime().block_on(async {
+                            let guard = client.lock().expect("client poisoned");
+                            guard.query_read(&sql).await
+                        })
                     })
                     .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
                 let result = grpc_query_json_to_pydict(py, &json_str)?;
@@ -367,10 +536,12 @@ impl RedDb {
                 rows_to_pylist(py, &qr.rows)?
             }
             Backend::Grpc(client) => {
-                let json_str = crate::get_runtime()
-                    .block_on(async {
-                        let mut guard = client.lock().expect("client poisoned");
-                        guard.query(&sql).await
+                let json_str = py
+                    .detach(|| {
+                        crate::get_runtime().block_on(async {
+                            let guard = client.lock().expect("client poisoned");
+                            guard.query_read(&sql).await
+                        })
                     })
                     .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
                 grpc_query_json_to_pydict(py, &json_str)?
@@ -394,10 +565,12 @@ impl RedDb {
                 out.set_item("version", env!("CARGO_PKG_VERSION"))?;
             }
             Backend::Grpc(client) => {
-                let health = crate::get_runtime()
-                    .block_on(async {
-                        let mut guard = client.lock().expect("client poisoned");
-                        guard.health_status().await
+                let health = py
+                    .detach(|| {
+                        crate::get_runtime().block_on(async {
+                            let guard = client.lock().expect("client poisoned");
+                            guard.health_status().await
+                        })
                     })
                     .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
                 out.set_item("ok", health.healthy)?;
@@ -510,7 +683,7 @@ impl RedDb {
         HELPER_SPEC_VERSION
     }
 
-    fn close(&mut self) -> PyResult<()> {
+    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         if self.closed {
             return Ok(());
         }
@@ -524,8 +697,12 @@ impl RedDb {
             Backend::Embedded(rt) => {
                 rt.checkpoint().map_err(|e| err("IO_ERROR", e))?;
             }
-            Backend::Grpc(_) => {
-                // tonic channel closes when the client is dropped.
+            Backend::Grpc(client) => {
+                py.detach(|| {
+                    crate::get_runtime()
+                        .block_on(client.into_inner().expect("client poisoned").0.close())
+                })
+                .map_err(|error| err(error.code.as_str(), error.message))?;
             }
         }
         Ok(())
@@ -537,11 +714,12 @@ impl RedDb {
 
     fn __exit__(
         &mut self,
+        py: Python<'_>,
         _exc_type: &Bound<'_, PyAny>,
         _exc_val: &Bound<'_, PyAny>,
         _exc_tb: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        self.close()
+        self.close(py)
     }
 }
 
@@ -1277,7 +1455,7 @@ impl CacheClient {
 ///   - `file:///absolute/path`   embedded engine on disk
 ///   - `grpc://host:port`        remote gRPC server (tonic backend)
 #[pyfunction]
-pub fn connect(uri: &str) -> PyResult<RedDb> {
+pub fn connect(py: Python<'_>, uri: &str) -> PyResult<RedDb> {
     if uri.is_empty() {
         return Err(err("INVALID_URI", "empty connection string"));
     }
@@ -1308,20 +1486,23 @@ pub fn connect(uri: &str) -> PyResult<RedDb> {
         #[cfg(not(feature = "embedded"))]
         return Err(err("FEATURE_DISABLED", "embedded backend not compiled in"));
     }
-    if uri.starts_with("grpc://") {
-        let addr = uri.strip_prefix("grpc://").unwrap_or(uri).to_string();
-        let endpoint = format!("http://{addr}");
-        let client = crate::get_runtime()
-            .block_on(RedDBClient::connect(&endpoint, None))
-            .map_err(|e| err("IO_ERROR", format!("grpc connect failed: {e}")))?;
+    if [
+        "red://", "reds://", "grpc://", "grpcs://", "http://", "https://", "ws://", "wss://",
+    ]
+    .iter()
+    .any(|scheme| uri.starts_with(scheme))
+    {
+        let client = py
+            .detach(|| crate::get_runtime().block_on(RoutedClient::connect(uri)))
+            .map_err(|error| err(error.code.as_str(), error.message))?;
         return Ok(RedDb {
-            backend: Some(Backend::Grpc(Mutex::new(client))),
+            backend: Some(Backend::Grpc(Mutex::new(RemoteClient(client)))),
             closed: false,
         });
     }
     Err(err(
         "UNSUPPORTED_SCHEME",
-        format!("unsupported URI: {uri}. Expected file://, memory:// or grpc://"),
+        format!("unsupported URI: {uri}. Expected an embedded or remote RedDB URI"),
     ))
 }
 
@@ -1826,12 +2007,16 @@ fn grpc_query_json_to_pydict<'py>(py: Python<'py>, json_str: &str) -> PyResult<B
         .map_err(|e| err("INTERNAL_ERROR", format!("bad server JSON: {e}")))?;
 
     let out = PyDict::new(py);
+    let result = parsed
+        .get("result")
+        .filter(|value| value.is_object())
+        .unwrap_or(&parsed);
 
     // Rows (the server uses various keys for the row array in different
     // versions — try the canonical `rows` first, then `records`.)
-    let rows_value = parsed
+    let rows_value = result
         .get("rows")
-        .or_else(|| parsed.get("records"))
+        .or_else(|| result.get("records"))
         .cloned()
         .unwrap_or(serde_json::Value::Array(Vec::new()));
     let rows_py = PyList::empty(py);
@@ -1839,7 +2024,11 @@ fn grpc_query_json_to_pydict<'py>(py: Python<'py>, json_str: &str) -> PyResult<B
         for row in rows {
             let dict = PyDict::new(py);
             if let serde_json::Value::Object(map) = row {
-                for (k, v) in map {
+                let values = map
+                    .get("values")
+                    .and_then(|value| value.as_object())
+                    .unwrap_or(&map);
+                for (k, v) in values {
                     dict.set_item(k, json_value_to_py(py, &v)?)?;
                 }
             }
@@ -1849,7 +2038,7 @@ fn grpc_query_json_to_pydict<'py>(py: Python<'py>, json_str: &str) -> PyResult<B
     out.set_item("rows", rows_py)?;
 
     let columns_py = PyList::empty(py);
-    if let Some(serde_json::Value::Array(cols)) = parsed.get("columns") {
+    if let Some(serde_json::Value::Array(cols)) = result.get("columns") {
         for col in cols {
             if let Some(s) = col.as_str() {
                 columns_py.append(s)?;
@@ -1858,11 +2047,22 @@ fn grpc_query_json_to_pydict<'py>(py: Python<'py>, json_str: &str) -> PyResult<B
     }
     out.set_item("columns", columns_py)?;
 
-    let affected = parsed.get("affected").and_then(|v| v.as_u64()).unwrap_or(0);
+    let affected = parsed
+        .get("affected")
+        .or_else(|| parsed.get("affected_rows"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     out.set_item("affected", affected)?;
 
     let statement = parsed
-        .get("statement")
+        .get("statement_type")
+        .or_else(|| {
+            if parsed.get("query").is_some() {
+                None
+            } else {
+                parsed.get("statement")
+            }
+        })
         .and_then(|v| v.as_str())
         .unwrap_or("select")
         .to_string();

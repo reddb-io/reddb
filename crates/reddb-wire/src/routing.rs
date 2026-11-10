@@ -11,6 +11,77 @@ pub const ROUTING_PROTOCOLS: [&str; 8] =
 pub const FEATURE_TOPOLOGY: u32 = 0x0000_0002;
 pub const TOPOLOGY_TRANSPORT_METADATA_KEY: &str = "x-reddb-topology-transport";
 
+/// URI details needed to retain proxy paths, auth and TLS options while dialing peers.
+pub struct RoutingUri {
+    pub protocol: String,
+    pub path: String,
+    pub parameters: Vec<(String, String)>,
+}
+impl RoutingUri {
+    pub fn query_pairs(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.parameters
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+pub fn routing_uri(
+    uri: &str,
+    target: &crate::ConnectionTarget,
+) -> Result<RoutingUri, crate::ParseError> {
+    let mut parsed = url::Url::parse(match target {
+        crate::ConnectionTarget::GrpcCluster { primary, .. } => primary,
+        _ => uri,
+    })
+    .map_err(|_| crate::ParseError::new(crate::ParseErrorKind::InvalidUri, "invalid remote URI"))?;
+    if matches!(target, crate::ConnectionTarget::GrpcCluster { .. }) {
+        parsed.set_query(
+            uri.split_once('?')
+                .map(|(_, query)| query.split('#').next().unwrap_or_default()),
+        );
+    }
+    let parameters: Vec<_> = parsed
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let scheme = uri
+        .trim()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let protocol = match scheme.as_str() {
+        "red+ws" => "ws",
+        "red+wss" => "wss",
+        "red"
+            if parameters
+                .iter()
+                .any(|(key, value)| key == "tls" && matches!(value.as_str(), "true" | "1")) =>
+        {
+            "reds"
+        }
+        other => other,
+    }
+    .to_owned();
+    Ok(RoutingUri {
+        protocol,
+        path: parsed.path().to_owned(),
+        parameters,
+    })
+}
+pub fn websocket_routing_url(address: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(address).ok()?;
+    if !matches!(parsed.scheme(), "ws" | "wss") {
+        return None;
+    }
+    if matches!(parsed.path(), "" | "/") {
+        parsed.set_path(crate::redwire::REDWIRE_WS_PATH);
+    }
+    Some(parsed.into())
+}
+
 pub type RoutingEndpoints = BTreeMap<String, String>;
 
 /// Ignore unknown optional fields, but never advertise credentials or a URI

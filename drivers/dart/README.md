@@ -288,3 +288,11 @@ SQL double quotes delimit identifiers; single quotes delimit text. For example,
 Bind application values as parameters. JSON object/array strings keep double
 quotes. See the [SQL quotation migration guide](../../docs/query/sql-quoting.md)
 before upgrading applications that used double-quoted SQL text literals.
+
+## Topology and replica reads
+
+Remote `connect` discovers advertised primary/replica endpoints on the driver's supported transports. Generic SQL and writes stay on the primary; transactions and session commands pin their connection.
+
+Use `db.queryWithOptions(sql, const ReadOptions(ReadConsistency.local))` for explicit replica reads. Strong and bounded-staleness options are also available. Ambiguous writes are never replayed automatically.
+
+See [the routing contract and transport matrix](../../docs/clients/topology-routing.md) for configuration, consistency and failover behavior.

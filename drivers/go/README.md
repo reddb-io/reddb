@@ -318,3 +318,11 @@ support, including queries without parameters. Rich helpers read canonical
 `result.records` and legacy `rows` responses, preserve exact integers, and expose
 only projected columns when the envelope declares them. Older servers without
 parameter support retain the legacy summary response for unparameterized SQL.
+
+## Topology and replica reads
+
+Remote `connect` discovers advertised primary/replica endpoints on the driver's supported transports. Generic SQL and writes stay on the primary; transactions and session commands pin their connection.
+
+Use `reddb.QueryWithOptions(ctx, db, sql, reddb.ReadOptions{Consistency: reddb.ReadLocal})` for explicit replica reads. Strong and bounded-staleness options are also available. Ambiguous writes are never replayed automatically.
+
+See [the routing contract and transport matrix](../../docs/clients/topology-routing.md) for configuration, consistency and failover behavior.

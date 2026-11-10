@@ -129,16 +129,21 @@ func (r *routedConn) discover(ctx context.Context, address string) (*contract.To
 	return source.topology(bounded, r.protocol)
 }
 func (r *routedConn) refresh(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if r.pinned != "" || r.closed {
 		return nil
 	}
 	r.refreshAt = time.Now().Add(30 * time.Second)
+	budget, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	candidates := []string{r.primary, r.seed}
 	for _, replica := range r.replicas {
 		candidates = append(candidates, replica.Addr)
 	}
-	for index := 0; index < len(candidates) && index < 258; index++ {
-		topology, err := r.discover(ctx, candidates[index])
+	for index := 0; index < len(candidates) && index < 258 && budget.Err() == nil; index++ {
+		topology, err := r.discover(budget, candidates[index])
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -162,21 +167,30 @@ func (r *routedConn) refresh(ctx context.Context) error {
 		if !present {
 			candidates = append(candidates, primary)
 		}
-		if _, err = r.endpoint(ctx, primary); err != nil {
+		if _, err = r.endpoint(budget, primary); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			continue
 		}
 		replicas := []contract.Replica{}
 		for index, replica := range topology.Replicas {
-			if index >= 256 {
+			if index >= 256 || budget.Err() != nil {
 				break
 			}
 			replica.Addr = contract.Address(replica.Addr, r.protocol)
 			if replica.Addr == "" || replica.Addr == primary || !replica.Healthy || replica.Rebootstrapping {
 				continue
 			}
-			if _, err = r.endpoint(ctx, replica.Addr); err == nil {
+			if _, err = r.endpoint(budget, replica.Addr); err == nil {
 				replicas = append(replicas, replica)
 			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		r.primary = primary
 		r.replicas = replicas
@@ -194,7 +208,7 @@ func (r *routedConn) refresh(ctx context.Context) error {
 			return nil
 		}
 	}
-	return nil
+	return ctx.Err()
 }
 func invokeRouted[T any](r *routedConn, ctx context.Context, sql string, read bool, options *ReadOptions, operation func(Conn) (T, error)) (T, error) {
 	r.mu.Lock()

@@ -191,6 +191,28 @@ struct Parser {
 // =========================================================================
 // SQL helpers
 // =========================================================================
+JsonValue parse_json_bounded(const std::string& text) {
+    if (text.size() > 16 * 1024 * 1024) throw RedDBError(ErrorCode::Protocol, "JSON exceeds topology limit");
+    int depth = 0; bool quoted = false, escaped = false;
+    for (char value : text) {
+        if (quoted) {
+            if (escaped) escaped = false;
+            else if (value == '\\') escaped = true;
+            else if (value == '"') quoted = false;
+        } else if (value == '"') quoted = true;
+        else if (value == '{' || value == '[') {
+            if (++depth > 64) throw RedDBError(ErrorCode::Protocol, "JSON nesting exceeds topology limit");
+        } else if (value == '}' || value == ']') {
+            if (--depth < 0) throw RedDBError(ErrorCode::Protocol, "invalid topology JSON");
+        }
+    }
+    Parser parser(text); JsonValue result;
+    if (quoted || depth != 0 || !parser.parse(result)) throw RedDBError(ErrorCode::Protocol, "invalid topology JSON");
+    parser.skip_ws();
+    if (!parser.eof()) throw RedDBError(ErrorCode::Protocol, "invalid trailing topology JSON");
+    return result;
+}
+
 namespace sql {
 
 bool is_ident_char(char c) {

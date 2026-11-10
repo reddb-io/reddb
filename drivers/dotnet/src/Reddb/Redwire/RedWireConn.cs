@@ -349,7 +349,8 @@ public sealed class RedWireConn : IConn, ITopologySource
 
     public async ValueTask<ReadOnlyMemory<byte>> QueryAsync(string sql, CancellationToken cancellationToken = default)
     {
-        return await SendQueryAsync(Frame.Kind.Query, Encoding.UTF8.GetBytes(sql), cancellationToken).ConfigureAwait(false);
+        return await SendQueryAsync(SupportsParams ? Frame.Kind.QueryWithParams : Frame.Kind.Query,
+            SupportsParams ? ValueCodec.EncodeQueryWithParams(sql, []) : Encoding.UTF8.GetBytes(sql), cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<ReadOnlyMemory<byte>> QueryAsync(string sql, params object?[] args)

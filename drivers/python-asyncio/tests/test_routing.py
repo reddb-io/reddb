@@ -35,7 +35,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
             async def query(self, sql, params=None):
                 calls.append((self.address, sql))
-                if sql == "UPDATE lost":
+                if sql == "UPDATE lost" or "effectful" in sql:
                     raise OSError("lost commit reply")
                 return self.address
 
@@ -66,9 +66,38 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(OSError):
             await client.query("UPDATE lost")
         self.assertEqual(sum(sql == "UPDATE lost" for _, sql in calls), 1)
+        before = len(calls)
+        with self.assertRaises(OSError):
+            await client.query_with_options('SELECT "effectful"()', {"consistency": "local"})
+        self.assertEqual(calls[before:], [(advertised, 'SELECT "effectful"()')])
         await client.close()
         with self.assertRaises(RedDBError):
             await client.query("SELECT 1")
+
+    async def test_watch_keeps_dedicated_primary_stream_and_closes_it(self):
+        streams = []
+        class Transport:
+            def __init__(self, address):
+                self.address, self.closed = address, False
+            async def topology(self, protocol): return None
+            async def ping(self): pass
+            async def close(self): self.closed = True
+            async def kv_watch(self, collection, key, **options):
+                streams.append(self)
+                yield {"key": key, "address": self.address}
+        async def dial(address): return Transport(address)
+        primary = "http://primary:5000"
+        client = await RoutingClient(primary, await dial(primary), dial, "http").initialize()
+        events = [event async for event in client.kv_watch("kv", "key")]
+        self.assertEqual(events, [{"key": "key", "address": primary}])
+        self.assertTrue(streams[0].closed)
+        self.assertFalse(client.streams)
+        await client.close()
+
+    def test_shared_sql_policy(self):
+        fixtures = json.loads((Path(__file__).parents[3] / "testdata/conformance/topology/sql-policy.json").read_text())
+        for case in fixtures:
+            self.assertEqual(sql_policy(case["sql"])[1], case["replica_read"], case["sql"])
 
     def test_sql_sessions(self):
         self.assertEqual(sql_policy("SET search_path = tenant")[0], "session")

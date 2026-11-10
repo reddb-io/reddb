@@ -347,7 +347,7 @@ class RedwireConnTest {
     }
 
     @Test
-    fun queryWithEmptyParamsUsesLegacyQueryFrame() = runBlocking {
+    fun queryWithEmptyParamsUsesFullResultFrame() = runBlocking {
         withTimeout(5_000) {
             val p = Pipes()
             coroutineScope {
@@ -368,8 +368,8 @@ class RedwireConnTest {
                     writeServerFrame(p.serverWrite, MessageKind.AuthOk, resp.correlationId, mapper.writeValueAsBytes(ok))
 
                     val q = readClientFrame(p.serverRead)
-                    assertEquals(MessageKind.Query, q.kind)
-                    assertEquals("SELECT 1", String(q.payload, StandardCharsets.UTF_8))
+                    assertEquals(MessageKind.QueryWithParams, q.kind)
+                    assertArrayEquals(dev.reddb.redwire.ValueCodec.encodeQueryWithParams("SELECT 1", emptyArray()), q.payload)
                     writeServerFrame(p.serverWrite, MessageKind.Result, q.correlationId, "{}".toByteArray(StandardCharsets.UTF_8))
 
                     readClientFrame(p.serverRead)

@@ -121,8 +121,10 @@ def sql_tokens(sql: str) -> list[str] | None:
                         break
             else:
                 return None
-            tokens.append("#value")
+            tokens.append("#value" if quote == "'" else "#identifier")
         else:
+            if ord(sql[index]) > 127:
+                return None
             word = re.match(r"[A-Za-z_][A-Za-z_0-9]*", sql[index:])
             token = word[0] if word else sql[index]
             tokens.append(token.upper())
@@ -146,13 +148,14 @@ def sql_policy(sql: str) -> tuple[str, bool]:
     if first in ("SET", "RESET", "USE", "PREPARE", "DEALLOCATE", "DECLARE", "LISTEN"):
         return "session", False
     forbidden = {"INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "INTO",
-                 "FOR", "LOCK", "CALL", "EXECUTE", "SET", "QUEUE", "COPY"}
+                 "FOR", "LOCK", "CALL", "EXECUTE", "SET", "QUEUE", "COPY", "[", "]"}
     functions = {"COUNT", "SUM", "MIN", "MAX", "AVG", "LOWER", "UPPER", "LENGTH",
                  "COALESCE", "ABS", "ROUND", "CAST", "EXISTS", "IN", "AS", "FROM",
                  "WHERE", "AND", "OR", "NOT", "SELECT"}
     read = first == "SELECT" and not forbidden.intersection(tokens)
     read = read and all(not (index + 1 < len(tokens) and tokens[index + 1] == "("
-                            and re.match(r"^[A-Z_]", token) and token not in functions)
+                            and (token == "#identifier" or re.match(r"^[A-Z_]", token))
+                            and token not in functions)
                         for index, token in enumerate(tokens))
     return "primary", read
 
@@ -178,6 +181,7 @@ class RoutingClient:
         self.closed = False
         self.force_primary = force_primary
         self.lock = asyncio.Lock()
+        self.streams: set[Any] = set()
 
     async def initialize(self) -> "RoutingClient":
         await self.refresh()
@@ -195,15 +199,21 @@ class RoutingClient:
         return self.clients[address]
 
     async def refresh(self) -> None:
+        await self._refresh_membership()
+
+    async def _refresh_membership(self) -> None:
         if self.pinned or self.closed:
             return
         self.refresh_at = time.monotonic() + 30
+        deadline = time.monotonic() + 5
         candidates = list(dict.fromkeys([self.primary, self.seed] + [r["addr"] for r in self.replicas]))
         for address in candidates:
+            if time.monotonic() >= deadline:
+                break
             control = None
             try:
-                control = await asyncio.wait_for(self.dial(address), 5)
-                topology = await asyncio.wait_for(control.topology(self.protocol), 5)
+                control = await asyncio.wait_for(self.dial(address), max(0.001, deadline - time.monotonic()))
+                topology = await asyncio.wait_for(control.topology(self.protocol), max(0.001, deadline - time.monotonic()))
                 if not topology or topology.get("version") != 1:
                     continue
                 primary = endpoint(topology.get("primary", {}).get("addr"), self.protocol)
@@ -211,14 +221,16 @@ class RoutingClient:
                     continue
                 if primary not in candidates and len(candidates) < 258:
                     candidates.append(primary)
-                await self._endpoint(primary)
+                await asyncio.wait_for(self._endpoint(primary), max(0.001, deadline - time.monotonic()))
                 replicas = []
                 for replica in topology.get("replicas", [])[:256]:
+                    if time.monotonic() >= deadline:
+                        break
                     target = endpoint(replica.get("addr"), self.protocol)
                     if not target or target == primary or not replica.get("healthy") or replica.get("rebootstrapping"):
                         continue
                     try:
-                        await self._endpoint(target)
+                        await asyncio.wait_for(self._endpoint(target), max(0.001, deadline - time.monotonic()))
                         replicas.append({**replica, "addr": target})
                     except Exception:
                         continue
@@ -229,7 +241,7 @@ class RoutingClient:
                 if primary == address:
                     return
             except Exception as error:
-                if getattr(error, "code", "") in {"AUTH_REFUSED", "HTTP_401"}:
+                if getattr(error, "code", "") in {"AUTH_REFUSED", "HTTP_401"} or getattr(error, "status", None) in {401, 403}:
                     raise
             finally:
                 if control is not None:
@@ -305,8 +317,39 @@ class RoutingClient:
     async def ping(self) -> Any:
         return await self._call("ping")
 
+    def kv_watch(self, *args: Any, **options: Any) -> Any:
+        return self._watch("kv_watch", *args, **options)
+
+    def kv_watch_prefix(self, *args: Any, **options: Any) -> Any:
+        return self._watch("kv_watch_prefix", *args, **options)
+
+    async def _watch(self, method: str, *args: Any, **options: Any) -> Any:
+        if self.protocol not in {"http", "https"}:
+            raise RedDBError("KV watch requires HTTP", code="UNSUPPORTED_TRANSPORT")
+        async with self.lock:
+            if self.closed or self.broken:
+                raise RedDBError("connection is closed", code="CONNECTION_CLOSED")
+            if not self.pinned and time.monotonic() >= self.refresh_at:
+                await self.refresh()
+            stream = await asyncio.wait_for(self.dial(self.pinned or self.primary), 5)
+            self.streams.add(stream)
+        try:
+            method_impl = getattr(stream, method, None)
+            if method_impl is None:
+                raise RedDBError("watch is unavailable", code="UNSUPPORTED_TRANSPORT")
+            async for event in method_impl(*args, **options):
+                yield event
+        except BaseException as error:
+            if network_error(error):
+                self.refresh_at = 0
+            raise
+        finally:
+            self.streams.discard(stream)
+            await stream.close()
+
     async def close(self) -> None:
         async with self.lock:
             self.closed = True
             clients, self.clients = self.clients, {}
-            await asyncio.gather(*(client.close() for client in clients.values()))
+            streams, self.streams = self.streams, set()
+            await asyncio.gather(*(client.close() for client in [*clients.values(), *streams]))

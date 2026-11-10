@@ -4,6 +4,11 @@
  * Uses Bun's native TCP socket and speaks the RedWire v1 frame protocol.
  */
 
+import { RoutingClient } from '@reddb-io/client/routing'
+import { decodeTopology } from '@reddb-io/client/topology'
+
+export type ReadOptions = { consistency: 'local' | 'strong' | 'bounded_staleness'; maxLagMs?: number }
+
 const MAGIC = 0xfe
 const SUPPORTED_VERSION = 0x01
 const FRAME_HEADER_SIZE = 16
@@ -73,6 +78,7 @@ export class RedDBConnection {
   private failure: Error | null = null
   private nextCorr = 1n
   private serverFeatures = 0
+  private routing?: RoutingClient
 
   constructor(socket: any) {
     this.socket = socket
@@ -187,11 +193,11 @@ export class RedDBConnection {
     })
   }
 
-  async _handshake() {
+  async _handshake(token?: string) {
     this.socket.write(Buffer.from([MAGIC, SUPPORTED_VERSION]))
     const hello = jsonBytes({
       versions: [SUPPORTED_VERSION],
-      auth_methods: ['anonymous', 'bearer'],
+      auth_methods: token ? ['bearer'] : ['anonymous'],
       features: 0,
       client_name: 'reddb-bun/1.0',
     })
@@ -201,11 +207,11 @@ export class RedDBConnection {
     }
     const parsedAck = jsonOf(ack.payload) ?? {}
     const chosenAuth = parsedAck.auth
-    if (chosenAuth !== 'anonymous') {
+    if (chosenAuth !== (token ? 'bearer' : 'anonymous')) {
       throw new RedDBError('AUTH_REFUSED', `unsupported auth method: ${chosenAuth}`)
     }
 
-    const authOk = await this._send(MSG_AUTH_RESPONSE, Buffer.alloc(0))
+    const authOk = await this._send(MSG_AUTH_RESPONSE, token ? jsonBytes({ token }) : Buffer.alloc(0))
     if (authOk.type !== MSG_AUTH_OK) {
       throw new RedDBError('PROTOCOL', `expected AuthOk, got ${authOk.type}`)
     }
@@ -217,10 +223,53 @@ export class RedDBConnection {
     return (this.serverFeatures & FEATURE_PARAMS) === FEATURE_PARAMS
   }
 
+  async queryWithOptions(sql: string, options: ReadOptions, ...params: QueryParam[]): Promise<string> {
+    if (!this.routing) throw new RedDBError('CONSISTENCY_UNSUPPORTED', 'use connect() for routed reads')
+    return this.routing.queryWithOptions(sql, options, normalizeQueryParams(params))
+  }
+
+  static async routed(address: string, initial: RedDBConnection, tls?: { ca?: string; rejectUnauthorized: boolean }, token?: string) {
+    const protocol = tls ? 'reds' : 'red'
+    const seed = new URL(`${protocol}://${address}`).href.replace(/\/$/, '')
+    const adapt = (raw: RedDBConnection) => ({
+      binaryQueryParams: true,
+      async call(method: string, params: any = {}) {
+        if (method === 'topology') return raw.topologyFor(protocol)
+        if (method === 'health') { await raw.query('SELECT 1'); return {} }
+        if (method === 'query') return raw.query(params.sql, params.params ?? [])
+        if (method === 'bulkInsert') return raw.bulkInsert(params.collection, params.payloads)
+        throw new RedDBError('UNSUPPORTED_OPERATION', method)
+      },
+      async close() { raw.close() },
+    })
+    const router = new RoutingClient(seed, adapt(initial), async (endpoint: string, signal: AbortSignal) => {
+      const uri = new URL(endpoint)
+      const pending = connectDirect(`${uri.hostname}:${uri.port}`, tls, token, signal)
+      const raw = await pending
+      if (signal.aborted) { raw.close(); throw new RedDBError('CLOSED', 'connection canceled') }
+      return adapt(raw)
+    }, protocol)
+    try {
+      await router.initialize()
+      const facade = new RedDBConnection(null)
+      facade.routing = router
+      facade.serverFeatures = initial.serverFeatures
+      return facade
+    } catch (error) { await router.close(); throw error }
+  }
+
+  private async topologyFor(protocol: string) {
+    if (!(this.serverFeatures & 2)) return null
+    const response = await this._send(0x32, Buffer.from(protocol))
+    if (response.type !== MSG_RESULT) throw new RedDBError('PROTOCOL', 'expected topology Result')
+    return decodeTopology(response.payload)
+  }
+
   async query(sql: string, params: QueryParam[]): Promise<string>
   async query(sql: string, ...params: QueryParam[]): Promise<string>
   async query(sql: string, ...params: unknown[]): Promise<string> {
     const wireParams = normalizeQueryParams(params)
+    if (this.routing) return this.routing.call('query', { sql, params: wireParams })
     const hasParams = wireParams.length > 0
     const fullResult = this.supportsParams()
     if (hasParams && !fullResult) {
@@ -263,6 +312,7 @@ export class RedDBConnection {
   }
 
   async bulkInsert(collection: string, jsonPayloads: string[]): Promise<number> {
+    if (this.routing) return this.routing.call('bulkInsert', { collection, payloads: jsonPayloads })
     const payloads = jsonPayloads.map((p) => JSON.parse(p))
     const resp = await this._send(
       MSG_BULK_INSERT,
@@ -278,6 +328,7 @@ export class RedDBConnection {
   }
 
   close() {
+    if (this.routing) { void this.routing.close(); return }
     if (this.failure) return
     try {
       this.socket.write(encodeFrame(MSG_BYE, this.nextCorr, Buffer.alloc(0)))
@@ -288,8 +339,8 @@ export class RedDBConnection {
   }
 }
 
-export async function connect(addr: string): Promise<RedDBConnection> {
-  return connectWithOptions(addr)
+export async function connect(addr: string, opts: { token?: string } = {}): Promise<RedDBConnection> {
+  return RedDBConnection.routed(addr, await connectDirect(addr, undefined, opts.token), undefined, opts.token)
 }
 
 /**
@@ -299,17 +350,20 @@ export async function connect(addr: string): Promise<RedDBConnection> {
  */
 export async function connectTls(
   addr: string,
-  opts: { ca?: string; rejectUnauthorized?: boolean } = {},
+  opts: { ca?: string; rejectUnauthorized?: boolean; token?: string } = {},
 ): Promise<RedDBConnection> {
-  return connectWithOptions(addr, {
+  const tls = {
     ca: opts.ca,
     rejectUnauthorized: opts.rejectUnauthorized ?? true,
-  })
+  }
+  return RedDBConnection.routed(addr, await connectDirect(addr, tls, opts.token), tls, opts.token)
 }
 
-async function connectWithOptions(addr: string, tls?: { ca?: string; rejectUnauthorized: boolean }) {
-  const [host, portStr] = addr.split(':')
-  const port = parseInt(portStr, 10)
+async function connectDirect(addr: string, tls?: { ca?: string; rejectUnauthorized: boolean }, token?: string, signal?: AbortSignal) {
+  if (signal?.aborted) throw new RedDBError('CLOSED', 'connection canceled')
+  const uri = new URL(`red://${addr}`)
+  const host = uri.hostname.replace(/^\[|\]$/g, '')
+  const port = Number(uri.port)
   let connRef: RedDBConnection | null = null
   let earlyFailure: Error | null = null
   const fail = (error: Error) => {
@@ -337,8 +391,12 @@ async function connectWithOptions(addr: string, tls?: { ca?: string; rejectUnaut
 
   connRef = new RedDBConnection(socket)
   if (earlyFailure) connRef._onError(earlyFailure)
-  try { await connRef._handshake() }
+  const abort = () => connRef?._onError(new RedDBError('CLOSED', 'connection canceled'))
+  signal?.addEventListener('abort', abort, { once: true })
+  if (signal?.aborted) abort()
+  try { await connRef._handshake(token) }
   catch (error) { connRef._onError(error as Error); throw error }
+  finally { signal?.removeEventListener('abort', abort) }
   return connRef
 }
 

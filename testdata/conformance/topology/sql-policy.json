@@ -1,0 +1,62 @@
+[
+  {
+    "sql": "SELECT 1",
+    "replica_read": true
+  },
+  {
+    "sql": "SELECT count(*) FROM users",
+    "replica_read": true
+  },
+  {
+    "sql": "SELECT name FROM users WHERE id = $1;",
+    "replica_read": true
+  },
+  {
+    "sql": "SELECT \"name\" FROM users",
+    "replica_read": true
+  },
+  {
+    "sql": "SELECT effectful()",
+    "replica_read": false
+  },
+  {
+    "sql": "SELECT \"effectful\"()",
+    "replica_read": false
+  },
+  {
+    "sql": "SELECT `effectful`()",
+    "replica_read": false
+  },
+  {
+    "sql": "SELECT [effectful]()",
+    "replica_read": false
+  },
+  {
+    "sql": "SELECT 1 FOR UPDATE",
+    "replica_read": false
+  },
+  {
+    "sql": "SELECT 1; DELETE FROM users",
+    "replica_read": false
+  },
+  {
+    "sql": "WITH q AS (SELECT 1) SELECT * FROM q",
+    "replica_read": false
+  },
+  {
+    "sql": "SELECT * INTO users FROM source",
+    "replica_read": false
+  },
+  {
+    "sql": "SELECT 'safe' AS name",
+    "replica_read": true
+  },
+  {
+    "sql": "SELECT \u529f\u80fd()",
+    "replica_read": false
+  },
+  {
+    "sql": "SELECT \"\u529f\u80fd\"()",
+    "replica_read": false
+  }
+]

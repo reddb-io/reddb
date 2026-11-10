@@ -101,6 +101,7 @@ function sqlTokens(sql) {
       tokens.push(quote === "'" ? '#value' : '#identifier')
       continue
     }
+    if (char.charCodeAt(0) > 127) return null
     const word = /^[A-Za-z_][A-Za-z_0-9]*/.exec(tail)
     if (word) { tokens.push(word[0].toUpperCase()); index += word[0].length }
     else { tokens.push(char); index++ }
@@ -113,7 +114,7 @@ export function isReplicaQuery(sql) {
   const tokens = sqlTokens(sql)
   if (!tokens || tokens[0] !== 'SELECT') return false
   const forbidden = new Set([';', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP',
-    'INTO', 'FOR', 'LOCK', 'CALL', 'EXECUTE', 'SET', 'QUEUE', 'COPY'])
+    'INTO', 'FOR', 'LOCK', 'CALL', 'EXECUTE', 'SET', 'QUEUE', 'COPY', '[', ']'])
   const functions = new Set(['COUNT', 'SUM', 'MIN', 'MAX', 'AVG', 'LOWER', 'UPPER',
     'LENGTH', 'COALESCE', 'ABS', 'ROUND', 'CAST', 'IN', 'EXISTS'])
   for (let token = 0; token < tokens.length; token++) {

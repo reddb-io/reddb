@@ -13,6 +13,8 @@ public class RoutingTests
         while (root != null && !File.Exists(Path.Combine(root.FullName, "testdata/conformance/topology/manifest.json"))) root = root.Parent;
         Assert.NotNull(root);
         JsonObject manifest = JsonNode.Parse(File.ReadAllText(Path.Combine(root!.FullName, "testdata/conformance/topology/manifest.json")))!.AsObject();
+        foreach (JsonNode? policy in JsonNode.Parse(File.ReadAllText(Path.Combine(root.FullName, "testdata/conformance/topology/sql-policy.json")))!.AsArray())
+            Assert.Equal(policy!["replica_read"]!.GetValue<bool>(), RoutingSql.Policy(policy["sql"]!.GetValue<string>()).Item2);
         foreach (JsonNode? fixture in manifest["cases"]!.AsArray())
         {
             byte[] bytes = Convert.FromHexString(fixture!["hex"]!.GetValue<string>());
@@ -29,6 +31,7 @@ public class RoutingTests
         {
             calls.Add((address, sql));
             if (sql == "UPDATE lost") throw new IOException("lost commit reply");
+            if (sql.Contains("effectful")) throw new RedDBException.ProtocolError("HTTP I/O", new IOException("lost reply"));
             return ValueTask.FromResult<ReadOnlyMemory<byte>>(Encoding.UTF8.GetBytes(address));
         }
         public ValueTask<ReadOnlyMemory<byte>> QueryAsync(string sql, params object?[] args) => QueryAsync(sql);
@@ -68,6 +71,10 @@ public class RoutingTests
         Assert.Equal(active, calls[^1].Address);
         await Assert.ThrowsAsync<IOException>(async () => await client.QueryAsync("UPDATE lost"));
         Assert.Single(calls.Where(c => c.Sql == "UPDATE lost"));
+        int before = calls.Count;
+        await Assert.ThrowsAsync<RedDBException.ProtocolError>(async () => await client.QueryWithOptionsAsync("SELECT \"effectful\"()", new(ReadConsistency.Local)));
+        Assert.Equal(before + 1, calls.Count);
+        Assert.Equal(active, calls[^1].Address);
         await client.DisposeAsync();
         await Assert.ThrowsAsync<IOException>(async () => await client.QueryAsync("SELECT 1"));
     }
