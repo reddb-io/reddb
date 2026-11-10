@@ -806,6 +806,34 @@ fn blob_result_cache_promotes_volatile_result_after_writes_stop() {
 }
 
 #[test]
+fn blob_result_cache_promotion_preserves_remaining_ttl() {
+    let rt = runtime();
+    exec(
+        &rt,
+        "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
+    );
+    exec(&rt, "SET CONFIG runtime.result_cache.ttl_seconds = 5");
+    exec(&rt, "CREATE TABLE items (id INT)");
+    exec(&rt, "INSERT INTO items (id) VALUES (1)");
+    let query = "SELECT id FROM items ORDER BY id";
+    assert_eq!(selected_ids(&rt, query), vec![1]);
+    exec(&rt, "INSERT INTO items (id) VALUES (2)");
+    assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let before = rt.result_blob_cache().stats().insertions();
+    assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+    assert_eq!(rt.result_blob_cache().stats().insertions(), before + 1);
+    std::thread::sleep(std::time::Duration::from_millis(4100));
+    let before = rt.result_cache_metrics();
+    assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+    assert_eq!(
+        rt.result_cache_metrics().1 - before.1,
+        1,
+        "promotion must not reset the TTL of the cached result"
+    );
+}
+
+#[test]
 fn blob_result_cache_invalidates_entries_evicted_from_tracking() {
     let rt = runtime();
     exec(
