@@ -252,19 +252,46 @@ fn prepared_registry_evicts_the_oldest_entry_at_capacity() {
 fn request_commit_policy_uses_global_default_and_honors_override() {
     let _env = env_lock().lock().expect("environment lock");
     let _global_policy = EnvGuard::set("RED_PRIMARY_COMMIT_POLICY", "ack_n=1");
-    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    let runtime = RedDBRuntime::with_options(
+        reddb_server::RedDBOptions::in_memory()
+            .with_replication(reddb_server::replication::ReplicationConfig::primary()),
+    )
+    .expect("runtime");
     runtime
         .execute_query("CREATE TABLE request_commit_policy (id INTEGER)")
         .expect("create table");
     let registry = PreparedRegistry::new();
     let executor = QueryRequestExecutor::new(&runtime, &registry);
 
-    executor
-        .execute(QueryRequest::sql(
-            "INSERT INTO request_commit_policy (id) VALUES ($1)",
-            vec![ParamValue::Int64(1)],
-        ))
-        .expect("omitted policy uses the server default");
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let lsn = runtime.primary_logical_head_lsn();
+                if lsn > 0 {
+                    runtime
+                        .db()
+                        .replication
+                        .as_ref()
+                        .unwrap()
+                        .commit_waiter
+                        .record_replica_ack("replica-a", lsn);
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "write did not publish"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+        executor
+            .execute(QueryRequest::sql(
+                "INSERT INTO request_commit_policy (id) VALUES ($1)",
+                vec![ParamValue::Int64(1)],
+            ))
+            .expect("omitted policy waits for the server default");
+    });
 
     let error = executor
         .execute(

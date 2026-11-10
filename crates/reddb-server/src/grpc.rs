@@ -769,7 +769,7 @@ mod grpc_query_value_tests {
         let _env = EnvGuard::set(&[
             ("RED_PRIMARY_COMMIT_POLICY", "ack_n=1"),
             ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
-            ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+            ("RED_COMMIT_FAIL_ON_TIMEOUT", "false"),
         ]);
         let data_path = temp_data_path("grpc_ack_n_timeout");
         cleanup(&data_path);
@@ -794,7 +794,7 @@ mod grpc_query_value_tests {
         assert_eq!(err.code(), tonic::Code::DeadlineExceeded);
         assert!(
             err.message().contains("commit policy timed out")
-                && err.message().contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+                && err.message().contains("local commit is durable"),
             "error should identify commit policy timeout, got {err:?}"
         );
         assert!(

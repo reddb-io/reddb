@@ -350,7 +350,7 @@ fn http_mutation_ack_n_commit_policy_fails_closed_without_replica_ack() {
     let _env = EnvGuard::set(&[
         ("RED_PRIMARY_COMMIT_POLICY", "ack_n=1"),
         ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
-        ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+        ("RED_COMMIT_FAIL_ON_TIMEOUT", "false"),
     ]);
     let data_path = temp_data_path("primary_replica_http_ack_n_timeout");
 
@@ -368,7 +368,7 @@ fn http_mutation_ack_n_commit_policy_fails_closed_without_replica_ack() {
         "ack_n without replica ack must fail closed, body={body}"
     );
     assert!(
-        body.contains("commit policy timed out") && body.contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+        body.contains("commit policy timed out") && body.contains("local commit is durable"),
         "error body should identify commit policy timeout, got {body}"
     );
     assert!(
@@ -383,7 +383,7 @@ fn http_request_commit_policy_can_strengthen_and_wait_for_ack() {
     let _env = EnvGuard::set(&[
         ("RED_PRIMARY_COMMIT_POLICY", "local"),
         ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
-        ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+        ("RED_COMMIT_FAIL_ON_TIMEOUT", "false"),
     ]);
     let data_path = temp_data_path("primary_replica_http_request_ack_n_timeout");
 
@@ -402,7 +402,7 @@ fn http_request_commit_policy_can_strengthen_and_wait_for_ack() {
         "request ack_n without replica ack must fail closed, body={body}"
     );
     assert!(
-        body.contains("commit policy timed out") && body.contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+        body.contains("commit policy timed out") && body.contains("local commit is durable"),
         "error body should identify request commit wait, got {body}"
     );
 }

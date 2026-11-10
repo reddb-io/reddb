@@ -375,6 +375,7 @@ pub(crate) fn map_runtime_error(err: &crate::api::RedDBError) -> (u16, String) {
     let status = match err {
         NotFound(_) => 404,
         ReadOnly(_) => 403,
+        CommitUncertain { .. } => 504,
         // Issue #524 — chain-INSERT conflict surfaces as a 409 so a polite
         // client can retry against the advanced tip. The body still carries
         // the marker so deeper handlers can parse the tip payload back out.

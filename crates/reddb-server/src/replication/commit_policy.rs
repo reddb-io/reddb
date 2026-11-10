@@ -16,8 +16,9 @@
 //! `Quorum` — commit returns after the configured `QuorumConfig`
 //! reaches its durable commit watermark.
 //!
-//! `RemoteWal` is parsed for observability but does not block the
-//! write path yet. The default remains `Local`.
+//! `RemoteWal` has no durable publication waiter yet and is rejected before
+//! mutation. Synchronous timeouts report an uncertain replica outcome after
+//! local commit; `RED_COMMIT_FAIL_ON_TIMEOUT` no longer weakens the policy.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CommitPolicy {
@@ -29,6 +30,15 @@ pub enum CommitPolicy {
 }
 
 impl CommitPolicy {
+    pub fn from_env_strict() -> Result<Self, String> {
+        match std::env::var("RED_PRIMARY_COMMIT_POLICY") {
+            Ok(raw) => Self::parse_strict(&raw)
+                .ok_or_else(|| format!("invalid RED_PRIMARY_COMMIT_POLICY: {raw}")),
+            Err(std::env::VarError::NotPresent) => Ok(Self::Local),
+            Err(_) => Err("RED_PRIMARY_COMMIT_POLICY must be valid UTF-8".into()),
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Local => "local",

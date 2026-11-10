@@ -203,6 +203,9 @@ impl GrpcRuntime {
 
 pub(crate) fn to_status(err: crate::api::RedDBError) -> Status {
     match err {
+        error @ crate::api::RedDBError::CommitUncertain { .. } => {
+            Status::deadline_exceeded(error.to_string())
+        }
         crate::api::RedDBError::Query(msg) if msg.starts_with("ask_primary_sync_unavailable:") => {
             Status::unavailable(msg)
         }

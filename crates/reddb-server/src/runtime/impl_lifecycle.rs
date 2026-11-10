@@ -446,6 +446,7 @@ impl RedDBRuntime {
                 pending_vault_writes: parking_lot::RwLock::new(HashMap::new()),
                 pending_store_wal_actions: parking_lot::RwLock::new(HashMap::new()),
                 pending_logical_records: parking_lot::Mutex::new(HashMap::new()),
+                pending_commit_policies: parking_lot::Mutex::new(HashMap::new()),
                 logical_publication: parking_lot::ReentrantMutex::new(()),
                 logical_allocated_lsn: std::sync::atomic::AtomicU64::new(0),
                 pending_claim_locks: parking_lot::RwLock::new(HashMap::new()),

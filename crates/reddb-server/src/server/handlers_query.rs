@@ -1904,6 +1904,7 @@ pub(crate) fn constant_time_str_eq(a: &str, b: &str) -> bool {
 pub(crate) fn ndjson_error_code(err: &crate::api::RedDBError) -> &'static str {
     use crate::api::RedDBError::*;
     match err {
+        CommitUncertain { .. } => "commit_uncertain",
         NotFound(_) => "not_found",
         ReadOnly(_) => "read_only",
         InvalidConfig(_) => "invalid_config",
