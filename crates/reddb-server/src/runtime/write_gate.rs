@@ -137,6 +137,7 @@ pub struct WriteGate {
     read_only: AtomicBool,
     role: ReplicationRole,
     lease: AtomicU8,
+    lease_deadline: parking_lot::RwLock<Option<std::time::Instant>>,
     /// Issue #519 — engine-managed graceful read-only triggered by
     /// `REDDB_BACKUP_PAUSE_ON_LAG_SECS` when WAL archive lag exceeds
     /// the threshold. Independent of `read_only` so the two precedences
@@ -183,6 +184,7 @@ impl WriteGate {
             read_only: AtomicBool::new(options.read_only),
             role: options.replication.role.clone(),
             lease: AtomicU8::new(LeaseGateState::NotRequired as u8),
+            lease_deadline: parking_lot::RwLock::new(None),
             auto_paused: AtomicBool::new(false),
             last_archive_at_ms: AtomicU64::new(0),
             pause_threshold_secs: AtomicU64::new(0),
@@ -315,7 +317,25 @@ impl WriteGate {
     /// Current writer-lease gate state. `NotRequired` for standalone,
     /// replica, and lease-disabled serverless instances.
     pub fn lease_state(&self) -> LeaseGateState {
-        LeaseGateState::from_u8(self.lease.load(Ordering::Acquire))
+        let state = LeaseGateState::from_u8(self.lease.load(Ordering::Acquire));
+        if state == LeaseGateState::Held
+            && !self
+                .lease_deadline
+                .read()
+                .is_some_and(|deadline| std::time::Instant::now() < deadline)
+        {
+            LeaseGateState::NotHeld
+        } else {
+            state
+        }
+    }
+
+    pub(crate) fn grant_lease_until(&self, deadline: std::time::Instant) -> LeaseGateState {
+        *self.lease_deadline.write() = Some(deadline);
+        LeaseGateState::from_u8(
+            self.lease
+                .swap(LeaseGateState::Held as u8, Ordering::AcqRel),
+        )
     }
 
     /// Issue #519 — install the archive-lag pause threshold and the
@@ -390,6 +410,12 @@ impl WriteGate {
     /// Returns the previous state so the caller can detect idempotent
     /// transitions and avoid spamming audit / metrics.
     pub(crate) fn set_lease_state(&self, state: LeaseGateState) -> LeaseGateState {
+        assert_ne!(
+            state,
+            LeaseGateState::Held,
+            "a held lease requires a deadline"
+        );
+        *self.lease_deadline.write() = None;
         LeaseGateState::from_u8(self.lease.swap(state as u8, Ordering::AcqRel))
     }
 
@@ -807,16 +833,37 @@ mod tests {
     #[test]
     fn lease_held_allows_writes_on_primary() {
         let g = gate(false, ReplicationRole::Primary);
-        g.set_lease_state(LeaseGateState::Held);
+        g.grant_lease_until(std::time::Instant::now() + std::time::Duration::from_secs(60));
         assert!(g.check(WriteKind::Dml).is_ok());
         assert!(!g.is_read_only());
+    }
+
+    #[test]
+    fn expired_lease_rejects_every_write_kind_without_refresh() {
+        let g = gate(false, ReplicationRole::Primary);
+        g.grant_lease_until(std::time::Instant::now());
+        for kind in [
+            WriteKind::Dml,
+            WriteKind::Ddl,
+            WriteKind::IndexBuild,
+            WriteKind::Maintenance,
+            WriteKind::Backup,
+            WriteKind::Serverless,
+        ] {
+            assert!(
+                g.check_consent(kind).is_err(),
+                "expired lease admitted {kind:?}"
+            );
+        }
+        assert_eq!(g.lease_state(), LeaseGateState::NotHeld);
+        assert!(g.is_read_only());
     }
 
     #[test]
     fn lease_state_transitions_return_previous() {
         let g = gate(false, ReplicationRole::Primary);
         assert_eq!(
-            g.set_lease_state(LeaseGateState::Held),
+            g.grant_lease_until(std::time::Instant::now() + std::time::Duration::from_secs(60)),
             LeaseGateState::NotRequired
         );
         assert_eq!(
