@@ -185,13 +185,12 @@ plugins:
         # --- pre_merge: drift-guard (HARD GATE) ------------------------
         # Reject the merge BEFORE CI burns a round on it. Checks:
         #   1. Scope drift    — > 25 files changed.
-        #   2. Per-file drift — single file +> 600 lines.
-        #   3. Protected paths — docs/conformance, contract matrix,
+        #   2. Protected paths — docs/conformance, contract matrix,
         #                        .red/adr/. CODEOWNERS already enforces
         #                        this; this is the local fast-fail.
-        #   4. New `.unwrap()` in non-allowlisted files (ratchet, ADR 0056).
-        #   5. New Cargo dep without `# track: issue-XXXX` comment.
-        # Thresholds are conservative on purpose — see ADR 0062 for
+        #   3. New `.unwrap()` in non-allowlisted files (ratchet, ADR 0056).
+        #   4. New Cargo dep without `# track: issue-XXXX` comment.
+        # The scope threshold is conservative on purpose — see ADR 0062 for
         # the rationale and the tuning policy.
         pre_merge: scripts/afk-pre-merge.sh
 

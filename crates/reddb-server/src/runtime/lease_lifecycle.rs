@@ -19,6 +19,7 @@
 //!   * Drive transitions; assert gate state + audit lines together.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::api::{RedDBError, RedDBResult};
 use crate::replication::lease::{LeaseError, LeaseStore, WriterLease};
@@ -49,6 +50,7 @@ pub struct LeaseLifecycle {
     database_key: String,
     ttl_ms: u64,
     current: Mutex<Option<WriterLease>>,
+    transition: Mutex<()>,
 }
 
 impl LeaseLifecycle {
@@ -62,6 +64,7 @@ impl LeaseLifecycle {
         database_key: String,
         ttl_ms: u64,
     ) -> Self {
+        write_gate.set_lease_state(LeaseGateState::NotHeld);
         Self {
             store,
             write_gate,
@@ -72,6 +75,7 @@ impl LeaseLifecycle {
             database_key,
             ttl_ms,
             current: Mutex::new(None),
+            transition: Mutex::new(()),
         }
     }
 
@@ -87,6 +91,10 @@ impl LeaseLifecycle {
         self.ttl_ms
     }
 
+    pub(crate) fn refresh_delay(&self) -> Duration {
+        self.write_gate.lease_remaining() / 3
+    }
+
     pub fn current_lease(&self) -> Option<WriterLease> {
         self.current.lock().expect("poisoned lease mutex").clone()
     }
@@ -94,6 +102,9 @@ impl LeaseLifecycle {
     /// Acquire the writer lease and flip the gate to `Held`. Audit
     /// line records the outcome (ok / err) either way.
     pub fn try_acquire(&self) -> RedDBResult<()> {
+        let _transition = self.transition.lock().expect("poisoned lease transition");
+        self.write_gate.set_lease_state(LeaseGateState::NotHeld);
+        let deadline = self.request_deadline()?;
         let term = (self.current_term)();
         match self.store.try_acquire_for_term(
             &self.database_key,
@@ -102,8 +113,14 @@ impl LeaseLifecycle {
             term,
         ) {
             Ok(lease) => {
+                if Instant::now() >= deadline {
+                    self.on_refresh_lost("acquire response arrived after the local lease deadline");
+                    return Err(RedDBError::ReadOnly(
+                        "writer lease expired during acquire".into(),
+                    ));
+                }
                 *self.current.lock().expect("poisoned lease mutex") = Some(lease.clone());
-                self.write_gate.set_lease_state(LeaseGateState::Held);
+                self.write_gate.grant_lease_until(deadline);
                 self.audit_log.record_event(
                     AuditEvent::builder("lease/acquire")
                         .principal(self.holder_id.clone())
@@ -144,6 +161,8 @@ impl LeaseLifecycle {
     /// — re-acquiring after a loss could race a freshly promoted
     /// writer.
     pub fn refresh(&self) -> RedDBResult<()> {
+        let _transition = self.transition.lock().expect("poisoned lease transition");
+        let deadline = self.request_deadline()?;
         let snapshot = match self.current.lock().expect("poisoned lease mutex").clone() {
             Some(lease) => lease,
             None => {
@@ -152,10 +171,23 @@ impl LeaseLifecycle {
                 ));
             }
         };
+        if self.write_gate.lease_state() != LeaseGateState::Held {
+            self.on_refresh_lost("local writer lease deadline expired");
+            return Err(RedDBError::ReadOnly(
+                "writer lease expired before refresh".into(),
+            ));
+        }
         let term = (self.current_term)();
         match self.store.refresh_for_term(&snapshot, self.ttl_ms, term) {
             Ok(updated) => {
+                if Instant::now() >= deadline {
+                    self.on_refresh_lost("refresh response arrived after the local lease deadline");
+                    return Err(RedDBError::ReadOnly(
+                        "writer lease expired during refresh".into(),
+                    ));
+                }
                 *self.current.lock().expect("poisoned lease mutex") = Some(updated);
+                self.write_gate.grant_lease_until(deadline);
                 Ok(())
             }
             Err(err) => {
@@ -169,6 +201,9 @@ impl LeaseLifecycle {
     /// effort: a backend failure is logged but does not propagate
     /// — shutdown should not block on a remote release.
     pub fn release(&self) -> RedDBResult<()> {
+        let _transition = self.transition.lock().expect("poisoned lease transition");
+        // Revoke local admission before a potentially slow backend release.
+        self.write_gate.set_lease_state(LeaseGateState::NotHeld);
         let snapshot = match self.current.lock().expect("poisoned lease mutex").take() {
             Some(lease) => lease,
             None => {
@@ -212,7 +247,24 @@ impl LeaseLifecycle {
         }
     }
 
-    fn on_refresh_lost(&self, err: LeaseError) {
+    fn request_deadline(&self) -> RedDBResult<Instant> {
+        // Charge all backend latency against the lease, including a delayed
+        // response; using response time would incorrectly extend ownership.
+        // The backend expiry is truncated to whole wall-clock milliseconds.
+        // Subtract its quantization so our precise clock never grants longer.
+        let ttl = self
+            .ttl_ms
+            .checked_sub(1)
+            .filter(|ttl| *ttl > 0)
+            .ok_or_else(|| {
+                RedDBError::InvalidOperation("writer lease TTL must exceed 1 ms".into())
+            })?;
+        Instant::now()
+            .checked_add(Duration::from_millis(ttl))
+            .ok_or_else(|| RedDBError::InvalidOperation("writer lease TTL is too large".into()))
+    }
+
+    fn on_refresh_lost(&self, err: impl std::fmt::Display) {
         tracing::error!(
             target: "reddb::serverless::lease",
             error = %err,
@@ -384,6 +436,115 @@ mod tests {
     }
 
     #[test]
+    fn successor_acquire_cannot_leave_expired_predecessor_writable() {
+        let (mut lifecycle, gate, _audit, drain, prefix) = build_lifecycle("expiry");
+        Arc::get_mut(&mut lifecycle)
+            .expect("invariant: test owns the only lifecycle reference")
+            .ttl_ms = 1_000;
+        lifecycle
+            .try_acquire()
+            .expect("first writer acquires lease");
+        let first = lifecycle
+            .current_lease()
+            .expect("acquire publishes the current lease");
+        let remaining = first
+            .expires_at_ms
+            .saturating_sub(crate::utils::now_unix_millis());
+        std::thread::sleep(Duration::from_millis(remaining + 20));
+        let successor = lifecycle
+            .store
+            .try_acquire_for_term("main", "writer-2", 60_000, 1)
+            .expect("successor acquires expired lease");
+        assert!(successor.generation > first.generation);
+        assert!(gate
+            .check(crate::runtime::write_gate::WriteKind::Dml)
+            .is_err());
+        assert!(lifecycle.refresh().is_err());
+        assert_eq!(drain.load(Ordering::SeqCst), 1);
+        assert!(lifecycle.current_lease().is_none());
+        lifecycle
+            .store
+            .release(&successor)
+            .expect("successor lease releases cleanly");
+        let _ = std::fs::remove_dir_all(prefix);
+    }
+
+    #[test]
+    fn refresh_cannot_reopen_a_released_gate() {
+        let (lifecycle, gate, _audit, _drain, prefix) = build_lifecycle("release-race");
+        lifecycle.try_acquire().expect("writer acquires lease");
+        let worker = lifecycle.clone();
+        let refresh = std::thread::spawn(move || worker.refresh());
+        lifecycle.release().expect("lease release succeeds");
+        let _ = refresh.join().expect("refresh worker does not panic");
+        assert_eq!(gate.lease_state(), LeaseGateState::NotHeld);
+        assert!(lifecycle.current_lease().is_none());
+        let _ = std::fs::remove_dir_all(prefix);
+    }
+
+    #[test]
+    fn renewal_installs_a_new_local_deadline() {
+        let (lifecycle, gate, _audit, _drain, prefix) = build_lifecycle("renewal");
+        lifecycle.try_acquire().expect("writer acquires lease");
+        gate.grant_lease_until(Instant::now() + Duration::from_millis(100));
+        lifecycle.refresh().expect("lease refresh succeeds");
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(gate.lease_state(), LeaseGateState::Held);
+        lifecycle.release().expect("lease release succeeds");
+        let _ = std::fs::remove_dir_all(prefix);
+    }
+
+    #[test]
+    fn minimum_configured_ttl_schedules_refresh_before_expiry() {
+        let (mut lifecycle, gate, _audit, _drain, prefix) = build_lifecycle("short-ttl");
+        Arc::get_mut(&mut lifecycle)
+            .expect("invariant: test owns the only lifecycle reference")
+            .ttl_ms = 1_000;
+        lifecycle.try_acquire().expect("writer acquires lease");
+        let delay = lifecycle.refresh_delay();
+        assert!(delay < Duration::from_millis(334));
+        assert!(delay < gate.lease_remaining());
+        // A slow acquire/refresh response must shorten the next sleep too.
+        gate.grant_lease_until(Instant::now() + Duration::from_millis(90));
+        assert!(lifecycle.refresh_delay() <= Duration::from_millis(30));
+        lifecycle.release().expect("lease release succeeds");
+        let _ = std::fs::remove_dir_all(prefix);
+    }
+
+    #[test]
+    fn local_deadline_accounts_for_backend_timestamp_quantization() {
+        let (mut lifecycle, _gate, _audit, _drain, prefix) = build_lifecycle("quantization");
+        Arc::get_mut(&mut lifecycle)
+            .expect("invariant: test owns the only lifecycle reference")
+            .ttl_ms = 1;
+        assert!(lifecycle.request_deadline().is_err());
+        Arc::get_mut(&mut lifecycle)
+            .expect("invariant: test owns the only lifecycle reference")
+            .ttl_ms = 1_000;
+        let deadline = lifecycle
+            .request_deadline()
+            .expect("one-second TTL has a conservative deadline");
+        assert!(deadline.saturating_duration_since(Instant::now()) <= Duration::from_millis(999));
+        let _ = std::fs::remove_dir_all(prefix);
+    }
+
+    #[test]
+    fn delayed_acquire_response_never_opens_admission() {
+        let (mut lifecycle, gate, _audit, _drain, prefix) = build_lifecycle("delayed-acquire");
+        let lifecycle_mut = Arc::get_mut(&mut lifecycle)
+            .expect("invariant: test owns the only lifecycle reference");
+        lifecycle_mut.ttl_ms = 2;
+        lifecycle_mut.current_term = Arc::new(|| {
+            std::thread::sleep(Duration::from_millis(5));
+            1
+        });
+        assert!(lifecycle.try_acquire().is_err());
+        assert_eq!(gate.lease_state(), LeaseGateState::NotHeld);
+        assert!(lifecycle.current_lease().is_none());
+        let _ = std::fs::remove_dir_all(prefix);
+    }
+
+    #[test]
     fn acquire_stamps_current_replication_term() {
         let (lifecycle, _gate, _audit, _drain, _term, prefix) =
             build_lifecycle_with_term("acquire-term", 7);
@@ -415,14 +576,14 @@ mod tests {
     }
 
     #[test]
-    fn refresh_without_acquire_returns_error_without_touching_gate() {
+    fn refresh_without_acquire_keeps_gate_closed() {
         let (lifecycle, gate, _audit, drain, prefix) = build_lifecycle("refresh-noop");
         let err = lifecycle.refresh().unwrap_err();
         match err {
             RedDBError::Internal(msg) => assert!(msg.contains("without an acquired lease")),
             other => panic!("expected Internal, got {other:?}"),
         }
-        assert_eq!(gate.lease_state(), LeaseGateState::NotRequired);
+        assert_eq!(gate.lease_state(), LeaseGateState::NotHeld);
         assert_eq!(drain.load(Ordering::SeqCst), 0);
         let _ = std::fs::remove_dir_all(&prefix);
     }
