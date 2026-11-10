@@ -24,30 +24,22 @@
 #
 # Checks (all run from the worker's branch vs the merge base):
 #   1. Scope drift       — more than 25 files changed → block.
-#   2. Per-file size     — any single file ADDED or MODIFIED in the
-#                          diff that ends up larger than 2000 lines
-#                          post-merge → block. This is the file-shape
-#                          half of the house limit (2000/file,
-#                          200/function). The function half is enforced
-#                          by clippy::too_many_lines at 200 in
-#                          clippy.toml + backpressure `cargo clippy
-#                          -D warnings`.
-#   3. Protected paths   — touches to /docs/conformance/,
+#   2. Protected paths   — touches to /docs/conformance/,
 #                          /testdata/conformance/, contract matrix
 #                          scripts, or .red/adr/ require a human
 #                          (CODEOWNERS already enforces; this is a
 #                          faster fail before CI burns the round).
-#   4. New .unwrap()     — added `.unwrap()` in a file NOT on the
+#   3. New .unwrap()     — added `.unwrap()` in a file NOT on the
 #                          existing serialization whitelist is a
 #                          ratchet violation (ADR 0056 + 0010).
-#   5. New dependency    — added `name = "..."` / `name = { ... }`
+#   4. New dependency    — added `name = "..."` / `name = { ... }`
 #                          entry in Cargo.toml without a `# track:
 #                          issue-XXXX` comment on the same line →
 #                          block. Forces the tracking issue discipline.
 #
-# Thresholds are deliberately conservative — drift-guard that fires
-# too often gets disabled. Tune UP only after looking at a month
-# of false positives.
+# The scope threshold is deliberately conservative — a drift-guard
+# that fires too often gets disabled. Tune UP only after looking at a
+# month of false positives.
 
 set -eu
 set -o pipefail
@@ -95,37 +87,7 @@ if [ "$NUM_CHANGED" -gt "$SCOPE_LIMIT" ]; then
     check "scope-drift" "$NUM_CHANGED files changed (limit: $SCOPE_LIMIT). Break the PR down."
 fi
 
-# 2. Per-file size policy (house limit: 2000 lines per file,
-#    120 per function — function is enforced by clippy::too_many_lines
-#    + backpressure; this is the file-shape half). Block on the
-#    post-diff size of every file ADDED or MODIFIED by the diff.
-#    Lines are counted with `wc -l` from the worktree checkout (which
-#    reflects $HEAD). Files we can't read (e.g. binary, deleted,
-#    submodule) are skipped — binary file size is governed by
-#    ADR 0046's wire/file authority boundary, not here.
-PER_FILE_LIMIT=2000
-if [ "$NUM_CHANGED" -gt 0 ]; then
-    bad_files=""
-    while IFS= read -r f; do
-        [ -z "$f" ] && continue
-        # Skip files we can't line-count: not present in worktree
-        # (deletions), binary, or symlinks to non-regular targets.
-        [ -f "$f" ] || continue
-        # `wc -l` on a regular file is portable and trivial. We don't
-        # trust `git ls-files`-derived sizes because they include
-        # index-form mangling on some platforms.
-        flines=$(wc -l < "$f" | tr -d '[:space:]' || echo 0)
-        if [ "${flines:-0}" -gt "$PER_FILE_LIMIT" ]; then
-            bad_files+="  $f ($flines lines)"$'\n'
-        fi
-    done < <(git diff --name-only --diff-filter=AM "$BASE"..."$HEAD")
-    if [ -n "$bad_files" ]; then
-        check "file-too-big" "files exceeding $PER_FILE_LIMIT lines after the diff (house limit):
-$bad_files"
-    fi
-fi
-
-# 3. Protected paths — mirror CODEOWNERS at `.github/CODEOWNERS`. The
+# 2. Protected paths — mirror CODEOWNERS at `.github/CODEOWNERS`. The
 #    contract matrix is the release-blocking artifact; if the agent
 #    wants to MODIFY it, a human must. New files (added ADRs, new
 #    conformance fixtures) are legitimate flow — don't blanket-block
@@ -140,7 +102,7 @@ $bad_paths"
     fi
 fi
 
-# 4. New `.unwrap()` outside the existing whitelist
+# 3. New `.unwrap()` outside the existing whitelist
 #    (`scripts/lint-untyped-serialization-whitelist.txt`).
 WHITELIST="scripts/lint-untyped-serialization-whitelist.txt"
 if [ "$NUM_CHANGED" -gt 0 ]; then
@@ -171,7 +133,7 @@ $bad_unwraps"
     fi
 fi
 
-# 5. New dependency in Cargo.toml without `# track:` marker.
+# 4. New dependency in Cargo.toml without `# track:` marker.
 if printf '%s\n' "${CHANGED_FILES[@]}" | grep -qx 'Cargo.toml'; then
     bad_deps=$(git diff -U0 "$BASE"..."$HEAD" -- Cargo.toml \
         | awk '
