@@ -519,7 +519,7 @@ async fn high_level_grpc_and_grpcs_discover_without_manual_refresh() {
         let db = reddb_client::Reddb::connect(&bootstrap)
             .await
             .expect("multi-host seed with distinct ports");
-        db.query("SELECT * FROM users")
+        db.query_with_options("SELECT * FROM users", QueryOptions::local())
             .await
             .expect("multi-host read");
         assert_eq!(
