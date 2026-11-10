@@ -112,7 +112,7 @@ pub fn change_record_from_entity(
     metadata: Option<JsonValue>,
 ) -> ChangeRecord {
     let entity_bytes = match operation {
-        ChangeOperation::Delete | ChangeOperation::Refresh => None,
+        ChangeOperation::Delete | ChangeOperation::Refresh | ChangeOperation::Transaction => None,
         ChangeOperation::Insert | ChangeOperation::Update => Some(
             crate::storage::UnifiedStore::serialize_entity(entity, format_version),
         ),

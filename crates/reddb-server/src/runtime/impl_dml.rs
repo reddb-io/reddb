@@ -1371,7 +1371,7 @@ impl RedDBRuntime {
                         &ids,
                     );
                 }
-                self.cdc_emit_insert_batch_no_cache_invalidate(&query.table, &ids, entity_kind);
+                self.cdc_emit_insert_batch_no_cache_invalidate(&query.table, &ids, entity_kind)?;
                 let store = self.inner.db.store();
                 entity_outputs.extend(ids.iter().map(|id| {
                     crate::application::entity::CreateEntityOutput {
@@ -1915,7 +1915,7 @@ impl RedDBRuntime {
             collection,
             id.raw(),
             "timeseries",
-        );
+        )?;
 
         Ok(id)
     }

@@ -413,7 +413,7 @@ impl RedDBRuntime {
             if matches!(query_result.statement_type, "insert" | "update" | "delete") {
                 let bookmark = crate::replication::CausalBookmark::new(
                     self.current_replication_term(),
-                    self.cdc_current_lsn(),
+                    self.replication_commit_lsn(),
                 );
                 query_result.bookmark = Some(bookmark.encode());
             }
@@ -544,7 +544,7 @@ impl RedDBRuntime {
             crate::replication::ReplicationRole::Replica { .. } => {
                 self.config_u64("red.replication.last_applied_lsn", 0)
             }
-            _ => self.cdc_current_lsn(),
+            _ => self.replication_commit_lsn(),
         }
     }
 
@@ -1537,6 +1537,11 @@ impl RedDBRuntime {
                                 self.finalize_pending_kv_watch_events(conn_id);
                                 self.finalize_pending_queue_wakes(conn_id);
                                 self.release_pending_claim_locks(conn_id);
+                                self.recover_transactional_replication().map_err(|error| {
+                                    RedDBError::Internal(format!(
+                                        "commit is locally durable; replication publication is pending: {error}"
+                                    ))
+                                })?;
                                 ("commit", format!("COMMIT — xid={} committed", ctx.xid))
                             }
                             None => (
@@ -1937,7 +1942,7 @@ impl RedDBRuntime {
                         // replicas deterministically replay the same
                         // backing-collection contents via
                         // `LogicalChangeApplier::apply_record`.
-                        if let Some(ref primary) = self.inner.db.replication {
+                        if self.inner.db.replication.is_some() {
                             let lsn = self.inner.cdc.emit(
                                 crate::replication::cdc::ChangeOperation::Refresh,
                                 &q.name,
@@ -1956,8 +1961,7 @@ impl RedDBRuntime {
                                 serialized_records,
                             )
                             .with_term(self.current_replication_term());
-                            let encoded = record.encode();
-                            primary.append_logical_record(record.lsn, encoded);
+                            self.stage_or_publish_logical_record(record)?;
                         }
 
                         let duration_ms = started.elapsed().as_millis() as u64;

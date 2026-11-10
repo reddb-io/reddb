@@ -175,7 +175,7 @@ impl RedDBRuntime {
                             collection,
                             id.raw(),
                             "entity",
-                        ),
+                        )?,
                     ));
                 }
             }
@@ -209,7 +209,7 @@ impl RedDBRuntime {
                     collection,
                     id.raw(),
                     "entity",
-                ),
+                )?,
             ));
         }
 
@@ -289,7 +289,7 @@ impl RedDBRuntime {
                 update_cdc_item_kind(self, &item.collection, &item.entity),
                 item.metadata.as_ref(),
                 false,
-            );
+            )?;
             lsns.push(lsn);
         }
         Ok(lsns)

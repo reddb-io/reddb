@@ -121,7 +121,7 @@ impl RedDBRuntime {
         self.index_store_ref().clear_paged_btree_overlays();
         self.inner.probabilistic.replayed_names.lock().clear();
         drop(publication);
-        let checkpoint_lsn = self.cdc_current_lsn();
+        let checkpoint_lsn = self.replication_commit_lsn();
         self.inner
             .checkpoint_projection_stats
             .record_checkpoint(checkpoint_lsn, started.elapsed().as_millis() as u64);

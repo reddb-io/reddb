@@ -76,7 +76,9 @@ impl RedDBRuntime {
             return Ok(None);
         };
         self.flush()?;
-        let checkpoint_lsn = self.primary_logical_head_lsn().max(self.cdc_current_lsn());
+        let checkpoint_lsn = self
+            .primary_logical_head_lsn()
+            .max(self.replication_commit_lsn());
         let snapshot = self.inner.db.store().to_binary_dump_bytes();
         let backup = reddb_file::BaseBackupPlan::new(plan.timeline, 0, checkpoint_lsn);
         let manifest = plan
@@ -366,7 +368,9 @@ impl RedDBRuntime {
         let Some(catalog) = self.primary_replica_slot_catalog()? else {
             return Ok(None);
         };
-        let current_lsn = self.primary_logical_head_lsn().max(self.cdc_current_lsn());
+        let current_lsn = self
+            .primary_logical_head_lsn()
+            .max(self.replication_commit_lsn());
         let fork_lsns = self.primary_replica_fork_lsns()?;
         Ok(Some(
             plan.plan_wal_retention_with_fork_lsns(&catalog, &fork_lsns, current_lsn)
@@ -483,7 +487,9 @@ impl RedDBRuntime {
     pub fn prune_primary_replica_wal_segments(
         &self,
     ) -> RedDBResult<Option<reddb_file::WalPruneResult>> {
-        let current_lsn = self.primary_logical_head_lsn().max(self.cdc_current_lsn());
+        let current_lsn = self
+            .primary_logical_head_lsn()
+            .max(self.replication_commit_lsn());
         self.prune_primary_replica_wal_segments_at(current_lsn)
     }
 
@@ -525,7 +531,7 @@ impl RedDBRuntime {
         self.refresh_replication_flow_control();
         let current_lsn = self
             .primary_logical_head_lsn()
-            .max(self.cdc_current_lsn())
+            .max(self.replication_commit_lsn())
             .max(applied_lsn)
             .max(durable_lsn);
         self.prune_primary_replica_wal_segments_at(current_lsn)
