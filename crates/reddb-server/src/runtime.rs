@@ -1309,6 +1309,9 @@ struct RuntimeInner {
     pending_vault_writes: parking_lot::RwLock<HashMap<u64, Vec<impl_kv::PendingVaultWrite>>>,
     pending_store_wal_actions:
         parking_lot::RwLock<HashMap<u64, crate::storage::unified::DeferredStoreWalActions>>,
+    pending_logical_records:
+        parking_lot::Mutex<HashMap<u64, Vec<(u64, crate::replication::cdc::ChangeRecord)>>>,
+    logical_publication: parking_lot::ReentrantMutex<()>,
     /// Transaction-scoped table UPDATE CLAIM ownership.
     ///
     /// Keyed by `(collection, logical_row_id)` and valued by connection id.
@@ -1654,6 +1657,7 @@ mod impl_runtime_index_registry;
 mod impl_telemetry_accessors;
 mod impl_tenant_registry;
 mod store_forks;
+mod transactional_replication;
 pub(crate) use impl_queue::RedwireWaitOutcome;
 pub(crate) mod claim_telemetry;
 #[cfg(test)]

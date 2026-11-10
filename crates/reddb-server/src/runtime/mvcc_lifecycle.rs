@@ -137,6 +137,8 @@ impl RedDBRuntime {
             return f();
         }
 
+        let logical_start = self.inner.pending_logical_records.lock()
+            .get(&conn_id).map_or(0, Vec::len);
         let capture = DmlWalCapture::begin();
         let result = f();
         let captured = capture.finish();
@@ -145,7 +147,12 @@ impl RedDBRuntime {
                 self.record_pending_store_wal_actions(conn_id, captured);
                 Ok(value)
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                if let Some(records) = self.inner.pending_logical_records.lock().get_mut(&conn_id) {
+                    records.truncate(logical_start);
+                }
+                Err(err)
+            }
         }
     }
 
@@ -232,22 +239,17 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn flush_pending_store_wal_actions(&self, conn_id: u64) -> RedDBResult<()> {
-        let Some(actions) = self
+        let actions = self
             .inner
             .pending_store_wal_actions
             .write()
             .remove(&conn_id)
-        else {
-            return Ok(());
-        };
-        self.inner
-            .db
-            .store()
-            .append_deferred_store_wal_actions(actions)
-            .map_err(|err| RedDBError::Internal(err.to_string()))
+            .unwrap_or_default();
+        self.commit_transactional_replication(conn_id, actions)
     }
 
     pub(crate) fn discard_pending_store_wal_actions(&self, conn_id: u64) {
+        self.inner.pending_logical_records.lock().remove(&conn_id);
         self.inner
             .pending_store_wal_actions
             .write()

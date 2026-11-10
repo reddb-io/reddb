@@ -684,41 +684,60 @@ impl PrimaryReplication {
     }
 
     pub fn append_logical_record(&self, lsn: u64, encoded: Vec<u8>) {
-        self.wal_buffer.append(lsn, encoded.clone());
-        if let Some(spool) = &self.logical_wal_spool {
-            let _ = spool.append(lsn, &encoded);
+        if let Err(error) = self.try_append_logical_record(lsn, encoded) {
+            warn!(%error, lsn, "failed to publish logical replication record");
         }
+    }
+
+    /// Publish durable projections before making a record available to readers.
+    /// Replaying a committed outbox is idempotent, including a crash between the
+    /// segment append and the spool append.
+    pub(crate) fn try_append_logical_record(&self, lsn: u64, encoded: Vec<u8>) -> io::Result<()> {
+        let _guard = self
+            .primary_replica_wal_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if let Some(plan) = &self.primary_replica_file_plan {
-            let _guard = self
-                .primary_replica_wal_lock
-                .lock()
-                .unwrap_or_else(|err| err.into_inner());
-            match self.current_timeline(&plan.root) {
-                Ok(timeline) => {
-                    let plan = reddb_file::PrimaryReplicaFilePlan::new(plan.root.clone(), timeline);
-                    if let Err(err) = plan.append_wal_record(lsn, &encoded) {
-                        warn!(
-                            target: "reddb::replication::primary",
-                            lsn,
-                            error = %err,
-                            "failed to append primary-replica WAL segment"
-                        );
-                    }
+            let timeline = self
+                .current_timeline(&plan.root)
+                .map_err(io::Error::other)?;
+            let plan = reddb_file::PrimaryReplicaFilePlan::new(plan.root.clone(), timeline);
+            let existing = match reddb_file::PrimaryReplicaWalSegment::read_from_path(
+                plan.wal_segment_path(lsn),
+            ) {
+                Ok(segment) => segment.records.into_iter().find(|record| record.lsn == lsn),
+                Err(reddb_file::RdbFileError::Io(error))
+                    if error.kind() == io::ErrorKind::NotFound =>
+                {
+                    None
                 }
-                Err(err) => {
-                    warn!(
-                        target: "reddb::replication::primary",
-                        lsn,
-                        error = %err,
-                        "failed to read primary-replica timeline history; skipping WAL append"
-                    );
+                Err(error) => return Err(io::Error::other(error)),
+            };
+            if let Some(existing) = existing {
+                if existing.payload != encoded {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "logical outbox conflicts with published WAL",
+                    ));
                 }
+            } else {
+                plan.append_wal_record(lsn, &encoded)
+                    .map_err(io::Error::other)?;
             }
         }
+        if let Some(spool) = &self.logical_wal_spool {
+            if spool.current_lsn() < lsn {
+                spool.append(lsn, &encoded)?;
+            }
+        }
+        if self.wal_buffer.current_lsn() < lsn {
+            self.wal_buffer.append(lsn, encoded);
+        }
         let (lock, cvar) = &self.wal_appended;
-        let mut latest = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut latest = lock.lock().unwrap_or_else(|error| error.into_inner());
         *latest = (*latest).max(lsn);
         cvar.notify_all();
+        Ok(())
     }
 
     pub fn wait_for_logical_lsn_after(&self, since_lsn: u64, timeout: Duration) -> bool {

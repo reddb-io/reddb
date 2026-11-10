@@ -445,6 +445,8 @@ impl RedDBRuntime {
                 pending_kv_watch_events: parking_lot::RwLock::new(HashMap::new()),
                 pending_vault_writes: parking_lot::RwLock::new(HashMap::new()),
                 pending_store_wal_actions: parking_lot::RwLock::new(HashMap::new()),
+                pending_logical_records: parking_lot::Mutex::new(HashMap::new()),
+                logical_publication: parking_lot::ReentrantMutex::new(()),
                 pending_claim_locks: parking_lot::RwLock::new(HashMap::new()),
                 queue_wait_registry: std::sync::Arc::new(
                     crate::runtime::queue_wait_registry::QueueWaitRegistry::new(),
@@ -737,6 +739,7 @@ impl RedDBRuntime {
         if let Some(repl) = &runtime.inner.db.replication {
             repl.wal_buffer.set_current_lsn(restored_cdc_lsn);
         }
+        runtime.recover_transactional_replication()?;
 
         // Save system info to red_config on boot
         {

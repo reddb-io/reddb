@@ -29,13 +29,18 @@ impl RedDBRuntime {
         entity_id: u64,
         entity_kind: &str,
     ) -> u64 {
-        let lsn = self
-            .inner
-            .cdc
-            .emit(operation, collection, entity_id, entity_kind);
+        let _publication = self.inner.logical_publication.lock();
+        let deferred = self.inner.db.replication.is_some() && self.current_xid().is_some();
+        let lsn = if deferred {
+            0
+        } else {
+            self.inner
+                .cdc
+                .emit(operation, collection, entity_id, entity_kind)
+        };
 
         // Append to logical WAL replication buffer (if primary mode)
-        if let Some(ref primary) = self.inner.db.replication {
+        if self.inner.db.replication.is_some() {
             let store = self.inner.db.store();
             let entity = if operation == crate::replication::cdc::ChangeOperation::Delete {
                 None
@@ -61,8 +66,7 @@ impl RedDBRuntime {
                 range_id: None,
                 ownership_epoch: None,
             };
-            let encoded = record.encode();
-            primary.append_logical_record(record.lsn, encoded);
+            self.stage_or_publish_logical_record(record);
         }
         lsn
     }
@@ -110,10 +114,15 @@ impl RedDBRuntime {
         entity_id: u64,
         entity_kind: &str,
     ) -> u64 {
-        let lsn = self
-            .inner
-            .cdc
-            .emit(operation, collection, entity_id, entity_kind);
+        let _publication = self.inner.logical_publication.lock();
+        let deferred = self.inner.db.replication.is_some() && self.current_xid().is_some();
+        let lsn = if deferred {
+            0
+        } else {
+            self.inner
+                .cdc
+                .emit(operation, collection, entity_id, entity_kind)
+        };
         // Perf: prior to this we called `invalidate_result_cache()`
         // which wipes EVERY cached query, across every table, under
         // a write lock — turning each INSERT into a serialisation
@@ -122,7 +131,7 @@ impl RedDBRuntime {
         self.invalidate_result_cache_for_table(collection);
 
         // Append to logical WAL replication buffer (if primary mode)
-        if let Some(ref primary) = self.inner.db.replication {
+        if self.inner.db.replication.is_some() {
             let store = self.inner.db.store();
             let entity = if operation == crate::replication::cdc::ChangeOperation::Delete {
                 None
@@ -148,8 +157,7 @@ impl RedDBRuntime {
                 range_id: None,
                 ownership_epoch: None,
             };
-            let encoded = record.encode();
-            primary.append_logical_record(record.lsn, encoded);
+            self.stage_or_publish_logical_record(record);
         }
         lsn
     }
@@ -163,6 +171,7 @@ impl RedDBRuntime {
         before: Option<crate::json::Value>,
         after: Option<crate::json::Value>,
     ) -> u64 {
+        let _publication = self.inner.logical_publication.lock();
         let lsn = self
             .inner
             .cdc
@@ -245,16 +254,22 @@ impl RedDBRuntime {
             self.invalidate_result_cache();
         }
 
+        let _publication = self.inner.logical_publication.lock();
         let public_id = entity.logical_id().raw();
-        let lsn = self.inner.cdc.emit_with_columns(
-            operation,
-            collection,
-            public_id,
-            entity_kind,
-            changed_columns,
-        );
+        let deferred = self.inner.db.replication.is_some() && self.current_xid().is_some();
+        let lsn = if deferred {
+            0
+        } else {
+            self.inner.cdc.emit_with_columns(
+                operation,
+                collection,
+                public_id,
+                entity_kind,
+                changed_columns,
+            )
+        };
 
-        if let Some(ref primary) = self.inner.db.replication {
+        if self.inner.db.replication.is_some() {
             let store = self.inner.db.store();
             let record = ChangeRecord {
                 term: self.current_replication_term(),
@@ -279,8 +294,7 @@ impl RedDBRuntime {
                 range_id: None,
                 ownership_epoch: None,
             };
-            let encoded = record.encode();
-            primary.append_logical_record(record.lsn, encoded);
+            self.stage_or_publish_logical_record(record);
         }
 
         lsn

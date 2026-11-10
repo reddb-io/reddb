@@ -178,6 +178,18 @@ pub struct CdcBuffer {
 }
 
 impl CdcBuffer {
+    pub(crate) fn publish_committed(&self, event: ChangeEvent) {
+        self.set_current_lsn(event.lsn);
+        if self.max_size == 0 {
+            return;
+        }
+        let mut events = self.events.lock();
+        if events.len() >= self.max_size {
+            events.pop_front();
+        }
+        events.push_back(event);
+    }
+
     /// Create a new CDC buffer with maximum capacity.
     pub fn new(max_size: usize) -> Self {
         Self {
