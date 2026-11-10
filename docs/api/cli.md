@@ -450,6 +450,28 @@ red mcp [--uri memory://]
 | `--uri` | | `REDDB_MCP_URI` or `memory://` | Connection URI; `memory://` and `file://` run embedded, remote schemes are selected by URI scheme |
 | `--path` | `-d` | (in-memory) | Legacy file-backed embedded path when `--uri`/`REDDB_MCP_URI` is not set |
 
+## red acp
+
+Start the local ACP v1/v2 session adapter backed by the native ASK harness.
+An ACP-compatible host launches this command as a child process and exchanges
+JSON-RPC messages over stdio. It is not an interactive terminal: running it by
+hand leaves it waiting for protocol input rather than displaying a prompt.
+
+```bash
+red acp [--path ./data/reddb.rdb]
+```
+
+| Flag | Short | Default | Description |
+|:-----|:------|:--------|:------------|
+| `--path` | `-d` | (in-memory) | Path to a single-file embedded database |
+
+The adapter uses newline-delimited JSON-RPC over stdio and negotiates v1 or v2
+during `initialize`. ACP v2 remains draft. The adapter is embedded-only in this
+release; it does not advertise remote authentication or external MCP
+attachment. For remote databases, use authenticated MCP and its `reddb.ask`
+tool. See [ACP (ASK sessions)](/api/acp.md) for the ASK/MCP/ACP decision guide,
+provider setup, host configuration, and protocol lifecycle.
+
 ## red auth
 
 Manage authentication.

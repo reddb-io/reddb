@@ -14,7 +14,7 @@
 /// appropriate command, and dispatches execution.
 use std::cell::OnceCell;
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -58,6 +58,7 @@ fn open_local_runtime(flags: &HashMap<String, FlagValue>) -> Result<reddb::RedDB
         Some(path) if !path.is_empty() => {
             let storage_profile = resolve_storage_profile(flags, "local")?;
             let options = reddb::api::RedDBOptions::persistent(&path)
+                .with_bounded_disk_residency(flag_bool(flags, "bounded-disk-residency"))
                 .with_storage_profile(storage_profile)
                 .map_err(|e| format!("storage profile: {e}"))?;
             reddb::RedDBRuntime::with_options(options).map_err(|e| format!("open {path}: {e}"))
@@ -279,11 +280,18 @@ fn resolve_mcp_client_options(
         }
     }
 
-    if spec.auth.is_bearer() && !mcp_uri_allows_bearer(&raw_uri) {
-        return Err(format!(
-            "bearer token requires TLS transport (reds://, https://, or red+wss://): {}",
-            spec.redacted_uri
-        ));
+    let tls_required_credential = match &spec.auth {
+        reddb_wire::ConnectionAuth::Bearer(_) => Some("bearer token"),
+        reddb_wire::ConnectionAuth::ApiKey(_) => Some("API key"),
+        _ => None,
+    };
+    if let Some(credential) = tls_required_credential {
+        if !mcp_uri_allows_secret(&raw_uri) {
+            return Err(format!(
+                "{credential} requires TLS transport (reds://, https://, or red+wss://): {}",
+                spec.redacted_uri
+            ));
+        }
     }
     if !matches!(
         spec.target,
@@ -343,7 +351,7 @@ fn query_param_value(uri: &str, key: &str) -> Option<String> {
     })
 }
 
-fn mcp_uri_allows_bearer(uri: &str) -> bool {
+fn mcp_uri_allows_secret(uri: &str) -> bool {
     let Some(colon) = uri.find(':') else {
         return false;
     };
@@ -367,12 +375,15 @@ fn mcp_redwire_connect_options(
     }
 }
 
-fn run_mcp_remote(mut options: McpClientOptions) -> i32 {
+fn run_mcp_remote(
+    mut options: McpClientOptions,
+    capability: reddb::mcp::capability::McpCapability,
+) -> i32 {
     if let Err(err) = validate_mcp_remote_connect(&mut options) {
         eprintln!("red mcp: {err}");
         return 1;
     }
-    let mut server = RemoteMcpServer::new(options);
+    let mut server = RemoteMcpServer::new(options, capability);
     server.run_stdio();
     0
 }
@@ -414,7 +425,15 @@ fn validate_mcp_remote_connect(options: &mut McpClientOptions) -> Result<(), Str
                 .map_err(|err| format!("connect {}: {err}", options.redacted_uri))
             })
         }
-        reddb_wire::ConnectionTarget::Http { .. } => Ok(()),
+        reddb_wire::ConnectionTarget::Http { .. } => {
+            if matches!(options.auth, reddb_wire::ConnectionAuth::Basic { .. }) {
+                return Err(
+                    "HTTP Basic authentication is not supported; use a bearer token or API key"
+                        .to_string(),
+                );
+            }
+            Ok(())
+        }
         reddb_wire::ConnectionTarget::WsNative { .. } => {
             Err("red mcp: red+ws/red+wss client connector is not implemented yet".to_string())
         }
@@ -492,13 +511,15 @@ fn http_auth_from_connection_auth(
 struct RemoteMcpServer {
     options: McpClientOptions,
     initialized: bool,
+    capability: reddb::mcp::capability::McpCapability,
 }
 
 impl RemoteMcpServer {
-    fn new(options: McpClientOptions) -> Self {
+    fn new(options: McpClientOptions, capability: reddb::mcp::capability::McpCapability) -> Self {
         Self {
             options,
             initialized: false,
+            capability,
         }
     }
 
@@ -606,6 +627,7 @@ impl RemoteMcpServer {
     fn handle_tools_list(&self, id: Option<&reddb::json::Value>) -> String {
         let mut tools_json: Vec<reddb::json::Value> = reddb::mcp::tools::all_tools()
             .into_iter()
+            .filter(|definition| Self::supports_remote_tool(definition.name))
             .map(|def| {
                 let mut obj = reddb::json::Map::new();
                 obj.insert(
@@ -625,6 +647,30 @@ impl RemoteMcpServer {
         let mut result = reddb::json::Map::new();
         result.insert("tools".to_string(), reddb::json::Value::Array(tools_json));
         reddb::mcp::protocol::build_result_message(id, reddb::json::Value::Object(result))
+    }
+
+    fn supports_remote_tool(name: &str) -> bool {
+        matches!(
+            name,
+            "reddb_query"
+                | "reddb_collections"
+                | "reddb_catalog"
+                | "reddb_describe_collection"
+                | "reddb_find_field"
+        )
+    }
+
+    fn check_tool_capability(&self, tool_name: &str) -> Result<(), String> {
+        let required = reddb::mcp::capability::tool_capability(tool_name);
+        if self.capability.permits(required) {
+            Ok(())
+        } else {
+            Err(reddb::mcp::capability::refusal(
+                &format!("tool `{tool_name}`"),
+                self.capability,
+                required,
+            ))
+        }
     }
 
     fn handle_resources_list(&self, id: Option<&reddb::json::Value>) -> String {
@@ -717,12 +763,19 @@ impl RemoteMcpServer {
         } else {
             reddb::mcp::tools::McpIdentityPosture::RemoteCredentialsPresented
         };
-        let result = reddb::mcp::tools::authorize_tool(name, posture).and_then(|_| match name {
-            "reddb_query" => self.remote_query_tool(args),
-            _ => Err(format!(
-                "remote MCP client mode currently forwards reddb_query only; tool requires embedded runtime: {name}"
-            )),
-        });
+        let result = reddb::mcp::tools::authorize_tool(name, posture)
+            .and_then(|_| self.check_tool_capability(name))
+            .and_then(|_| match name {
+                "reddb_query" => self.remote_query_tool(args),
+                "reddb_collections" => self.remote_collections_tool(),
+                "reddb_catalog" => self.remote_query("SHOW COLLECTIONS", &[]),
+                "reddb_describe_collection" => self.remote_describe_collection_tool(args),
+                "reddb_find_field" => self.remote_find_field_tool(args),
+                reddb::runtime::ai::mcp_ask_tool::TOOL_NAME => self.remote_ask_tool(args),
+                _ => Err(format!(
+                    "remote MCP client mode does not advertise or implement tool: {name}"
+                )),
+            });
         mcp_tool_text_result(id, result)
     }
 
@@ -731,9 +784,49 @@ impl RemoteMcpServer {
             .get("sql")
             .and_then(|value| value.as_str())
             .ok_or("missing required field 'sql'")?;
-        if args.get("params").is_some() {
-            return Err("remote MCP client mode does not support query params yet".to_string());
+        let required = reddb::mcp::capability::statement_capability(sql);
+        if !self.capability.permits(required) {
+            return Err(reddb::mcp::capability::refusal(
+                "this statement",
+                self.capability,
+                required,
+            ));
         }
+        let params = mcp_client_params(args.get("params"))?;
+        self.remote_query(sql, &params)
+    }
+
+    fn remote_collections_tool(&self) -> Result<String, String> {
+        let response = self.remote_query("SELECT name FROM red.collections ORDER BY name", &[])?;
+        normalize_remote_collection_names(&response)
+    }
+
+    fn remote_describe_collection_tool(&self, args: &reddb::json::Value) -> Result<String, String> {
+        let collection = required_mcp_string(args, "collection")?;
+        self.remote_query(
+            "SELECT collection, name, type, nullable, default_value, is_primary_key, is_unique \
+             FROM red.columns WHERE collection = $1 ORDER BY name",
+            &[reddb_client::Value::Text(collection.to_string())],
+        )
+    }
+
+    fn remote_find_field_tool(&self, args: &reddb::json::Value) -> Result<String, String> {
+        let field = required_mcp_string(args, "field")?;
+        self.remote_query(
+            "SELECT collection, name, type, nullable FROM red.columns \
+             WHERE name = $1 ORDER BY collection, name",
+            &[reddb_client::Value::Text(field.to_string())],
+        )
+    }
+
+    fn remote_ask_tool(&self, args: &reddb::json::Value) -> Result<String, String> {
+        let invocation = reddb::runtime::ai::mcp_ask_tool::parse(args)
+            .map_err(format_remote_mcp_ask_parse_error)?;
+        let response = self.remote_query(&invocation.to_rql(), &[])?;
+        normalize_remote_ask_response(&response)
+    }
+
+    fn remote_query(&self, sql: &str, params: &[reddb_client::Value]) -> Result<String, String> {
         match &self.options.target {
             reddb_wire::ConnectionTarget::Grpc { endpoint } => {
                 let mut client =
@@ -743,16 +836,28 @@ impl RemoteMcpServer {
                     .build()
                     .map_err(|err| format!("build runtime: {err}"))?;
                 rt.block_on(async {
-                    tokio::time::timeout(self.options.timeout, client.query(sql))
-                        .await
-                        .map_err(|_| "connection timeout".to_string())?
-                        .map_err(|err| format!("{err}"))
+                    let grpc_params = reddb_client::connector::params_to_grpc_values(params);
+                    tokio::time::timeout(
+                        self.options.timeout,
+                        client.query_reply_with_params(sql, grpc_params),
+                    )
+                    .await
+                    .map_err(|_| "connection timeout".to_string())?
+                    .map(|reply| reply.result_json)
+                    .map_err(|err| format!("{err}"))
                 })
             }
             reddb_wire::ConnectionTarget::Http { base_url } => {
                 let auth = http_auth_from_connection_auth(&self.options.auth);
-                reddb_client::connector::http::query_one_shot(base_url, sql, &auth)
+                if params.is_empty() {
+                    reddb_client::connector::http::query_one_shot(base_url, sql, &auth)
+                        .map_err(|err| format!("{err}"))
+                } else {
+                    reddb_client::connector::http::query_one_shot_with_params(
+                        base_url, sql, params, &auth,
+                    )
                     .map_err(|err| format!("{err}"))
+                }
             }
             reddb_wire::ConnectionTarget::RedWire { host, port, tls } => {
                 let host = host.clone();
@@ -772,10 +877,14 @@ impl RemoteMcpServer {
                     .await
                     .map_err(|_| "connection timeout".to_string())?
                     .map_err(|err| format!("{err}"))?;
-                    tokio::time::timeout(self.options.timeout, client.query_raw(sql))
-                        .await
-                        .map_err(|_| "query timeout".to_string())?
-                        .map_err(|err| format!("{err}"))
+                    let result = tokio::time::timeout(
+                        self.options.timeout,
+                        client.query_envelope_json(sql, params),
+                    )
+                    .await
+                    .map_err(|_| "query timeout".to_string())?
+                    .map_err(|err| format!("{err}"))?;
+                    Ok(result.to_string())
                 })
             }
             other => Err(format!(
@@ -783,6 +892,151 @@ impl RemoteMcpServer {
             )),
         }
     }
+}
+
+fn required_mcp_string<'a>(args: &'a reddb::json::Value, field: &str) -> Result<&'a str, String> {
+    args.get(field)
+        .and_then(reddb::json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("missing required field '{field}'"))
+}
+
+fn mcp_client_params(
+    raw_params: Option<&reddb::json::Value>,
+) -> Result<Vec<reddb_client::Value>, String> {
+    let Some(raw_params) = raw_params else {
+        return Ok(Vec::new());
+    };
+    let params = raw_params
+        .as_array()
+        .ok_or_else(|| "'params' must be an array".to_string())?;
+    params.iter().map(mcp_client_param).collect()
+}
+
+fn mcp_client_param(value: &reddb::json::Value) -> Result<reddb_client::Value, String> {
+    use reddb::runtime::query_request::ParamValue;
+    use reddb_client::Value;
+
+    match ParamValue::decode_json(value)? {
+        ParamValue::Null => Ok(Value::Null),
+        ParamValue::Bool(value) => Ok(Value::Bool(value)),
+        ParamValue::Int64(value) => Ok(Value::Int(value)),
+        ParamValue::UInt64(value) => i64::try_from(value)
+            .map(Value::Int)
+            .map_err(|_| "remote MCP parameter exceeds the signed 64-bit client range".to_string()),
+        ParamValue::Float64(value) => Ok(Value::Float(value)),
+        ParamValue::DecimalText(_) => Err(
+            "remote MCP exact-decimal parameters are not supported by the client connector"
+                .to_string(),
+        ),
+        ParamValue::Text(value) => Ok(Value::Text(value)),
+        ParamValue::Bytes(value) => Ok(Value::Bytes(value)),
+        ParamValue::Vector(value) => Ok(Value::Vector(value)),
+        ParamValue::Json(value) => {
+            let json = reddb::json::from_slice(&value)
+                .map_err(|error| format!("invalid JSON parameter: {error}"))?;
+            Ok(Value::Json(mcp_client_json(&json)?))
+        }
+        ParamValue::Timestamp(value) => Ok(Value::Timestamp(value)),
+        ParamValue::Uuid(value) => Ok(Value::Uuid(value)),
+    }
+}
+
+fn mcp_client_json(value: &reddb::json::Value) -> Result<reddb_client::types::JsonValue, String> {
+    use reddb::json::Value as Source;
+    use reddb_client::types::JsonValue as Target;
+
+    match value {
+        Source::Null => Ok(Target::Null),
+        Source::Bool(value) => Ok(Target::Bool(*value)),
+        Source::Integer(value) => Ok(Target::Number(*value as f64)),
+        Source::Number(value) => Ok(Target::Number(*value)),
+        Source::Decimal(_) => Err(
+            "remote MCP nested exact-decimal parameters are not supported by the client connector"
+                .to_string(),
+        ),
+        Source::String(value) => Ok(Target::String(value.clone())),
+        Source::Array(values) => values
+            .iter()
+            .map(mcp_client_json)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Target::Array),
+        Source::Object(values) => values
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), mcp_client_json(value)?)))
+            .collect::<Result<Vec<_>, String>>()
+            .map(Target::Object),
+    }
+}
+
+fn format_remote_mcp_ask_parse_error(
+    error: reddb::runtime::ai::mcp_ask_tool::ParseError,
+) -> String {
+    use reddb::runtime::ai::mcp_ask_tool::ParseError;
+
+    match error {
+        ParseError::NotAnObject => "arguments must be an object".to_string(),
+        ParseError::MissingQuestion => "missing required field 'question'".to_string(),
+        ParseError::QuestionWrongType => "field 'question' must be a string".to_string(),
+        ParseError::WrongType { path, expected } => {
+            format!("field '{path}' must be {expected}")
+        }
+        ParseError::OutOfRange { path, detail } => format!("field '{path}' {detail}"),
+        ParseError::CacheAndNocache => {
+            "options.cache and options.nocache cannot be used together".to_string()
+        }
+        ParseError::UnknownOption { path } => format!("unknown field '{path}'"),
+    }
+}
+
+fn normalize_remote_ask_response(response: &str) -> Result<String, String> {
+    let parsed: reddb::json::Value = reddb::json::from_str(response)
+        .map_err(|error| format!("remote ASK returned invalid JSON: {error}"))?;
+    let candidate = if parsed.get("answer").is_some() {
+        Some(&parsed)
+    } else if let Some(records) = parsed
+        .get("result")
+        .and_then(|result| result.get("records"))
+        .and_then(reddb::json::Value::as_array)
+    {
+        records.first()
+    } else if let Some(rows) = parsed.get("rows").and_then(reddb::json::Value::as_array) {
+        rows.first()
+    } else {
+        parsed.as_array().and_then(|rows| rows.first())
+    };
+    let candidate = candidate
+        .filter(|value| value.get("answer").is_some())
+        .ok_or_else(|| {
+            "remote ASK response did not contain the canonical ASK envelope".to_string()
+        })?;
+    reddb::json::to_string(candidate)
+        .map_err(|error| format!("remote ASK response serialization failed: {error}"))
+}
+
+fn normalize_remote_collection_names(response: &str) -> Result<String, String> {
+    let parsed: reddb::json::Value = reddb::json::from_str(response)
+        .map_err(|error| format!("remote collection listing returned invalid JSON: {error}"))?;
+    let records = parsed
+        .get("result")
+        .and_then(|result| result.get("records"))
+        .or_else(|| parsed.get("records"))
+        .and_then(reddb::json::Value::as_array)
+        .ok_or_else(|| "remote collection listing did not contain records".to_string())?;
+    let names = records
+        .iter()
+        .map(|record| {
+            record
+                .get("values")
+                .unwrap_or(record)
+                .get("name")
+                .and_then(reddb::json::Value::as_str)
+                .map(|name| reddb::json::Value::String(name.to_string()))
+                .ok_or_else(|| "remote collection record did not contain a name".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    reddb::json::to_string(&reddb::json::Value::Array(names))
+        .map_err(|error| format!("remote collection listing serialization failed: {error}"))
 }
 
 fn mcp_tool_text_result(id: Option<&reddb::json::Value>, result: Result<String, String>) -> String {
@@ -1342,6 +1596,10 @@ fn restore_identifier_is_safe(name: &str) -> bool {
     })
 }
 
+fn restore_input_lines<R: Read>(reader: R) -> impl Iterator<Item = std::io::Result<String>> {
+    BufReader::new(reader).lines()
+}
+
 /// Print an error JSON envelope to **stderr** and exit with code 1.
 fn json_error(command: &str, error: &str) -> ! {
     eprintln!(
@@ -1374,6 +1632,23 @@ fn main() {
     // before threads exist, so the process-global change races nothing.
     reddb::utils::file_mode::restrict_new_file_permissions();
 
+    // Windows executables have a smaller default main-thread stack. Embedded
+    // query startup can exceed it in debug builds, so run the dispatcher with
+    // the same 8 MiB stack used by the integration-test threads.
+    #[cfg(windows)]
+    std::thread::Builder::new()
+        .name("red-cli".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run_cli)
+        .expect("start CLI thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+
+    #[cfg(not(windows))]
+    run_cli();
+}
+
+fn run_cli() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Private desktop persistence service: fixed loopback binding, authenticated
@@ -1764,6 +2039,26 @@ fn main() {
             std::process::exit(run_compact_command(&result.flags));
         }
 
+        "recover-paged-wal" => {
+            std::process::exit(run_recover_paged_wal_command(&result.flags));
+        }
+
+        "scrub-paged-trees" => {
+            std::process::exit(run_scrub_paged_trees_command(&result.flags));
+        }
+
+        "scrub-paged" => {
+            std::process::exit(run_scrub_paged_command(&result.flags));
+        }
+
+        "salvage-paged-indexes" => {
+            std::process::exit(run_salvage_paged_indexes_command(&result.flags));
+        }
+
+        "salvage-paged-collections" => {
+            std::process::exit(run_salvage_paged_collections_command(&result.flags));
+        }
+
         "salvage" => {
             std::process::exit(run_salvage_command(&result.flags));
         }
@@ -1829,6 +2124,10 @@ fn main() {
         }
 
         "mcp" => {
+            let capability = reddb::mcp::capability::McpCapability::from_flags(
+                flag_bool(&result.flags, "allow-write"),
+                flag_bool(&result.flags, "allow-admin"),
+            );
             let mcp_client_options =
                 resolve_mcp_client_options(&result.flags).unwrap_or_else(|err| {
                     eprintln!("red mcp: {err}");
@@ -1843,7 +2142,7 @@ fn main() {
                         Some(reddb_wire::ConnectionTarget::File { path: path.clone() })
                     }
                     _ => {
-                        let code = run_mcp_remote(options);
+                        let code = run_mcp_remote(options, capability);
                         std::process::exit(code);
                     }
                 }
@@ -1871,16 +2170,29 @@ fn main() {
                 )
                 .unwrap(),
             };
-            let capability = reddb::mcp::capability::McpCapability::from_flags(
-                flag_bool(&result.flags, "allow-write"),
-                flag_bool(&result.flags, "allow-admin"),
-            );
             if capability != reddb::mcp::capability::McpCapability::ReadOnly {
                 eprintln!("[reddb] MCP session capability: {capability}");
             }
             let mut server =
                 reddb::mcp::server::McpServer::new(runtime).with_capability(capability);
             server.run_stdio();
+        }
+
+        "acp" => {
+            let path = result
+                .flags
+                .get("path")
+                .map(|value| value.as_str_value())
+                .unwrap_or_default();
+            let runtime = if path.is_empty() {
+                reddb::runtime::RedDBRuntime::in_memory().unwrap()
+            } else {
+                reddb::runtime::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(
+                    &path,
+                ))
+                .unwrap()
+            };
+            reddb::acp::server::AcpServer::new(runtime).run_stdio();
         }
 
         "auth" => {
@@ -2083,6 +2395,13 @@ fn main() {
                 }
                 _ => store.list_collections(),
             };
+            // Keep the stable dump identity for configuration rows even when
+            // the store lists their canonical internal collection name.
+            for name in &mut targets {
+                if name == "red.config" {
+                    *name = "red_config".to_string();
+                }
+            }
             targets.sort();
             targets.dedup();
             // Virtual system rows are rebuilt by the runtime, not writable imports.
@@ -2276,7 +2595,7 @@ fn main() {
             };
             let override_collection = flag_string(&result.flags, "collection");
 
-            let file_text = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
+            let input = std::fs::File::open(&input_path).unwrap_or_else(|e| {
                 if json_mode {
                     json_error("restore", &format!("read failed: {e}"));
                 }
@@ -2296,7 +2615,15 @@ fn main() {
             let mut errors = 0usize;
             let mut restored_secret_keys = 0usize;
             let mut auth_store: Option<std::sync::Arc<reddb::auth::AuthStore>> = None;
-            for (line_no, line) in file_text.lines().enumerate() {
+            for (line_no, line) in restore_input_lines(input).enumerate() {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(error) => {
+                        errors += 1;
+                        eprintln!("line {}: read failed: {error}", line_no + 1);
+                        break;
+                    }
+                };
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
@@ -3248,10 +3575,17 @@ fn run_compact_command(flags: &HashMap<String, FlagValue>) -> i32 {
         let destination = flag_string(flags, "destination-dir")
             .filter(|value| !value.is_empty())
             .ok_or("--destination-dir is required and must not exist")?;
-        reddb_server::storage::compact::compact_paged(
-            std::path::Path::new(&source),
-            std::path::Path::new(&destination),
-        )
+        if flag_bool(flags, "retain-canonical-system-config") {
+            reddb_server::storage::compact::compact_paged_canonical_system_config(
+                std::path::Path::new(&source),
+                std::path::Path::new(&destination),
+            )
+        } else {
+            reddb_server::storage::compact::compact_paged(
+                std::path::Path::new(&source),
+                std::path::Path::new(&destination),
+            )
+        }
     })();
     match result {
         Ok(report) => {
@@ -3268,6 +3602,249 @@ fn run_compact_command(flags: &HashMap<String, FlagValue>) -> i32 {
                 json_error("compact", &error.to_string());
             } else {
                 eprintln!("compact: {error}");
+            }
+            1
+        }
+    }
+}
+
+fn run_recover_paged_wal_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        let destination = flag_string(flags, "destination-dir")
+            .filter(|value| !value.is_empty())
+            .ok_or("--destination-dir is required and must not exist")?;
+        if flag_bool(flags, "retain-canonical-system-config") {
+            reddb_server::storage::compact::recover_paged_wal_canonical_system_config(
+                std::path::Path::new(&source),
+                std::path::Path::new(&destination),
+            )
+        } else {
+            reddb_server::storage::compact::recover_paged_wal(
+                std::path::Path::new(&source),
+                std::path::Path::new(&destination),
+            )
+        }
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                json_ok("recover-paged-wal", &report.machine_json());
+            } else {
+                println!(
+                    "Replayed WAL on a preserved copy and verified {} records. Source preserved.",
+                    report.records
+                );
+            }
+            0
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("recover-paged-wal", &error.to_string());
+            } else {
+                eprintln!("recover-paged-wal: {error}");
+            }
+            1
+        }
+    }
+}
+
+fn run_scrub_paged_trees_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        reddb_server::storage::compact::scrub_paged_trees(std::path::Path::new(&source))
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                let findings: Vec<_> = report
+                    .findings
+                    .iter()
+                    .map(|finding| {
+                        reddb::json!({
+                            "collection": finding.collection.clone(),
+                            "tree": finding.tree.clone(),
+                            "root_page": finding.root_page,
+                            "reason": finding.reason.clone(),
+                        })
+                    })
+                    .collect();
+                let value = reddb::json!({
+                    "scope": "paged_trees_only",
+                    "trees_verified": report.trees_verified,
+                    "records_verified": report.records_verified,
+                    "findings": findings,
+                });
+                json_ok("scrub-paged-trees", &value.to_string_compact());
+            } else {
+                println!(
+                    "Tree-only diagnostic: {} trees and {} records verified; {} findings.",
+                    report.trees_verified,
+                    report.records_verified,
+                    report.findings.len()
+                );
+                println!("Vault, physical assets, logical index correctness and replica state were not checked.");
+                for finding in &report.findings {
+                    println!(
+                        "{} / {} (root {}): {}",
+                        finding.collection, finding.tree, finding.root_page, finding.reason
+                    );
+                }
+            }
+            if report.findings.is_empty() {
+                0
+            } else {
+                1
+            }
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("scrub-paged-trees", &error.to_string());
+            } else {
+                eprintln!("scrub-paged-trees: {error}");
+            }
+            1
+        }
+    }
+}
+
+fn run_scrub_paged_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        reddb_server::storage::compact::scrub_paged(std::path::Path::new(&source))
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                let findings: Vec<_> = report
+                    .trees
+                    .findings
+                    .iter()
+                    .map(|finding| {
+                        reddb::json!({
+                            "collection": finding.collection.clone(), "tree": finding.tree.clone(),
+                            "root_page": finding.root_page, "reason": finding.reason.clone(),
+                        })
+                    })
+                    .collect();
+                let value = reddb::json!({
+                    "scope": "supported_offline_paged_layout",
+                    "trees_verified": report.trees.trees_verified,
+                    "records_verified": report.trees.records_verified,
+                    "assets_verified": report.assets_verified,
+                    "unclassified_pages": report.unclassified_pages,
+                    "page_generation_freshness_verified": false,
+                    "findings": findings,
+                });
+                json_ok("scrub-paged", &value.to_string_compact());
+            } else {
+                println!(
+                    "Verified {} trees and {} records; {} findings. Auxiliary assets verified: {}; unclassified pages: {}.",
+                    report.trees.trees_verified,
+                    report.trees.records_verified,
+                    report.trees.findings.len(),
+                    report.assets_verified,
+                    report.unclassified_pages
+                );
+                println!("Checksums do not establish that every page is the latest published generation.");
+                for finding in &report.trees.findings {
+                    println!(
+                        "{} / {} (root {}): {}",
+                        finding.collection, finding.tree, finding.root_page, finding.reason
+                    );
+                }
+            }
+            if report.trees.findings.is_empty()
+                && report.assets_verified
+                && report.unclassified_pages == 0
+            {
+                0
+            } else {
+                1
+            }
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("scrub-paged", &error.to_string());
+            } else {
+                eprintln!("scrub-paged: {error}");
+            }
+            1
+        }
+    }
+}
+
+fn run_salvage_paged_indexes_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        let destination = flag_string(flags, "destination-dir")
+            .filter(|value| !value.is_empty())
+            .ok_or("--destination-dir is required and must not exist")?;
+        reddb_server::storage::compact::salvage_paged_indexes(
+            std::path::Path::new(&source),
+            std::path::Path::new(&destination),
+        )
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                json_ok("salvage-paged-indexes", &report.machine_json());
+            } else {
+                println!("Recovered verified trees into a new directory; {} secondary indexes were discarded for rebuilding. See salvage.json.", report.indexes.len());
+            }
+            0
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("salvage-paged-indexes", &error.to_string());
+            } else {
+                eprintln!("salvage-paged-indexes: {error}");
+            }
+            1
+        }
+    }
+}
+
+fn run_salvage_paged_collections_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    let json_mode = wants_json(flags);
+    let result = (|| {
+        let source = flag_string(flags, "source")
+            .filter(|value| !value.is_empty())
+            .ok_or("--source is required")?;
+        let destination = flag_string(flags, "destination-dir")
+            .filter(|value| !value.is_empty())
+            .ok_or("--destination-dir is required and must not exist")?;
+        reddb_server::storage::compact::salvage_paged_collections(
+            std::path::Path::new(&source),
+            std::path::Path::new(&destination),
+        )
+    })();
+    match result {
+        Ok(report) => {
+            if json_mode {
+                json_ok("salvage-paged-collections", &report.machine_json());
+            } else {
+                println!("Recovered verified collection records; {} collections had damaged pages. Lost record counts and identity high-water marks are unknown. The output is fenced read-only; export verified data into a new store. See salvage.json.", report.collections.len());
+            }
+            0
+        }
+        Err(error) => {
+            if json_mode {
+                json_error("salvage-paged-collections", &error.to_string());
+            } else {
+                eprintln!("salvage-paged-collections: {error}");
             }
             1
         }
@@ -3904,6 +4481,11 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ("migrate-pager-zone".to_string(), vec![]),
         ("salvage".to_string(), vec![]),
         ("compact".to_string(), vec![]),
+        ("recover-paged-wal".to_string(), vec![]),
+        ("scrub-paged-trees".to_string(), vec![]),
+        ("scrub-paged".to_string(), vec![]),
+        ("salvage-paged-indexes".to_string(), vec![]),
+        ("salvage-paged-collections".to_string(), vec![]),
         ("health".to_string(), vec![]),
         (
             "admin".to_string(),
@@ -3926,6 +4508,7 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ),
         ("status".to_string(), vec![]),
         ("mcp".to_string(), vec![]),
+        ("acp".to_string(), vec![]),
         ("connect".to_string(), vec![]),
         ("version".to_string(), vec![]),
     ]
@@ -5838,7 +6421,36 @@ fn run_doctor(result: &reddb::cli::schema::SchemaResult) -> i32 {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use std::sync::{Mutex, OnceLock};
+    use std::io::{self, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{mpsc, Mutex, OnceLock};
+    use std::thread;
+
+    struct OneReadThenPanic {
+        emitted: bool,
+    }
+
+    impl Read for OneReadThenPanic {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            assert!(!self.emitted, "restore input was read eagerly");
+            let line = b"{\"collection\":\"items\",\"fields\":{\"id\":\"1\"}}\n";
+            assert!(buf.len() >= line.len());
+            buf[..line.len()].copy_from_slice(line);
+            self.emitted = true;
+            Ok(line.len())
+        }
+    }
+
+    #[test]
+    fn restore_input_is_consumed_incrementally() {
+        let reader = OneReadThenPanic { emitted: false };
+        let mut lines = restore_input_lines(reader);
+
+        assert_eq!(
+            lines.next().expect("first line").expect("read line"),
+            r#"{"collection":"items","fields":{"id":"1"}}"#,
+        );
+    }
 
     #[test]
     fn doctor_parses_simple_metric_line() {
@@ -6103,6 +6715,43 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
     }
 
     #[test]
+    fn mcp_api_key_rejects_cleartext_and_redacts_error() {
+        let flags = HashMap::from([(
+            "url".to_string(),
+            str_flag("http://secret-api-key@host:5000"),
+        )]);
+
+        let err = resolve_mcp_client_options(&flags).unwrap_err();
+
+        assert!(err.contains("API key requires TLS"), "{err}");
+        assert!(!err.contains("secret-api-key"), "{err}");
+    }
+
+    #[test]
+    fn mcp_http_basic_auth_is_rejected_before_dispatch() {
+        let mut options = McpClientOptions {
+            redacted_uri: "https://<redacted>:<redacted>@db.example".to_string(),
+            target: reddb_wire::ConnectionTarget::Http {
+                base_url: "https://db.example".to_string(),
+            },
+            auth: reddb_wire::ConnectionAuth::Basic {
+                user: "alice".to_string(),
+                pass: "secret".to_string(),
+            },
+            timeout: Duration::from_secs(1),
+        };
+
+        let err = validate_mcp_remote_connect(&mut options).unwrap_err();
+
+        assert!(
+            err.contains("HTTP Basic authentication is not supported"),
+            "{err}"
+        );
+        assert!(!err.contains("alice"), "{err}");
+        assert!(!err.contains("secret"), "{err}");
+    }
+
+    #[test]
     fn mcp_redwire_connect_options_honor_secure_scheme() {
         let secure = mcp_redwire_connect_options(
             "db.example".to_string(),
@@ -6142,7 +6791,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             auth: reddb_wire::ConnectionAuth::Anonymous,
             timeout: Duration::from_secs(1),
         };
-        let server = RemoteMcpServer::new(options);
+        let server = RemoteMcpServer::new(options, reddb::mcp::capability::McpCapability::ReadOnly);
 
         for tool_name in tool_names {
             let mut params = reddb::json::Map::new();
@@ -6176,6 +6825,276 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
                 "unexpected denial for {tool_name}: {text}"
             );
         }
+    }
+
+    fn remote_mcp_http_server(
+        response_body: &'static str,
+    ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind remote MCP fixture");
+        let address = listener.local_addr().expect("remote MCP fixture address");
+        let (request_tx, request_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept remote MCP request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).expect("read remote MCP request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().expect("content length"))
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            request_tx
+                .send(String::from_utf8(request).expect("UTF-8 remote MCP request"))
+                .expect("capture remote MCP request");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write remote MCP response");
+        });
+        (format!("http://{address}"), request_rx, handle)
+    }
+
+    fn authenticated_remote_mcp(base_url: String) -> RemoteMcpServer {
+        RemoteMcpServer::new(
+            McpClientOptions {
+                redacted_uri: base_url.clone(),
+                target: reddb_wire::ConnectionTarget::Http { base_url },
+                auth: reddb_wire::ConnectionAuth::bearer("session-token"),
+                timeout: Duration::from_secs(2),
+            },
+            reddb::mcp::capability::McpCapability::ReadOnly,
+        )
+    }
+
+    fn remote_mcp_tool_call(
+        server: &RemoteMcpServer,
+        name: &str,
+        arguments: reddb::json::Value,
+    ) -> reddb::json::Value {
+        let params = json_object([
+            ("name", reddb::json::Value::String(name.to_string())),
+            ("arguments", arguments),
+        ]);
+        let response =
+            server.handle_tools_call(Some(&reddb::json::Value::Number(1.0)), Some(&params));
+        reddb::json::from_str(&response).expect("valid MCP tool response")
+    }
+
+    fn json_object<const N: usize>(entries: [(&str, reddb::json::Value); N]) -> reddb::json::Value {
+        reddb::json::Value::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
+        )
+    }
+
+    fn remote_mcp_result_text(response: &reddb::json::Value) -> &str {
+        response
+            .get("result")
+            .and_then(|result| result.get("content"))
+            .and_then(reddb::json::Value::as_array)
+            .and_then(|content| content.first())
+            .and_then(|item| item.get("text"))
+            .and_then(reddb::json::Value::as_str)
+            .expect("MCP result text")
+    }
+
+    #[test]
+    fn remote_mcp_ask_uses_the_callers_authenticated_http_session() {
+        let response_body = r#"{"ok":true,"result":{"records":[{"answer":"Only the permitted rows","sources_flat":[{"urn":"urn:row:1","payload":"allowed"}],"citations":[],"validation":{"ok":true,"warnings":[],"errors":[]},"cost_usd":0.001}]}}"#;
+        let (base_url, request_rx, handle) = remote_mcp_http_server(response_body);
+        let server = authenticated_remote_mcp(base_url);
+        let arguments = json_object([(
+            "question",
+            reddb::json::Value::String("who owns passport O'Reilly?".to_string()),
+        )]);
+
+        let response = remote_mcp_tool_call(
+            &server,
+            reddb::runtime::ai::mcp_ask_tool::TOOL_NAME,
+            arguments,
+        );
+
+        assert_eq!(
+            response
+                .get("result")
+                .and_then(|result| result.get("isError"))
+                .and_then(reddb::json::Value::as_bool),
+            None,
+            "{response:?}"
+        );
+        let answer: reddb::json::Value =
+            reddb::json::from_str(remote_mcp_result_text(&response)).expect("canonical ASK JSON");
+        assert_eq!(
+            answer.get("answer").and_then(reddb::json::Value::as_str),
+            Some("Only the permitted rows")
+        );
+        assert!(
+            answer
+                .get("sources_flat")
+                .and_then(reddb::json::Value::as_array)
+                .is_some(),
+            "{answer:?}"
+        );
+        assert!(
+            answer
+                .get("validation")
+                .and_then(|validation| validation.get("warnings"))
+                .and_then(reddb::json::Value::as_array)
+                .is_some(),
+            "{answer:?}"
+        );
+
+        let request = request_rx.recv().expect("captured ASK request");
+        let (headers, body) = request.split_once("\r\n\r\n").expect("HTTP request");
+        assert!(
+            headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("authorization: Bearer session-token")),
+            "{headers}"
+        );
+        let body: serde_json::Value = serde_json::from_str(body).expect("ASK request JSON");
+        assert_eq!(
+            body.get("query").and_then(serde_json::Value::as_str),
+            Some("ASK 'who owns passport O''Reilly?'")
+        );
+        assert!(!body.to_string().contains("session-token"));
+        handle.join().expect("remote MCP fixture");
+    }
+
+    #[test]
+    fn remote_mcp_metadata_discovery_uses_bound_parameters() {
+        let response_body = r#"{"ok":true,"result":{"records":[]}}"#;
+        let (base_url, request_rx, handle) = remote_mcp_http_server(response_body);
+        let server = authenticated_remote_mcp(base_url);
+        let crafted_name = "people' OR collection = 'secret";
+        let arguments = json_object([(
+            "collection",
+            reddb::json::Value::String(crafted_name.to_string()),
+        )]);
+
+        let response = remote_mcp_tool_call(&server, "reddb_describe_collection", arguments);
+
+        assert_eq!(
+            response
+                .get("result")
+                .and_then(|result| result.get("isError"))
+                .and_then(reddb::json::Value::as_bool),
+            None,
+            "{response:?}"
+        );
+        let request = request_rx.recv().expect("captured metadata request");
+        let (_, body) = request.split_once("\r\n\r\n").expect("HTTP request");
+        let body: serde_json::Value = serde_json::from_str(body).expect("metadata request JSON");
+        let query = body
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .expect("metadata query");
+        assert!(query.contains("collection = $1"), "{query}");
+        assert!(!query.contains(crafted_name), "{query}");
+        assert_eq!(
+            body.get("params")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|params| params.first())
+                .and_then(serde_json::Value::as_str),
+            Some(crafted_name)
+        );
+        handle.join().expect("remote MCP fixture");
+    }
+
+    #[test]
+    fn remote_mcp_collection_names_keep_the_legacy_array_contract() {
+        for response in [
+            r#"{"ok":true,"result":{"records":[{"name":"people"},{"name":"visits"}]}}"#,
+            r#"{"records":[{"values":{"name":"people"}},{"values":{"name":"visits"}}]}"#,
+        ] {
+            let names: reddb::json::Value = reddb::json::from_str(
+                &normalize_remote_collection_names(response).expect("collection names"),
+            )
+            .expect("names JSON");
+            assert_eq!(
+                names.as_array().map(|values| values.len()),
+                Some(2),
+                "response: {response}"
+            );
+            assert_eq!(
+                names
+                    .as_array()
+                    .and_then(|names| names.first())
+                    .and_then(reddb::json::Value::as_str),
+                Some("people")
+            );
+        }
+    }
+
+    #[test]
+    fn remote_mcp_read_only_mode_rejects_mutation_before_connecting() {
+        let server = authenticated_remote_mcp("http://127.0.0.1:1".to_string());
+        let arguments = json_object([(
+            "sql",
+            reddb::json::Value::String("DROP TABLE customers".to_string()),
+        )]);
+
+        let response = remote_mcp_tool_call(&server, "reddb_query", arguments);
+
+        assert_eq!(
+            response
+                .get("result")
+                .and_then(|result| result.get("isError"))
+                .and_then(reddb::json::Value::as_bool),
+            Some(true),
+            "{response:?}"
+        );
+        assert!(
+            remote_mcp_result_text(&response).contains("read-only"),
+            "{response:?}"
+        );
+    }
+
+    #[test]
+    fn remote_mcp_only_advertises_implemented_tools() {
+        let server = authenticated_remote_mcp("http://127.0.0.1:1".to_string());
+        let response = server.handle_tools_list(Some(&reddb::json::Value::Number(1.0)));
+        let response: reddb::json::Value =
+            reddb::json::from_str(&response).expect("valid MCP tools/list response");
+        let names: Vec<&str> = response
+            .get("result")
+            .and_then(|result| result.get("tools"))
+            .and_then(reddb::json::Value::as_array)
+            .expect("MCP tools")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(reddb::json::Value::as_str))
+            .collect();
+
+        assert!(names.contains(&"reddb_query"), "{names:?}");
+        assert!(names.contains(&"reddb_collections"), "{names:?}");
+        assert!(names.contains(&"reddb_catalog"), "{names:?}");
+        assert!(names.contains(&"reddb_describe_collection"), "{names:?}");
+        assert!(names.contains(&"reddb_find_field"), "{names:?}");
+        assert!(names.contains(&reddb::runtime::ai::mcp_ask_tool::TOOL_NAME));
+        assert!(!names.contains(&"reddb_vault_unseal"), "{names:?}");
     }
 
     #[test]

@@ -216,3 +216,20 @@ pub fn recover_from_dwb<F: VfsFile>(file: &mut F) -> Result<(), PagerIoError> {
     file.sync_all()?;
     clear_dwb_zone(file)
 }
+
+/// Read a complete staged frame without consuming or repairing the source.
+/// Incomplete staging cannot have reached home pages and is ignored, just as
+/// in writer recovery. The frame decoder bounds the number of pages.
+pub fn read_dwb_pages<F: VfsFile>(file: &mut F) -> Result<Vec<(u32, Page)>, PagerIoError> {
+    if file.file_len()? < dwb_zone_offset() + DWB_ZONE_BYTES as u64 {
+        return Ok(Vec::new());
+    }
+    let mut buffer = vec![0u8; DWB_ZONE_BYTES];
+    file.seek(SeekFrom::Start(dwb_zone_offset()))?;
+    file.read_exact(&mut buffer)?;
+    Ok(reddb_file::decode_paged_dwb_frame(&buffer)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| (entry.page_id, Page::from_bytes(entry.page)))
+        .collect())
+}

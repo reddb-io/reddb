@@ -57,4 +57,173 @@ impl<P: PageStore> BTree<P> {
         }
         Ok(pages)
     }
+
+    /// Stream the verified leaves of a damaged tree. Only checksum failures at
+    /// the proven leaf depth may be skipped. The caller must separately prove
+    /// that no allocated pages remain unowned before publishing any output.
+    pub fn visit_recoverable_leaves<C, R>(
+        &self,
+        mut claim: C,
+        mut record: R,
+    ) -> BTreeResult<Vec<u32>>
+    where
+        C: FnMut(u32) -> BTreeResult<()>,
+        R: FnMut(Vec<u8>, Vec<u8>) -> BTreeResult<()>,
+    {
+        struct Work {
+            id: u32,
+            depth: usize,
+            low: Option<Vec<u8>>,
+            high: Option<Vec<u8>>,
+        }
+        let mut pending = vec![Work {
+            id: self.root_page_id(),
+            depth: 0,
+            low: None,
+            high: None,
+        }];
+        let mut seen = std::collections::HashSet::new();
+        let count = self.pager.page_count()?;
+        let mut leaves: Vec<(u32, Option<u32>)> = Vec::new();
+        let mut skipped = Vec::new();
+        let mut leaf_depth = None;
+        let mut skipped_depths = Vec::new();
+        let mut previous: Option<Vec<u8>> = None;
+        while let Some(work) = pending.pop() {
+            if work.id == 0 || work.id >= count || work.depth > 64 || !seen.insert(work.id) {
+                return Err(BTreeError::Corrupted(
+                    "invalid recovery tree ownership".into(),
+                ));
+            }
+            claim(work.id)?;
+            let page = match self.pager.read_page(work.id) {
+                Ok(page) => page,
+                Err(PagerError::Page(super::super::page::PageError::ChecksumMismatch {
+                    ..
+                })) if work.depth > 0 => {
+                    skipped.push(work.id);
+                    skipped_depths.push(work.depth);
+                    leaves.push((work.id, None));
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            match page.page_type()? {
+                PageType::BTreeInterior => {
+                    let (keys, children) = read_interior_keys_children(&page)?;
+                    if children.len() != keys.len() + 1
+                        || children.contains(&0)
+                        || keys.windows(2).any(|pair| pair[0] >= pair[1])
+                        || keys.iter().any(|key| {
+                            work.low.as_ref().is_some_and(|low| key < low)
+                                || work.high.as_ref().is_some_and(|high| key >= high)
+                        })
+                    {
+                        return Err(BTreeError::Corrupted(
+                            "invalid recovery interior bounds".into(),
+                        ));
+                    }
+                    for i in (0..children.len()).rev() {
+                        pending.push(Work {
+                            id: children[i],
+                            depth: work.depth + 1,
+                            low: if i == 0 {
+                                work.low.clone()
+                            } else {
+                                Some(keys[i - 1].clone())
+                            },
+                            high: if i == keys.len() {
+                                work.high.clone()
+                            } else {
+                                Some(keys[i].clone())
+                            },
+                        });
+                    }
+                }
+                PageType::BTreeLeaf => {
+                    if leaf_depth.is_some_and(|depth| depth != work.depth) {
+                        return Err(BTreeError::Corrupted(
+                            "inconsistent recovery leaf depth".into(),
+                        ));
+                    }
+                    leaf_depth = Some(work.depth);
+                    let bytes = page.content();
+                    let next = u32::from_le_bytes(bytes[4..8].try_into().expect("leaf header"));
+                    leaves.push((work.id, Some(next)));
+                    for index in 0..usize::from(page.cell_count()) {
+                        let (key, stored) = read_leaf_cell(&page, index)?;
+                        if work.low.as_ref().is_some_and(|low| &key < low)
+                            || work.high.as_ref().is_some_and(|high| &key >= high)
+                            || previous.as_ref().is_some_and(|old| old >= &key)
+                        {
+                            return Err(BTreeError::Corrupted(
+                                "invalid recovery leaf ordering".into(),
+                            ));
+                        }
+                        previous = Some(key.clone());
+                        if let Some(mut overflow) = value_layout::pointer_head(&stored) {
+                            while overflow != 0 {
+                                if overflow >= count || !seen.insert(overflow) {
+                                    return Err(BTreeError::Corrupted(
+                                        "invalid recovery overflow ownership".into(),
+                                    ));
+                                }
+                                claim(overflow)?;
+                                let page = self.pager.read_page(overflow)?;
+                                if page.page_type()? != PageType::Overflow {
+                                    return Err(BTreeError::Corrupted(
+                                        "invalid recovery overflow page".into(),
+                                    ));
+                                }
+                                let bytes = page.content();
+                                let length = u32::from_le_bytes(
+                                    bytes[4..8].try_into().expect("overflow header"),
+                                );
+                                if length as usize
+                                    > crate::storage::overflow::OVERFLOW_PAYLOAD_PER_PAGE
+                                {
+                                    return Err(BTreeError::Corrupted(
+                                        "invalid recovery overflow length".into(),
+                                    ));
+                                }
+                                overflow = u32::from_le_bytes(
+                                    bytes[..4].try_into().expect("overflow header"),
+                                );
+                            }
+                        }
+                        record(
+                            key,
+                            value_layout::decode_with_budget(
+                                self.pager.as_ref(),
+                                &stored,
+                                32 * 1024 * 1024,
+                            )?,
+                        )?;
+                    }
+                }
+                _ => {
+                    return Err(BTreeError::Corrupted(
+                        "invalid recovery tree page type".into(),
+                    ))
+                }
+            }
+        }
+        if leaf_depth.is_none()
+            || skipped_depths
+                .iter()
+                .any(|depth| Some(*depth) != leaf_depth)
+        {
+            return Err(BTreeError::Corrupted(
+                "damaged page is not at proven leaf depth".into(),
+            ));
+        }
+        for (i, (_, next)) in leaves.iter().enumerate() {
+            if next.is_some_and(|id| id != leaves.get(i + 1).map_or(0, |leaf| leaf.0)) {
+                return Err(BTreeError::Corrupted(
+                    "invalid recovery forward leaf chain".into(),
+                ));
+            }
+        }
+        Ok(skipped)
+    }
 }

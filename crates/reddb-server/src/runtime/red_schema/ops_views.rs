@@ -125,19 +125,13 @@ pub(super) fn analytics_sources_snapshot(
 }
 
 pub(super) fn forks_snapshot(runtime: &RedDBRuntime) -> RedDBResult<Vec<UnifiedRecord>> {
-    let db = runtime.db();
-    let Some(path) = db.options().data_path.as_ref() else {
-        return Ok(Vec::new());
-    };
     let schema = Arc::new(
         FORK_COLUMNS
             .iter()
             .map(|name| Arc::<str>::from(*name))
             .collect::<Vec<_>>(),
     );
-    let forks = reddb_file::OperationalManifest::for_db_path(path)
-        .list_forks()
-        .map_err(RedDBError::Io)?;
+    let forks = runtime.list_store_forks()?;
     Ok(forks
         .into_iter()
         .map(|fork| {
@@ -290,14 +284,23 @@ pub(super) fn retention_snapshot(
             // simple rather than reach for zone-map min lookups
             // that don't exist on the schemaless `created_at`
             // axis yet.
-            let cutoff = retention_ms.map(|ret| (now_ms as i64).saturating_sub(ret as i64));
+            let cutoff = retention_ms.map(|ret| {
+                super::super::retention_sweeper::cutoff_ms(
+                    u64::try_from(now_ms).unwrap_or(u64::MAX),
+                    ret,
+                )
+            });
             let mut oldest_ts: Option<i64> = None;
             let mut expired_count: u64 = 0;
             if let Some(manager) = store.get_collection(&collection.name) {
                 manager.for_each_entity(|entity| {
                     let ts = match ts_column.as_deref() {
-                        Some("created_at") => Some(entity.created_at as i64),
-                        Some("updated_at") => Some(entity.updated_at as i64),
+                        Some("created_at") => i64::try_from(entity.created_at)
+                            .ok()
+                            .and_then(|value| value.checked_mul(1_000)),
+                        Some("updated_at") => i64::try_from(entity.updated_at)
+                            .ok()
+                            .and_then(|value| value.checked_mul(1_000)),
                         Some(name) => entity
                             .data
                             .as_row()
@@ -344,6 +347,9 @@ pub(super) fn retention_snapshot(
                     Value::UnsignedInteger(sweeper_state.rows_swept_total),
                     Value::UnsignedInteger(sweeper_state.segments_retired_total),
                     Value::UnsignedInteger(sweeper_state.last_pending_estimate),
+                    Value::UnsignedInteger(sweeper_state.ttl_rows_swept_total),
+                    Value::UnsignedInteger(sweeper_state.ttl_pending_estimate),
+                    Value::UnsignedInteger(sweeper_state.ttl_last_sweep_duration_ms),
                 ],
             )
         })

@@ -162,7 +162,7 @@ test "kv get returns value or null" {
         \\{"rows":[]}
     );
     const h = helpers.Helpers.init(a, fq.querier());
-    var got = (try h.kv(null).get("k", null)) orelse return error.MissingValue;
+    const got = (try h.kv(null).get("k", null)) orelse return error.MissingValue;
     try testing.expectEqualStrings("v", got.string);
     a.free(got.string);
 

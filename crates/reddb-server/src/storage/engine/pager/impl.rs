@@ -5,9 +5,6 @@ pub(super) const ZFS_SUPER_MAGIC: i64 = 0x2fc1_2fc1;
 pub(super) const FS_NOCOW_FL: u64 = 0x0080_0000;
 
 #[cfg(test)]
-const PHASE3_DWB_ZONE_FILE_VERSION: u32 = 0x0001_0001;
-
-#[cfg(test)]
 pub(super) const SUPERBLOCK_SLOT_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
 #[cfg(test)]
 pub(super) const SUPERBLOCK_ZONE_SIZE: usize = reddb_file::PAGED_SUPERBLOCK_ZONE_SIZE;
@@ -210,7 +207,7 @@ impl Pager {
         if !config.read_only {
             file.try_lock_exclusive().map_err(|_| PagerError::Locked)?;
         } else {
-            let _ = FileExt::try_lock_shared(&file);
+            FileExt::try_lock_shared(&file).map_err(|_| PagerError::Locked)?;
         }
         // Own lock release across both ordinary close and later open failures.
         let file = NativePagerFile(file);
@@ -595,6 +592,157 @@ mod tests {
         zone
     }
 
+    #[test]
+    fn read_only_dwb_recovery_survives_cache_eviction_without_writing() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let path = directory.path().join("data.rdb");
+        let writer = Pager::open_default(&path).expect("writer");
+        let mut pages = Vec::new();
+        for _ in 0..100 {
+            let mut page = writer.allocate_page(PageType::Overflow).expect("allocate");
+            page.update_checksum();
+            writer
+                .write_page(page.page_id(), page.clone())
+                .expect("page");
+            pages.push(page);
+        }
+        writer.sync().expect("checkpoint");
+        drop(writer);
+        let mut staged = pages.last().expect("tail page").clone();
+        staged.content_mut()[0] = 123;
+        staged.update_checksum();
+        let frame = reddb_file::encode_paged_dwb_frame([(staged.page_id(), staged.as_bytes())]);
+        let mut file = OpenOptions::new().write(true).open(&path).expect("fixture");
+        file.seek(SeekFrom::Start(
+            u64::from(reddb_engine::storage::pager_io::DWB_ZONE_START_PAGE) * PAGE_SIZE as u64,
+        ))
+        .expect("DWB offset");
+        file.write_all(&frame).expect("stage durable image");
+        // Simulate interruption before the staged tail page reached its home.
+        file.set_len(u64::from(staged.page_id()) * PAGE_SIZE as u64)
+            .expect("truncate tail");
+        file.sync_all().expect("fixture sync");
+        drop(file);
+        let before = std::fs::read(&path).expect("source bytes");
+        for _ in 0..2 {
+            let reader = Pager::open(
+                &path,
+                PagerConfig {
+                    read_only: true,
+                    create: false,
+                    cache_size: 2,
+                    ..Default::default()
+                },
+            )
+            .expect("read-only DWB recovery");
+            for page in &pages[..pages.len() - 1] {
+                reader
+                    .read_page(page.page_id())
+                    .expect("evict ordinary cache entries");
+            }
+            assert_eq!(
+                reader
+                    .read_page(staged.page_id())
+                    .expect("recovered tail")
+                    .as_bytes(),
+                staged.as_bytes()
+            );
+            assert!(reader.write_page(staged.page_id(), staged.clone()).is_err());
+            drop(reader);
+            assert_eq!(std::fs::read(&path).expect("unchanged source"), before);
+        }
+        let writer = Pager::open_default(&path).expect("ordinary DWB recovery");
+        assert_eq!(
+            writer
+                .read_page(staged.page_id())
+                .expect("durable tail")
+                .as_bytes(),
+            staged.as_bytes()
+        );
+    }
+
+    #[test]
+    fn read_only_dwb_retains_raw_pages_for_host_authentication() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let path = directory.path().join("data.rdb");
+        let writer = Pager::open_default(&path).expect("writer");
+        let id = writer
+            .allocate_page(PageType::Overflow)
+            .expect("page")
+            .page_id();
+        writer.sync().expect("checkpoint");
+        drop(writer);
+        // Ciphertext does not carry a plaintext PageHeader or page checksum.
+        let raw = [91; PAGE_SIZE];
+        let frame = reddb_file::encode_paged_dwb_frame([(id, &raw)]);
+        let mut file = OpenOptions::new().write(true).open(&path).expect("fixture");
+        file.seek(SeekFrom::Start(
+            u64::from(DWB_ZONE_START_PAGE) * PAGE_SIZE as u64,
+        ))
+        .expect("DWB offset");
+        file.write_all(&frame).expect("staged raw frame");
+        file.sync_all().expect("fixture sync");
+        drop(file);
+        let before = std::fs::read(&path).expect("source");
+        let reader = Pager::open(
+            &path,
+            PagerConfig {
+                read_only: true,
+                create: false,
+                ..Default::default()
+            },
+        )
+        .expect("raw DWB recovery");
+        assert_eq!(
+            reader
+                .read_page_no_checksum(id)
+                .expect("raw image")
+                .as_bytes(),
+            &raw
+        );
+        assert!(
+            reader.read_page(id).is_err(),
+            "normal reads still require a page checksum"
+        );
+        drop(reader);
+        assert_eq!(std::fs::read(&path).expect("unchanged source"), before);
+    }
+
+    #[test]
+    fn read_only_recovery_refuses_excess_images_without_writing() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let path = directory.path().join("data.rdb");
+        drop(Pager::open_default(&path).expect("writer"));
+        let before = std::fs::read(&path).expect("source");
+        let reader = Pager::open(
+            &path,
+            PagerConfig {
+                read_only: true,
+                create: false,
+                cache_size: 2,
+                ..Default::default()
+            },
+        )
+        .expect("reader");
+        let limit = reddb_engine::storage::pager_io::DWB_MAX_PAGES_PER_FRAME;
+        for index in 0..=limit {
+            let id = reddb_engine::storage::pager_io::FIRST_ALLOCATABLE_PAGE + index as u32;
+            let mut page = Page::new(PageType::Overflow, id);
+            page.update_checksum();
+            let result = reader.restore_read_only_page(id, page);
+            if index < limit {
+                result.expect("within recovery budget");
+            } else {
+                assert!(result
+                    .expect_err("bounded recovery")
+                    .to_string()
+                    .contains("budget"));
+            }
+        }
+        drop(reader);
+        assert_eq!(std::fs::read(&path).expect("unchanged source"), before);
+    }
+
     /// Overwrite one superblock slot in place, leaving the sibling untouched.
     fn poke_slot(path: &Path, copy_index: usize, bytes: &[u8]) {
         let mut file = OpenOptions::new()
@@ -616,8 +764,11 @@ mod tests {
             let mut slot = zone[start..start + SUPERBLOCK_SLOT_SIZE].to_vec();
             let generation = reddb_file::paged_superblock_slot_generation(&slot, copy_index)
                 .expect("fresh store should publish both slots");
-            reddb_file::set_database_header_version(&mut slot, PHASE3_DWB_ZONE_FILE_VERSION - 1)
-                .expect("set_database_header_version() should succeed");
+            reddb_file::set_database_header_version(
+                &mut slot,
+                reddb_file::PAGE_DWB_ZONE_FILE_VERSION - 1,
+            )
+            .expect("set_database_header_version() should succeed");
             reddb_file::set_database_header_page_count(&mut slot, page_count)
                 .expect("set_database_header_page_count() should succeed");
             reddb_file::seal_paged_superblock_slot(&mut slot, copy_index, generation)
@@ -883,6 +1034,20 @@ mod tests {
         torn[64] ^= 0xFF;
         poke_slot(&path, newest.copy_index, &torn);
 
+        let before = std::fs::read(&path).expect("torn source");
+        let reader = Pager::open(
+            &path,
+            PagerConfig {
+                read_only: true,
+                create: false,
+                ..Default::default()
+            },
+        )
+        .expect("read-only fallback to older superblock");
+        assert!(reader.page_count().expect("read-only page count") >= 3);
+        drop(reader);
+        assert_eq!(std::fs::read(&path).expect("preserved torn source"), before);
+
         let pager = Pager::open_default(&path).expect("older copy must root the store");
         assert!(pager.page_count().expect("page_count() should succeed") >= 3);
         drop(pager);
@@ -911,7 +1076,9 @@ mod tests {
         let rendered = err.to_string();
         assert!(matches!(err, PagerError::SuperblockZoneUnrecoverable(_)));
         assert!(rendered.contains("superblock zone"), "{rendered}");
-        assert!(rendered.contains("salvage"), "{rendered}");
+        assert!(rendered.contains("Preserve the database"), "{rendered}");
+        assert!(rendered.contains("verified backup"), "{rendered}");
+        assert!(!rendered.contains("salvage"), "{rendered}");
 
         cleanup(&path);
     }

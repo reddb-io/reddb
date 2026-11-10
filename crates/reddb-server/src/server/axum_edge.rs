@@ -353,11 +353,15 @@ impl RedDBServer {
         is_health_request: bool,
         started: Instant,
     ) -> Response {
+        let latency_sensitive = self.request_uses_latency_reserve(&request);
         let execution_permit = if is_health_request {
             None
         } else {
             let remaining = self.handler_timeout.saturating_sub(started.elapsed());
-            match tokio::time::timeout(remaining, self.execution_admission.acquire()).await {
+            let acquire = self
+                .execution_admission
+                .acquire_classified(latency_sensitive);
+            match tokio::time::timeout(remaining, acquire).await {
                 Ok(Ok(execution_permit)) => {
                     self.http_metrics
                         .record_queue_wait(transport, execution_permit.wait().as_secs_f64());
@@ -404,9 +408,12 @@ impl RedDBServer {
         };
 
         let server = self.clone();
+        let execution_ticket = (!is_health_request).then(|| self.execution_watchdog.start());
+        let worker_ticket = execution_ticket.clone();
         let cancellation = crate::runtime::query_budget::RequestCancellation::new();
         let worker_cancellation = cancellation.clone();
         let join = tokio::task::spawn_blocking(move || {
+            let _execution_completion = worker_ticket.as_ref().map(|ticket| ticket.completion());
             let _cancellation_scope = worker_cancellation.install();
             // Both the global and per-principal permits are held for the
             // duration of the engine call and released when this closure
@@ -421,11 +428,11 @@ impl RedDBServer {
             // handful of concurrent requests instead of racing real load.
             // The atomic is 0 in production, so this is a single relaxed
             // load on the hot path.
-            let inject_ms = server
-                .slow_inject_ms
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if inject_ms > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(inject_ms));
+            // Finite delays retain the legacy health-deadline test contract.
+            // Only the deterministic blocking gate stays query-scoped so a
+            // readiness probe can observe the stalled worker.
+            if !is_health_request || !server.test_slow_inject_is_blocking_gate() {
+                server.apply_test_slow_inject();
             }
             server.route(request)
         });
@@ -439,6 +446,9 @@ impl RedDBServer {
                 // engine checkpoints unwind the worker and release both
                 // admission permits instead of leaving capacity stranded.
                 cancellation.cancel();
+                if let Some(ticket) = execution_ticket {
+                    ticket.mark_timed_out();
+                }
                 self.http_metrics
                     .record_reject(transport, HttpRejectReason::HandlerTimeout);
                 self.reject_capacity_response(
@@ -467,8 +477,12 @@ impl RedDBServer {
     ) -> Response {
         let execution_permit = if self.streaming_request_uses_execution_admission(&request) {
             let remaining = self.handler_timeout.saturating_sub(started.elapsed());
+            let latency_sensitive = self.request_uses_latency_reserve(&request);
+            let acquire = self
+                .execution_admission
+                .acquire_classified(latency_sensitive);
             let permit =
-                match tokio::time::timeout(remaining, self.execution_admission.acquire()).await {
+                match tokio::time::timeout(remaining, acquire).await {
                     Ok(Ok(execution_permit)) => {
                         self.http_metrics
                             .record_queue_wait(transport, execution_permit.wait().as_secs_f64());

@@ -55,7 +55,7 @@ $conn = Reddb::connect('https://reddb.example.com:55555', [
 | `reds://host:5050` | TLS redwire | ALPN `redwire/1` injected automatically. |
 | `http://host:5000` | HTTP REST | |
 | `https://host:55555` | HTTPS REST | |
-| `red://`, `red://memory`, `red:///path` | embedded | Throws `EmbeddedUnsupported`. |
+| `memory://`, `file:///path` | embedded | Loads the shared RedDB ABI through `ext-ffi`. |
 
 Username, password, token, and apiKey may be carried in the URL or
 the `$opts` array; the latter wins on collision.
@@ -239,7 +239,7 @@ All exceptions extend `Reddb\RedDBException`:
 | `RedDBException\FrameTooLarge` | Frame length out of range. |
 | `RedDBException\UnknownFlags` | Peer set a flag bit we don't recognise. |
 | `RedDBException\CompressedButNoZstd` | Compressed frame but `ext-zstd` isn't loaded. |
-| `RedDBException\EmbeddedUnsupported` | URL selected the embedded engine. |
+| `RedDBException\EmbeddedUnsupported` | PHP FFI or the matching native embedded library is unavailable. |
 | `RedDBException\ParamsUnsupported` | Parameterized RedWire query sent to a server without `FEATURE_PARAMS`. |
 
 ## Testing

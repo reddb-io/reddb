@@ -463,6 +463,8 @@ pub struct PrimaryReplication {
     pub replicas: RwLock<Vec<ReplicaState>>,
     pub(crate) routing_endpoints: RwLock<BTreeMap<String, reddb_wire::routing::RoutingEndpoints>>,
     wal_appended: (Mutex<u64>, Condvar),
+    metadata_store: Option<Arc<crate::storage::unified::UnifiedStore>>,
+    metadata_error: Mutex<Option<String>>,
     slot_path: Option<PathBuf>,
     slot_catalog_path: Option<PathBuf>,
     primary_replica_file_plan: Option<reddb_file::PrimaryReplicaFilePlan>,
@@ -582,6 +584,8 @@ impl PrimaryReplication {
             replicas: RwLock::new(Vec::new()),
             routing_endpoints: RwLock::new(BTreeMap::new()),
             wal_appended: (Mutex::new(current_lsn), Condvar::new()),
+            metadata_store: None,
+            metadata_error: Mutex::new(None),
             slot_path,
             slot_catalog_path,
             primary_replica_file_plan,
@@ -596,6 +600,89 @@ impl PrimaryReplication {
         }
     }
 
+    pub(crate) fn new_with_store(
+        data_path: Option<&Path>,
+        config: &crate::replication::ReplicationConfig,
+        store: Arc<crate::storage::unified::UnifiedStore>,
+    ) -> io::Result<Self> {
+        let mut primary = Self::new_with_config(data_path, config);
+        if let Some(bytes) = super::metadata::read(&store, super::metadata::SLOTS)? {
+            let catalog =
+                reddb_file::ReplicationSlotCatalog::decode(&bytes).map_err(io::Error::other)?;
+            primary.slots = RwLock::new(
+                catalog
+                    .slots
+                    .into_iter()
+                    .map(|slot| (slot.replica_id.clone(), slot))
+                    .collect(),
+            );
+        } else {
+            // Validate legacy sources before importing. An unreadable source
+            // must not silently become an empty authoritative catalog.
+            let mut valid_source = false;
+            let mut import_error = None;
+            for path in [&primary.slot_catalog_path, &primary.slot_path]
+                .into_iter()
+                .flatten()
+            {
+                if path.try_exists()? {
+                    let result = if primary.slot_catalog_path.as_ref() == Some(path) {
+                        reddb_file::ReplicationSlotCatalog::read_from_path(path)
+                    } else {
+                        reddb_file::ReplicationSlotCatalog::read_legacy_json_from_path(
+                            path,
+                            crate::utils::now_unix_millis() as u128,
+                        )
+                    };
+                    match result {
+                        Ok(_) => valid_source = true,
+                        Err(error) => import_error = Some(error),
+                    }
+                }
+            }
+            if !valid_source {
+                if let Some(error) = import_error {
+                    return Err(io::Error::other(error));
+                }
+            }
+            let slots = primary
+                .slots
+                .read()
+                .unwrap_or_else(|error| error.into_inner());
+            let bytes = slots::slot_catalog_from_map(&slots)
+                .and_then(|catalog| catalog.encode())
+                .map_err(io::Error::other)?;
+            super::metadata::write(&store, super::metadata::SLOTS, &bytes)?;
+        }
+        for path in [&primary.slot_catalog_path, &primary.slot_path]
+            .into_iter()
+            .flatten()
+        {
+            super::metadata::retire_legacy(path)?;
+        }
+        primary.metadata_store = Some(store);
+        Ok(primary)
+    }
+
+    fn current_timeline(
+        &self,
+        root: &Path,
+    ) -> Result<reddb_file::TimelineId, reddb_file::RdbFileError> {
+        if let Some(store) = &self.metadata_store {
+            let path =
+                reddb_file::PrimaryReplicaFilePlan::new(root, reddb_file::TimelineId::initial())
+                    .timeline_history_path();
+            return super::metadata::timeline(store, &path)
+                .map(|history| {
+                    history
+                        .current()
+                        .unwrap_or_else(reddb_file::TimelineId::initial)
+                })
+                .map_err(reddb_file::RdbFileError::Io);
+        }
+        Self::primary_replica_current_timeline_for_root(root)
+    }
+
     pub fn append_logical_record(&self, lsn: u64, encoded: Vec<u8>) {
         self.wal_buffer.append(lsn, encoded.clone());
         if let Some(spool) = &self.logical_wal_spool {
@@ -606,7 +693,7 @@ impl PrimaryReplication {
                 .primary_replica_wal_lock
                 .lock()
                 .unwrap_or_else(|err| err.into_inner());
-            match Self::primary_replica_current_timeline_for_root(&plan.root) {
+            match self.current_timeline(&plan.root) {
                 Ok(timeline) => {
                     let plan = reddb_file::PrimaryReplicaFilePlan::new(plan.root.clone(), timeline);
                     if let Err(err) = plan.append_wal_record(lsn, &encoded) {
@@ -679,8 +766,17 @@ impl PrimaryReplication {
     /// the current WAL LSN for a fresh registration, or the durable slot
     /// restart point for a reconnect.
     pub fn register_replica_with_region(&self, id: String, region: Option<String>) -> u64 {
+        self.register_replica_with_region_at(id, region, self.current_logical_lsn())
+    }
+
+    fn register_replica_with_region_at(
+        &self,
+        id: String,
+        region: Option<String>,
+        initial_lsn: u64,
+    ) -> u64 {
         let now_ms = crate::utils::now_unix_millis() as u128;
-        let resume_lsn = self.ensure_slot(&id, self.current_logical_lsn());
+        let resume_lsn = self.ensure_slot(&id, initial_lsn);
         let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = replicas.iter_mut().find(|r| r.id == id) {
             existing.last_seen_at_unix_ms = now_ms;
@@ -740,9 +836,11 @@ impl PrimaryReplication {
     /// its `replica_id` on a pull, the primary registers it so it is no
     /// longer blind to that replica's existence; subsequent pulls are
     /// idempotent no-ops. Returns `true` when a new registration was
-    /// created. Delegates to `register_replica_with_region`, so reconnects
-    /// preserve progress and do not bump the topology epoch.
-    pub fn ensure_replica_registered(&self, id: &str) -> bool {
+    /// created. A fresh slot starts at the replica's requested cursor rather
+    /// than the primary's current LSN, so an empty replica does not skip WAL
+    /// that was written before its first pull. Reconnects preserve existing
+    /// progress and do not bump the topology epoch.
+    pub fn ensure_replica_registered(&self, id: &str, requested_since_lsn: u64) -> bool {
         let already = self
             .replicas
             .read()
@@ -752,7 +850,7 @@ impl PrimaryReplication {
         if already {
             return false;
         }
-        self.register_replica(id.to_string());
+        self.register_replica_with_region_at(id.to_string(), None, requested_since_lsn);
         true
     }
 
@@ -880,9 +978,13 @@ impl PrimaryReplication {
     }
 
     pub fn retention_floor_lsn(&self) -> Option<u64> {
-        self.slots
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+        // A slot update publishes its durability result while holding this lock.
+        // Check the error only after joining that same publication boundary.
+        let slots = self.slots.read().unwrap_or_else(|e| e.into_inner());
+        if self.ensure_slot_metadata_durable().is_err() {
+            return Some(0);
+        }
+        slots
             .values()
             .filter(|slot| slot.invalidation_reason.is_none())
             .map(|slot| slot.restart_lsn)
@@ -923,6 +1025,10 @@ impl PrimaryReplication {
 
     fn ensure_slot(&self, id: &str, initial_lsn: u64) -> u64 {
         let now_ms = crate::utils::now_unix_millis() as u128;
+        let _publication = self
+            .metadata_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
         let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
         if let Some(slot) = slots.get_mut(id) {
             slot.last_seen_at_unix_ms = now_ms;
@@ -943,6 +1049,10 @@ impl PrimaryReplication {
     }
 
     fn advance_slot(&self, id: &str, confirmed_lsn: u64, restart_lsn: u64, now_ms: u128) {
+        let _publication = self
+            .metadata_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
         let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
         let slot = slots.entry(id.to_string()).or_insert_with(|| {
             let mut slot =
@@ -962,6 +1072,10 @@ impl PrimaryReplication {
     }
 
     pub fn touch_slot(&self, id: &str, now_ms: u128) {
+        let _publication = self
+            .metadata_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
         let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
         let mut changed = false;
         if let Some(slot) = slots.get_mut(id) {
@@ -981,6 +1095,10 @@ impl PrimaryReplication {
     ) -> Vec<(String, ReplicationSlotInvalidationCause)> {
         let current_lsn = self.current_logical_lsn();
         let mut invalidated = Vec::new();
+        let _publication = self
+            .metadata_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
         let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
         for slot in slots.values_mut() {
             if slot.invalidation_reason.is_some() {
@@ -1017,6 +1135,10 @@ impl PrimaryReplication {
         oldest_available_lsn: Option<u64>,
     ) -> Option<ReplicationSlotInvalidationCause> {
         let now_ms = crate::utils::now_unix_millis() as u128;
+        let _publication = self
+            .metadata_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
         let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
         let slot = slots.get_mut(id)?;
         if let Some(reason) = slot.invalidation_reason {
@@ -1083,6 +1205,24 @@ impl PrimaryReplication {
     }
 
     fn persist_slots_locked(&self, slots: &BTreeMap<String, ReplicationSlot>) {
+        if let Some(store) = &self.metadata_store {
+            let result = slots::slot_catalog_from_map(slots)
+                .and_then(|catalog| catalog.encode())
+                .map_err(io::Error::other)
+                .and_then(|bytes| super::metadata::write(store, super::metadata::SLOTS, &bytes));
+            let mut last_error = self
+                .metadata_error
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Err(error) = result {
+                *last_error = Some(error.to_string());
+                warn!(target: "reddb::replication::slots", %error,
+                    "failed to persist replication slots inside database");
+            } else {
+                *last_error = None;
+            }
+            return;
+        }
         if let Err(err) = persist_replication_slots(self.slot_path.as_deref(), slots) {
             warn!(
                 target: "reddb::replication::slots",
@@ -1097,6 +1237,18 @@ impl PrimaryReplication {
                 error = %err,
                 "failed to persist binary replication slot catalog"
             );
+        }
+    }
+
+    pub(crate) fn ensure_slot_metadata_durable(&self) -> io::Result<()> {
+        match self
+            .metadata_error
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+        {
+            Some(error) => Err(io::Error::other(error.clone())),
+            None => Ok(()),
         }
     }
 }

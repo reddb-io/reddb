@@ -1,6 +1,9 @@
 package reddb
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestParseURI_TableDriven(t *testing.T) {
 	// errCode == "" means parsing must succeed and the want fields must match.
@@ -92,19 +95,21 @@ func TestParseURI_TableDriven(t *testing.T) {
 			uri: "red://host?proto=grpc",
 			w:   want{kind: KindGRPC, host: "host", port: 55055}},
 
+		// embedded
+		{name: "embedded canonical memory", uri: "memory://", w: want{kind: KindEmbedded}},
+		{name: "embedded in-memory", uri: "red://memory", w: want{kind: KindEmbedded}},
+		{name: "embedded sqlite-style", uri: "red://:memory:", w: want{kind: KindEmbedded}},
+		{name: "embedded file", uri: "red:///data/db.rdb",
+			w: want{kind: KindEmbedded, path: filepath.FromSlash("/data/db.rdb")}},
+		{name: "embedded canonical file", uri: "file:///data/db.rdb",
+			w: want{kind: KindEmbedded, path: filepath.FromSlash("/data/db.rdb")}},
+		{name: "missing host bare scheme", uri: "red://", w: want{kind: KindEmbedded}},
+
 		// errors
 		{name: "empty uri", uri: "", errCode: CodeUnparseableURI},
 		{name: "unsupported scheme", uri: "ftp://host", errCode: CodeUnsupportedScheme},
 		{name: "unsupported proto", uri: "red://host?proto=quic",
 			errCode: CodeUnsupportedProto},
-		{name: "embedded in-memory", uri: "red://memory",
-			errCode: CodeEmbeddedUnsupported},
-		{name: "embedded sqlite-style", uri: "red://:memory:",
-			errCode: CodeEmbeddedUnsupported},
-		{name: "embedded file", uri: "red:///data/db.rdb",
-			errCode: CodeEmbeddedUnsupported},
-		{name: "missing host bare scheme", uri: "red://",
-			errCode: CodeEmbeddedUnsupported},
 	}
 
 	for _, tc := range cases {

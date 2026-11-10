@@ -73,6 +73,85 @@ loss. This is a standalone public-contract fixture; it does not contain the
 private Hunter schema, migration sequence or client application from #2536.
 Its success must not be described as reproducing or qualifying that private run.
 
+Each reopen records monotonic durations from process launch to HTTP readiness,
+readiness to the first successful RedWire query, and launch to its result in
+`reopenTimings`. The first query checks an acknowledged table row; subsequent
+checks verify the named secondary index, all expected table and KV values and
+collection models. The first-query duration includes starting the CLI client.
+On Linux, each sample also records the server's peak RSS, process read-byte
+count and bytes returned by read calls through the first result. These counters
+include all server activity, not just the database; missing counters are null.
+No universal latency threshold is imposed: use repeated runs on the target
+hardware and compare against the POC's chosen SLO. Restarting a process does not
+flush the OS page cache, simulate remote object storage, or prove a hosted
+scale-to-zero orchestrator. These receipts therefore measure local reopens,
+not a production cold-cache or remote-hydration SLO.
+The four-case fixture remains available through the manually dispatched storage
+recovery workflow, which retains its receipt. A single case can be selected
+locally with `--case serverless`.
+
+The Linux and Windows sparse-file startup regressions measure pager data-file
+reads on the calling thread through the first query for identical live data at
+compact and 50 GiB logical sizes, in both resident and bounded disk-resident
+profiles. They also start separate processes and report process-wide read bytes,
+readiness, and first-result time, then write, checkpoint, and reopen the sparse
+database. Run them with:
+
+```sh
+cargo test -p reddb-io-server --lib runtime::startup_io_budget:: -- --test-threads=1 --nocapture
+```
+
+Physical allocation remains small; the sparse extent contains holes, not 50 GiB
+of populated rows. Process restarts do not evict the OS page cache. This guards
+against work proportional to the logical file extent, but does not establish
+latency for a fully populated database, remote hydration, or cold physical I/O.
+The embedded startup test separately uses a real multi-megabyte snapshot and a
+fresh process to bound total snapshot read bytes. The embedded format still
+materializes the complete snapshot and decoded data in memory.
+
+For actual recoverable values, the Linux/Windows populated fixture writes
+51,200 distinct rows with a shared, repetitive 1 MiB text value (50 GiB of
+logical value bytes). RedDB compresses each value before writing it. A separate
+process, limited to 1.5 GiB of address space or committed memory, opens the
+legacy checkpoint, a prepared checkpoint, and the disk-resident runtime; it
+then reopens the runtime after its visibility projection is prepared. It checks
+the row count and values at the beginning, middle and end. It reports
+elapsed time, peak resident/working-set memory, file length and allocated file
+bytes. The parent also polls the whole private fixture directory and stops its
+child if total file lengths exceed 1 GiB (short-lived overshoot is possible).
+The regular test uses 32 rows; run the full manual measurement with:
+
+```sh
+cargo test -p reddb-io-server --test populated_cold_start populated_startup_50_gib -- --ignored --nocapture
+```
+
+This fixture exercises decompression and actual persisted records but is highly
+compressible and uses an OS-warm cache. It is not a 50 GiB populated *file*, a
+high-cardinality small-row workload, a SQL benchmark, cold physical I/O, or a
+remote-storage measurement. In writable disk-resident runtimes, a missing
+visibility-count projection is built in background batches against a pinned
+immutable generation. Batches contain up to 65 rows when visibility keys vary;
+uniform keys can be grouped up to 384 rows because their postings share an
+ordered range. Source records are decoded outside the publication lock in
+groups of up to 64, with two concurrent workers and a bounded input budget.
+Records that do not fit a worker's decode allowance are retried sequentially
+using the full read allowance. Each batch publishes
+its private pages in an ownership epoch; only the finished projection becomes
+visible to COUNT. A crash discards the unfinished tree through the retirement
+ledger and a later worker retries from the beginning. If a checkpoint replaces
+the source generation, the build restarts; frequent checkpoints can delay
+completion. COUNT falls back to the ordinary scan until publication. Batch size
+does not bound a slow fsync, WAL verification, or an individual large value's
+decode time. The
+harness samples concurrent reads, writes, and the incomplete-projection probe
+during the build, reports the
+subsequent checkpoint separately, and verifies the writes after reopen. Its
+timings do not establish a production SLO.
+The serverless generation crash matrix separately
+checks that the selected published generation hydrates to queryable rows after
+each publication interruption; the partial-cache/source fixture checks failed
+hydration and retry. They do not model a process kill at every hydration write.
+
 ## Interpreting space checks
 
 The crash matrix uses four warmup generations, then allows at most two database

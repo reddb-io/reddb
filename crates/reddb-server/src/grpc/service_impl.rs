@@ -285,10 +285,7 @@ impl RedDb for GrpcRuntime {
             return Err(Status::invalid_argument("collection and key are required"));
         }
         self.runtime
-            .check_collection_privilege(
-                reddb_rql::ast::PolicyAction::Select,
-                &req.collection,
-            )
+            .check_collection_privilege(reddb_rql::ast::PolicyAction::Select, &req.collection)
             .map_err(to_status)?;
 
         let runtime = self.runtime.clone();
@@ -310,12 +307,7 @@ impl RedDb for GrpcRuntime {
                 let (events, scanned_through) =
                     crate::runtime::execution_context::with_snapshot_bundle(&bundle, || {
                         if prefix {
-                            runtime.kv_watch_batch_since_prefix(
-                                &collection,
-                                &key,
-                                cursor,
-                                256,
-                            )
+                            runtime.kv_watch_batch_since_prefix(&collection, &key, cursor, 256)
                         } else {
                             runtime.kv_watch_batch_since(&collection, &key, cursor, 256)
                         }
@@ -1230,8 +1222,7 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<PayloadReply>, Status> {
         let request = request.into_inner();
         let indexes = match none_if_empty(&request.collection) {
-            Some(collection) => self.runtime
-                .declared_indexes_for_collection(collection),
+            Some(collection) => self.runtime.declared_indexes_for_collection(collection),
             None => self.runtime.declared_indexes(),
         };
         Ok(Response::new(json_payload_reply(
@@ -1394,9 +1385,7 @@ impl RedDb for GrpcRuntime {
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        let projections = self.runtime
-            .graph_projections()
-            .map_err(to_status)?;
+        let projections = self.runtime.graph_projections().map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::admin_json::graph_projections_json(&projections),
         )))
@@ -1642,9 +1631,7 @@ impl RedDb for GrpcRuntime {
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        let jobs = self.runtime
-            .analytics_jobs()
-            .map_err(to_status)?;
+        let jobs = self.runtime.analytics_jobs().map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::admin_json::analytics_jobs_json(&jobs),
         )))
@@ -1805,14 +1792,17 @@ impl RedDb for GrpcRuntime {
         .await?
         .map_err(grpc_query_request_error)?;
         let no_filter: Option<Vec<String>> = None;
-        Ok(Response::new(owned_query_reply(result, &no_filter, &no_filter)))
+        Ok(Response::new(owned_query_reply(
+            result, &no_filter, &no_filter,
+        )))
     }
 
     async fn explain_query(
         &self,
         request: Request<QueryRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        let result = self.runtime
+        let result = self
+            .runtime
             .explain_query(&(request.into_inner().query))
             .map_err(to_status)?;
         let universal_mode = crate::presentation::query_plan_json::logical_plan_uses_universal_mode(
@@ -1842,9 +1832,7 @@ impl RedDb for GrpcRuntime {
                     &input.entity_types,
                     &input.capabilities,
                 );
-                let result = self.runtime
-                    .search_hybrid_input(input)
-                    .map_err(to_status)?;
+                let result = self.runtime.search_hybrid_input(input).map_err(to_status)?;
                 crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
                     crate::presentation::query_json::scored_match_json(
                         item,
@@ -1857,7 +1845,8 @@ impl RedDb for GrpcRuntime {
                     &input.entity_types,
                     &input.capabilities,
                 );
-                let result = self.runtime
+                let result = self
+                    .runtime
                     .search_multimodal_input(input)
                     .map_err(to_status)?;
                 crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
@@ -1872,9 +1861,7 @@ impl RedDb for GrpcRuntime {
                     &input.entity_types,
                     &input.capabilities,
                 );
-                let result = self.runtime
-                    .search_index_input(input)
-                    .map_err(to_status)?;
+                let result = self.runtime.search_index_input(input).map_err(to_status)?;
                 crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
                     crate::presentation::query_json::scored_match_json(
                         item,
@@ -1898,9 +1885,7 @@ impl RedDb for GrpcRuntime {
             &input.capabilities,
         );
 
-        let result = self.runtime
-            .search_text_input(input)
-            .map_err(to_status)?;
+        let result = self.runtime.search_text_input(input).map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
                 crate::presentation::query_json::scored_match_json(
@@ -1923,7 +1908,8 @@ impl RedDb for GrpcRuntime {
             &input.capabilities,
         );
 
-        let result = self.runtime
+        let result = self
+            .runtime
             .search_multimodal_input(input)
             .map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
@@ -1949,9 +1935,7 @@ impl RedDb for GrpcRuntime {
                     &input.entity_types,
                     &input.capabilities,
                 );
-                let result = self.runtime
-                    .search_hybrid_input(input)
-                    .map_err(to_status)?;
+                let result = self.runtime.search_hybrid_input(input).map_err(to_status)?;
                 crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
                     crate::presentation::query_json::scored_match_json(
                         item,
@@ -1964,7 +1948,8 @@ impl RedDb for GrpcRuntime {
                     &input.entity_types,
                     &input.capabilities,
                 );
-                let result = self.runtime
+                let result = self
+                    .runtime
                     .search_multimodal_input(input)
                     .map_err(to_status)?;
                 crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
@@ -1979,9 +1964,7 @@ impl RedDb for GrpcRuntime {
                     &input.entity_types,
                     &input.capabilities,
                 );
-                let result = self.runtime
-                    .search_index_input(input)
-                    .map_err(to_status)?;
+                let result = self.runtime.search_index_input(input).map_err(to_status)?;
                 crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
                     crate::presentation::query_json::scored_match_json(
                         item,
@@ -2007,7 +1990,8 @@ impl RedDb for GrpcRuntime {
         let response_collection = input.collection.clone();
         let k = input.k;
         let min_score = input.min_score;
-        let result = self.runtime
+        let result = self
+            .runtime
             .search_similar_input(input)
             .map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
@@ -2030,9 +2014,7 @@ impl RedDb for GrpcRuntime {
         let input =
             crate::application::query_payload::parse_ivf_search_input(request.collection, &payload)
                 .map_err(to_status)?;
-        let result = self.runtime
-            .search_ivf_input(input)
-            .map_err(to_status)?;
+        let result = self.runtime.search_ivf_input(input).map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
             crate::presentation::query_json::runtime_ivf_json(
                 &result,
@@ -2340,8 +2322,8 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = grpc_spawn_blocking(&self.runtime, move || create_row_reply(&rt, request))
-            .await??;
+        let reply =
+            grpc_spawn_blocking(&self.runtime, move || create_row_reply(&rt, request)).await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2352,8 +2334,8 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = grpc_spawn_blocking(&self.runtime, move || create_node_reply(&rt, request))
-            .await??;
+        let reply =
+            grpc_spawn_blocking(&self.runtime, move || create_node_reply(&rt, request)).await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2364,8 +2346,8 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = grpc_spawn_blocking(&self.runtime, move || create_edge_reply(&rt, request))
-            .await??;
+        let reply =
+            grpc_spawn_blocking(&self.runtime, move || create_edge_reply(&rt, request)).await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2376,8 +2358,8 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = grpc_spawn_blocking(&self.runtime, move || create_vector_reply(&rt, request))
-            .await??;
+        let reply =
+            grpc_spawn_blocking(&self.runtime, move || create_vector_reply(&rt, request)).await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2388,10 +2370,8 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = grpc_spawn_blocking(&self.runtime, move || {
-            create_document_reply(&rt, request)
-        })
-        .await??;
+        let reply = grpc_spawn_blocking(&self.runtime, move || create_document_reply(&rt, request))
+            .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2402,8 +2382,8 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<EntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = grpc_spawn_blocking(&self.runtime, move || create_kv_reply(&rt, request))
-            .await??;
+        let reply =
+            grpc_spawn_blocking(&self.runtime, move || create_kv_reply(&rt, request)).await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2417,9 +2397,8 @@ impl RedDb for GrpcRuntime {
         // Running it directly inside an async fn would block the Tokio worker thread,
         // starving other concurrent requests under high write concurrency.
         let rt = self.clone();
-        let reply =
-            grpc_spawn_blocking(&self.runtime, move || bulk_create_rows_fast(&rt, request))
-                .await??;
+        let reply = grpc_spawn_blocking(&self.runtime, move || bulk_create_rows_fast(&rt, request))
+            .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2430,8 +2409,8 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<proto::BulkInsertReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply = grpc_spawn_blocking(&self.runtime, move || bulk_insert_binary(&rt, request))
-            .await??;
+        let reply =
+            grpc_spawn_blocking(&self.runtime, move || bulk_insert_binary(&rt, request)).await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2459,7 +2438,6 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<tonic::Streaming<BatchInsertChunk>>,
     ) -> Result<Response<BatchInsertReply>, Status> {
-
         let idempotency_key = request
             .metadata()
             .get("idempotency-key")
@@ -2519,11 +2497,10 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<BulkEntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply =
-            grpc_spawn_blocking(&self.runtime, move || {
-                bulk_create_reply(&rt, request, create_node_reply)
-            })
-            .await??;
+        let reply = grpc_spawn_blocking(&self.runtime, move || {
+            bulk_create_reply(&rt, request, create_node_reply)
+        })
+        .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2534,11 +2511,10 @@ impl RedDb for GrpcRuntime {
     ) -> Result<Response<BulkEntityReply>, Status> {
         let request = request.into_inner();
         let rt = self.clone();
-        let reply =
-            grpc_spawn_blocking(&self.runtime, move || {
-                bulk_create_reply(&rt, request, create_edge_reply)
-            })
-            .await??;
+        let reply = grpc_spawn_blocking(&self.runtime, move || {
+            bulk_create_reply(&rt, request, create_edge_reply)
+        })
+        .await??;
         self.enforce_commit_policy_after_write()?;
         Ok(Response::new(reply))
     }
@@ -2608,7 +2584,8 @@ impl RedDb for GrpcRuntime {
         let payload = parse_json_payload(&request.into_inner().payload_json)?;
         let input = crate::application::query_payload::parse_context_search_input(&payload)
             .map_err(to_status)?;
-        let result = self.runtime
+        let result = self
+            .runtime
             .search_context_input(input)
             .map_err(to_status)?;
         Ok(Response::new(json_payload_reply(
@@ -2749,12 +2726,16 @@ impl RedDb for GrpcRuntime {
             .metadata()
             .get(reddb_wire::routing::TOPOLOGY_TRANSPORT_METADATA_KEY)
         {
-            let protocol = protocol.to_str().map_err(|_| Status::invalid_argument("invalid topology transport"))?;
+            let protocol = protocol
+                .to_str()
+                .map_err(|_| Status::invalid_argument("invalid topology transport"))?;
             if !reddb_wire::routing::ROUTING_PROTOCOLS.contains(&protocol) {
                 return Err(Status::invalid_argument("unsupported topology transport"));
             }
             return Ok(Response::new(TopologyReply {
-                topology_bytes: reddb_wire::encode_topology(&self.runtime.client_topology(protocol, &auth)),
+                topology_bytes: reddb_wire::encode_topology(
+                    &self.runtime.client_topology(protocol, &auth),
+                ),
             }));
         }
         let primary_endpoint = reddb_wire::topology::Endpoint {
@@ -2797,7 +2778,7 @@ impl RedDb for GrpcRuntime {
         let mut map = crate::json::Map::new();
         map.insert(
             "current_term".into(),
-            JsonValue::Number(db.options().replication.term as f64),
+            JsonValue::Number(self.runtime.current_replication_term() as f64),
         );
 
         match role {
@@ -2888,13 +2869,11 @@ impl RedDb for GrpcRuntime {
                     }
                     let slots = repl
                         .slot_snapshots()
-                            .into_iter()
-                            .map(|slot| {
-                                let mut slot_json = crate::json::Map::new();
-                            slot_json.insert(
-                                "id".into(),
-                                JsonValue::String(slot.replica_id.clone()),
-                            );
+                        .into_iter()
+                        .map(|slot| {
+                            let mut slot_json = crate::json::Map::new();
+                            slot_json
+                                .insert("id".into(), JsonValue::String(slot.replica_id.clone()));
                             slot_json.insert(
                                 "restart_lsn".into(),
                                 JsonValue::Number(slot.restart_lsn as f64),
@@ -2986,8 +2965,9 @@ impl RedDb for GrpcRuntime {
         })?;
 
         let payload = request.into_inner().payload_json;
-        let (open, routing_endpoints) = reddb_wire::replication::WalStreamOpen::decode_json_with_endpoints(payload.as_bytes())
-        .map_err(|err| Status::invalid_argument(err.to_string()))?;
+        let (open, routing_endpoints) =
+            reddb_wire::replication::WalStreamOpen::decode_json_with_endpoints(payload.as_bytes())
+                .map_err(|err| Status::invalid_argument(err.to_string()))?;
         let handshake = crate::replication::StreamHandshake::new(
             open.replica_id.as_deref().unwrap_or("<anonymous>"),
             open.term,
@@ -3033,7 +3013,7 @@ impl RedDb for GrpcRuntime {
         // retention cap is told to re-bootstrap (issue #832).
         let mut partial_resync = false;
         if let Some(id) = &replica_id {
-            repl.ensure_replica_registered(id);
+            repl.ensure_replica_registered(id, since_lsn);
             if let Some(endpoints) = routing_endpoints {
                 self.runtime.register_routing_endpoints(id, endpoints);
             }
@@ -3140,8 +3120,10 @@ impl RedDb for GrpcRuntime {
 
         Ok(Response::new(PayloadReply {
             ok: true,
-            payload: String::from_utf8(chunk.encode_json_with_endpoints(Some(&self.runtime.routing_endpoints())))
-                .expect("invariant: WAL chunk encoder emits UTF-8 JSON"),
+            payload: String::from_utf8(
+                chunk.encode_json_with_endpoints(Some(&self.runtime.routing_endpoints())),
+            )
+            .expect("invariant: WAL chunk encoder emits UTF-8 JSON"),
         }))
     }
 
@@ -3153,7 +3135,11 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<JsonPayloadRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
-        let authenticated_replica_id = authorized_principal(&request)?.to_string();
+        let authenticated_replica_id = if self.auth_store.is_enabled() {
+            Some(authorized_principal(&request)?.to_string())
+        } else {
+            None
+        };
         let db = self.runtime.db();
         db.replication.as_ref().ok_or_else(|| {
             Status::failed_precondition("this instance is not a replication primary")
@@ -3164,11 +3150,14 @@ impl RedDb for GrpcRuntime {
         )
         .map_err(|err| Status::invalid_argument(err.to_string()))?;
         let replica_id = ack.replica_id;
-        if replica_id != authenticated_replica_id {
-            return Err(Status::permission_denied(
-                "replica_id does not match authenticated identity",
-            ));
+        if let Some(authenticated_replica_id) = &authenticated_replica_id {
+            if replica_id != *authenticated_replica_id {
+                return Err(Status::permission_denied(
+                    "replica_id does not match authenticated identity",
+                ));
+            }
         }
+        let effective_replica_id = authenticated_replica_id.unwrap_or(replica_id);
         let applied_lsn = ack.applied_lsn;
         let durable_lsn = ack.durable_lsn;
         let apply_errors_total = ack.apply_errors_total;
@@ -3176,7 +3165,7 @@ impl RedDb for GrpcRuntime {
 
         self.runtime
             .ack_primary_replica_lsn_and_prune(
-                &authenticated_replica_id,
+                &effective_replica_id,
                 applied_lsn,
                 durable_lsn,
                 apply_errors_total,
@@ -3186,7 +3175,7 @@ impl RedDb for GrpcRuntime {
 
         let reply = reddb_wire::replication::WalStreamAckReply::from_ack(
             &reddb_wire::replication::WalStreamAck {
-                replica_id: authenticated_replica_id,
+                replica_id: effective_replica_id,
                 applied_lsn,
                 durable_lsn,
                 apply_errors_total,
@@ -3203,7 +3192,17 @@ impl RedDb for GrpcRuntime {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<PayloadReply>, Status> {
-        let replica_id = authorized_principal(&request)?.to_string();
+        let replica_id = if self.auth_store.is_enabled() {
+            authorized_principal(&request)?.to_string()
+        } else {
+            snapshot_metadata_string(request.metadata(), "x-reddb-replica-id")?
+                .filter(|replica_id| !replica_id.trim().is_empty())
+                .ok_or_else(|| {
+                    Status::invalid_argument(
+                        "x-reddb-replica-id is required when authentication is disabled",
+                    )
+                })?
+        };
         // Issue #830 resumable transfer control headers (all optional — their
         // absence preserves the legacy whole-snapshot envelope).
         let snapshot_max_bytes =
@@ -3223,7 +3222,8 @@ impl RedDb for GrpcRuntime {
         let slot_restart_lsn = repl.register_replica(replica_id.clone());
 
         // Trigger a checkpoint first to ensure data is flushed
-        db.flush().map_err(|e| crate::grpc::control_support::internal_status(&e))?;
+        db.flush()
+            .map_err(|e| crate::grpc::control_support::internal_status(&e))?;
 
         let snapshot_lsn = repl
             .logical_wal_spool
@@ -3260,10 +3260,8 @@ impl RedDb for GrpcRuntime {
                 .map_err(to_status)?
         };
 
-        let mut chunk = reddb_wire::replication::BaseBackupChunk::new(
-            replica_id.clone(),
-            slot_restart_lsn,
-        );
+        let mut chunk =
+            reddb_wire::replication::BaseBackupChunk::new(replica_id.clone(), slot_restart_lsn);
         chunk.snapshot_lsn = Some(snapshot_lsn);
         if let Some(manifest) = &basebackup_manifest {
             if let Some(plan) = self.runtime.primary_replica_file_plan() {
@@ -3276,7 +3274,8 @@ impl RedDb for GrpcRuntime {
             }
         }
         if let Some(path) = db.path() {
-            let bytes = std::fs::read(path).map_err(|e| crate::grpc::control_support::internal_status(&e))?;
+            let bytes = std::fs::read(path)
+                .map_err(|e| crate::grpc::control_support::internal_status(&e))?;
             // A resumable snapshot token is keyed to the replica, the pinned
             // snapshot LSN, and the total size so a resuming caller is matched
             // to the same byte stream it started.
@@ -3454,12 +3453,10 @@ impl RedDb for GrpcRuntime {
             .ok_or_else(|| Status::invalid_argument(format!("invalid role: {role_str}")))?;
 
         let target = crate::auth::UserId::from_parts(actor.tenant.as_deref(), &username);
-        if !self.auth_store.check_user_lifecycle_authz(
-            &actor,
-            actor_role,
-            "user:create",
-            &target,
-        ) {
+        if !self
+            .auth_store
+            .check_user_lifecycle_authz(&actor, actor_role, "user:create", &target)
+        {
             return Err(Status::permission_denied(format!(
                 "policy denied user:create on user:{target}"
             )));
@@ -3501,12 +3498,10 @@ impl RedDb for GrpcRuntime {
             .ok_or_else(|| Status::invalid_argument("missing field: username"))?;
 
         let target = crate::auth::UserId::from_parts(actor.tenant.as_deref(), &username);
-        if !self.auth_store.check_user_lifecycle_authz(
-            &actor,
-            actor_role,
-            "user:delete",
-            &target,
-        ) {
+        if !self
+            .auth_store
+            .check_user_lifecycle_authz(&actor, actor_role, "user:delete", &target)
+        {
             return Err(Status::permission_denied(format!(
                 "policy denied user:delete on user:{target}"
             )));
@@ -3674,10 +3669,7 @@ impl RedDb for GrpcRuntime {
             if !actor_role.can_admin() {
                 return Err(Status::permission_denied("admin role required"));
             }
-            let target = crate::auth::UserId::from_parts(
-                actor.tenant.as_deref(),
-                &target_username,
-            );
+            let target = crate::auth::UserId::from_parts(actor.tenant.as_deref(), &target_username);
             if !self.auth_store.check_user_lifecycle_authz(
                 &actor,
                 actor_role,
@@ -4000,8 +3992,8 @@ mod tests {
             oauth_validator: None,
         };
         let mut request = Request::new(JsonPayloadRequest {
-            payload_json:
-                r#"{"username":"minted","password":"password","role":"admin"}"#.to_string(),
+            payload_json: r#"{"username":"minted","password":"password","role":"admin"}"#
+                .to_string(),
         });
         request
             .extensions_mut()

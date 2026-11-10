@@ -1,57 +1,34 @@
-use reddb_file::OperationalManifest;
-use reddb_server::{RedDBOptions, RedDBRuntime};
-
-fn exec(rt: &RedDBRuntime, sql: &str) {
-    rt.execute_query(sql)
-        .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
-}
+use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
 #[test]
-fn fork_store_at_lsn_records_historical_lsn_and_rejects_future_without_partial_state() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("fork-at-lsn.rdb");
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime");
-
-    exec(&rt, "CREATE TABLE fork_lsn_items (id INT, label TEXT)");
-    exec(
-        &rt,
-        "INSERT INTO fork_lsn_items (id, label) VALUES (1, 'before')",
+fn fork_lsn_is_an_actual_snapshot_boundary_not_a_historical_label() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("data.rdb");
+    let runtime = RedDBRuntime::with_options(
+        RedDBOptions::persistent(&path)
+            .with_storage_profile(StorageDeployPreset::Serverless.selection())
+            .expect("profile"),
+    )
+    .expect("runtime");
+    runtime
+        .execute_query("CREATE TABLE items (id INT)")
+        .expect("table");
+    runtime
+        .execute_query("INSERT INTO items (id) VALUES (1)")
+        .expect("data");
+    let current = runtime.cdc_current_lsn();
+    assert!(current > 0);
+    for lsn in [current - 1, current + 1] {
+        assert!(runtime
+            .execute_query(&format!("FORK STORE AS wrong AT LSN {lsn}"))
+            .is_err());
+    }
+    assert!(runtime.list_store_forks().expect("listing").is_empty());
+    runtime
+        .execute_query(&format!("FORK STORE AS exact AT LSN {current}"))
+        .expect("current snapshot");
+    assert_eq!(
+        runtime.list_store_forks().expect("listing")[0].fork_lsn,
+        current
     );
-    let historical_lsn = rt.cdc_current_lsn();
-    exec(
-        &rt,
-        "UPDATE fork_lsn_items SET label = 'after' WHERE id = 1",
-    );
-
-    exec(
-        &rt,
-        &format!("FORK STORE AS historical_cut AT LSN {historical_lsn}"),
-    );
-
-    let manifest = OperationalManifest::for_db_path(&path);
-    let forks = manifest.list_forks().expect("list forks");
-    assert_eq!(forks.len(), 1);
-    assert_eq!(forks[0].name, "historical_cut");
-    assert_eq!(forks[0].fork_lsn, historical_lsn);
-
-    let err = rt
-        .execute_query("FORK STORE AS too_old AT LSN 0")
-        .expect_err("LSN below retention floor must fail");
-    let message = err.to_string();
-    assert!(message.contains("restore from backup"), "{message}");
-
-    let forks = manifest.list_forks().expect("list forks after old fork");
-    assert_eq!(forks.len(), 1);
-    assert_eq!(forks[0].name, "historical_cut");
-
-    let future_lsn = rt.cdc_current_lsn() + 1;
-    let err = rt
-        .execute_query(&format!("FORK STORE AS impossible AT LSN {future_lsn}"))
-        .expect_err("future LSN must fail");
-    let message = err.to_string();
-    assert!(message.contains("restore from backup"), "{message}");
-
-    let forks = manifest.list_forks().expect("list forks after failed fork");
-    assert_eq!(forks.len(), 1);
-    assert_eq!(forks[0].name, "historical_cut");
 }

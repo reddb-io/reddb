@@ -22,6 +22,9 @@ dependencies {
     // Jackson for JSON encode/decode of handshake + RPC payloads.
     api("com.fasterxml.jackson.core:jackson-databind:2.17.2")
 
+    // JNA binds the stable RedDB C ABI without a per-driver JNI shim.
+    implementation("net.java.dev.jna:jna:5.19.1")
+
     // zstd-jni — lazily loaded; tests can run without zstd payloads.
     implementation("com.github.luben:zstd-jni:1.5.6-6")
 

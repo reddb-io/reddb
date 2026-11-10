@@ -530,7 +530,12 @@ pub(crate) fn register(registry: &mut RouteRegistry) {
             stability: RouteStability::Stable,
             middlewares: STANDARD_MIDDLEWARE,
         },
-        &[RouteEntry::new("client.topology", RouteMethod::Get, "/v1/topology", client_topology)],
+        &[RouteEntry::new(
+            "client.topology",
+            RouteMethod::Get,
+            "/v1/topology",
+            client_topology,
+        )],
     );
     registry.routes(ADMIN_MUTATION, ADMIN_MUTATION_ROUTES);
     registry.routes(
@@ -556,18 +561,27 @@ fn admin_shutdown(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<HttpR
 }
 
 fn client_topology(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
-    let protocol = req.query.get("transport").map(String::as_str).unwrap_or("http");
+    let protocol = req
+        .query
+        .get("transport")
+        .map(String::as_str)
+        .unwrap_or("http");
     if !reddb_wire::routing::ROUTING_PROTOCOLS.contains(&protocol) {
         return Some(json_error(400, "unsupported topology transport"));
     }
     let auth = match crate::server::handlers_auth::resolve_auth_caller(server, req.headers) {
-        Some(caller) => crate::auth::middleware::AuthResult::password_principal(caller.id, caller.role),
+        Some(caller) => {
+            crate::auth::middleware::AuthResult::password_principal(caller.id, caller.role)
+        }
         None => crate::auth::middleware::AuthResult::Anonymous,
     };
     let topology = server.runtime.client_topology(protocol, &auth);
     let value = reddb_wire::routing::topology_json(&topology);
-    Some(json_response(200, crate::json::from_str(&value.to_string())
-        .expect("invariant: topology JSON is valid server JSON")))
+    Some(json_response(
+        200,
+        crate::json::from_str(&value.to_string())
+            .expect("invariant: topology JSON is valid server JSON"),
+    ))
 }
 
 fn admin_drain(server: &RedDBServer, _req: &RouteRequest<'_>) -> Option<HttpResponse> {

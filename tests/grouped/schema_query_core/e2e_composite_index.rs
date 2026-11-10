@@ -5,13 +5,40 @@
 //! up that index instead of falling back to two single-col scans + intersect.
 
 use reddb::{RedDBOptions, RedDBRuntime};
+use reddb_types::Value;
 
 fn open_runtime() -> RedDBRuntime {
     RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime")
 }
 
-fn row_count(r: &reddb::runtime::RuntimeQueryResult) -> usize {
-    r.result.records.len()
+fn selected_ids(result: &reddb::runtime::RuntimeQueryResult) -> Vec<i64> {
+    let mut ids = result
+        .result
+        .records
+        .iter()
+        .map(|record| match record.get("id") {
+            Some(Value::Integer(id)) => *id,
+            other => panic!("expected integer id, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids
+}
+
+fn assert_uses_index(rt: &RedDBRuntime, query: &str, expected_index: &str) {
+    let explain = rt.explain_query(query).expect("query should explain");
+    let mut nodes = vec![&explain.logical_plan.root];
+    let mut observed = Vec::new();
+    while let Some(node) = nodes.pop() {
+        observed.push((node.operator.as_str(), node.details.get("index")));
+        if node.operator == "index_seek"
+            && node.details.get("index").map(String::as_str) == Some(expected_index)
+        {
+            return;
+        }
+        nodes.extend(&node.children);
+    }
+    panic!("expected index_seek on {expected_index}, got {observed:?}");
 }
 
 #[test]
@@ -33,15 +60,16 @@ fn composite_index_matches_and_eq_range() {
     }
 
     // Point+range via composite: city='NYC' AND age BETWEEN 20 AND 40.
-    // Every 5th row is NYC (100 rows); within those, age cycles — ~42 of
-    // the 100 fall in [20, 40]. The exact count isn't load-bearing; what
-    // matters is that the composite path returns the same set as the
-    // plain filter-scan baseline.
+    // Compare the exact result set and the selected access path; a partial
+    // candidate set and a full-scan fallback must both fail this test.
     let q = "SELECT * FROM users WHERE city = 'NYC' AND age BETWEEN 20 AND 40";
     let r = rt.execute_query(q).expect("ok");
-    let cnt = row_count(&r);
-    assert!(cnt > 0, "composite range query returned 0 rows");
-    assert!(cnt <= 100, "composite match count exceeded NYC total");
+    let expected = (0..500)
+        .filter(|i| i % cities.len() == 0 && (20..=40).contains(&(18 + (i % 50))))
+        .map(|i| i64::try_from(i).expect("fixture id fits i64"))
+        .collect::<Vec<_>>();
+    assert_eq!(selected_ids(&r), expected);
+    assert_uses_index(&rt, q, "idx_city_age");
 }
 
 #[test]
@@ -64,40 +92,18 @@ fn composite_index_matches_and_eq_gt() {
 
     let q = "SELECT * FROM users WHERE city = 'NYC' AND age > 30";
     let r = rt.execute_query(q).expect("ok");
-    let cnt = row_count(&r);
-    assert!(cnt > 0, "composite Gt query returned 0 rows");
-
-    // Every row must match the predicate (composite + fast path both
-    // must re-apply `age > 30` either via index bounds or post-filter).
-    for rec in &r.result.records {
-        let city = rec
-            .get("city")
-            .and_then(|v| {
-                if let reddb_types::Value::Text(s) = v {
-                    Some(s.to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
-        let age = rec
-            .get("age")
-            .and_then(|v| match v {
-                reddb_types::Value::Integer(n) => Some(*n),
-                _ => None,
-            })
-            .unwrap_or(0);
-        assert_eq!(city, "NYC", "non-NYC row leaked through composite");
-        assert!(age > 30, "age {age} <= 30 leaked through composite");
-    }
+    let expected = (0..300)
+        .filter(|i| i % cities.len() == 0 && 18 + (i % 40) > 30)
+        .map(|i| i64::try_from(i).expect("fixture id fits i64"))
+        .collect::<Vec<_>>();
+    assert_eq!(selected_ids(&r), expected);
+    assert_uses_index(&rt, q, "idx_city_age");
 }
 
 #[test]
 fn composite_returns_same_rows_as_no_index_baseline() {
-    // Parity guard: the rows the composite path returns must be a
-    // subset of the rows the generic filter returns. Run the same
-    // query against two runtimes — one with the composite index, one
-    // without — and compare counts + id sets.
+    // Parity guard: run the same query against two runtimes — one with the
+    // composite index and one without — and compare their exact id sets.
     let rt_comp = open_runtime();
     rt_comp
         .execute_query("CREATE TABLE t (id INT, city TEXT, age INT)")
@@ -122,11 +128,11 @@ fn composite_returns_same_rows_as_no_index_baseline() {
     let q = "SELECT * FROM t WHERE city = 'NYC' AND age BETWEEN 22 AND 35";
     let r_comp = rt_comp.execute_query(q).unwrap();
     let r_plain = rt_plain.execute_query(q).unwrap();
-    assert_eq!(
-        row_count(&r_comp),
-        row_count(&r_plain),
-        "composite {} vs plain {}",
-        row_count(&r_comp),
-        row_count(&r_plain)
-    );
+    let expected = (0..200)
+        .filter(|i| i % cities.len() == 0 && (22..=35).contains(&(18 + (i % 30))))
+        .map(|i| i64::try_from(i).expect("fixture id fits i64"))
+        .collect::<Vec<_>>();
+    assert_eq!(selected_ids(&r_comp), expected);
+    assert_eq!(selected_ids(&r_comp), selected_ids(&r_plain));
+    assert_uses_index(&rt_comp, q, "idx_city_age");
 }

@@ -193,9 +193,10 @@ deferred — see the spec for one-line rationale per item.
 | `http://` | HTTP REST         | 5000         | no  |
 | `https://`| HTTPS REST        | 55555        | yes |
 
-`red://`, `red://memory`, `red:///path/file.rdb` are reserved for the
-embedded engine — they currently throw
-`UnsupportedOperationException` until the JNI binding ships.
+`memory://` and `file:///path/file.rdb` open the embedded engine through the
+version-matched shared RedDB ABI. Set `REDDB_FFI_LIBRARY` when the library is
+not installed on the platform library path. The `red://memory` and
+`red:///path/file.rdb` aliases remain supported.
 
 ## Auth
 

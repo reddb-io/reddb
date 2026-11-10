@@ -9,6 +9,8 @@ Run after `maturin develop`:
 """
 
 import sys
+import tempfile
+from pathlib import Path
 
 import reddb
 
@@ -48,6 +50,32 @@ def test_insert_then_query_round_trip():
 
         names = sorted(row["name"] for row in result["rows"])
         assert names == ["Alice", "Bob"]
+
+
+def test_parameterized_query_round_trip():
+    with reddb.connect("memory://") as db:
+        db.query("CREATE TABLE params (id INTEGER, name TEXT)")
+        db.query("INSERT INTO params (id, name) VALUES ($1, $2)", 7, "Ada")
+        rows = db.query("SELECT name FROM params WHERE id = $1", 7)["rows"]
+        assert len(rows) == 1
+        assert rows[0]["name"] == "Ada"
+
+
+def test_single_file_reopens_with_committed_data():
+    with tempfile.TemporaryDirectory(prefix="reddb-python-") as directory:
+        path = Path(directory) / "driver-contract.rdb"
+        uri = f"file://{path}"
+
+        with reddb.connect(uri) as first:
+            first.query("CREATE TABLE durable_items (id INTEGER, name TEXT)")
+            first.query("INSERT INTO durable_items (id, name) VALUES (1, 'persisted')")
+
+        with reddb.connect(uri) as second:
+            rows = second.query("SELECT name FROM durable_items WHERE id = 1")["rows"]
+            assert len(rows) == 1
+            assert rows[0]["name"] == "persisted"
+
+        assert list(Path(directory).iterdir()) == [path]
 
 
 def test_bulk_insert_returns_total_affected():
@@ -130,6 +158,8 @@ if __name__ == "__main__":
         ("version_reports_module_version", test_version_reports_module_version),
         ("health_returns_ok_true", test_health_returns_ok_true),
         ("insert_then_query_round_trip", test_insert_then_query_round_trip),
+        ("parameterized_query_round_trip", test_parameterized_query_round_trip),
+        ("single_file_reopens_with_committed_data", test_single_file_reopens_with_committed_data),
         ("bulk_insert_returns_total_affected", test_bulk_insert_returns_total_affected),
         ("query_error_raises_value_error", test_query_error_raises_value_error),
         ("unsupported_scheme_raises", test_unsupported_scheme_raises),

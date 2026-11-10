@@ -1,5 +1,193 @@
 # Changelog
 
+## 1.30.0
+
+### Minor Changes
+
+- Add the scoped ASK tool harness and ACP v1/v2 session support.
+
+## 1.29.3
+
+### Patch Changes
+
+- [#2753](https://github.com/reddb-io/reddb/pull/2753) [`c3ce3f4`](https://github.com/reddb-io/reddb/commit/c3ce3f4ca73e01d7113b3cde0549d2e482881112) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep individual-TTL cleanup responsive after a disk-resident restart by
+  limiting each cold maintenance tick to 32 row materializations. Resident
+  workloads retain the 1,000-row batch, expired rows remain immediately hidden,
+  and later ticks continue physical reclamation without blocking foreground
+  queries behind a multi-second cold delete batch.
+
+## 1.29.2
+
+### Patch Changes
+
+- [#2750](https://github.com/reddb-io/reddb/pull/2750) [`444e9d2`](https://github.com/reddb-io/reddb/commit/444e9d2effdcafa54149f8cfcfe236898e20a962) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Hide rows past their `WITH TTL` or `WITH EXPIRES AT` deadline immediately on
+  primary reads while the bounded background sweeper reclaims them physically.
+  Apply the same visibility rule to ordinary scans, point reads, grouped
+  aggregates and paged `COUNT(*)` without slowing collections that have no TTL
+  metadata. Storage and WAL formats are unchanged.
+
+## 1.29.1
+
+### Patch Changes
+
+- Automate bounded per-record TTL reclamation and compound index seeks. Paged databases checkpointed by 1.29.1 use resume trailer v6; 1.29.1 reads older trailers, but older binaries cannot reopen files after the new trailer is published.
+
+## 1.29.0
+
+### Minor Changes
+
+- [#2740](https://github.com/reddb-io/reddb/pull/2740) [`2b79ed5`](https://github.com/reddb-io/reddb/commit/2b79ed5087119e20875b3f3082d50868019fdd97) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Qualify RedDB's four deployment-mode contract across the official language
+  facades. Add the versioned shared ABI for embedded single-file databases,
+  explicit primary/replica read routing, and term-fenced manual promotion with
+  post-promotion writes and stale-primary rejection. The promotion response adds
+  the backward-compatible `term` field; storage and WAL formats are unchanged.
+
+### Patch Changes
+
+- [#2734](https://github.com/reddb-io/reddb/pull/2734) [`fe2856d`](https://github.com/reddb-io/reddb/commit/fe2856d247b446e98cf344f5b270b614cd510a7b) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Group concurrent queue READ reservations and ACKs into durable WAL publications on the native paginated store. Validate ownership under the publication fence, preserve per-request ACK errors, and retain the lifecycle path for explicit transactions, ordered keys, expiry and exhausted attempts. Existing `.rdb` and WAL formats are unchanged.
+
+- [#2731](https://github.com/reddb-io/reddb/pull/2731) [`cfc3445`](https://github.com/reddb-io/reddb/commit/cfc34458df09b32176c68fcd37229d63fcd6c5b4) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Batch unkeyed queue delivery reservations and attempt counters, and add bounded multi-message ACK with one durable autocommit publication. Preserve ordered-key, retry, FANOUT and explicit-transaction behavior, with failure rollback, recovery and cold-boot coverage. Verify queue/table relevance joins without consuming messages.
+
+- [#2732](https://github.com/reddb-io/reddb/pull/2732) [`dcf7510`](https://github.com/reddb-io/reddb/commit/dcf7510babf5cd9b33e0aeaa1864d26e315b9348) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Read queue lifecycle policy through its existing metadata index instead of scanning the full catalog on delivery and ACK. Avoid duplicate configuration reads in batch ACK. Keep ALTER changes visible and fix disk-backed FANOUT, delivery deadline and DLQ policy falling back to defaults after reopen.
+
+## 1.28.28
+
+### Patch Changes
+
+- [#2729](https://github.com/reddb-io/reddb/pull/2729) Group concurrent native KV writes and plain queue publications into durable WAL batches. Publish delivery state and attempt counts together, and retire ACK state atomically. Preserve failure rollback, checkpoint ordering, retry behavior and cold-boot recovery; include cold backing rows in queue projections and propagate read-budget failures. No storage format changes or new metadata sidecars.
+
+- [#2727](https://github.com/reddb-io/reddb/pull/2727) Batch native paged KV writes and preserve cold metadata, with recovery coverage and end-to-end Redis, RabbitMQ and Kafka comparisons. See the [performance report](docs/perf/grouped-publication-2026-11-07.md) for measured gains, remaining bottlenecks and durability-contract differences.
+
+- [#2726](https://github.com/reddb-io/reddb/pull/2726) [`8fc8a1e`](https://github.com/reddb-io/reddb/commit/8fc8a1e29f62ba5342f929fa3bcef811e1228f94) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Index queue producer deduplication and expiry inside the database, bound indexed expiry cleanup, and check queue capacity without loading persisted payloads. Preserve source validation for legacy indices and visibility policies. Allow ordinary hot blob-cache hits under shared shard locks and prepare compressed writes before exclusive publication, preserving version and invalidation checks.
+
+  Read disk-only queue message payloads and retry limits after bounded cold boot, preserving delivery and ACK recovery.
+
+  Publish the visibility/count index alongside the first checkpoint of a new or empty collection. Keep historical backfills incremental, make the index immediately available to GC, and reuse it during cold append checkpoints instead of rereading the old payloads.
+
+- [#2725](https://github.com/reddb-io/reddb/pull/2725) [`d4923c6`](https://github.com/reddb-io/reddb/commit/d4923c6896464521272d748f501b647d7a35a104) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow old native catalogs without resume counters to reopen when a legacy system collection has a zero-root canonical alias. Preserve the populated tree and its records; continue rejecting two populated roots. Cover cold reopen and checkpoint recovery.
+
+## 1.28.27
+
+### Patch Changes
+
+- [#2723](https://github.com/reddb-io/reddb/pull/2723) [`f5938de`](https://github.com/reddb-io/reddb/commit/f5938de2ebc0fc35c775cac75fef8ff8582beeb0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Restore durable database forks with each fork's data and lifecycle metadata stored in its own `.rdb` and WAL. Recover create, drop, detach, and promotion operations across crashes and cold boots, validate file ownership before deletion, and reject busy fork files without blocking. Audit logs remain separate.
+
+  Fork creation copies the current committed checkpoint; historical `AT LSN` branching is not supported. Promotion returns the replacement database path and requires reopening the server on that path.
+
+## 1.28.26
+
+### Patch Changes
+
+- [#2711](https://github.com/reddb-io/reddb/pull/2711) [`50ca925`](https://github.com/reddb-io/reddb/commit/50ca925f283e5d54b3586d3521891e3e8ebdeeb7) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reduce embedded cold-start I/O by reusing the validated snapshot and publishing boot-time system configuration in one WAL batch.
+
+- [#2710](https://github.com/reddb-io/reddb/pull/2710) [`ebc6588`](https://github.com/reddb-io/reddb/commit/ebc6588ecdde8b7793a2bb3621f4ebb83369cbe3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow read-only opens of native paged databases, including WAL and interrupted-checkpoint recovery into a private memory view, without rewriting database or recovery files. Enforce shared-reader locking and retain paged indexes in bounded residency mode.
+
+- [#2718](https://github.com/reddb-io/reddb/pull/2718) [`2dc0e53`](https://github.com/reddb-io/reddb/commit/2dc0e5397bf748549f0987d4a3a45a676978fe2a) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix routed B-tree bulk inserts and PostgreSQL binary text parameters, refuse unsafe legacy pager migrations without changing source files, and authenticate replica bootstrap, WAL, and acknowledgement requests while preserving explicit no-auth deployments.
+
+- [#2708](https://github.com/reddb-io/reddb/pull/2708) [`d11d984`](https://github.com/reddb-io/reddb/commit/d11d9843ee9b73f404d8b11451f10f7b561e51a6) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Speed up vector.turbo snapshot checksums and index reconstruction, and correctly refresh changed vector codes during recovery.
+
+## 1.28.25
+
+### Patch Changes
+
+- [#2702](https://github.com/reddb-io/reddb/pull/2702) [`1b8c4d0`](https://github.com/reddb-io/reddb/commit/1b8c4d07527a2726a785cb0b6f2b10c43fb2dd2c) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve snapshot-visible rows during secondary-index publication and logical replay. Persist replayed version changes in WAL, retain table-delete tombstones, and update indexes before advancing the replica frontier. Keep embedded read-only opens and legacy snapshots unchanged, detect Windows memory, and preserve client projection and cancellation contracts. Interrupted RedWire connections must be reopened without automatically retrying writes; unsupported read-only native paged recovery now fails before writing.
+
+- [#2709](https://github.com/reddb-io/reddb/pull/2709) [`c023b67`](https://github.com/reddb-io/reddb/commit/c023b67b925f5c8f30196078c04e321d34654d22) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Read materialized-view definitions from disk-backed collections during boot, replacement and deletion. Decode both named and schema-backed rows, propagate storage scan failures, and prevent descriptor accumulation across cold restarts.
+
+- [#2707](https://github.com/reddb-io/reddb/pull/2707) [`08ecd91`](https://github.com/reddb-io/reddb/commit/08ecd914e75f0c344affa95c09f43946f3d4698f) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reconcile duplicate runtime metadata during explicit canonical-config WAL recovery. Preserve missing index and view definitions, verify equivalent queue-group identities, keep canonical planner observations, and reject conflicting definitions, delivery state, references and overlapping metadata WAL.
+
+- [#2705](https://github.com/reddb-io/reddb/pull/2705) [`ce38731`](https://github.com/reddb-io/reddb/commit/ce387314a3112b95feec72bea897950cd8359e9c) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Recover a canonical system-config copy when its pending WAL only targets proved boot-derived legacy metadata. Preserve all other transactions, original WAL framing and consumed identities; reject unknown deletes and user configuration changes.
+
+## 1.28.24
+
+### Patch Changes
+
+- [#2703](https://github.com/reddb-io/reddb/pull/2703) [`0181217`](https://github.com/reddb-io/reddb/commit/0181217b2c856bc3140d7438b51064f866ca8438) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow explicit recovery of pending WAL on an isolated copy while retaining the canonical system configuration. Reject WAL actions and cross-references targeting the divergent legacy identity instead of silently redirecting them.
+
+## 1.28.23
+
+### Patch Changes
+
+- [#2700](https://github.com/reddb-io/reddb/pull/2700) [`d2a71da`](https://github.com/reddb-io/reddb/commit/d2a71da5655d58fe819cb098b951945b510d545f) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Recover a closed store with pending WAL without dropping its verified active or rotated audit logs, preserving byte parity and hash-chain continuity in the published copy.
+
+- [#2694](https://github.com/reddb-io/reddb/pull/2694) [`2e92525`](https://github.com/reddb-io/reddb/commit/2e92525373fe8bc08d73de82f206a4d7eb2b1457) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve probabilistic and vector WAL records across internal checkpoints until their runtime state is durable, and recover supported multimodel WAL on an isolated verified copy.
+
+## 1.28.22
+
+### Patch Changes
+
+- [#2697](https://github.com/reddb-io/reddb/pull/2697) [`4ae7e01`](https://github.com/reddb-io/reddb/commit/4ae7e01acd86babb481c755a0647f76d88327b4d) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Restore snapshots containing an empty system collection alias alongside its populated predecessor, preserving all records while continuing to reject collisions between populated aliases.
+
+## 1.28.21
+
+### Patch Changes
+
+- [#2695](https://github.com/reddb-io/reddb/pull/2695) [`7971bac`](https://github.com/reddb-io/reddb/commit/7971baca120cc93d97d26b72352785c6a87d2de0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add an explicit offline compaction repair that retires a divergent legacy `red_config` collection while preserving `red.config` as the canonical system configuration store, leaving the source unchanged and failing closed on ambiguous catalog shapes or cross-references.
+
+## 1.28.20
+
+### Patch Changes
+
+- [#2691](https://github.com/reddb-io/reddb/pull/2691) [`5c24dc9`](https://github.com/reddb-io/reddb/commit/5c24dc9e3eba92a551b310d4bf455feafc700e76) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reconcile legacy and canonical system collection aliases when they share the same physical data and index roots but carry different resume counters, preserving the roots, recounting the shared tree, and retaining conservative identity high-water marks.
+
+## 1.28.19
+
+### Patch Changes
+
+- [#2689](https://github.com/reddb-io/reddb/pull/2689) [`7a94140`](https://github.com/reddb-io/reddb/commit/7a94140eec3f640a5a13dfb8beb47a3d7c875de4) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reconcile populated legacy and canonical system collection names only when their complete physical state is identical, preserving shared data and index roots while continuing to fail closed on divergent collections.
+
+## 1.28.18
+
+### Patch Changes
+
+- [#2687](https://github.com/reddb-io/reddb/pull/2687) [`b3d2025`](https://github.com/reddb-io/reddb/commit/b3d202592a874c2aa06dbca3262c87c0a33da8b9) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Rebuild a missing physical metadata sidecar for legacy paged stores after an in-place catalogue migration while preserving native collection roots and failing closed on partial summary publications.
+
+## 1.28.17
+
+### Patch Changes
+
+- [#2685](https://github.com/reddb-io/reddb/pull/2685) [`f3ed5eb`](https://github.com/reddb-io/reddb/commit/f3ed5ebb80ebe486034d137c26b623c558fd6419) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Recover catalogues containing an empty duplicate legacy system collection while preserving the populated collection and its existing data and index roots.
+
+## 1.28.16
+
+### Patch Changes
+
+- [#2683](https://github.com/reddb-io/reddb/pull/2683) [`2f32b89`](https://github.com/reddb-io/reddb/commit/2f32b89cd8b0c99c885c0ac12ea01e79aeb36513) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Bound logical restores by the configured memory budget and seek exact composite BTREE prefixes containing NULL values.
+
+## 1.28.15
+
+### Patch Changes
+
+- [#2679](https://github.com/reddb-io/reddb/pull/2679) [`b41962a`](https://github.com/reddb-io/reddb/commit/b41962ad17db4863a97ee20f5d17fde7531c49df) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Enforce configured authentication for native wire transports.
+
+## 1.28.14
+
+### Patch Changes
+
+- [#2669](https://github.com/reddb-io/reddb/pull/2669) [`91eeaa5`](https://github.com/reddb-io/reddb/commit/91eeaa5256d405ab868f1c9ed28eba2d8987a5b0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Bound synchronous `red.collections` disk accounting and skip legacy payload inspection when projected catalog fields do not require it, preventing large collections from blocking metadata requests.
+
+## 1.28.13
+
+### Patch Changes
+
+- [#2665](https://github.com/reddb-io/reddb/pull/2665) [`04d29a4`](https://github.com/reddb-io/reddb/commit/04d29a49956c41cf4ac562e95f93e2c4c92961e5) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Push collection-name filters and projected fields into `red.collections` catalog snapshots so targeted introspection no longer decodes unrelated collection payloads or computes unrequested on-disk sizes.
+
+## 1.28.12
+
+### Patch Changes
+
+- [#2662](https://github.com/reddb-io/reddb/pull/2662) [`768275c`](https://github.com/reddb-io/reddb/commit/768275c591b832d0333441129bd1b2d5345000a4) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Serve `SHOW INDEXES` from the operational index registry so introspection no longer scans unrelated collection payloads or starves query workers on large databases.
+
+## 1.28.11
+
+### Patch Changes
+
+- [#2656](https://github.com/reddb-io/reddb/pull/2656) [`9ec2441`](https://github.com/reddb-io/reddb/commit/9ec24418245e08e864b47d14dff46dcc6e707e12) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Publish disk-resident BTREE and equality roots with their index descriptor so cold startup reuses the compacted trees instead of rebuilding them and regrowing storage.
+
+- [#2639](https://github.com/reddb-io/reddb/pull/2639) [`06bc63f`](https://github.com/reddb-io/reddb/commit/06bc63f4ac83366d487af8e2fb36ff149a04bff2) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Remove retired storage scaffolding and unused direct dependencies, and expose the root gRPC client feature.
+
+- [#2644](https://github.com/reddb-io/reddb/pull/2644) [`eab4869`](https://github.com/reddb-io/reddb/commit/eab4869f68ba8f8b7a706275532ef33a8cb75341) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Stop advertising readiness while a handler that exceeded its deadline is still occupying the blocking executor, and recover readiness automatically when that work unwinds.
+
 ## 1.28.10
 
 ### Patch Changes

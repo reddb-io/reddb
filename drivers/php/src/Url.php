@@ -9,9 +9,8 @@
  *   reds://[user[:pass]@]host[:port][?...]     RedWire over TLS
  *   http://host[:port]/                        HTTP (REST)
  *   https://host[:port]/                       HTTPS
- *   red://                                     embedded in-memory   (unsupported here)
- *   red:///abs/path/file.rdb                   embedded persistent  (unsupported here)
- *   red://memory  red://:memory  red://:memory:  embedded aliases   (unsupported here)
+ *   memory://  red://memory                    embedded in-memory
+ *   file:///abs/path/file.rdb  red:///abs/path  embedded single-file
  *
  * Default ports follow the RedDB listener contract: RedWire 5050,
  * HTTP 5000, HTTPS 55555.
@@ -62,7 +61,7 @@ final class Url
         return $this->kind === self::KIND_REDWIRE_TLS || $this->kind === self::KIND_HTTPS;
     }
 
-    /** True for either embedded variant. The PHP driver does not ship an embedded engine. */
+    /** True for either embedded variant. */
     public function isEmbedded(): bool
     {
         return $this->kind === self::KIND_EMBEDDED_FILE || $this->kind === self::KIND_EMBEDDED_MEMORY;
@@ -83,6 +82,7 @@ final class Url
 
         // Embedded shortcuts.
         $memoryAliases = [
+            'memory:', 'memory://',
             'red:', 'red:/', 'red://',
             'red://memory', 'red://memory/',
             'red://:memory', 'red://:memory:',
@@ -97,6 +97,21 @@ final class Url
                 kind: self::KIND_EMBEDDED_FILE,
                 path: $path,
             );
+        }
+        if (str_starts_with(strtolower($uri), 'file://')) {
+            $parts = parse_url($uri);
+            if ($parts === false) {
+                throw new \InvalidArgumentException("failed to parse embedded file URI: '{$uri}'");
+            }
+            $host = $parts['host'] ?? '';
+            if ($host !== '' && $host !== 'localhost') {
+                throw new \InvalidArgumentException('embedded file URI must not name a remote host');
+            }
+            $path = $parts['path'] ?? '';
+            if ($path === '') {
+                throw new \InvalidArgumentException('embedded file URI is missing a path');
+            }
+            return new self(original: $uri, kind: self::KIND_EMBEDDED_FILE, path: $path);
         }
 
         $scheme = self::schemeOf($uri);
@@ -185,15 +200,14 @@ final class Url
     }
 
     /**
-     * Throw if the URI selects an embedded engine the PHP driver
-     * cannot serve. Caller can use {@see isEmbedded()} for a
-     * non-throwing check.
+     * Validate that a caller explicitly requiring a remote transport did not
+     * receive an embedded URI. The main Reddb factory supports embedded URLs.
      */
     public function assertNotEmbedded(): void
     {
         if ($this->isEmbedded()) {
             throw new EmbeddedUnsupported(
-                "embedded RedDB ('{$this->original}') needs the native lib — not yet shipped in the PHP driver"
+                "URI '{$this->original}' selects embedded mode, but this caller requires a remote transport"
             );
         }
     }

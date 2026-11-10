@@ -89,7 +89,7 @@ red://host?token=sk-...       # static bearer token
 ## Limitations
 
 - **zstd compression** on the wire path is not supported in pure Dart. If a peer sends a frame with the `COMPRESSED` flag the driver throws `CompressedButNoZstd`. The driver never sets that flag on outbound frames, so connections to a server with default config work fine.
-- **Embedded URIs** (`red://`, `red:///path`, `memory://`) raise `EmbeddedUnsupported` — the engine is Rust-only.
+- **Embedded mode** is available on native Dart and Flutter targets through the version-matched shared RedDB ABI. Browser builds return `EmbeddedUnsupported` because they cannot load native libraries.
 - **Flutter web** is HTTP-only (no `dart:io` socket access). Use `http://` / `https://` URIs there.
 
 ## Production checklist

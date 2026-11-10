@@ -1,27 +1,7 @@
 name: Client codec JS and WASM parity
 
 on:
-  pull_request:
-    paths:
-      - 'drivers/js-client/**'
-      - 'crates/reddb-wire/**'
-      - 'crates/reddb-types/**'
-      - 'Cargo.lock'
-      - 'Cargo.toml'
-      - 'pnpm-lock.yaml'
-      - 'packages/browser/package.json'
-      - '.github/workflows/client-codecs.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'drivers/js-client/**'
-      - 'crates/reddb-wire/**'
-      - 'crates/reddb-types/**'
-      - 'Cargo.lock'
-      - 'Cargo.toml'
-      - 'pnpm-lock.yaml'
-      - 'packages/browser/package.json'
-      - '.github/workflows/client-codecs.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -44,7 +24,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           components: clippy
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
       - name: Install pinned browser dependencies

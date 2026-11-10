@@ -1,5 +1,5 @@
 // URL parser tests. Targets ≥20 cases across schemes, ports, auth,
-// query strings and embedded rejection.
+// query strings and embedded classification.
 
 #include "reddb/errors.hpp"
 #include "reddb/url.hpp"
@@ -30,7 +30,7 @@ TEST(Url, RedsExplicitTls) {
 TEST(Url, RedsDefaultPort) {
     auto u = parse_uri("reds://primary");
     EXPECT_EQ(u.kind, UrlKind::Reds);
-    EXPECT_EQ(u.port, 5051);
+    EXPECT_EQ(u.port, 5050);
 }
 
 TEST(Url, HttpDefaultPort) {
@@ -115,20 +115,28 @@ TEST(Url, EmptyUriRejected) {
     EXPECT_THROW(parse_uri(""), RedDBError);
 }
 
-TEST(Url, EmbeddedRedRejected) {
-    EXPECT_THROW(parse_uri("red://"), RedDBError);
+TEST(Url, EmbeddedRedMemory) {
+    auto u = parse_uri("red://");
+    EXPECT_EQ(u.kind, UrlKind::Embedded);
+    EXPECT_TRUE(u.path.empty());
 }
 
-TEST(Url, EmbeddedRedPathRejected) {
-    EXPECT_THROW(parse_uri("red:///var/lib/data.rdb"), RedDBError);
+TEST(Url, EmbeddedRedPath) {
+    auto u = parse_uri("red:///var/lib/data.rdb");
+    EXPECT_EQ(u.kind, UrlKind::Embedded);
+    EXPECT_EQ(u.path, "/var/lib/data.rdb");
 }
 
-TEST(Url, EmbeddedMemoryRejected) {
-    EXPECT_THROW(parse_uri("memory://"), RedDBError);
+TEST(Url, EmbeddedMemoryAlias) {
+    auto u = parse_uri("memory://");
+    EXPECT_EQ(u.kind, UrlKind::Embedded);
+    EXPECT_TRUE(u.path.empty());
 }
 
-TEST(Url, EmbeddedFileRejected) {
-    EXPECT_THROW(parse_uri("file:///tmp/x.rdb"), RedDBError);
+TEST(Url, EmbeddedFilePath) {
+    auto u = parse_uri("file:///tmp/x.rdb");
+    EXPECT_EQ(u.kind, UrlKind::Embedded);
+    EXPECT_EQ(u.path, "/tmp/x.rdb");
 }
 
 TEST(Url, UnsupportedSchemeRejected) {
@@ -156,12 +164,12 @@ TEST(Url, GrpcsAliasMapsToReds) {
     EXPECT_EQ(u.port, 5052);
 }
 
-TEST(Url, ErrorCodeForEmbedded) {
+TEST(Url, EmptyFilePathRejected) {
     try {
-        parse_uri("red:///abs/path");
-        FAIL() << "expected EmbeddedUnsupported";
+        parse_uri("file://");
+        FAIL() << "expected InvalidUri";
     } catch (const RedDBError& e) {
-        EXPECT_EQ(e.code(), ErrorCode::EmbeddedUnsupported);
+        EXPECT_EQ(e.code(), ErrorCode::InvalidUri);
     }
 }
 

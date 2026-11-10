@@ -155,7 +155,10 @@ impl ResidentStore {
     }
 
     pub fn get_collection(&self, name: &str) -> Option<Arc<SegmentManager>> {
-        self.collections.read().get(name).map(Arc::clone)
+        self.collections
+            .read()
+            .get(super::system_collection_names::canonical_or_self(name))
+            .map(Arc::clone)
     }
 
     pub fn context_index(&self) -> &ContextIndex {
@@ -497,6 +500,7 @@ impl ResidentStore {
         name: &str,
         manager_config: &ManagerConfig,
     ) -> Result<(), StoreError> {
+        let name = super::system_collection_names::canonical_or_self(name);
         let mut collections = self.collections.write();
         if collections.contains_key(name) {
             return Ok(());
@@ -562,6 +566,7 @@ impl ResidentStore {
         name: &str,
         retire_index: impl FnOnce(),
     ) -> Result<(), StoreError> {
+        let name = super::system_collection_names::canonical_or_self(name);
         let manager = {
             let mut collections = self.collections.write();
             match collections.remove(name) {
@@ -698,7 +703,9 @@ struct ResidentReplayTarget<'a> {
 
 impl super::store_wal::StoreReplayTarget for ResidentReplayTarget<'_> {
     fn set_aux_metadata(&self, bytes: &[u8]) -> Result<(), StoreError> {
-        self.store.set_aux_metadata(bytes.to_vec());
+        let bytes = crate::catalog::codec::canonicalize_collection_contract_blob(bytes)
+            .map_err(|err| StoreError::Serialization(err.to_string()))?;
+        self.store.set_aux_metadata(bytes);
         Ok(())
     }
     fn has_collection(&self, name: &str) -> bool {
@@ -742,7 +749,7 @@ impl ResidentStore {
         name: impl Into<String>,
         manager_config: &ManagerConfig,
     ) -> Arc<SegmentManager> {
-        let name = name.into();
+        let name = super::system_collection_names::canonical_owned(name.into());
         // Fast path: shared read lock — zero contention for existing collections
         {
             let collections = self.collections.read();

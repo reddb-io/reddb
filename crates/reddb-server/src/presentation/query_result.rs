@@ -458,6 +458,12 @@ fn ask_result_from_records(
     let validation = json_field(row, "validation").unwrap_or(JsonValue::Object(Map::new()));
     Some(crate::runtime::ai::ask_response_envelope::AskResult {
         answer,
+        reasoning: json_field(row, "reasoning").unwrap_or(JsonValue::Null),
+        exploratory_queries: json_field(row, "exploratory_queries")
+            .unwrap_or(JsonValue::Array(Vec::new())),
+        final_query: text_field(row, "final_query"),
+        final_query_params: json_field(row, "final_query_params")
+            .unwrap_or(JsonValue::Array(Vec::new())),
         sources_flat: ask_sources(&sources),
         citations: ask_citations(&citations),
         validation: ask_validation(&validation),
@@ -730,6 +736,10 @@ mod tests {
         let result = result_with(
             &[
                 "answer",
+                "reasoning",
+                "exploratory_queries",
+                "final_query",
+                "final_query_params",
                 "sources_flat",
                 "citations",
                 "validation",
@@ -744,6 +754,16 @@ mod tests {
             ],
             vec![
                 Value::text("Deploy failed [^1]."),
+                Value::Json(
+                    br#"{"evidence_policy":"final_query_only","summary":"Checked deploy events","steps":[]}"#
+                        .to_vec(),
+                ),
+                Value::Json(
+                    br#"[{"params":[],"purpose":"Locate recent failures","sql":"SELECT id FROM deploys WHERE status = 'failed' LIMIT 5"}]"#
+                        .to_vec(),
+                ),
+                Value::text("SELECT id, status FROM deploys WHERE id = $1"),
+                Value::Json(br#"[42]"#.to_vec()),
                 Value::Json(
                     br#"[{"payload":"{\"status\":\"failed\"}","urn":"urn:reddb:row:d:1"}]"#
                         .to_vec(),
@@ -936,8 +956,11 @@ mod tests {
         let expected = concat!(
             r#"{"answer":"Deploy failed [^1].","cache_hit":true,"#,
             r#""citations":[{"marker":1,"urn":"urn:reddb:row:d:1"}],"#,
-            r#""completion_tokens":17,"cost_usd":0.125,"mode":"lenient","#,
-            r#""model":"m-1","prompt_tokens":41,"provider":"acme","retry_count":1,"#,
+            r#""completion_tokens":17,"cost_usd":0.125,"#,
+            r#""exploratory_queries":[{"params":[],"purpose":"Locate recent failures","sql":"SELECT id FROM deploys WHERE status = 'failed' LIMIT 5"}],"#,
+            r#""final_query":"SELECT id, status FROM deploys WHERE id = $1","final_query_params":[42],"#,
+            r#""mode":"lenient","model":"m-1","prompt_tokens":41,"provider":"acme","#,
+            r#""reasoning":{"evidence_policy":"final_query_only","steps":[],"summary":"Checked deploy events"},"retry_count":1,"#,
             r#""sources_flat":[{"payload":"{\"status\":\"failed\"}","urn":"urn:reddb:row:d:1"}],"#,
             r#""validation":{"errors":[{"detail":"missing source","kind":"out_of_range"}],"#,
             r#""ok":false,"warnings":[{"detail":"provider fallback","kind":"mode_fallback"}]}}"#,

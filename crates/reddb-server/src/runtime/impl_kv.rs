@@ -676,11 +676,7 @@ impl<'a> KvAtomicOps<'a> {
         // which drops whatever the previous version carried — so a plain
         // INCR silently made an expiring key permanent and cleared its tags.
         // Carry both forward unless the caller asked to change them.
-        let carried_tags = self
-            .runtime
-            .inner
-            .kv_tag_index
-            .tags_for_key(collection, key);
+        let carried_tags = self.try_tags_for_key(collection, key)?;
         let carried_ttl_ms = if ttl_ms.is_none() {
             self.existing_ttl_ms(collection, key)?
         } else {
@@ -783,11 +779,7 @@ impl<'a> KvAtomicOps<'a> {
         // an optional EXPIRE, so — exactly as with INCR — the delete-then-
         // create below would drop a TTL and tags the caller never asked to
         // change. Carry both across the swap.
-        let carried_tags = self
-            .runtime
-            .inner
-            .kv_tag_index
-            .tags_for_key(collection, key);
+        let carried_tags = self.try_tags_for_key(collection, key)?;
         let carried_ttl_ms = if ttl_ms.is_none() {
             self.existing_ttl_ms(collection, key)?
         } else {
@@ -849,16 +841,57 @@ impl<'a> KvAtomicOps<'a> {
             .check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         self.runtime.check_kv_invalidate_policy(collection)?;
         self.ensure_kv_collection(collection)?;
-        let entries = self
-            .runtime
-            .inner
-            .kv_tag_index
-            .entries_for_tags(collection, tags);
+        if tags.is_empty() {
+            return Ok(0);
+        }
+        let store = self.runtime.inner.db.store();
+        let entries = if let Some(manager) = store
+            .get_collection(collection)
+            .filter(|manager| manager.has_backing())
+        {
+            // The hot tag cache contains resident rows only after a bounded
+            // cold boot. Explicit invalidation must also consult durable rows;
+            // do this on demand, never by materializing the collection at boot.
+            let mut keys = std::collections::BTreeSet::new();
+            super::function_budget::try_scan(
+                |visit| manager.try_for_each_entity(usize::MAX, visit),
+                |entity| {
+                    if let Some(Value::Text(key)) =
+                        entity.data.as_row().and_then(|row| row.get_field("key"))
+                    {
+                        keys.insert(key.to_string());
+                    }
+                    true
+                },
+            )?;
+            let resolver = super::kv_read::KvReadResolver::for_keyed_model(
+                self.runtime,
+                CollectionModel::Kv,
+                collection,
+            )?;
+            let mut entries = Vec::new();
+            for key in keys {
+                if self
+                    .try_tags_for_key(collection, &key)?
+                    .iter()
+                    .any(|tag| tags.contains(tag))
+                {
+                    if let Some(id) = resolver.identity(&key)? {
+                        entries.push((key, id));
+                    }
+                }
+            }
+            entries
+        } else {
+            self.runtime
+                .inner
+                .kv_tag_index
+                .entries_for_tags(collection, tags)
+        };
         if entries.is_empty() {
             return Ok(0);
         }
 
-        let store = self.runtime.inner.db.store();
         let mut removed = 0usize;
         for (key, id) in entries {
             let Some(entity) = store.get(collection, id) else {
@@ -897,10 +930,47 @@ impl<'a> KvAtomicOps<'a> {
     }
 
     pub fn tags_for_key(&self, collection: &str, key: &str) -> Vec<String> {
-        self.runtime
-            .inner
-            .kv_tag_index
-            .tags_for_key(collection, key)
+        self.try_tags_for_key(collection, key).unwrap_or_default()
+    }
+
+    /// Read authoritative tags, propagating cold storage errors to the caller.
+    pub fn try_tags_for_key(&self, collection: &str, key: &str) -> RedDBResult<Vec<String>> {
+        let store = self.runtime.inner.db.store();
+        if !store
+            .get_collection(collection)
+            .is_some_and(|manager| manager.has_backing())
+        {
+            return Ok(self
+                .runtime
+                .inner
+                .kv_tag_index
+                .tags_for_key(collection, key));
+        }
+        let _publication = store.vault_publication_lock.lock();
+        let resolver = super::kv_read::KvReadResolver::for_keyed_model(
+            self.runtime,
+            CollectionModel::Kv,
+            collection,
+        )?;
+        let Some(id) = resolver.identity(key)? else {
+            return Ok(Vec::new());
+        };
+        let metadata = store.try_get_metadata(collection, id, usize::MAX)?;
+        Ok(
+            match metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("_kv_tags"))
+            {
+                Some(MetadataValue::Array(tags)) => tags
+                    .iter()
+                    .filter_map(|tag| match tag {
+                        MetadataValue::String(tag) => Some(tag.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
+        )
     }
 
     /// Auto-create a KV collection if it does not exist yet.
@@ -987,6 +1057,7 @@ impl<'a> KvAtomicOps<'a> {
         &self,
         collection: &str,
         prefix: Option<&str>,
+        entries_max: usize,
     ) -> RedDBResult<Vec<(String, crate::storage::UnifiedEntity)>> {
         self.ensure_declared_model(crate::catalog::CollectionModel::Kv, collection)?;
         let store = self.runtime.inner.db.store();
@@ -1022,6 +1093,16 @@ impl<'a> KvAtomicOps<'a> {
                 if prefix.is_some_and(|prefix| !key.starts_with(prefix)) {
                     return true;
                 }
+                // Keep only the requested lexicographic prefix of keys. Continue
+                // scanning so version selection and late read errors stay intact.
+                if entries_max == 0
+                    || (entries.len() >= entries_max
+                        && entries
+                            .last_key_value()
+                            .is_some_and(|(last, _)| key.as_ref() > last.as_str()))
+                {
+                    return true;
+                }
                 let should_replace = match entries.get(key.as_ref()) {
                     Some(existing) if versioned => entity.xmin >= existing.xmin,
                     Some(existing) => entity.id.raw() >= existing.id.raw(),
@@ -1029,6 +1110,9 @@ impl<'a> KvAtomicOps<'a> {
                 };
                 if should_replace {
                     entries.insert(key.to_string(), entity.clone());
+                    if entries.len() > entries_max {
+                        entries.pop_last();
+                    }
                 }
                 true
             },
@@ -1097,14 +1181,14 @@ impl<'a> KvAtomicOps<'a> {
         let mut found = false;
         for record in records {
             let (entity, metadata) = record?;
-            let crate::storage::EntityData::Row(ref row) = entity.data else {
+            let crate::storage::EntityData::Row(row) = entity.data else {
                 continue;
             };
-            if !self.vault_row_in_scope(row) {
+            if !self.vault_row_in_scope(&row) {
                 continue;
             }
             let Some(version) =
-                super::keyed_spine::row_version(entity.id, row, entity.sequence_id as i64)
+                super::keyed_spine::row_version_owned(entity.id, row, entity.sequence_id as i64)
             else {
                 continue;
             };
@@ -1163,14 +1247,14 @@ impl<'a> KvAtomicOps<'a> {
         let mut latest = std::collections::BTreeMap::new();
         for record in records {
             let (entity, metadata) = record?;
-            let crate::storage::EntityData::Row(ref row) = entity.data else {
+            let crate::storage::EntityData::Row(row) = entity.data else {
                 continue;
             };
-            if !self.vault_row_in_scope(row) {
+            if !self.vault_row_in_scope(&row) {
                 continue;
             }
             let Some(version) =
-                super::keyed_spine::row_version(entity.id, row, entity.sequence_id as i64)
+                super::keyed_spine::row_version_owned(entity.id, row, entity.sequence_id as i64)
             else {
                 continue;
             };
@@ -1777,7 +1861,7 @@ impl RedDBRuntime {
         tenant: Option<&str>,
     ) -> RedDBResult<Value> {
         let key = self.vault_encryption_key(collection)?;
-        let plaintext = value.to_bytes();
+        let plaintext = zeroize::Zeroizing::new(value.to_bytes());
         let nonce_bytes = crate::auth::store::random_bytes(12);
         let mut nonce = [0u8; 12];
         nonce.copy_from_slice(&nonce_bytes[..12]);
@@ -1863,13 +1947,15 @@ impl RedDBRuntime {
         let mut nonce = [0u8; 12];
         nonce.copy_from_slice(&payload[..12]);
         let aad = vault_value_aad(collection, tenant);
-        let plaintext = crate::crypto::aes_gcm::aes256_gcm_decrypt(
-            &key,
-            &nonce,
-            aad.as_bytes(),
-            &payload[12..],
-        )
-        .map_err(|_| RedDBError::Query("vault unseal failed: decryption failed".to_string()))?;
+        let plaintext = zeroize::Zeroizing::new(
+            crate::crypto::aes_gcm::aes256_gcm_decrypt(
+                &key,
+                &nonce,
+                aad.as_bytes(),
+                &payload[12..],
+            )
+            .map_err(|_| RedDBError::Query("vault unseal failed: decryption failed".to_string()))?,
+        );
         let (value, consumed) =
             reddb_types::Value::from_bytes_with_limit(&plaintext, limit_bytes - cipher_bytes)
                 .map_err(|error| match error {
@@ -2569,7 +2655,13 @@ impl RedDBRuntime {
                         "value".into(),
                         "tags".into(),
                     ]);
-                    let entries = ops.latest_kv_entries(collection, prefix.as_deref())?;
+                    let entries_max = match limit {
+                        Some(0) => 0,
+                        Some(limit) => offset.saturating_add(*limit),
+                        None => usize::MAX,
+                    };
+                    let entries =
+                        ops.latest_kv_entries(collection, prefix.as_deref(), entries_max)?;
                     if *as_json {
                         let mut tree = crate::json::Value::Object(crate::json::Map::new());
                         for (key, entity) in entries
@@ -2613,7 +2705,10 @@ impl RedDBRuntime {
                                 "value",
                                 kv_value_from_entity(&entity).unwrap_or(reddb_types::Value::Null),
                             );
-                            record.set("tags", kv_tags_value(&ops.tags_for_key(collection, &key)));
+                            record.set(
+                                "tags",
+                                kv_tags_value(&ops.try_tags_for_key(collection, &key)?),
+                            );
                             result.push(record);
                         }
                         Ok(RuntimeQueryResult {
@@ -2828,7 +2923,12 @@ impl RedDBRuntime {
                     "value",
                     entry.and_then(|entry| entry.value).unwrap_or(Value::Null),
                 );
-                record.set("tags", kv_tags_value(&ops.tags_for_key(collection, key)));
+                let tags = if *model == CollectionModel::Kv {
+                    ops.try_tags_for_key(collection, key)?
+                } else {
+                    ops.tags_for_key(collection, key)
+                };
+                record.set("tags", kv_tags_value(&tags));
                 result.push(record);
 
                 Ok(RuntimeQueryResult {
@@ -3813,6 +3913,208 @@ mod tests {
 
     fn rt() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
+    }
+
+    #[test]
+    fn limited_kv_lists_match_full_version_selection_across_segments() {
+        use crate::storage::{EntityData, EntityId, RowData, UnifiedEntity};
+        let runtime = rt();
+        runtime
+            .execute_query("CREATE KV bounded_keys")
+            .expect("collection");
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("bounded_keys")
+            .expect("manager");
+        for (index, key) in ["z", "app.z", "a", "m", "a", "c", "app.a", "b"]
+            .iter()
+            .enumerate()
+        {
+            let mut entity = UnifiedEntity::table_row(
+                EntityId::new(1_000_000 + index as u64),
+                "bounded_keys",
+                index as u64,
+                vec![],
+            );
+            entity.data = EntityData::Row(RowData::with_names(
+                vec![Value::text(*key), Value::Integer(index as i64)],
+                vec!["key".into(), "value".into()],
+            ));
+            manager.insert(entity).expect("version");
+            if index == 3 {
+                manager.force_seal().expect("seal");
+            }
+        }
+        for versioned in [false, true] {
+            runtime
+                .vcs_set_versioned("bounded_keys", versioned)
+                .expect("versioning");
+            let ops = super::KvAtomicOps::new(&runtime);
+            for prefix in [None, Some("app."), Some("missing")] {
+                let summarize = |entries: Vec<(String, UnifiedEntity)>| {
+                    entries
+                        .into_iter()
+                        .map(|(key, entity)| (key, entity.id))
+                        .collect::<Vec<_>>()
+                };
+                let expected = summarize(
+                    ops.latest_kv_entries("bounded_keys", prefix, usize::MAX)
+                        .expect("full view"),
+                );
+                for count in [0, 1, 3, 100] {
+                    let actual = summarize(
+                        ops.latest_kv_entries("bounded_keys", prefix, count)
+                            .expect("bounded view"),
+                    );
+                    assert_eq!(
+                        actual,
+                        expected.iter().take(count).cloned().collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+        let full = runtime
+            .execute_query("KV LIST bounded_keys")
+            .expect("SQL full");
+        let page = runtime
+            .execute_query("KV LIST bounded_keys LIMIT 2 OFFSET 1")
+            .expect("SQL page");
+        let keys = |rows: &[crate::storage::query::unified::UnifiedRecord]| {
+            rows.iter()
+                .map(|row| row.get("key").cloned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&page.result.records), keys(&full.result.records[1..3]));
+    }
+
+    #[test]
+    fn limited_kv_lists_do_not_copy_payloads_beyond_the_key_window() {
+        use crate::storage::no_malloc_hot_paths::measure_allocations;
+        use crate::storage::{EntityData, EntityId, RowData, UnifiedEntity};
+        let runtime = rt();
+        runtime
+            .execute_query("CREATE KV payload_keys")
+            .expect("collection");
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("payload_keys")
+            .expect("manager");
+        for id in 0..128 {
+            let mut entity =
+                UnifiedEntity::table_row(EntityId::new(1_000_000 + id), "payload_keys", id, vec![]);
+            entity.data = EntityData::Row(RowData {
+                columns: vec![],
+                schema: None,
+                named: Some(std::collections::HashMap::from([
+                    ("key".into(), Value::text(format!("key{id:04}"))),
+                    ("value".into(), Value::Blob(vec![7; 32 * 1024])),
+                ])),
+            });
+            manager.insert(entity).expect("key");
+        }
+        let ops = super::KvAtomicOps::new(&runtime);
+        let (full, all_allocations) = measure_allocations(|| {
+            ops.latest_kv_entries("payload_keys", None, usize::MAX)
+                .expect("full list")
+        });
+        let (bounded, allocations) = measure_allocations(|| {
+            ops.latest_kv_entries("payload_keys", None, 3)
+                .expect("bounded list")
+        });
+        assert_eq!(
+            bounded
+                .iter()
+                .map(|(key, entity)| (key, entity.id))
+                .collect::<Vec<_>>(),
+            full.iter()
+                .take(3)
+                .map(|(key, entity)| (key, entity.id))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            allocations.peak_live_bytes < all_allocations.peak_live_bytes / 8,
+            "{allocations:?} / {all_allocations:?}"
+        );
+        eprintln!(
+            "KV list temporary peak bytes, full/3 keys: {} / {}",
+            all_allocations.peak_live_bytes, allocations.peak_live_bytes
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paged_replacements_batch_value_ttl_and_tags_across_cold_boots() {
+        use crate::api::{DurabilityMode, RedDBOptions};
+        use crate::storage::profile::StorageDeployPreset;
+
+        for mode in [DurabilityMode::Strict, DurabilityMode::WalDurableGrouped] {
+            let directory = tempfile::tempdir().expect("directory");
+            let options = RedDBOptions::persistent(directory.path().join("keys.rdb"))
+                .with_durability_mode(mode)
+                .with_memory_budget(64 * 1024 * 1024)
+                .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+                .expect("paged profile");
+            for generation in 0..3 {
+                let runtime = RedDBRuntime::with_options(options.clone()).expect("runtime");
+                let ops = super::KvAtomicOps::new(&runtime);
+                if generation > 0 {
+                    assert_eq!(
+                        ops.get(CollectionModel::Kv, "keys", "item")
+                            .expect("cold read"),
+                        Some(Value::Integer(generation - 1))
+                    );
+                    assert_eq!(
+                        ops.existing_ttl_ms("keys", "item").expect("TTL"),
+                        Some(600_000)
+                    );
+                    assert_eq!(
+                        runtime.inner.kv_tag_index.tags_for_key("keys", "item"),
+                        vec!["daily"]
+                    );
+                }
+                let batches = || {
+                    crate::storage::wal::WalReader::open(reddb_file::unified_wal_path(
+                        options.data_path.as_ref().expect("persistent path"),
+                    ))
+                    .expect("WAL")
+                    .iter()
+                    .filter(|record| {
+                        matches!(
+                            &record.as_ref().expect("record").1,
+                            crate::storage::wal::WalRecord::TxCommitBatch { .. }
+                        )
+                    })
+                    .count()
+                };
+                let before = batches();
+                ops.set_with_tags(
+                    "keys",
+                    "item",
+                    Value::Integer(generation),
+                    Some(600_000),
+                    &["daily".into()],
+                    false,
+                )
+                .expect("replacement");
+                if generation > 0 {
+                    assert_eq!(
+                        batches() - before,
+                        1,
+                        "value, deletion and metadata share one WAL batch"
+                    );
+                }
+                assert!(runtime.db().store().pager().is_some());
+                assert!(super::super::kv_write::atomic_available(&runtime, "keys")
+                    .expect("atomic path"));
+                assert_eq!(
+                    ops.get(CollectionModel::Kv, "keys", "item").expect("read"),
+                    Some(Value::Integer(generation))
+                );
+                runtime.checkpoint().expect("checkpoint");
+            }
+        }
     }
 
     #[test]

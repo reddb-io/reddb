@@ -205,6 +205,7 @@ pub struct FailoverPromotionReply {
     pub generation: u64,
     pub acquired_at_ms: u64,
     pub expires_at_ms: u64,
+    pub term: u64,
     pub timeline: u64,
     pub applied_lsn: u64,
     pub next_step: String,
@@ -216,6 +217,7 @@ impl FailoverPromotionReply {
         generation: u64,
         acquired_at_ms: u64,
         expires_at_ms: u64,
+        term: u64,
         timeline: u64,
         applied_lsn: u64,
     ) -> Self {
@@ -225,10 +227,12 @@ impl FailoverPromotionReply {
             generation,
             acquired_at_ms,
             expires_at_ms,
+            term,
             timeline,
             applied_lsn,
-            next_step: "restart with RED_REPLICATION_MODE=primary to start accepting writes"
-                .to_string(),
+            next_step: format!(
+                "restart with REDDB_NODE_ROLE=primary and RED_REPLICATION_TERM={term} to start accepting writes"
+            ),
         }
     }
 
@@ -251,6 +255,7 @@ impl FailoverPromotionReply {
             "expires_at_ms".to_string(),
             JsonValue::Number(self.expires_at_ms.into()),
         );
+        obj.insert("term".to_string(), JsonValue::Number(self.term.into()));
         obj.insert(
             "timeline".to_string(),
             JsonValue::Number(self.timeline.into()),
@@ -274,6 +279,7 @@ impl FailoverPromotionReply {
             generation: get_u64(&obj, "generation")?,
             acquired_at_ms: get_u64(&obj, "acquired_at_ms")?,
             expires_at_ms: get_u64(&obj, "expires_at_ms")?,
+            term: get_opt_u64(&obj, "term").unwrap_or(super::DEFAULT_REPLICATION_TERM),
             timeline: get_u64(&obj, "timeline")?,
             applied_lsn: get_u64(&obj, "applied_lsn")?,
             next_step: get_string(&obj, "next_step")?,
@@ -345,7 +351,7 @@ mod tests {
         assert_eq!(request.holder_id.as_deref(), Some("replica-a"));
         assert_eq!(request.ttl_ms, Some(30_000));
 
-        let reply = FailoverPromotionReply::promoted("replica-a", 7, 100, 200, 2, 42);
+        let reply = FailoverPromotionReply::promoted("replica-a", 7, 100, 200, 8, 2, 42);
         assert_eq!(
             FailoverPromotionReply::decode_json(&reply.encode_json()).unwrap(),
             reply

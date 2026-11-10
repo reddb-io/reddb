@@ -68,7 +68,7 @@ pub(super) fn scan_runtime_table_source_records_limited(
         crate::runtime::function_budget::try_scan(
             |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
             |e| {
-                if db.replica_allows_entity_at_read(table, e) {
+                if db.entity_visible_at_read(table, e) {
                     entities.push(e.clone());
                 }
                 true
@@ -147,7 +147,7 @@ pub(super) fn scan_runtime_table_source_records_window(
     crate::runtime::function_budget::try_scan(
         |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
-            if !db.replica_allows_entity_at_read(table, entity) {
+            if !db.entity_visible_at_read(table, entity) {
                 return true;
             }
             let hydrated =
@@ -203,7 +203,7 @@ pub(super) fn scan_runtime_universal_source_records_limited(
                     if records.len() >= limit.unwrap_or(usize::MAX) {
                         return false;
                     }
-                    if !db.replica_allows_entity_at_read(collection, entity) {
+                    if !db.entity_visible_at_read(collection, entity) {
                         return true;
                     }
                     let hydrated = crate::runtime::impl_timeseries::hydrate_timeseries_entity(
@@ -226,7 +226,7 @@ pub(super) fn scan_runtime_universal_source_records_limited(
         .scan(snapshot.as_ref(), |_| true)
         .into_iter()
         .filter_map(|(collection, entity)| {
-            if !db.replica_allows_entity_at_read(&collection, &entity) {
+            if !db.entity_visible_at_read(&collection, &entity) {
                 return None;
             }
             let hydrated = crate::runtime::impl_timeseries::hydrate_timeseries_entity(
@@ -277,7 +277,6 @@ pub(crate) fn stream_runtime_table_source_scan(
             manager.try_paged_entity_cursor(snapshot.clone())?
         };
         if let Some(cursor) = cursor {
-            let is_replica = db.is_replica_role();
             let schema = schema.clone();
             let table = table_name.clone();
             let mut source = cursor.filter_map(move |entry| {
@@ -288,15 +287,13 @@ pub(crate) fn stream_runtime_table_source_scan(
                 if let Err(error) = crate::runtime::function_budget::charge(1) {
                     return Some(Err(error));
                 }
-                if is_replica
-                    && metadata.as_ref().is_some_and(|metadata| {
-                        RedDB::entity_metadata_expired_at(
-                            &entity,
-                            metadata,
-                            crate::utils::now_unix_millis(),
-                        )
-                    })
-                {
+                if metadata.as_ref().is_some_and(|metadata| {
+                    RedDB::entity_metadata_expired_at(
+                        &entity,
+                        metadata,
+                        crate::utils::now_unix_millis(),
+                    )
+                }) {
                     return None;
                 }
                 let hydrated = crate::runtime::impl_timeseries::hydrate_timeseries_entity(
@@ -331,7 +328,7 @@ pub(crate) fn stream_runtime_table_source_scan(
     crate::runtime::function_budget::try_scan(
         |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
-            if db.replica_allows_entity_at_read(table, entity) {
+            if db.entity_visible_at_read(table, entity) {
                 entities.push(entity.clone());
             }
             true

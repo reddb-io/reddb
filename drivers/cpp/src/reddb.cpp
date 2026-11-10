@@ -1,6 +1,10 @@
 #include "reddb/reddb.hpp"
 #include "reddb/errors.hpp"
 
+#if REDDB_HAS_EMBEDDED
+#include "embedded/conn.hpp"
+#endif
+
 #include <utility>
 
 namespace reddb {
@@ -65,8 +69,12 @@ std::unique_ptr<Conn> connect(const std::string& uri, const ConnectOptions& opts
     auto parsed = parse_uri(uri);
 
     if (parsed.kind == UrlKind::Embedded) {
+#if REDDB_HAS_EMBEDDED
+        return embedded::connect(parsed);
+#else
         throw RedDBError(ErrorCode::EmbeddedUnsupported,
-                         "embedded URIs are not supported by the C++ driver");
+                         "embedded engine is not linked; configure REDDB_FFI_LIBRARY");
+#endif
     }
 
     if (parsed.kind == UrlKind::Http || parsed.kind == UrlKind::Https) {

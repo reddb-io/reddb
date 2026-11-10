@@ -201,6 +201,45 @@ pub(crate) trait QueueStore {
         deadline: Instant,
     ) -> Result<DeliveryId>;
 
+    /// Reserve and count a delivery as one durable transition when supported.
+    fn mark_pending_for_read(
+        &self,
+        txn: &QueueTxn,
+        queue: &str,
+        message_id: MessageId,
+        group: &str,
+        consumer: &str,
+        deadline: Instant,
+        count_attempt: bool,
+    ) -> Result<(DeliveryId, u32)> {
+        let delivery = self.mark_pending(txn, queue, message_id, group, consumer, deadline)?;
+        let attempts = if count_attempt {
+            self.bump_attempt(txn, &delivery)?.attempts
+        } else {
+            1
+        };
+        Ok((delivery, attempts))
+    }
+
+    /// Reserve a bounded group with a single durable publication when supported.
+    fn mark_pending_many_for_read(
+        &self,
+        txn: &QueueTxn,
+        queue: &str,
+        message_ids: &[MessageId],
+        group: &str,
+        consumer: &str,
+        deadline: Instant,
+        count_attempt: bool,
+    ) -> Result<Vec<(DeliveryId, u32)>> {
+        message_ids
+            .iter()
+            .map(|&id| {
+                self.mark_pending_for_read(txn, queue, id, group, consumer, deadline, count_attempt)
+            })
+            .collect()
+    }
+
     /// Release a pending delivery back to the available pool. No-op if
     /// `delivery_id` is unknown (already released or never existed).
     fn release_pending(&self, txn: &QueueTxn, delivery_id: &str) -> Result<()>;
@@ -351,7 +390,7 @@ pub(crate) trait QueueStore {
     fn reclaim_expired_dedup(&self, txn: &QueueTxn, queue: &str, now_ns: u64) -> Result<usize>;
 
     /// Look up a live push-idempotency key.
-    fn find_dedup(&self, queue: &str, dedup_key: &str, now_ns: u64) -> Option<MessageId>;
+    fn find_dedup(&self, queue: &str, dedup_key: &str, now_ns: u64) -> Result<Option<MessageId>>;
 
     /// Record the first producer push outcome for `dedup_key`.
     fn record_dedup(
@@ -1001,13 +1040,13 @@ impl QueueStore for InMemoryQueueStore {
         Ok(before.saturating_sub(state.dedup.len()))
     }
 
-    fn find_dedup(&self, queue: &str, dedup_key: &str, now_ns: u64) -> Option<MessageId> {
+    fn find_dedup(&self, queue: &str, dedup_key: &str, now_ns: u64) -> Result<Option<MessageId>> {
         let state = self.state.lock().expect("state poisoned");
-        state
+        Ok(state
             .dedup
             .get(&(queue.to_string(), dedup_key.to_string()))
             .filter(|entry| entry.expires_at_ns > now_ns)
-            .map(|entry| entry.message_id)
+            .map(|entry| entry.message_id))
     }
 
     fn record_dedup(
@@ -1167,20 +1206,32 @@ mod tests {
         store
             .record_dedup(&t, "q", "retry-1", 10, 2_000)
             .expect("record dedup");
-        assert_eq!(store.find_dedup("q", "retry-1", 1_000), Some(10));
+        assert_eq!(
+            store
+                .find_dedup("q", "retry-1", 1_000)
+                .expect("dedup lookup"),
+            Some(10)
+        );
 
         let delivery = store
             .mark_pending(&t, "q", 10, "workers", "alice", deadline_in(1000))
             .expect("mark pending");
         store.ack_pending(&t, &delivery).expect("ack original");
         assert_eq!(
-            store.find_dedup("q", "retry-1", 1_500),
+            store
+                .find_dedup("q", "retry-1", 1_500)
+                .expect("dedup lookup"),
             Some(10),
             "consuming the original message must not remove the dedup outcome",
         );
 
         assert_eq!(store.reclaim_expired_dedup(&t, "q", 2_000).unwrap(), 1);
-        assert_eq!(store.find_dedup("q", "retry-1", 2_001), None);
+        assert_eq!(
+            store
+                .find_dedup("q", "retry-1", 2_001)
+                .expect("dedup lookup"),
+            None
+        );
     }
 
     #[test]

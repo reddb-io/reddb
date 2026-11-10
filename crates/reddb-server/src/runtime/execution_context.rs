@@ -684,6 +684,94 @@ mod tests {
         );
     }
 
+    #[test]
+    fn config_snapshot_does_not_copy_superseded_values() {
+        use crate::storage::no_malloc_hot_paths::measure_allocations;
+
+        // Drive the selection in a known order. Two traversals of the live
+        // store need not have the same order (or see the same compaction), so
+        // counting replacements in a separate traversal is not a stable bound.
+        let observe = |payload_bytes| {
+            let values: Vec<_> = (1..=64)
+                .rev()
+                .map(|id| (id, Value::Blob(vec![id as u8; payload_bytes])))
+                .collect();
+            let (latest, allocations) = measure_allocations(|| {
+                let mut latest = HashMap::new();
+                for (id, value) in &values {
+                    let mut shared = None;
+                    insert_latest_config_value(
+                        &mut latest,
+                        "fixture.copy".into(),
+                        *id,
+                        value,
+                        &mut shared,
+                    );
+                    insert_latest_config_value(
+                        &mut latest,
+                        "red.config/fixture.copy".into(),
+                        *id,
+                        value,
+                        &mut shared,
+                    );
+                }
+                latest
+            });
+            assert_eq!(latest["fixture.copy"].0, 64);
+            assert_eq!(
+                *latest["fixture.copy"].1,
+                Value::Blob(vec![64; payload_bytes])
+            );
+            assert!(Arc::ptr_eq(
+                &latest["fixture.copy"].1,
+                &latest["red.config/fixture.copy"].1
+            ));
+            allocations
+        };
+        let empty = observe(0);
+        let large = observe(64 * 1024);
+        assert!(
+            large.allocated_bytes <= empty.allocated_bytes + 2 * 64 * 1024,
+            "superseded config payload copies: {empty:?} -> {large:?}"
+        );
+    }
+
+    #[test]
+    fn config_snapshot_keeps_legacy_and_namespaced_aliases_after_collection_migration() {
+        use crate::storage::{EntityData, EntityId, RowData, UnifiedEntity};
+        let runtime = super::super::RedDBRuntime::in_memory().expect("runtime");
+        let store = runtime.db().store();
+        let manager = store.get_or_create_collection("red_config");
+        assert!(Arc::ptr_eq(
+            &manager,
+            &store.get_collection("red.config").unwrap()
+        ));
+        for (id, key, value, tombstone) in [
+            (1, "theme", "dark", false),
+            (2, "red.config.theme", "light", false),
+            (3, "other", "hidden", true),
+        ] {
+            let mut entity =
+                UnifiedEntity::table_row(EntityId::new(2_000_000 + id), "red_config", id, vec![]);
+            entity.data = EntityData::Row(RowData {
+                columns: vec![],
+                schema: None,
+                named: Some(HashMap::from([
+                    ("key".into(), Value::text(key)),
+                    ("value".into(), Value::text(value)),
+                    ("tombstone".into(), Value::Boolean(tombstone)),
+                ])),
+            });
+            manager.insert(entity).expect("config row");
+        }
+        let values = latest_config_snapshot(runtime.db().as_ref()).expect("snapshot");
+        assert_eq!(values.get("theme"), Some(&Value::text("dark")));
+        assert_eq!(values.get("red.config.theme"), Some(&Value::text("light")));
+        assert_eq!(values.get("red.config/theme"), Some(&Value::text("light")));
+        assert_eq!(values.get("other"), Some(&Value::text("hidden")));
+        assert!(!values.contains_key("red.config/other"));
+    }
+
     fn with_kv_values<T>(values: HashMap<String, String>, f: impl FnOnce() -> T) -> T {
         CURRENT_KV_RESOLVER.with(|cell| {
             cell.replace(Some(KvResolver {
@@ -760,35 +848,10 @@ mod tests {
 }
 
 fn latest_config_snapshot(db: &RedDB) -> RedDBResult<HashMap<String, Value>> {
-    let mut latest: HashMap<String, (u64, Value)> = HashMap::new();
+    let mut latest: HashMap<String, (u64, Arc<Value>)> = HashMap::new();
 
-    if let Some(manager) = db.store().get_collection("red_config") {
-        super::function_budget::try_scan(
-            |visit| manager.try_for_each_entity(usize::MAX, visit),
-            |entity| {
-                let Some(row) = entity.data.as_row() else {
-                    return true;
-                };
-                let Some(Value::Text(key)) = row.get_field("key") else {
-                    return true;
-                };
-                let value = row.get_field("value").cloned().unwrap_or(Value::Null);
-                let id = entity.id.raw();
-                let key = key.to_ascii_lowercase();
-                insert_latest_config_value(&mut latest, key.clone(), id, value.clone());
-                if let Some(rest) = key.strip_prefix("red.config.") {
-                    insert_latest_config_value(
-                        &mut latest,
-                        format!("red.config/{rest}"),
-                        id,
-                        value,
-                    );
-                }
-                true
-            },
-        )?;
-    }
-
+    // The store canonicalizes the legacy `red_config` name to `red.config`.
+    // Scan it once, but preserve both legacy and namespaced resolver keys.
     if let Some(manager) = db.store().get_collection("red.config") {
         super::function_budget::try_scan(
             |visit| manager.try_for_each_entity(usize::MAX, visit),
@@ -796,19 +859,34 @@ fn latest_config_snapshot(db: &RedDB) -> RedDBResult<HashMap<String, Value>> {
                 let Some(row) = entity.data.as_row() else {
                     return true;
                 };
-                if matches!(row.get_field("tombstone"), Some(Value::Boolean(true))) {
-                    return true;
-                }
                 let Some(Value::Text(key)) = row.get_field("key") else {
                     return true;
                 };
-                let value = row.get_field("value").cloned().unwrap_or(Value::Null);
-                insert_latest_config_value(
-                    &mut latest,
-                    format!("red.config/{}", key.to_ascii_lowercase()),
-                    entity.id.raw(),
-                    value,
-                );
+                let value = row.get_field("value").unwrap_or(&Value::Null);
+                let id = entity.id.raw();
+                let key = key.to_ascii_lowercase();
+                // One value may be visible under several aliases. Clone the
+                // payload at most once for each advancing entity version.
+                let mut shared = None;
+                insert_latest_config_value(&mut latest, key.clone(), id, value, &mut shared);
+                if let Some(rest) = key.strip_prefix("red.config.") {
+                    insert_latest_config_value(
+                        &mut latest,
+                        format!("red.config/{rest}"),
+                        id,
+                        value,
+                        &mut shared,
+                    );
+                }
+                if !matches!(row.get_field("tombstone"), Some(Value::Boolean(true))) {
+                    insert_latest_config_value(
+                        &mut latest,
+                        format!("red.config/{key}"),
+                        id,
+                        value,
+                        &mut shared,
+                    );
+                }
                 true
             },
         )?;
@@ -816,20 +894,27 @@ fn latest_config_snapshot(db: &RedDB) -> RedDBResult<HashMap<String, Value>> {
 
     Ok(latest
         .into_iter()
-        .map(|(key, (_, value))| (key, value))
+        .map(|(key, (_, value))| {
+            (
+                key,
+                Arc::try_unwrap(value).unwrap_or_else(|shared| (*shared).clone()),
+            )
+        })
         .collect())
 }
 
 fn insert_latest_config_value(
-    latest: &mut HashMap<String, (u64, Value)>,
+    latest: &mut HashMap<String, (u64, Arc<Value>)>,
     key: String,
     id: u64,
-    value: Value,
+    value: &Value,
+    shared: &mut Option<Arc<Value>>,
 ) {
     match latest.get(&key) {
         Some((prev_id, _)) if *prev_id > id => {}
         _ => {
-            latest.insert(key, (id, value));
+            let shared = shared.get_or_insert_with(|| Arc::new(value.clone()));
+            latest.insert(key, (id, Arc::clone(shared)));
         }
     }
 }

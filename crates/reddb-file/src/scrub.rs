@@ -124,6 +124,32 @@ pub(crate) fn reject_paged_store(file: &mut File, operation: &str) -> RdbFileRes
             )));
         }
     }
+    // If both superblocks lose their magic, an intact or partly damaged
+    // native catalog is still evidence of a paged store. Refuse embedded
+    // carving rather than promote an unrelated embedded-looking value into
+    // a supposedly recovered database. This is only a rejection signal;
+    // it does not establish that the catalog or the store is healthy.
+    let catalog_offset = crate::PAGED_PAGE_SIZE as u64;
+    let mut catalog = [0u8; crate::PAGED_PAGE_HEADER_SIZE + 4];
+    if file.metadata()?.len() >= catalog_offset + catalog.len() as u64 {
+        file.seek(SeekFrom::Start(catalog_offset))?;
+        file.read_exact(&mut catalog)?;
+        let header = crate::decode_paged_page_header(
+            catalog[..crate::PAGED_PAGE_HEADER_SIZE]
+                .try_into()
+                .expect("fixed page header"),
+        );
+        let magic = &catalog[crate::PAGED_PAGE_HEADER_SIZE..];
+        if header.page_type == 6
+            && header.page_id == 1
+            && (magic == crate::METADATA_MAGIC || magic == crate::METADATA_OVERFLOW_MAGIC)
+        {
+            return Err(RdbFileError::InvalidOperation(format!(
+                "{operation} does not support the paged RDDB format; \
+                 preserve the source and use a paged-format verifier or recovery tool"
+            )));
+        }
+    }
     Ok(())
 }
 

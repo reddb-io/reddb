@@ -250,7 +250,7 @@ async fn high_level_client_routes_over_tcp_http_websocket_and_tls() {
         uri.query_pairs_mut().append_pair("token", "test-token");
         let db = Reddb::connect(uri.as_str()).await.expect(protocol);
         let read = db
-            .query("SELECT node FROM users")
+            .query_with_options("SELECT node FROM users", QueryOptions::local())
             .await
             .expect("replica read");
         assert_eq!(

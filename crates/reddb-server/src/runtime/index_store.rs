@@ -10,6 +10,7 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::storage::unified::bitmap_index::BitmapIndexManager;
 use crate::storage::unified::entity::EntityId;
@@ -1091,10 +1092,16 @@ type MutationTestHook = std::sync::Arc<dyn Fn(&str, MutationTestPhase) + Send + 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MutationTestPhase {
     DmlTargetScanCandidate,
+    DmlIndexLookupStarted,
+    DirectWireQueryStarted,
     DmlPostImageCandidate,
     StoragePublished,
     BeforeEvents,
     BeforeUndoTopology,
+    UndoIndexRemoved,
+    DeleteVisibilityCommitted,
+    IndexTopologyPublishing,
+    IndexTopologyDropping,
 }
 
 type PagedBtreeProviders =
@@ -1111,10 +1118,27 @@ pub struct IndexStore {
     // Keep identities stable across DROP/recreate, including queued writers.
     // The memory sampler never takes a topology lock.
     topology: RwLock<HashMap<String, std::sync::Arc<RwLock<()>>>>,
+    indexed_mutations_active: AtomicUsize,
+    indexed_mutation_generation: AtomicU64,
     #[cfg(test)]
     pub(super) before_build: parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     pub(super) mutation_hook: parking_lot::Mutex<Option<MutationTestHook>>,
+}
+
+/// Covers the interval in which storage and secondary indexes are published.
+/// Scoped to one runtime so unrelated databases do not affect each other.
+pub(crate) struct IndexedMutationGuard<'a>(&'a IndexStore);
+
+impl Drop for IndexedMutationGuard<'_> {
+    fn drop(&mut self) {
+        self.0
+            .indexed_mutation_generation
+            .fetch_add(1, Ordering::SeqCst);
+        self.0
+            .indexed_mutations_active
+            .fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl IndexStore {
@@ -1126,6 +1150,8 @@ impl IndexStore {
             paged_btrees: RwLock::new(HashMap::new()),
             registry: RwLock::new(HashMap::new()),
             topology: RwLock::new(HashMap::new()),
+            indexed_mutations_active: AtomicUsize::new(0),
+            indexed_mutation_generation: AtomicU64::new(0),
             #[cfg(test)]
             before_build: parking_lot::Mutex::new(None),
             #[cfg(test)]
@@ -1133,11 +1159,29 @@ impl IndexStore {
         }
     }
 
+    pub(crate) fn begin_indexed_mutation(&self) -> IndexedMutationGuard<'_> {
+        self.indexed_mutations_active.fetch_add(1, Ordering::SeqCst);
+        self.indexed_mutation_generation
+            .fetch_add(1, Ordering::SeqCst);
+        IndexedMutationGuard(self)
+    }
+
+    pub(crate) fn indexed_mutation_active(&self) -> bool {
+        self.indexed_mutations_active.load(Ordering::SeqCst) != 0
+    }
+
+    pub(crate) fn indexed_mutation_generation(&self) -> u64 {
+        self.indexed_mutation_generation.load(Ordering::SeqCst)
+    }
+
     /// The caller exclusively fences collection topology until publication.
     /// No live backing is changed until the complete replacement is ready.
     pub(crate) fn replace_collection_from(&self, collection: &str, prepared: Self) {
+        let _indexed_mutation = self.begin_indexed_mutation();
         let mut registry = self.registry.write();
         self.hash.replace_collection_from(collection, prepared.hash);
+        #[cfg(test)]
+        self.mutation_test_hook(collection, MutationTestPhase::IndexTopologyPublishing);
         self.bitmap
             .replace_collection_from(collection, prepared.bitmap);
         let mut sorted = self.sorted.indices.write();
@@ -1151,6 +1195,14 @@ impl IndexStore {
         paged.extend(prepared.paged_btrees.into_inner());
         registry.retain(|(table, _), _| table != collection);
         registry.extend(prepared.registry.into_inner());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_mutation_test_hook(
+        &self,
+        hook: Option<std::sync::Arc<dyn Fn(&str, MutationTestPhase) + Send + Sync>>,
+    ) {
+        *self.mutation_hook.lock() = hook;
     }
 
     #[cfg(test)]
@@ -1254,7 +1306,7 @@ impl IndexStore {
             }
         }
         for index in indexes {
-            if self.index_is_paged(index) {
+            if self.index_is_paged(index) && !matches!(index.method, IndexMethodKind::BTree) {
                 continue;
             }
             for fields in rows.clone() {
@@ -1290,7 +1342,9 @@ impl IndexStore {
             .map(|(name, value)| (name.to_string(), value.clone()))
             .collect();
         indexes
-            .filter(|index| !self.index_is_paged(index))
+            .filter(|index| {
+                !self.index_is_paged(index) || matches!(index.method, IndexMethodKind::BTree)
+            })
             .filter(|index| {
                 versioned
                     || index.columns.iter().any(|column| {
@@ -1440,9 +1494,12 @@ impl IndexStore {
 
     /// Drop an index
     pub fn drop_index(&self, name: &str, collection: &str) -> bool {
+        let _indexed_mutation = self.begin_indexed_mutation();
         let mut registry = write_unpoisoned(&self.registry);
         let key = (collection.to_string(), name.to_string());
         if let Some(info) = registry.remove(&key) {
+            #[cfg(test)]
+            self.mutation_test_hook(collection, MutationTestPhase::IndexTopologyDropping);
             self.paged_btrees.write().remove(&key);
             match info.method {
                 IndexMethodKind::Hash => self.hash.drop_index(collection, name),
@@ -1551,6 +1608,11 @@ impl IndexStore {
             .filter(|idx| idx.collection == collection)
             .cloned()
             .collect()
+    }
+
+    /// List every operational index without consulting collection payloads.
+    pub(crate) fn list_all_indices(&self) -> Vec<RegisteredIndex> {
+        read_unpoisoned(&self.registry).values().cloned().collect()
     }
 
     /// Standalone UNIQUE indexes enforced at admission. Both are backed by a
@@ -1673,6 +1735,9 @@ impl IndexStore {
         if rows.is_empty() {
             return Ok(());
         }
+        for (entity_id, fields) in rows {
+            self.paged_btree_overlay_insert(collection, *entity_id, fields)?;
+        }
         let registry = self.registry.read();
 
         // Pre-collect the index list for this collection once so the
@@ -1778,6 +1843,7 @@ impl IndexStore {
         entity_id: EntityId,
         fields: &[(String, Value)],
     ) -> Result<(), String> {
+        self.paged_btree_overlay_insert(collection, entity_id, fields)?;
         let registry = self.registry.read();
         for idx in registry.values() {
             if idx.collection != collection || self.index_is_paged(idx) {
@@ -1861,6 +1927,7 @@ impl IndexStore {
         entity_id: EntityId,
         fields: &[(String, Value)],
     ) -> Result<(), String> {
+        self.paged_btree_overlay_delete(collection, entity_id, fields)?;
         let registry = self.registry.read();
         for idx in registry.values() {
             if idx.collection != collection || self.index_is_paged(idx) {
@@ -1939,6 +2006,7 @@ impl IndexStore {
         old_fields: &[(String, Value)],
         new_fields: &[(String, Value)],
     ) -> Result<(), String> {
+        self.paged_btree_overlay_update(collection, entity_id, old_fields, new_fields)?;
         // Snapshot the indexed columns once to avoid holding the registry
         // lock across delete/insert sub-calls (those re-acquire it).
         // Also include parent path segments (e.g. "body" for "body.service.tier")

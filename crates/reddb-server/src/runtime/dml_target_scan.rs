@@ -28,6 +28,28 @@ pub(super) struct DmlTargetScan<'a> {
     declared_table: bool,
 }
 
+fn dml_snapshot_index_is_stale(snapshot: &crate::runtime::impl_core::SnapshotContext) -> bool {
+    let current = snapshot.manager.fresh_read_snapshot();
+    snapshot.manager.oldest_active_xid().is_some()
+        || snapshot.snapshot.xid != current.xid
+        || snapshot.snapshot.in_progress != current.in_progress
+}
+
+fn dml_filter_can_retry(filter: &Filter) -> bool {
+    match filter {
+        Filter::Compare { .. }
+        | Filter::In { .. }
+        | Filter::Between { .. }
+        | Filter::IsNull(_)
+        | Filter::IsNotNull(_) => true,
+        Filter::And(left, right) | Filter::Or(left, right) => {
+            dml_filter_can_retry(left) && dml_filter_can_retry(right)
+        }
+        Filter::Not(inner) => dml_filter_can_retry(inner),
+        _ => false,
+    }
+}
+
 impl<'a> DmlTargetScan<'a> {
     pub(super) fn new(
         runtime: &'a RedDBRuntime,
@@ -90,6 +112,10 @@ impl<'a> DmlTargetScan<'a> {
             .ok_or_else(|| RedDBError::NotFound(self.table.to_string()))?;
         let compiled_filter = self.compiled_filter();
 
+        if let Some(ids) = super::retention_sweeper::take_delete_candidates() {
+            return self.recheck_index_candidates(&ids, compiled_filter.as_ref());
+        }
+
         // Fast path: WHERE _entity_id = N. The resolver maps stable
         // table-row identity to the version visible to this statement.
         // Skip for graph node/edge targets — the table-row resolver only
@@ -130,35 +156,60 @@ impl<'a> DmlTargetScan<'a> {
             }
         }
 
-        if !matches!(self.target, Some(UpdateTarget::Documents))
-            && !crate::runtime::impl_core::current_snapshot_requires_index_fallback()
-        {
+        let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+        let index_store = self.runtime.index_store_ref();
+        let generation = index_store.indexed_mutation_generation();
+        // DML target discovery may run against a retained snapshot even for an
+        // autocommit statement. Current index entries cannot recover old values.
+        // Only retry a pure filter outside stored-function work limits if
+        // publication raced the lookup. Query deadlines still cover both scans.
+        let can_retry = self.filter.is_some_and(dml_filter_can_retry)
+            && compiled_filter.is_some()
+            && !super::function_budget::stored_function_active();
+        let scan_required = self.target.is_none() && self.limit.is_some()
+            || matches!(self.target, Some(UpdateTarget::Documents))
+            || crate::runtime::impl_core::current_snapshot_requires_index_fallback()
+            || !can_retry
+            || index_store.indexed_mutation_active()
+            || snapshot.as_ref().is_some_and(dml_snapshot_index_is_stale);
+        if !scan_required {
             if let Some(filter) = self.filter {
-                if let Some(ids) = query_exec::try_hash_eq_lookup(
-                    filter,
+                #[cfg(test)]
+                index_store.mutation_test_hook(
                     self.table,
-                    self.runtime.index_store_ref(),
-                )? {
-                    return self.recheck_index_candidates(&ids, compiled_filter.as_ref());
-                }
-
-                if let Some(ids) = query_exec::try_sorted_index_lookup(
-                    filter,
-                    self.table,
-                    self.runtime.index_store_ref(),
-                    None,
-                )? {
-                    return self.recheck_index_candidates(&ids, compiled_filter.as_ref());
+                    super::index_store::MutationTestPhase::DmlIndexLookupStarted,
+                );
+                let candidates =
+                    match query_exec::try_hash_eq_lookup(filter, self.table, index_store)? {
+                        Some(ids) => Some(ids),
+                        None => query_exec::try_sorted_index_lookup(
+                            filter,
+                            self.table,
+                            index_store,
+                            None,
+                        )?,
+                    };
+                if let Some(ids) = candidates {
+                    let result = self.recheck_index_candidates(&ids, compiled_filter.as_ref());
+                    if !index_store.indexed_mutation_active()
+                        && generation == index_store.indexed_mutation_generation()
+                        && snapshot
+                            .as_ref()
+                            .is_none_or(|ctx| !dml_snapshot_index_is_stale(ctx))
+                    {
+                        return result;
+                    }
                 }
             }
         }
 
-        let snapshot = crate::runtime::impl_core::capture_current_snapshot();
         let mut ids = Vec::new();
         let mut predicate_failure = None;
         if let Some(filter) = self.filter {
             let mut owned_zone_preds = Vec::new();
-            if !matches!(self.target, Some(UpdateTarget::Documents)) {
+            if !(matches!(self.target, Some(UpdateTarget::Documents))
+                || self.target.is_none() && self.limit.is_some())
+            {
                 query_exec::extract_zone_predicates(filter, &mut owned_zone_preds);
             }
             let zone_preds: Vec<_> = owned_zone_preds

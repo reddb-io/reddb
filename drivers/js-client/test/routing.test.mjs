@@ -23,7 +23,8 @@ for (const protocol of ['red', 'reds', 'grpc', 'grpcs', 'http', 'https', 'ws', '
       async close() {},
     })
     const client = await new RoutingClient(primary, await dial(primary), dial, protocol, { now: () => now }).initialize()
-    assert.equal(await client.call('query', { sql: '/* read */ SELECT COUNT(*) FROM users' }), replica)
+    assert.equal(await client.call('query', { sql: 'SELECT COUNT(*) FROM users' }), primary)
+    assert.equal(await client.queryWithOptions('/* read */ SELECT COUNT(*) FROM users', { consistency: 'local' }), replica)
     assert.equal(await client.call('query', { sql: 'UPDATE users SET name = $1', params: ['name'] }), primary)
     assert.equal(await client.call('insert', {}), primary)
     await client.call('query', { sql: '/* transaction */ BEGIN' })
@@ -245,4 +246,33 @@ test('cancelled pinned binary stream cannot leave stale frames for a later query
   assert.equal(dials, 1, 'only the initial discovery connection was opened')
   assert.ok(closed >= 2, 'discovery and interrupted session were closed')
   await client.close()
+})
+
+test('explicit reads enforce consistency and generic SQL stays on the primary', async () => {
+  const primary = 'https://primary:5000'
+  const replica = 'https://replica:5000'
+  const dial = async (address) => ({
+    async call(method, params) {
+      if (method === 'topology') return {
+        version: 1, primary: { addr: primary },
+        replicas: [{ addr: replica, healthy: true, lag_ms: 20 }],
+      }
+      return { address, params }
+    },
+    async close() {},
+  })
+  const client = await new RoutingClient(primary, await dial(primary), dial, 'https').initialize()
+  assert.equal((await client.call('query', { sql: 'SELECT 1' })).address, primary)
+  assert.equal((await client.queryWithOptions('SELECT 1', { consistency: 'local' })).address, replica)
+  assert.equal((await client.queryWithOptions('SELECT 1', { consistency: 'strong' })).address, primary)
+  assert.equal((await client.queryWithOptions('SELECT 1', { consistency: 'bounded_staleness', maxLagMs: 10 })).address, primary)
+  assert.equal((await client.queryWithOptions('SELECT 1', { consistency: 'bounded_staleness', maxLagMs: 25 })).address, replica)
+  assert.equal((await client.queryWithOptions('UPDATE users SET id = 1', { consistency: 'local' })).address, primary)
+  await assert.rejects(client.queryWithOptions('SELECT 1', { consistency: 'causal' }), { code: 'CONSISTENCY_UNSUPPORTED' })
+  await assert.rejects(client.queryWithOptions('SELECT 1', { consistency: 'bounded_staleness', maxLagMs: -1 }), { code: 'CONSISTENCY_UNSUPPORTED' })
+  const db = new NodeRedDB(client)
+  await db.queryWithOptions('SELECT $1', { consistency: 'local' }, 42)
+  await db.close()
+  const raw = new NodeRedDB({ call() { assert.fail('consistency must not be dropped') } })
+  assert.throws(() => raw.queryWithOptions('SELECT 1', { consistency: 'strong' }), { code: 'CONSISTENCY_UNSUPPORTED' })
 })

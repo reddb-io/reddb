@@ -1,8 +1,8 @@
 //! In-memory store for probabilistic data structures (HLL, Sketch, Filter)
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use crate::storage::primitives::count_min_sketch::CountMinSketch;
 use crate::storage::primitives::cuckoo_filter::CuckooFilter;
@@ -14,6 +14,7 @@ pub struct ProbabilisticStore {
     pub hlls: RwLock<HashMap<String, HyperLogLog>>,
     pub sketches: RwLock<HashMap<String, CountMinSketch>>,
     pub filters: RwLock<HashMap<String, CuckooFilter>>,
+    pub(crate) replayed_names: Mutex<BTreeSet<(u8, String)>>,
 }
 
 impl ProbabilisticStore {
@@ -22,6 +23,7 @@ impl ProbabilisticStore {
             hlls: RwLock::new(HashMap::new()),
             sketches: RwLock::new(HashMap::new()),
             filters: RwLock::new(HashMap::new()),
+            replayed_names: Mutex::new(BTreeSet::new()),
         }
     }
 }

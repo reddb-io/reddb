@@ -185,7 +185,8 @@ for (const [protocol, factory, runtime] of [
     let db
     try {
       db = await factory(primary.address, { auth: { token: 'test-token' } })
-      assert.equal((await db.query('SELECT node FROM users')).rows[0].node, 'replica')
+      assert.equal((await db.query('SELECT node FROM users')).rows[0].node, 'primary')
+      assert.equal((await db.queryWithOptions('SELECT node FROM users', { consistency: 'local' })).rows[0].node, 'replica')
       await db.query('UPDATE users SET node = $1', 'updated')
       assert.equal(calls.at(-1)[0], 'primary')
       await db.transaction(async (transaction) => {

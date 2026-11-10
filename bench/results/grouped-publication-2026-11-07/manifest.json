@@ -1,0 +1,283 @@
+{
+  "containers": {
+    "client": {
+      "container": "reddb-pub-client-1107",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "sleep",
+        "infinity"
+      ],
+      "environment": [
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a"
+      ],
+      "cpu_set": "4-5",
+      "nano_cpus": 2000000000,
+      "memory_limit": 1073741824,
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "C:\\Users\\filip\\.codex\\worktrees\\system-collection-domains\\RedDB",
+          "Destination": "/source",
+          "Mode": "ro",
+          "RW": false,
+          "Propagation": "rprivate"
+        }
+      ]
+    },
+    "native-before": {
+      "container": "reddb-pub-native-before-1107",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "/usr/local/bin/red",
+        "server",
+        "--http-bind",
+        "0.0.0.0:5000",
+        "--path",
+        "/data/data.rdb",
+        "--no-auth",
+        "--http-max-handlers",
+        "64",
+        "--workers",
+        "4",
+        "--bounded-disk-residency"
+      ],
+      "environment": [
+        "REDDB_NO_AUTH=1",
+        "REDDB_DURABILITY_MODE=wal_durable_grouped",
+        "REDDB_DURABILITY=wal_durable_grouped",
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+        "REDDB_MEMORY_BUDGET=1073741824",
+        "REDDB_RUNTIME_RESULT_CACHE_ENABLED=false",
+        "LANG=C.UTF-8",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a",
+        "REDDB_GROUP_COMMIT_WINDOW_US=200"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-pub-native-before-1107-data",
+          "Source": "/var/lib/docker/volumes/reddb-pub-native-before-1107-data/_data",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ],
+      "binary_sha256": "0f3ab3b71a704f9b9d7e0f38ba131890d1d63e782d68f2f2ec5af372f26dc78a"
+    },
+    "native-after": {
+      "container": "reddb-pub-native-after-1107",
+      "image_id": "sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258",
+      "image_digests": [
+        "python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258"
+      ],
+      "command": [
+        "/usr/local/bin/red",
+        "server",
+        "--http-bind",
+        "0.0.0.0:5000",
+        "--path",
+        "/data/data.rdb",
+        "--no-auth",
+        "--http-max-handlers",
+        "64",
+        "--workers",
+        "4",
+        "--bounded-disk-residency"
+      ],
+      "environment": [
+        "REDDB_DURABILITY_MODE=wal_durable_grouped",
+        "REDDB_DURABILITY=wal_durable_grouped",
+        "REDDB_MEMORY_BUDGET=1073741824",
+        "PYTHON_VERSION=3.12.15",
+        "PYTHON_SHA256=c2c4321961fab0fb999d66e0cecf521c2ab3994c7992873ea99e306c1094fd5a",
+        "REDDB_RUNTIME_RESULT_CACHE_ENABLED=false",
+        "REDDB_GROUP_COMMIT_WINDOW_US=200",
+        "REDDB_NO_AUTH=1",
+        "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=C.UTF-8",
+        "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-pub-native-after-1107-data",
+          "Source": "/var/lib/docker/volumes/reddb-pub-native-after-1107-data/_data",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ],
+      "binary_sha256": "e4e5fc251db303fda0189af195ec63a520cea793e04681260347ab9c633001e5"
+    },
+    "redis": {
+      "container": "reddb-pub-redis-1107",
+      "image_id": "sha256:c22af04bb576503bf16b3e34a1fd2fd82de0f765afd866d2e380145e0af30d78",
+      "image_digests": [
+        "redis@sha256:c22af04bb576503bf16b3e34a1fd2fd82de0f765afd866d2e380145e0af30d78"
+      ],
+      "command": [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--appendfsync",
+        "always",
+        "--save",
+        ""
+      ],
+      "environment": [
+        "REDIS_DOWNLOAD_SHA=b947d9015622669b5bee8ec954f658b3278d42dbefae23a92d9b7704bfe143f9",
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "REDIS_DOWNLOAD_URL=https://github.com/redis/redis/archive/refs/tags/8.4.0.tar.gz"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-pub-redis-1107-data",
+          "Source": "/var/lib/docker/volumes/reddb-pub-redis-1107-data/_data",
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    },
+    "rabbit": {
+      "container": "reddb-pub-rabbit-1107",
+      "image_id": "sha256:45c46011117e65ff84bd5e48806af3e4c220161a1b6d670f934b5cee6e282711",
+      "image_digests": [
+        "rabbitmq@sha256:45c46011117e65ff84bd5e48806af3e4c220161a1b6d670f934b5cee6e282711"
+      ],
+      "command": [
+        "rabbitmq-server"
+      ],
+      "environment": [
+        "RABBITMQ_DEFAULT_USER=bench",
+        "RABBITMQ_VERSION=4.1.4",
+        "RABBITMQ_PGP_KEY_ID=0x0A9AF2115F4687BD29803A206B73A36E6026DFCA",
+        "LANGUAGE=C.UTF-8",
+        "LC_ALL=C.UTF-8",
+        "RABBITMQ_DEFAULT_PASS=bench",
+        "PATH=/opt/rabbitmq/sbin:/opt/erlang/bin:/opt/openssl/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "ERLANG_INSTALL_PATH_PREFIX=/opt/erlang",
+        "OPENSSL_INSTALL_PATH_PREFIX=/opt/openssl",
+        "RABBITMQ_DATA_DIR=/var/lib/rabbitmq",
+        "RABBITMQ_HOME=/opt/rabbitmq",
+        "HOME=/var/lib/rabbitmq",
+        "LANG=C.UTF-8"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-pub-rabbit-1107-data",
+          "Source": "/var/lib/docker/volumes/reddb-pub-rabbit-1107-data/_data",
+          "Destination": "/var/lib/rabbitmq",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    },
+    "kafka": {
+      "container": "reddb-pub-kafka-1107",
+      "image_id": "sha256:bff074a5d0051dbc0bbbcd25b045bb1fe84833ec0d3c7c965d1797dd289ec88f",
+      "image_digests": [
+        "apache/kafka@sha256:bff074a5d0051dbc0bbbcd25b045bb1fe84833ec0d3c7c965d1797dd289ec88f"
+      ],
+      "command": [
+        "/etc/kafka/docker/run"
+      ],
+      "environment": [
+        "KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093",
+        "KAFKA_CONTROLLER_QUORUM_VOTERS=1@reddb-pub-kafka-1107:9093",
+        "KAFKA_PROCESS_ROLES=broker,controller",
+        "KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0",
+        "KAFKA_NODE_ID=1",
+        "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1",
+        "KAFKA_LOG_FLUSH_INTERVAL_MESSAGES=1",
+        "KAFKA_LOG_DIRS=/var/lib/kafka/data",
+        "PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "LANG=en_US.UTF-8",
+        "LC_ALL=en_US.UTF-8",
+        "KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://reddb-pub-kafka-1107:9092",
+        "KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1",
+        "KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER",
+        "JAVA_HOME=/opt/java/openjdk",
+        "LANGUAGE=en_US:en",
+        "JAVA_VERSION=jdk-21.0.8+9",
+        "KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1"
+      ],
+      "cpu_set": "0-3",
+      "nano_cpus": 4000000000,
+      "memory_limit": 2147483648,
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "reddb-pub-kafka-1107-data",
+          "Source": "/var/lib/docker/volumes/reddb-pub-kafka-1107-data/_data",
+          "Destination": "/etc/kafka/secrets",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        },
+        {
+          "Type": "volume",
+          "Name": "reddb-pub-kafka-1107-data",
+          "Source": "/var/lib/docker/volumes/reddb-pub-kafka-1107-data/_data",
+          "Destination": "/mnt/shared/config",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        },
+        {
+          "Type": "volume",
+          "Name": "reddb-pub-kafka-1107-data",
+          "Source": "/var/lib/docker/volumes/reddb-pub-kafka-1107-data/_data",
+          "Destination": "/var/lib/kafka/data",
+          "Driver": "local",
+          "Mode": "z",
+          "RW": true,
+          "Propagation": ""
+        }
+      ]
+    }
+  },
+  "classification": "shared-host diagnostic; single-node local durability",
+  "git_head": "23d4bdcd52331e64097ef84347038ed37fa6f697",
+  "dirty_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "operations": 256,
+  "queue_rounds": 3,
+  "queue_settle_ms": 2000,
+  "kv_rounds": 3
+}

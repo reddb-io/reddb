@@ -850,10 +850,10 @@ impl GrowingSegment {
     ) -> Result<UpdateIndexSnapshot, SegmentError> {
         self.mark_checkpoint_entity_dirty(entity.id);
         self.invalidate_unique_key_lookup();
-        if self
-            .get(entity.id)
-            .is_some_and(|old| SegmentKeyLookup::key(old) != SegmentKeyLookup::key(entity))
-        {
+        if self.get(entity.id).is_some_and(|old| {
+            SegmentKeyLookup::key(old) != SegmentKeyLookup::key(entity)
+                || SegmentKeyLookup::queue_dedup(old) != SegmentKeyLookup::queue_dedup(entity)
+        }) {
             if let Some(mut index) = self.key_lookup.take() {
                 index.remove(
                     self.get(entity.id)
@@ -1758,6 +1758,58 @@ impl GrowingSegment {
             }
         }
         best
+    }
+
+    /// Visit only the requested producer key or expired dedup rows. Recheck
+    /// original strings after hashing, including rows changed through raw access.
+    pub fn visit_queue_dedup(
+        &self,
+        queue: &str,
+        key: Option<&str>,
+        now: u64,
+        visit: &mut impl FnMut(&UnifiedEntity) -> bool,
+    ) -> bool {
+        let index = self
+            .key_lookup
+            .as_ref()
+            .expect("segment owns its key index");
+        let mut inspect = |id| {
+            let Some(entity) = self.get(id) else {
+                return true;
+            };
+            let Some((candidate_queue, candidate_key, expires)) =
+                SegmentKeyLookup::queue_dedup(entity)
+            else {
+                return true;
+            };
+            if candidate_queue == queue
+                && key.map_or(expires <= now, |key| {
+                    candidate_key == Some(key) && expires > now
+                })
+            {
+                return visit(entity);
+            }
+            true
+        };
+        if let Some(key) = key {
+            for id in index.queue_candidates(queue, key) {
+                if !inspect(*id) {
+                    return false;
+                }
+            }
+        } else {
+            for id in index.queue_expired(queue, now) {
+                if !inspect(id) {
+                    return false;
+                }
+            }
+        }
+        for id in index.mutated_candidates() {
+            if !inspect(*id) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Check whether an early-exit probe key exists in this segment.
@@ -2850,6 +2902,67 @@ mod tests {
             .expect("later batch");
         assert_eq!(segment.checkpoint_mutations_since(revision), Some(vec![id]));
         assert_eq!(segment.checkpoint_mutations.len(), CHECKPOINT_MUTATIONS_MAX);
+    }
+
+    fn dedup_row(id: u64, queue: &str, key: &str, expires: u64) -> UnifiedEntity {
+        let mut entity = keyed_row(id, "unused", 1, 0);
+        entity.data = EntityData::Row(RowData::with_names(
+            vec![
+                Value::text("queue_push_dedup"),
+                Value::text(queue),
+                Value::text(key),
+                Value::UnsignedInteger(expires),
+            ],
+            vec![
+                "kind".into(),
+                "queue".into(),
+                "dedup_key".into(),
+                "expires_at_ns".into(),
+            ],
+        ));
+        entity
+    }
+
+    #[test]
+    fn queue_dedup_candidates_exclude_unrelated_history_and_track_mutations() {
+        let mut segment = GrowingSegment::new(1, "meta");
+        segment
+            .bulk_insert(
+                (1..=4096)
+                    .map(|id| dedup_row(id, "other", "same", 1))
+                    .collect(),
+            )
+            .expect("unrelated history");
+        segment
+            .insert(dedup_row(5000, "wanted", "same", 100))
+            .expect("live key");
+        segment
+            .insert(dedup_row(5001, "wanted", "old", 50))
+            .expect("expired key");
+        let candidates = |segment: &GrowingSegment, key, now| {
+            let mut ids = Vec::new();
+            segment.visit_queue_dedup("wanted", key, now, &mut |entity| {
+                ids.push(entity.id.raw());
+                true
+            });
+            ids
+        };
+        assert_eq!(candidates(&segment, Some("same"), 50), vec![5000]);
+        assert!(candidates(&segment, Some("absent"), 50).is_empty());
+        assert_eq!(candidates(&segment, None, 50), vec![5001]);
+        segment
+            .update(dedup_row(5000, "wanted", "changed", 40))
+            .expect("replace indexed fields");
+        assert!(candidates(&segment, Some("same"), 50).is_empty());
+        let mut expired = candidates(&segment, None, 50);
+        expired.sort_unstable();
+        assert_eq!(expired, vec![5000, 5001]);
+        *segment.get_mut(EntityId::new(5000)).expect("raw access") =
+            dedup_row(5000, "wanted", "raw", 200);
+        assert_eq!(candidates(&segment, Some("raw"), 100), vec![5000]);
+        assert_eq!(candidates(&segment, None, 100), vec![5001]);
+        segment.force_delete(EntityId::new(5001));
+        assert!(candidates(&segment, None, 100).is_empty());
     }
 
     #[test]

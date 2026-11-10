@@ -11,6 +11,10 @@ use reddb_file::{
 };
 use std::collections::HashMap;
 
+fn persistent_name(name: &str) -> &str {
+    super::system_collection_names::canonical_or_self(name)
+}
+
 /// Write entity to binary buffer
 pub fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_version: u32) {
     // Entity ID
@@ -19,6 +23,7 @@ pub fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_ver
     // EntityKind
     match &entity.kind {
         EntityKind::TableRow { table, row_id } => {
+            let table = persistent_name(table);
             buf.push(0);
             write_varu32(buf, table.len() as u32);
             buf.extend_from_slice(table.as_bytes());
@@ -42,18 +47,21 @@ pub fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_ver
             buf.extend_from_slice(&edge.weight.to_le_bytes());
         }
         EntityKind::Vector { collection } => {
+            let collection = persistent_name(collection);
             buf.push(3);
             write_varu32(buf, collection.len() as u32);
             buf.extend_from_slice(collection.as_bytes());
         }
         EntityKind::TimeSeriesPoint(ref ts) => {
+            let series = persistent_name(&ts.series);
             buf.push(4);
-            write_varu32(buf, ts.series.len() as u32);
-            buf.extend_from_slice(ts.series.as_bytes());
+            write_varu32(buf, series.len() as u32);
+            buf.extend_from_slice(series.as_bytes());
             write_varu32(buf, ts.metric.len() as u32);
             buf.extend_from_slice(ts.metric.as_bytes());
         }
         EntityKind::QueueMessage { queue, position } => {
+            let queue = persistent_name(queue);
             buf.push(5);
             write_varu32(buf, queue.len() as u32);
             buf.extend_from_slice(queue.as_bytes());
@@ -223,8 +231,9 @@ pub fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_ver
         write_varu64(buf, cross_ref.target.raw());
         buf.push(cross_ref.ref_type.to_byte());
         if format_version >= STORE_VERSION_V2 {
-            write_varu32(buf, cross_ref.target_collection.len() as u32);
-            buf.extend_from_slice(cross_ref.target_collection.as_bytes());
+            let target_collection = persistent_name(&cross_ref.target_collection);
+            write_varu32(buf, target_collection.len() as u32);
+            buf.extend_from_slice(target_collection.as_bytes());
             buf.extend_from_slice(&cross_ref.weight.to_le_bytes());
             write_varu64(buf, cross_ref.created_at);
         }
@@ -286,7 +295,7 @@ fn read_entity_from_reader(
     let id = EntityId::new(reader.variable_u64()?);
     let kind = match reader.byte()? {
         0 => {
-            let table = reader.string()?;
+            let table = super::system_collection_names::canonical_owned(reader.string()?);
             reader.reserve_bytes(table.len().saturating_add(2 * std::mem::size_of::<usize>()))?;
             EntityKind::TableRow {
                 table: table.into(),
@@ -310,17 +319,17 @@ fn read_entity_from_reader(
             }))
         }
         3 => EntityKind::Vector {
-            collection: reader.string()?,
+            collection: super::system_collection_names::canonical_owned(reader.string()?),
         },
         4 => {
             reader.reserve_elements::<TimeSeriesPointKind>(1)?;
             EntityKind::TimeSeriesPoint(Box::new(TimeSeriesPointKind {
-                series: reader.string()?,
+                series: super::system_collection_names::canonical_owned(reader.string()?),
                 metric: reader.string()?,
             }))
         }
         5 => EntityKind::QueueMessage {
-            queue: reader.string()?,
+            queue: super::system_collection_names::canonical_owned(reader.string()?),
             position: reader.variable_u64()?,
         },
         tag => return Err(invalid(format!("Unknown EntityKind type: {tag}"))),
@@ -417,7 +426,7 @@ fn read_entity_from_reader(
         let ref_type = RefType::from_byte(reader.byte()?);
         let (collection, weight, created_at) = if format_version >= STORE_VERSION_V2 {
             (
-                reader.string()?,
+                super::system_collection_names::canonical_owned(reader.string()?),
                 f32::from_le_bytes(reader.fixed()?),
                 reader.variable_u64()?,
             )

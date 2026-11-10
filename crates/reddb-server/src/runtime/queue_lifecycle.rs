@@ -273,39 +273,67 @@ impl<S: QueueStore> QueueLifecycle<S> {
             }
         };
         let mut out = Vec::with_capacity(count.min(available.len()));
-        for message_id in available {
-            if out.len() >= count {
+        let mut available = available.into_iter().peekable();
+        while out.len() < count {
+            let mut selected = Vec::new();
+            // Keep ordered-key transitions sequential. Unkeyed deliveries share
+            // one WAL publication: up to 256 messages cost one fsync, not 256.
+            while selected.len() < (count - out.len()).min(256) {
+                let Some(&message_id) = available.peek() else {
+                    break;
+                };
+                let ordering_key = self.store.read_ordering_key(queue, message_id);
+                if ordering_key.is_some() && !selected.is_empty() {
+                    break;
+                }
+                available.next();
+                if ordering_key
+                    .as_deref()
+                    .is_some_and(|key| self.store.ordering_key_in_flight(queue, group, key))
+                {
+                    continue;
+                }
+                selected.push(message_id);
+                if ordering_key.is_some() {
+                    break;
+                }
+            }
+            if selected.is_empty() {
                 break;
             }
-            if self.ordering_key_blocked(queue, group, message_id) {
-                continue;
+            let deliveries = self.store.mark_pending_many_for_read(
+                txn,
+                queue,
+                &selected,
+                group,
+                consumer,
+                now + self.config.lock_duration,
+                self.config.mode == QueueMode::Work,
+            )?;
+            assert_eq!(
+                deliveries.len(),
+                selected.len(),
+                "one result per reservation"
+            );
+            for (message_id, (delivery_id, delivery_count)) in selected.into_iter().zip(deliveries)
+            {
+                let max_attempts = self.store.read_max_attempts(queue, message_id);
+                if delivery_count > max_attempts {
+                    self.retire_exhausted(txn, &delivery_id)?;
+                    continue;
+                }
+                let payload = self
+                    .store
+                    .read_message(queue, message_id)
+                    .ok_or_else(|| QueueStoreError::UnknownQueue(queue.to_string()))?;
+                out.push(DeliveredMessage {
+                    delivery_id,
+                    message_id,
+                    payload,
+                    consumer: consumer.to_string(),
+                    delivery_count,
+                });
             }
-            let deadline = now + self.config.lock_duration;
-            let delivery_id = self
-                .store
-                .mark_pending(txn, queue, message_id, group, consumer, deadline)?;
-            // WORK counts every (re)delivery against the persistent
-            // attempt budget; FANOUT hands each group its own first copy.
-            let delivery_count = match self.config.mode {
-                QueueMode::Work => self.store.bump_attempt(txn, &delivery_id)?.attempts,
-                QueueMode::Fanout => 1,
-            };
-            let max_attempts = self.store.read_max_attempts(queue, message_id);
-            if delivery_count > max_attempts {
-                self.retire_exhausted(txn, &delivery_id)?;
-                continue;
-            }
-            let payload = self
-                .store
-                .read_message(queue, message_id)
-                .ok_or_else(|| QueueStoreError::UnknownQueue(queue.to_string()))?;
-            out.push(DeliveredMessage {
-                delivery_id,
-                message_id,
-                payload,
-                consumer: consumer.to_string(),
-                delivery_count,
-            });
         }
         if !out.is_empty() {
             if let Some(telemetry) = self.telemetry.as_ref() {

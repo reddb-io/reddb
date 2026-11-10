@@ -278,15 +278,22 @@ impl DeletePublication {
     }
 
     fn commit(mut self) -> RedDBResult<()> {
+        let _indexed_mutation = self.runtime.index_store_ref().begin_indexed_mutation();
         let store = self.runtime.db().store();
         let _publication = store.vault_publication_lock.lock();
         self.runtime
             .snapshot_manager()
             .commit(self.autocommit_xid.expect("autocommit writer"));
+        #[cfg(test)]
+        self.runtime.index_store_ref().mutation_test_hook(
+            &self.collection,
+            super::index_store::MutationTestPhase::DeleteVisibilityCommitted,
+        );
         // Durable visibility is irreversible even if a later index repair fails.
         self.finished = true;
         let mut failure = None;
         for original in &self.preimages {
+            self.manager.remove_metadata_expiry(original.id);
             let fields = crate::application::ports::entity_row_fields_snapshot(original);
             if !fields.is_empty() {
                 if let Err(error) = self.runtime.index_store_ref().index_entity_delete(
@@ -303,6 +310,7 @@ impl DeletePublication {
     }
 
     pub(super) fn abort(&mut self) -> RedDBResult<()> {
+        let _indexed_mutation = self.runtime.index_store_ref().begin_indexed_mutation();
         let store = self.runtime.db().store();
         let _publication = store.vault_publication_lock.lock();
         let mut failure = None;

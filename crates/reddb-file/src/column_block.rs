@@ -81,6 +81,35 @@ pub struct ColumnBlockGranuleIndex {
     pub granules: Vec<ColumnBlockGranuleStats>,
 }
 
+/// Validated min/max entries borrowed directly from a granule-index blob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnBlockGranuleIndexView<'a> {
+    granule_size: u32,
+    value_width: u32,
+    entries: &'a [u8],
+}
+
+impl ColumnBlockGranuleIndexView<'_> {
+    pub fn granule_size(&self) -> u32 {
+        self.granule_size
+    }
+
+    pub fn value_width(&self) -> u32 {
+        self.value_width
+    }
+
+    pub fn granule_count(&self) -> usize {
+        self.entries.len() / (self.value_width as usize * 2)
+    }
+
+    pub fn granules(&self) -> impl ExactSizeIterator<Item = (&[u8], &[u8])> {
+        let width = self.value_width as usize;
+        self.entries
+            .chunks_exact(width * 2)
+            .map(move |entry| entry.split_at(width))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnBlockGranuleBloom<'a> {
     pub granule_size: u32,
@@ -359,9 +388,9 @@ pub fn encode_column_block_granule_index_blob(index: &ColumnBlockGranuleIndex) -
     out
 }
 
-pub fn decode_column_block_granule_index_blob(
+pub fn decode_column_block_granule_index_view(
     bytes: &[u8],
-) -> Result<ColumnBlockGranuleIndex, ColumnBlockFrameError> {
+) -> Result<ColumnBlockGranuleIndexView<'_>, ColumnBlockFrameError> {
     if bytes.len() < 12 {
         return Err(ColumnBlockFrameError::BadDirectory);
     }
@@ -378,28 +407,40 @@ pub fn decode_column_block_granule_index_blob(
     if w == 0 {
         return Err(ColumnBlockFrameError::BadDirectory);
     }
+    let entry_width = w
+        .checked_mul(2)
+        .ok_or(ColumnBlockFrameError::BadDirectory)?;
     let need = 12usize
         .checked_add(
             count
-                .checked_mul(w * 2)
+                .checked_mul(entry_width)
                 .ok_or(ColumnBlockFrameError::BadDirectory)?,
         )
         .ok_or(ColumnBlockFrameError::BadDirectory)?;
     if bytes.len() < need {
         return Err(ColumnBlockFrameError::BadDirectory);
     }
-    let mut granules = Vec::with_capacity(count);
-    let mut cur = 12;
-    for _ in 0..count {
-        let min = bytes[cur..cur + w].to_vec();
-        cur += w;
-        let max = bytes[cur..cur + w].to_vec();
-        cur += w;
-        granules.push(ColumnBlockGranuleStats { min, max });
-    }
-    Ok(ColumnBlockGranuleIndex {
+    Ok(ColumnBlockGranuleIndexView {
         granule_size,
         value_width,
+        entries: &bytes[12..need],
+    })
+}
+
+pub fn decode_column_block_granule_index_blob(
+    bytes: &[u8],
+) -> Result<ColumnBlockGranuleIndex, ColumnBlockFrameError> {
+    let view = decode_column_block_granule_index_view(bytes)?;
+    let granules = view
+        .granules()
+        .map(|(min, max)| ColumnBlockGranuleStats {
+            min: min.to_vec(),
+            max: max.to_vec(),
+        })
+        .collect();
+    Ok(ColumnBlockGranuleIndex {
+        granule_size: view.granule_size(),
+        value_width: view.value_width(),
         granules,
     })
 }
@@ -519,6 +560,46 @@ mod tests {
             decode_column_block_granule_index_blob(&encoded).unwrap(),
             index
         );
+    }
+
+    #[test]
+    fn granule_index_view_borrows_entries_and_rejects_bad_lengths() {
+        let index = ColumnBlockGranuleIndex {
+            granule_size: 128,
+            value_width: 2,
+            granules: vec![ColumnBlockGranuleStats {
+                min: vec![1, 2],
+                max: vec![3, 4],
+            }],
+        };
+        let encoded = encode_column_block_granule_index_blob(&index);
+        let view = decode_column_block_granule_index_view(&encoded).expect("borrowed index");
+        assert_eq!(view.granule_size(), 128);
+        assert_eq!(view.value_width(), 2);
+        assert_eq!(view.granule_count(), 1);
+        let (min, max) = view.granules().next().expect("one entry");
+        assert_eq!(min, index.granules[0].min);
+        assert_eq!(max, index.granules[0].max);
+        assert_eq!(min.as_ptr(), encoded[12..].as_ptr());
+        assert_eq!(max.as_ptr(), encoded[14..].as_ptr());
+        for length in 0..encoded.len() {
+            assert!(decode_column_block_granule_index_view(&encoded[..length]).is_err());
+        }
+        let mut invalid = encoded.clone();
+        invalid[4..8].copy_from_slice(&0u32.to_le_bytes());
+        assert!(decode_column_block_granule_index_view(&invalid).is_err());
+        invalid[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        invalid[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_column_block_granule_index_view(&invalid).is_err());
+
+        let empty = encode_column_block_granule_index_blob(&ColumnBlockGranuleIndex {
+            granule_size: 128,
+            value_width: 8,
+            granules: Vec::new(),
+        });
+        let view = decode_column_block_granule_index_view(&empty).expect("empty index");
+        assert_eq!(view.granule_count(), 0);
+        assert_eq!(view.granules().count(), 0);
     }
 
     #[test]

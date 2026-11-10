@@ -115,7 +115,7 @@ See the [Driver Matrix](./drivers.md) for the full per-language hub. RedWire-cap
 | [`reddb-io/reddb`](./drivers/php.md) (PHP) | 🟡 Preview | TCP / TLS | ✅ | — | ✅ | — | ✅ |
 | [`reddb`](./drivers/dart.md) (Dart / Flutter) | 🟡 Preview | TCP / TLS | ✅ | — | ✅ | — | ✅ |
 | [cpp source](./drivers/cpp.md) (C++17) | 🟡 Preview | TCP / TLS | ✅ | — | ✅ | ✅ | ✅ |
-| [zig source](./drivers/zig.md) (Zig 0.13+) | 🟡 Preview | TCP / TLS (no ALPN) | ✅ | — | partial | — | ✅ |
+| [zig source](./drivers/zig.md) (Zig 0.14.1+) | 🟡 Preview | TCP / TLS (no ALPN) | ✅ | — | partial | — | ✅ |
 | .NET, Java, Kotlin | ⏳ Planned | — | — | — | — | — | — |
 
 ## Versioning Promise

@@ -235,13 +235,17 @@ stable URNs for UI deep-links. See
 [ADR 0013](../../.red/adr/0013-ask-grounding-citations.md) for the grounding contract.
 
 > [!IMPORTANT]
-> `ASK` is planner-first (ADR 0068). Every question runs a planning step that
-> routes it to an intent and, for a factual question, generates a read-only
-> RQL candidate that **auto-executes by default**. A candidate that is not
-> read-only is never executed under any flag. To inspect the plan and the
-> generated query without running anything, add the `PLAN` clause; to see the
-> plan (intent, retrieval, provider, cost) without even calling the planner's
-> synthesis step, use `EXPLAIN ASK`.
+> ADR 0068 defines `ASK` as planner-first, but the automatic planner rollout is
+> currently gated by `red.config.ai.ask.planner` and that gate defaults to
+> `false`. With the gate off, ordinary `ASK` uses the grounded RAG pipeline.
+> `ASK ... PLAN` always runs the planner explicitly without executing or
+> synthesizing. With the gate on, a factual question generates a read-only RQL
+> candidate that **auto-executes by default** under the caller's scope. Before
+> the final query, the planner may spend its bounded `STEPS` budget on
+> `reddb_catalog`, `reddb_describe_collection`, or `reddb_find_field`. A
+> bounded `reddb_query` in `explore` phase may also guide planning. The last
+> step is reserved for the parameterized `final` query. A candidate that is
+> not read-only is never executed under any flag.
 >
 > The `EXECUTE` and `AS RQL` clauses were **removed** (clean break, no
 > deprecation window). `EXECUTE` is gone because read-only candidates now
@@ -269,7 +273,7 @@ ASK 'list all users with admin access' USING ollama MODEL 'llama3'
 | `STREAM` | No | HTTP/SSE token stream; transports without SSE return non-streaming rows |
 | `CACHE TTL '5m'` | No | Cache this answer for the supplied TTL |
 | `NOCACHE` | No | Bypass the global ASK cache default |
-| `PLAN` | No | Return the typed plan (routed intent + candidate query) without executing the candidate and without the synthesis call |
+| `PLAN` | No | Return the first typed action (metadata tool or candidate query) without executing it and without synthesis |
 | `STEPS n` | No | Per-query plan-step budget, clamped to `red.config.ai.ask.max_plan_steps` |
 
 > [!NOTE]
@@ -315,17 +319,32 @@ ASK executes a retrieval-then-synthesis pipeline:
 
 3. **LLM Synthesis** — Sends the context + your question to the configured AI provider. The LLM generates a natural-language answer with inline `[^N]` markers, and RedDB validates those markers against `sources_flat`.
 
-For a **factual** question, the planner generates a read-only RQL candidate,
-re-validates it through the production parser, and auto-executes it under your
-RLS scope; the executed rows become the grounded sources for the cited answer.
+When `red.config.ai.ask.planner` is enabled, a **factual** question enters a
+bounded tool loop. It can inspect the visible catalog, describe a collection,
+find an exact field name, or execute a bounded parameterized exploratory query
+with `reddb_query` before producing one final read-only RQL query with
+`reddb_final_query`. Every tool call consumes one
+`STEPS` unit, and the loop reserves its last unit for the final query. SQL uses
+`$N` placeholders with typed `params`; observations are bounded and treated as
+untrusted data. Every call is re-validated through the production parser and
+executes with the tenant, structured principal, role, visible collections,
+snapshot, IAM, RLS, and collection policies captured from the ASK caller.
+
+Exploratory rows may guide planning but never support the answer. Only final-
+query rows become `sources_flat` and ground the natural-language answer and
+citations. The factual result also returns `exploratory_queries`, `final_query`,
+`final_query_params`, and an auditable `reasoning` action trace. That trace
+contains tool purposes and bounded observation summaries, not private model
+chain-of-thought.
 To inspect that candidate without running it, add `PLAN`:
 
 ```sql
 ASK 'who owns passport FDD-12313?' PLAN
 ```
 
-`ASK ... PLAN` returns one row with the routed `intent`, the `candidate_query`,
-its `candidate_type`, and a `mutating` flag — **no execution, no synthesis**.
+`ASK ... PLAN` returns one row with the routed `intent` and either a metadata
+`tool` plus `tool_arguments`, or the `candidate_query`, `candidate_type`, and
+`mutating` flag — **no execution, no synthesis**.
 A missing `FROM` means the universal source `any`, so the eventual query
 searches eligible collections and applies the `WHERE` filter itself.
 

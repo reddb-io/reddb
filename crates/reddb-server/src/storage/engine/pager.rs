@@ -106,6 +106,28 @@ pub struct Pager {
 #[doc(hidden)]
 pub struct NativePagerFile(File);
 
+#[cfg(test)]
+thread_local! {
+    static PAGER_READ_BYTES: std::cell::Cell<Option<u64>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn measure_pager_read_bytes<T>(operation: impl FnOnce() -> T) -> (T, u64) {
+    PAGER_READ_BYTES.with(|bytes| {
+        assert!(bytes.get().is_none(), "pager read measurement cannot nest");
+        bytes.set(Some(0));
+    });
+    let result = operation();
+    let bytes = PAGER_READ_BYTES.with(|bytes| {
+        bytes
+            .take()
+            .expect("pager read measurement remains active until completion")
+    });
+    (result, bytes)
+}
+
 #[cfg(unix)]
 impl Drop for NativePagerFile {
     fn drop(&mut self) {
@@ -132,7 +154,19 @@ impl reddb_file::VfsFile for NativePagerFile {
         std::io::Write::write_all(&mut self.0, bytes)
     }
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        std::io::Read::read(&mut self.0, bytes)
+        let count = std::io::Read::read(&mut self.0, bytes)?;
+        #[cfg(test)]
+        PAGER_READ_BYTES.with(|bytes| {
+            let Some(current) = bytes.get() else {
+                return;
+            };
+            bytes.set(Some(
+                current
+                    .checked_add(u64::try_from(count).expect("read size fits u64"))
+                    .expect("test pager read byte counter does not overflow"),
+            ));
+        });
+        Ok(count)
     }
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         std::io::Seek::seek(&mut self.0, pos)

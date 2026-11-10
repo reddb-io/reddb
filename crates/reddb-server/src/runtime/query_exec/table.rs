@@ -132,7 +132,7 @@ fn indexed_table_records(
         let result = (|| -> RedDBResult<bool> {
             crate::runtime::function_budget::charge(1)?;
             if resolver.resolve_read_candidate(entity).is_none()
-                || !db.replica_allows_entity_at_read(table, entity)
+                || !db.entity_visible_at_read(table, entity)
                 || !matches(entity)?
             {
                 return Ok(true);
@@ -258,12 +258,13 @@ fn finish_ordered_index_records(
     db: &RedDB,
     query: &TableQuery,
     effective_projections: &[Projection],
+    index_order_satisfied: bool,
     mut records: Vec<UnifiedRecord>,
     table_name: &str,
     table_alias: &str,
     has_added_order_by_columns: bool,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
-    if !query.order_by.is_empty() {
+    if !query.order_by.is_empty() && !index_order_satisfied {
         crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
         super::super::join_filter::try_sort_records_by_order_by_with_db(
             Some(db),
@@ -346,7 +347,7 @@ fn execute_geo_candidate_scan(
             if !candidate_ids.contains(&entity.id.raw()) {
                 return true;
             }
-            if !db.replica_allows_entity_at_read(&query.table, entity) {
+            if !db.entity_visible_at_read(&query.table, entity) {
                 return true;
             }
             let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity_ref(
@@ -612,6 +613,113 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     query: &TableQuery,
     index_store: Option<&super::index_store::IndexStore>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    let snapshot = crate::runtime::impl_core::capture_current_snapshot();
+    let Some(mut snapshot) = snapshot else {
+        return execute_runtime_canonical_table_query_inner(db, query, index_store);
+    };
+    if snapshot.requires_index_fallback {
+        return execute_runtime_canonical_table_query_inner(db, query, index_store);
+    }
+    let Some(index_store) = index_store else {
+        return execute_runtime_canonical_table_query_inner(db, query, None);
+    };
+    let start = index_store.indexed_mutation_generation();
+    if !indexed_query_can_retry(query)
+        || crate::runtime::function_budget::stored_function_active()
+        || index_store.indexed_mutation_active()
+        || snapshot_index_is_stale(&snapshot)
+    {
+        snapshot.requires_index_fallback = true;
+        let _guard = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot);
+        return execute_runtime_canonical_table_query_inner(db, query, Some(index_store));
+    }
+    let result = execute_runtime_canonical_table_query_inner(db, query, Some(index_store));
+    if index_store.indexed_mutation_active()
+        || start != index_store.indexed_mutation_generation()
+        || snapshot_index_is_stale(&snapshot)
+    {
+        snapshot.requires_index_fallback = true;
+        let _guard = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot);
+        return execute_runtime_canonical_table_query_inner(db, query, Some(index_store));
+    }
+    result
+}
+
+// The optimistic path may repeat a read when a writer races it. Never repeat
+// arbitrary expressions, subqueries, graph expansion, or metered work.
+fn indexed_query_can_retry(query: &TableQuery) -> bool {
+    use reddb_rql::ast::{Expr, SelectItem, TableSource};
+
+    let plain_source = matches!(query.source, None | Some(TableSource::Name(_)));
+    let plain_select = query.select_items.iter().all(|item| {
+        matches!(
+            item,
+            SelectItem::Wildcard
+                | SelectItem::Expr {
+                    expr: Expr::Column { .. },
+                    ..
+                }
+        )
+    });
+    let plain_columns = query.columns.iter().all(|column| {
+        matches!(
+            column,
+            Projection::All
+                | Projection::Column(_)
+                | Projection::Alias(_, _)
+                | Projection::Field(_, _)
+        )
+    });
+    let plain_filter = effective_table_filter(query)
+        .as_ref()
+        .is_none_or(|filter| !runtime_filter_contains_compare_expr(filter));
+    let plain_where = query.where_expr.as_ref().is_none_or(indexed_pure_expr);
+    plain_source
+        && plain_select
+        && plain_columns
+        && plain_filter
+        && plain_where
+        && query.group_by_exprs.is_empty()
+        && query.group_by.is_empty()
+        && query.having_expr.is_none()
+        && query.having.is_none()
+        && query
+            .order_by
+            .iter()
+            .all(|order| order.expr.as_ref().is_none_or(indexed_pure_expr))
+        && query.expand.is_none()
+        && query.sessionize.is_none()
+        && query.as_of.is_none()
+}
+
+fn indexed_pure_expr(expr: &reddb_rql::ast::Expr) -> bool {
+    use reddb_rql::ast::Expr;
+    match expr {
+        Expr::Literal { .. } | Expr::Column { .. } | Expr::Parameter { .. } => true,
+        Expr::BinaryOp { lhs, rhs, .. } => indexed_pure_expr(lhs) && indexed_pure_expr(rhs),
+        Expr::UnaryOp { operand, .. } | Expr::IsNull { operand, .. } => indexed_pure_expr(operand),
+        Expr::InList { target, values, .. } => {
+            indexed_pure_expr(target) && values.iter().all(indexed_pure_expr)
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => indexed_pure_expr(target) && indexed_pure_expr(low) && indexed_pure_expr(high),
+        _ => false,
+    }
+}
+
+fn snapshot_index_is_stale(snapshot: &crate::runtime::impl_core::SnapshotContext) -> bool {
+    let current = snapshot.manager.fresh_read_snapshot();
+    snapshot.manager.oldest_active_xid().is_some()
+        || snapshot.snapshot.xid != current.xid
+        || snapshot.snapshot.in_progress != current.in_progress
+}
+
+fn execute_runtime_canonical_table_query_inner(
+    db: &RedDB,
+    query: &TableQuery,
+    index_store: Option<&super::index_store::IndexStore>,
+) -> RedDBResult<Vec<UnifiedRecord>> {
     let effective_projections = effective_table_projections(query);
     let effective_filter = effective_table_filter(query);
     let effective_group_by = effective_table_group_by_exprs(query);
@@ -832,7 +940,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         } else {
             None
         };
-        let paged_result = idx_store.paged_btree_lookup(&query.table, filter)?;
+        let (paged_result, paged_order_satisfied) =
+            idx_store.paged_btree_lookup_for_query(&query.table, filter, &query.order_by)?;
         let uses_paged_range = paged_result.is_some();
         let sorted_res = match paged_result {
             Some(ids) => Some(ids),
@@ -900,11 +1009,22 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             // path below so user-specified system fields (e.g. SELECT rid,
             // age FROM t) are not silently dropped.
             let lean = explicit_cols.is_empty(); // SELECT * → lean path
-            let limit = if query.order_by.is_empty() && query.offset.is_none() {
-                query.limit.map(|l| l as usize).unwrap_or(usize::MAX)
-            } else {
-                usize::MAX
-            };
+            let limit =
+                if (query.order_by.is_empty() && query.offset.is_none()) || paged_order_satisfied {
+                    query
+                        .limit
+                        .map(|limit| {
+                            usize::try_from(limit).unwrap_or(usize::MAX).saturating_add(
+                                query
+                                    .offset
+                                    .and_then(|offset| usize::try_from(offset).ok())
+                                    .unwrap_or(0),
+                            )
+                        })
+                        .unwrap_or(usize::MAX)
+                } else {
+                    usize::MAX
+                };
 
             // Lean/SELECT-* path uses the borrow-based
             // `SegmentManager::for_each_id` → `runtime_table_record_lean_ref`
@@ -933,7 +1053,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         if table_row_resolver.resolve_read_candidate(entity).is_none() {
                             return Ok(true);
                         }
-                        if !db.replica_allows_entity_at_read(&query.table, entity) {
+                        if !db.entity_visible_at_read(&query.table, entity) {
                             return Ok(true);
                         }
                         if let Some(cf) = compiled_filter.as_ref() {
@@ -960,6 +1080,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     db,
                     query,
                     &effective_projections,
+                    paged_order_satisfied,
                     records,
                     table_name,
                     table_alias,
@@ -988,6 +1109,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 db,
                 query,
                 &effective_projections,
+                paged_order_satisfied,
                 records,
                 table_name,
                 table_alias,
@@ -1096,6 +1218,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                 db,
                                 query,
                                 &effective_projections,
+                                false,
                                 records,
                                 table_name,
                                 table_alias,
@@ -1278,6 +1401,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     db,
                     query,
                     &effective_projections,
+                    false,
                     records,
                     table_name,
                     table_alias,
@@ -1692,7 +1816,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         }
                         crate::runtime::observe_timeseries_tag_index_point();
                     }
-                    if !db.replica_allows_entity_at_read(&query.table, entity) {
+                    if !db.entity_visible_at_read(&query.table, entity) {
                         return Ok(None);
                     }
                     let hydrated = super::super::impl_timeseries::hydrate_timeseries_entity_ref(
@@ -1767,7 +1891,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     if records.len() >= limit {
                         return Ok(false); // stop iteration
                     }
-                    if !db.replica_allows_entity_at_read(&query.table, entity) {
+                    if !db.entity_visible_at_read(&query.table, entity) {
                         return Ok(true);
                     }
                     if let Some(candidates) = tag_series_candidates.as_ref() {
@@ -1839,10 +1963,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         if !query.order_by.is_empty() {
             // Issue #769 — cap the materialized sort buffer.
             crate::runtime::materialization_limit::guard(db, "sort", records.len())?;
-            super::super::join_filter::try_sort_records_by_order_by_with_db(
+            super::super::join_filter::try_sort_or_top_k_records_with_db(
                 Some(db),
                 &mut records,
                 &query.order_by,
+                query.offset,
+                query.limit,
                 Some(table_name),
                 Some(table_alias),
             )?;
@@ -2097,7 +2223,7 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                     EntityId::new(entity_id),
                 );
                 if let Some(entity) = entity {
-                    if !db.replica_allows_entity_at_read(&context.query.table, &entity) {
+                    if !db.entity_visible_at_read(&context.query.table, &entity) {
                         return Ok(Vec::new());
                     }
                     return Ok(
@@ -2194,7 +2320,7 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                     if records.len() >= limit {
                         return Ok(false);
                     }
-                    if !db.replica_allows_entity_at_read(&context.query.table, entity) {
+                    if !db.entity_visible_at_read(&context.query.table, entity) {
                         return Ok(true);
                     }
                     if compiled_entity_filter_matches(
@@ -2336,10 +2462,12 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
                 document_projection,
                 entity_projection,
             );
-            super::super::join_filter::try_sort_records_by_order_by_with_db(
+            super::super::join_filter::try_sort_or_top_k_records_with_db(
                 Some(db),
                 records,
                 &context.query.order_by,
+                context.query.offset,
+                context.query.limit,
                 Some(context.table_name),
                 Some(context.table_alias),
             )?;
@@ -2886,6 +3014,43 @@ mod tests {
 
     fn rt() -> RedDBRuntime {
         RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime")
+    }
+
+    #[test]
+    fn filtered_and_computed_top_k_match_the_full_ordered_result() {
+        let runtime = rt();
+        exec(
+            &runtime,
+            "CREATE TABLE ordered_candidates (id INTEGER, cohort INTEGER)",
+        );
+        for id in 0..96 {
+            let cohort = if id % 7 == 0 {
+                "NULL".to_string()
+            } else {
+                (id % 5).to_string()
+            };
+            exec(
+                &runtime,
+                &format!("INSERT INTO ordered_candidates (id, cohort) VALUES ({id}, {cohort})"),
+            );
+        }
+        for sql in [
+            "SELECT id, cohort FROM ordered_candidates WHERE cohort >= 0 ORDER BY cohort, id DESC",
+            "SELECT id * 2 AS score, cohort FROM ordered_candidates WHERE id >= 0 ORDER BY score DESC, cohort",
+            "SELECT id, cohort FROM ordered_candidates WHERE id >= 0 ORDER BY cohort DESC NULLS LAST, id",
+        ] {
+            let values = |result: crate::storage::query::unified::UnifiedResult| {
+                result.records.iter().map(|row| (
+                    row.get("id").cloned(), row.get("score").cloned(), row.get("cohort").cloned()
+                )).collect::<Vec<_>>()
+            };
+            let expected = values(runtime.execute_query(sql).expect("full sort").result);
+            for (limit, offset) in [(0, 0), (1, 0), (5, 3), (5, 200), (100, 3)] {
+                let query = format!("{sql} LIMIT {limit} OFFSET {offset}");
+                let actual = values(runtime.execute_query(&query).expect("top K").result);
+                assert_eq!(actual, expected.iter().skip(offset).take(limit).cloned().collect::<Vec<_>>(), "{query}");
+            }
+        }
     }
 
     #[test]

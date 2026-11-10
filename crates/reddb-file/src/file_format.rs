@@ -8,6 +8,8 @@ use std::fmt;
 /// Magic bytes for database file identification: `RDDB`.
 pub const PAGE_FILE_MAGIC: [u8; 4] = [0x52, 0x44, 0x44, 0x42];
 
+/// The first version that reserves the in-file double-write buffer zone.
+pub const PAGE_DWB_ZONE_FILE_VERSION: u32 = 0x0001_0001;
 /// The first version with durable page-ownership recovery.
 pub const PAGE_OWNERSHIP_FILE_VERSION: u32 = 0x0001_0002;
 /// Checkpoint before-images must be restored before following published roots.
@@ -18,7 +20,10 @@ pub const PAGE_DISK_RESIDENCY_FILE_VERSION: u32 = 0x0001_0004;
 /// Generation-bound secondary trees participate in catalog ownership/reclamation.
 /// Older readers must reject the file before recovering or recycling pages.
 pub const PAGE_SECONDARY_INDEX_FILE_VERSION: u32 = 0x0001_0005;
-pub const PAGE_FILE_VERSION: u32 = PAGE_SECONDARY_INDEX_FILE_VERSION;
+/// Legacy recovery output: identity high-water marks are unknown and every
+/// writer must refuse this file. Older readers reject the version outright.
+pub const PAGE_RECOVERY_READ_ONLY_FILE_VERSION: u32 = 0x0001_0006;
+pub const PAGE_FILE_VERSION: u32 = PAGE_RECOVERY_READ_ONLY_FILE_VERSION;
 
 /// Paged database page size.
 pub const PAGED_PAGE_SIZE: usize = 16_384;

@@ -26,6 +26,7 @@ use crate::params::Value as ParamValue;
 use crate::router::{HealthAwareRouter, Outcome};
 use crate::topology::ClusterMembership;
 use crate::types::{BulkInsertResult, InsertResult, JsonValue, QueryResult, ValueOut};
+use tokio::sync::Mutex as AsyncMutex;
 
 /// Default per-endpoint pool size when callers don't specify one.
 /// Each pooled `RedDBClient` is a clone of the same tonic channel,
@@ -36,15 +37,19 @@ pub const DEFAULT_POOL_SIZE: usize = 4;
 /// Async handle to a remote RedDB server over gRPC.
 ///
 /// Internally either a single-endpoint client or a primary +
-/// read-replica cluster. Writes always go to the primary; reads
-/// round-robin across the replicas (or the primary when the replica
-/// pool is empty / `force_primary` is set).
+/// read-replica cluster. Writes and arbitrary queries always go to the
+/// primary. Explicitly local reads use health-aware replica selection (or the
+/// primary when the replica pool is empty / `force_primary` is set).
 pub struct GrpcClient {
-    primary: Endpoint,
-    /// Replica endpoints. Wrapped in `RwLock` so topology discovery
-    /// (issue #168 / #172) can swap in new replicas at runtime
-    /// without rebuilding the whole client.
-    replicas: RwLock<Vec<Endpoint>>,
+    /// Active primary, replica pools, and the membership that names them.
+    /// They move under one lock so a request cannot observe a promoted
+    /// primary paired with the previous membership (or vice versa).
+    topology: RwLock<TopologyState>,
+    /// URI seed retained for the backwards-compatible `endpoint()` diagnostic.
+    seed_endpoint: String,
+    /// Serializes endpoint dialing and topology publication. No synchronous
+    /// topology lock is held while a new endpoint is being connected.
+    topology_update: AsyncMutex<()>,
     /// Round-robin counter for replica selection. Wraps cleanly
     /// (`Relaxed` is fine — exact ordering doesn't matter; spreading
     /// load across replicas does).
@@ -66,9 +71,12 @@ pub struct GrpcClient {
     /// endpoint. Behind an `RwLock` so [`update_membership`] can
     /// swap the membership snapshot without poisoning hot reads.
     router: RwLock<HealthAwareRouter>,
-    /// Latest topology snapshot, including each replica's contiguous
-    /// applied frontier for causal-read routing.
-    membership: RwLock<ClusterMembership>,
+}
+
+struct TopologyState {
+    primary: Endpoint,
+    replicas: Vec<Endpoint>,
+    membership: ClusterMembership,
 }
 
 /// One remote endpoint plus a fixed pool of `RedDBClient` clones.
@@ -131,14 +139,27 @@ impl Endpoint {
         let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.pool.len();
         self.pool[idx].clone()
     }
+
+    fn clone_pool(&self) -> Self {
+        Self {
+            url: self.url.clone(),
+            pool: self.pool.clone(),
+            next: AtomicUsize::new(self.next.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+fn take_endpoint(endpoints: &mut Vec<Endpoint>, url: &str) -> Option<Endpoint> {
+    let index = endpoints.iter().position(|endpoint| endpoint.url == url)?;
+    Some(endpoints.swap_remove(index))
 }
 
 impl std::fmt::Debug for GrpcClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let replicas_guard = self.replicas.read().unwrap();
-        let replicas: Vec<&str> = replicas_guard.iter().map(|e| e.url.as_str()).collect();
+        let topology = self.topology.read().unwrap();
+        let replicas: Vec<&str> = topology.replicas.iter().map(|e| e.url.as_str()).collect();
         f.debug_struct("GrpcClient")
-            .field("primary", &self.primary.url)
+            .field("primary", &topology.primary.url)
             .field("replicas", &replicas)
             .field("force_primary", &self.force_primary)
             .finish()
@@ -152,7 +173,7 @@ impl GrpcClient {
             ConnectionAuth::Anonymous => return Ok(()),
             ConnectionAuth::Bearer(token) | ConnectionAuth::ApiKey(token) => token.clone(),
             ConnectionAuth::Basic { user, pass } => {
-                let result = self.primary.pool[0]
+                let result = self.topology.get_mut().unwrap().primary.pool[0]
                     .login(user, pass)
                     .await
                     .map_err(|error| ClientError::new(ErrorCode::AuthRefused, error.to_string()))?;
@@ -169,7 +190,7 @@ impl GrpcClient {
                     })?
             }
         };
-        for client in &mut self.primary.pool {
+        for client in &mut self.topology.get_mut().unwrap().primary.pool {
             client.set_token(token.clone());
         }
         Ok(())
@@ -180,8 +201,7 @@ impl GrpcClient {
         protocol: &str,
     ) -> Result<Option<ClusterMembership>> {
         let bytes = self
-            .primary
-            .pick()
+            .primary_client()
             .topology_for_transport(protocol)
             .await
             .map_err(|error| ClientError::new(ErrorCode::Network, error.to_string()))?;
@@ -216,24 +236,30 @@ impl GrpcClient {
     ) -> Result<Self> {
         let primary = Endpoint::connect_with_tls(endpoint, pool_size, tls).await?;
         let membership = ClusterMembership::from_uri_addresses(primary.url.clone(), Vec::new());
+        let seed_endpoint = primary.url.clone();
         let router = RwLock::new(HealthAwareRouter::with_force_primary(
             membership.clone(),
             true,
         ));
         Ok(Self {
-            primary,
-            replicas: RwLock::new(Vec::new()),
+            topology: RwLock::new(TopologyState {
+                primary,
+                replicas: Vec::new(),
+                membership,
+            }),
+            seed_endpoint,
+            topology_update: AsyncMutex::new(()),
             next_replica: AtomicUsize::new(0),
             force_primary: true,
             pool_size,
             router,
-            membership: RwLock::new(membership),
         })
     }
 
-    /// Multi-host gRPC client. Writes go to `primary`; reads
-    /// round-robin across `replicas` unless `force_primary` is set
-    /// (equivalent to passing `?route=primary` in the URI).
+    /// Multi-host gRPC client. Writes and arbitrary queries go to `primary`;
+    /// explicitly local reads use health-aware selection across `replicas`
+    /// unless `force_primary` is set (equivalent to passing
+    /// `?route=primary` in the URI).
     pub async fn connect_cluster(
         primary: String,
         replicas: Vec<String>,
@@ -261,70 +287,86 @@ impl GrpcClient {
             primary_ep.url.clone(),
             replica_eps.iter().map(|e| e.url.clone()).collect(),
         );
+        let seed_endpoint = primary_ep.url.clone();
         let router = RwLock::new(HealthAwareRouter::with_force_primary(
             membership.clone(),
             force_primary,
         ));
         Ok(Self {
-            primary: primary_ep,
-            replicas: RwLock::new(replica_eps),
+            topology: RwLock::new(TopologyState {
+                primary: primary_ep,
+                replicas: replica_eps,
+                membership,
+            }),
+            seed_endpoint,
+            topology_update: AsyncMutex::new(()),
             next_replica: AtomicUsize::new(0),
             force_primary,
             pool_size,
             router,
-            membership: RwLock::new(membership),
         })
     }
 
-    /// Diagnostic: primary URL.
+    /// Diagnostic: URI seed used to create this client.
+    ///
+    /// Use [`Self::active_endpoint`] when topology refresh may have promoted a
+    /// different primary. This method retains its borrowed return type for
+    /// source compatibility with existing callers.
     pub fn endpoint(&self) -> &str {
-        &self.primary.url
+        &self.seed_endpoint
+    }
+
+    /// Diagnostic: primary URL from the latest applied topology.
+    pub fn active_endpoint(&self) -> String {
+        self.topology.read().unwrap().primary.url.clone()
     }
 
     /// Diagnostic: replica URLs in declaration order. Cloned because
     /// the inner pool sits behind an `RwLock` that we don't want to
     /// hand out a borrow of.
     pub fn replica_endpoints(&self) -> Vec<String> {
-        self.replicas
+        self.topology
             .read()
             .unwrap()
+            .replicas
             .iter()
             .map(|e| e.url.clone())
             .collect()
     }
 
-    /// Pick a read-side connector clone. Delegates to
-    /// [`HealthAwareRouter`] (issue #171): inverse-RTT weighted across
-    /// healthy replicas, fallback to primary when all are unhealthy or
-    /// `force_primary` is set. Returns the connector clone plus the
-    /// index the router used so the caller can `observe(...)` the
-    /// outcome. We hand back an owned `RedDBClient` rather than an
-    /// `Endpoint` borrow so the read lock on the (now-mutable)
-    /// replica pool can drop before the RPC awaits.
+    /// Pick a healthy endpoint for an explicitly declared local read.
     fn read_endpoint(&self) -> (RedDBClient, usize) {
         let idx = self.router.read().unwrap().pick_read_index();
+        let topology = self.topology.read().unwrap();
         if idx == 0 {
-            return (self.primary.pick(), 0);
+            return (topology.primary.pick(), 0);
         }
-        // Index `i` (1-based) maps onto replica `i-1`. Guard against a
-        // stale router pointing past the current pool — fall back to
-        // primary.
-        let replicas = self.replicas.read().unwrap();
-        match replicas.get(idx - 1) {
-            Some(ep) => (ep.pick(), idx),
-            None => (self.primary.pick(), 0),
+        match topology.replicas.get(idx - 1) {
+            Some(endpoint) => (endpoint.pick(), idx),
+            // Topology and health publication use separate locks. A reader in
+            // the narrow hand-off window fails safe to the active primary.
+            None => (topology.primary.pick(), 0),
         }
     }
 
     fn endpoint_by_addr(&self, addr: &str) -> (RedDBClient, usize) {
-        if addr == self.primary.url {
-            return (self.primary.pick(), 0);
+        let topology = self.topology.read().unwrap();
+        if addr == topology.primary.url {
+            return (topology.primary.pick(), 0);
         }
-        let replicas = self.replicas.read().unwrap();
-        match replicas.iter().enumerate().find(|(_, ep)| ep.url == addr) {
+        match topology
+            .replicas
+            .iter()
+            .enumerate()
+            .find(|(_, ep)| ep.url == addr)
+        {
             Some((idx, ep)) => (ep.pick(), idx + 1),
-            None => (self.primary.pick(), 0),
+            None => (topology.primary.pick(), 0),
         }
+    }
+
+    fn primary_client(&self) -> RedDBClient {
+        self.topology.read().unwrap().primary.pick()
     }
 
     /// Refresh routing state from a new canonical cluster membership.
@@ -333,7 +375,7 @@ impl GrpcClient {
             .write()
             .unwrap()
             .update_membership(new_membership.clone());
-        *self.membership.write().unwrap() = new_membership;
+        self.topology.write().unwrap().membership = new_membership;
     }
 
     /// Refresh the live replica pool from a topology advertisement.
@@ -351,50 +393,41 @@ impl GrpcClient {
     /// [`crate::topology::TopologyConsumer`] and hands the resulting
     /// [`ClusterMembership`] straight in here.
     pub async fn apply_membership(&self, membership: &ClusterMembership) -> Result<()> {
-        // Reject a primary swap — that would invalidate the writer
-        // path and is out of scope for this slice. ADR 0008 §2's
-        // "advertised primary always wins" still holds for the URI
-        // seed; cross-session primary failover is tracked separately.
-        if membership.primary.addr != self.primary.url {
-            return Err(ClientError::new(
-                ErrorCode::InvalidUri,
-                format!(
-                    "topology advertised primary {} differs from connected {}; primary failover is out of scope for #172",
-                    membership.primary.addr, self.primary.url
-                ),
-            ));
-        }
+        let _update = self.topology_update.lock().await;
         let replica_addrs = membership.replica_addrs();
-        // Snapshot current URLs without holding the lock across the
-        // (potentially blocking) `Endpoint::connect` calls.
-        let current_urls: Vec<String> = self
-            .replicas
-            .read()
-            .unwrap()
-            .iter()
-            .map(|e| e.url.clone())
-            .collect();
+        let mut existing = {
+            let topology = self.topology.read().unwrap();
+            let mut endpoints = Vec::with_capacity(topology.replicas.len() + 1);
+            endpoints.push(topology.primary.clone_pool());
+            endpoints.extend(topology.replicas.iter().map(Endpoint::clone_pool));
+            endpoints
+        };
 
-        // Build the new pool: keep existing endpoints, dial new ones.
+        let next_primary =
+            if let Some(endpoint) = take_endpoint(&mut existing, &membership.primary.addr) {
+                endpoint
+            } else {
+                Endpoint::connect(membership.primary.addr.clone(), self.pool_size).await?
+            };
+
+        // Preserve existing tonic channels and dial only new addresses.
         let mut next: Vec<Endpoint> = Vec::with_capacity(replica_addrs.len());
         for url in &replica_addrs {
-            if current_urls.iter().any(|u| u == url) {
-                // Existing — move it across by re-acquiring the lock
-                // briefly. We swap_remove from the existing pool so
-                // we don't drop + reconnect.
-                let mut guard = self.replicas.write().unwrap();
-                if let Some(pos) = guard.iter().position(|e| e.url == *url) {
-                    next.push(guard.swap_remove(pos));
-                }
+            if let Some(endpoint) = take_endpoint(&mut existing, url) {
+                next.push(endpoint);
             } else {
                 next.push(Endpoint::connect(url.clone(), self.pool_size).await?);
             }
         }
-        // Replace the live pool. Anything still left in the old guard
-        // is a dropped replica; let it Drop here (closes channels).
+        // Publish the endpoint pools and the membership that names them as one
+        // snapshot. In-flight RPCs already own a channel clone and may finish.
         {
-            let mut guard = self.replicas.write().unwrap();
-            *guard = next;
+            let mut topology = self.topology.write().unwrap();
+            *topology = TopologyState {
+                primary: next_primary,
+                replicas: next,
+                membership: membership.clone(),
+            };
         }
         // Sync the router's view of membership so its index space
         // matches the pool's index space.
@@ -402,7 +435,6 @@ impl GrpcClient {
             .write()
             .unwrap()
             .update_membership(membership.clone());
-        *self.membership.write().unwrap() = membership.clone();
         Ok(())
     }
 
@@ -419,7 +451,7 @@ impl GrpcClient {
     /// [`Self::apply_membership`]. Convenience for tests and the
     /// background refresh loop.
     pub async fn refresh_topology(&self) -> Result<()> {
-        let mut client = self.primary.pick();
+        let mut client = self.primary_client();
         let bytes = client
             .topology()
             .await
@@ -437,15 +469,16 @@ impl GrpcClient {
         self.router.read().unwrap().observe_index(idx, outcome);
     }
 
+    /// Execute SQL against the primary.
+    ///
+    /// RedDB permits effectful statements whose first token is `SELECT`
+    /// (for example operational registration and refresh functions), so a
+    /// thin client cannot safely infer whether arbitrary SQL is read-only.
+    /// Call [`Self::query_with_options`] to explicitly opt a read into replica
+    /// routing.
     pub async fn query(&self, sql: &str) -> Result<QueryResult> {
-        let (mut client, idx) = if reddb_wire::sql_routing::sql_route(sql)
-            == reddb_wire::sql_routing::SqlRoute::Replica
-        {
-            self.read_endpoint()
-        } else {
-            (self.primary.pick(), 0)
-        };
-        self.query_on_endpoint(&mut client, idx, sql).await
+        let mut client = self.primary_client();
+        self.query_on_endpoint(&mut client, 0, sql).await
     }
 
     pub async fn query_with_options(
@@ -453,18 +486,20 @@ impl GrpcClient {
         sql: &str,
         options: QueryOptions,
     ) -> Result<QueryResult> {
-        if self.force_primary
-            || reddb_wire::sql_routing::sql_route(sql) != reddb_wire::sql_routing::SqlRoute::Replica
-        {
-            return self.query(sql).await;
+        if matches!(
+            &options.consistency,
+            crate::bookmark_routing::ReadConsistency::Local
+        ) {
+            let (mut client, idx) = self.read_endpoint();
+            return self.query_on_endpoint(&mut client, idx, sql).await;
         }
-        let membership = self.membership.read().unwrap().clone();
+        let membership = self.topology.read().unwrap().membership.clone();
         let term = match &options.consistency {
             crate::bookmark_routing::ReadConsistency::Causal { bookmark, .. } => bookmark.term(),
             _ => 0,
         };
         let table = RoutingTable::from_membership(membership, term);
-        let mut waiter = MembershipFrontierWaiter::new(&self.membership);
+        let mut waiter = MembershipFrontierWaiter::new(&self.topology);
         let decision = table.route_read(&options, &mut waiter);
         let (mut client, idx) = self.endpoint_by_addr(&decision.endpoint.addr);
         self.query_on_endpoint(&mut client, idx, sql).await
@@ -476,14 +511,9 @@ impl GrpcClient {
         bookmark: BookmarkTarget,
         opts: CausalReadOptions,
     ) -> Result<QueryResult> {
-        if self.force_primary
-            || reddb_wire::sql_routing::sql_route(sql) != reddb_wire::sql_routing::SqlRoute::Replica
-        {
-            return self.query(sql).await;
-        }
-        let membership = self.membership.read().unwrap().clone();
+        let membership = self.topology.read().unwrap().membership.clone();
         let table = RoutingTable::from_membership(membership, bookmark.term());
-        let mut waiter = MembershipFrontierWaiter::new(&self.membership);
+        let mut waiter = MembershipFrontierWaiter::new(&self.topology);
         let options = QueryOptions::causal(bookmark, opts);
         let decision = table.route_read(&options, &mut waiter);
         let (mut client, idx) = self.endpoint_by_addr(&decision.endpoint.addr);
@@ -530,21 +560,18 @@ impl GrpcClient {
             return self.query(sql).await;
         }
         let grpc_params = params_to_grpc_values(params);
-        let (mut client, idx) = if reddb_wire::sql_routing::sql_route(sql)
-            == reddb_wire::sql_routing::SqlRoute::Replica
-        {
-            self.read_endpoint()
-        } else {
-            (self.primary.pick(), 0)
-        };
+        // Parameter binding does not make arbitrary SQL safe to classify as a
+        // read. Keep the same primary-only contract as `query`; callers that
+        // need replica routing use `query_with_options`.
+        let mut client = self.primary_client();
         let started = Instant::now();
         let reply = match client.query_reply_with_params(sql, grpc_params).await {
             Ok(r) => {
-                self.observe(idx, Outcome::Rtt(started.elapsed()));
+                self.observe(0, Outcome::Rtt(started.elapsed()));
                 r
             }
             Err(e) => {
-                self.observe(idx, Outcome::Timeout);
+                self.observe(0, Outcome::Timeout);
                 return Err(query_rpc_error(e));
             }
         };
@@ -569,7 +596,7 @@ impl GrpcClient {
         // contract (spec §3.3).
         let json_payload = JsonValue::object([("fields", payload.clone())]).to_json_string();
         // Writes always go to the primary.
-        let mut client = self.primary.pick();
+        let mut client = self.primary_client();
         let reply = client
             .create_row_entity(collection, &json_payload)
             .await
@@ -607,7 +634,7 @@ impl GrpcClient {
             // (`bulk_create_reply` delegates to `create_row_reply`).
             encoded.push(JsonValue::object([("fields", payload.clone())]).to_json_string());
         }
-        let mut client = self.primary.pick();
+        let mut client = self.primary_client();
         let reply = client
             .bulk_create_rows(collection, encoded)
             .await
@@ -631,7 +658,7 @@ impl GrpcClient {
                 "id must be a numeric string".to_string(),
             )
         })?;
-        let mut client = self.primary.pick();
+        let mut client = self.primary_client();
         client
             .delete_entity(collection, id)
             .await
@@ -672,14 +699,14 @@ impl GrpcClient {
 }
 
 struct MembershipFrontierWaiter<'a> {
-    membership: &'a RwLock<ClusterMembership>,
+    topology: &'a RwLock<TopologyState>,
     started: Instant,
 }
 
 impl<'a> MembershipFrontierWaiter<'a> {
-    fn new(membership: &'a RwLock<ClusterMembership>) -> Self {
+    fn new(topology: &'a RwLock<TopologyState>) -> Self {
         Self {
-            membership,
+            topology,
             started: Instant::now(),
         }
     }
@@ -692,9 +719,10 @@ impl BookmarkWaiter for MembershipFrontierWaiter<'_> {
 
     fn poll(&mut self, target_addr: &str) -> u64 {
         std::thread::sleep(Duration::from_millis(1));
-        self.membership
+        self.topology
             .read()
             .unwrap()
+            .membership
             .replicas
             .iter()
             .find(|replica| replica.addr == target_addr)
@@ -790,28 +818,7 @@ fn parse_scalar(value: &serde_json::Value) -> ValueOut {
 }
 
 fn params_to_grpc_values(params: &[ParamValue]) -> Vec<reddb_grpc_proto::QueryValue> {
-    use reddb_grpc_proto::query_value::Kind;
-    use reddb_grpc_proto::{QueryNull, QueryValue, QueryVector};
-
-    params
-        .iter()
-        .cloned()
-        .map(|value| {
-            let kind = match value {
-                ParamValue::Null => Kind::NullValue(QueryNull {}),
-                ParamValue::Bool(value) => Kind::BoolValue(value),
-                ParamValue::Int(value) => Kind::IntValue(value),
-                ParamValue::Float(value) => Kind::FloatValue(value),
-                ParamValue::Text(value) => Kind::TextValue(value),
-                ParamValue::Bytes(value) => Kind::BytesValue(value),
-                ParamValue::Vector(values) => Kind::VectorValue(QueryVector { values }),
-                ParamValue::Json(value) => Kind::JsonValue(value.to_json_string()),
-                ParamValue::Timestamp(value) => Kind::TimestampValue(value),
-                ParamValue::Uuid(value) => Kind::UuidValue(value.to_vec()),
-            };
-            QueryValue { kind: Some(kind) }
-        })
-        .collect()
+    crate::connector::params_to_grpc_values(params)
 }
 
 #[cfg(test)]

@@ -134,6 +134,15 @@ export class RedDB {
     return this.query(sql, ...params)
   }
 
+  /** Explicit read routing. Generic query/execute always use the primary. */
+  queryWithOptions(sql, options, ...params) {
+    if (typeof this.client.queryWithOptions !== 'function') {
+      throw new RedDBError('CONSISTENCY_UNSUPPORTED', 'this transport does not support explicit read consistency')
+    }
+    const wireParams = normalizeQueryParams(params, this.client.binaryQueryParams === true)
+    return this.client.queryWithOptions(sql, options, wireParams).then(normalizeExactNumbers)
+  }
+
   /** Insert one row. Returns `{ affected, rid, id }`; `id` is a legacy alias for `rid`. */
   async insert(collection, payload) {
     let result = await this.client.call('insert', { collection, payload: serializeJsonValue(payload) })

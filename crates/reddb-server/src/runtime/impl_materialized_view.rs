@@ -52,10 +52,10 @@ impl RedDBRuntime {
         self.inner.retention_sweeper.read().snapshot()
     }
 
-    /// Drive one tick of the retention sweeper. Mutable collections
-    /// physically delete at most `batch_size` expired rows; append-only
-    /// collections retire whole expired segments through the operational
-    /// manifest. Records the counters that `red.retention` exposes.
+    /// Drive one tick of the retention sweeper. Mutable and append-only
+    /// collections physically delete at most `batch_size` expired rows across
+    /// collections through the regular WAL path. Records the counters that
+    /// `red.retention` exposes.
     /// Called from the background sweeper thread; safe to invoke directly
     /// from tests with a small batch size to drain rows deterministically.
     /// Issue #584 slice 12.
@@ -67,12 +67,8 @@ impl RedDBRuntime {
     /// sweeper's deletes via the same WAL stream with no special
     /// handling on the replication side.
     ///
-    /// Batching is enforced by tightening the cutoff: if more than
-    /// `batch_size` rows are expired, the cutoff is dropped to the
-    /// `batch_size`-th oldest expired timestamp + 1 so the predicate
-    /// matches roughly `batch_size` rows; the remainder is reported
-    /// as `current_rows_pending_sweep_estimate` and drained on the
-    /// next tick.
+    /// Scans inspect at most `batch_size` physical positions across
+    /// collections and resume from their previous position on the next tick.
     pub fn sweep_retention_tick(&self, batch_size: usize) {
         if batch_size == 0 {
             return;
@@ -83,98 +79,197 @@ impl RedDBRuntime {
             .unwrap_or(0);
 
         let store = self.inner.db.store();
-        let collections = store.list_collections();
-        for name in collections {
-            let Some(contract) = self.inner.db.collection_contract(&name) else {
+        let mut collections = store.list_collections();
+        collections.sort();
+        if let Some(next) = self.inner.retention_sweeper.read().next_collection() {
+            if let Some(start) = collections.iter().position(|name| name == next) {
+                collections.rotate_left(start);
+            }
+        }
+        let mut remaining = batch_size;
+        for (index, name) in collections.iter().enumerate() {
+            let Some(contract) = self.inner.db.collection_contract(name) else {
                 continue;
             };
             let Some(retention_ms) = contract.retention_duration_ms else {
                 continue;
             };
-            if contract.append_only {
-                let _ = self.retire_expired_append_only_segments(now_ms);
-                continue;
-            }
             let Some(ts_column) =
                 crate::runtime::retention_filter::resolve_timestamp_column(&contract)
             else {
                 continue;
             };
-            let Some(manager) = store.get_collection(&name) else {
+            if store.get_collection(name).is_none() {
                 continue;
-            };
-            let cutoff = (now_ms as i64).saturating_sub(retention_ms as i64);
+            }
+            if remaining == 0 {
+                continue;
+            }
+            let cutoff = super::retention_sweeper::cutoff_ms(now_ms, retention_ms);
 
-            // Single pass: collect expired timestamps. We keep the
-            // full Vec rather than a bounded heap because the partial
-            // sort below is the simplest correct way to find the
-            // batch-th oldest; for the slice's "1000-row default
-            // batch" target this is bounded enough for production
-            // operation, and the alternative (in-place heap of size
-            // batch+1) is a follow-up optimisation.
-            let mut expired_ts: Vec<i64> = Vec::new();
-            manager.for_each_entity(|entity| {
-                let ts = match ts_column.as_str() {
-                    "created_at" => Some(entity.created_at as i64),
-                    "updated_at" => Some(entity.updated_at as i64),
-                    other => entity
-                        .data
-                        .as_row()
-                        .and_then(|row| row.get_field(other))
-                        .and_then(|v| match v {
-                            reddb_types::Value::TimestampMs(t) => Some(*t),
-                            reddb_types::Value::Timestamp(t) => Some(t.saturating_mul(1_000)),
-                            reddb_types::Value::BigInt(t) => Some(*t),
-                            reddb_types::Value::UnsignedInteger(t) => i64::try_from(*t).ok(),
-                            reddb_types::Value::Integer(t) => Some(*t),
-                            _ => None,
-                        }),
-                };
-                if let Some(t) = ts {
-                    if t < cutoff {
-                        expired_ts.push(t);
-                    }
+            let candidates = self
+                .inner
+                .retention_sweeper
+                .write()
+                .scan_tick(&store, name, remaining);
+            let (candidates, scanned) = match candidates {
+                Ok(result) => result,
+                Err(_) => {
+                    self.inner
+                        .retention_sweeper
+                        .write()
+                        .record_tick(name, 0, 1, now_ms);
+                    // The failed scan may already have consumed its budget.
+                    // Retry other collections on a later tick.
+                    remaining = 0;
+                    self.inner
+                        .retention_sweeper
+                        .write()
+                        .resume_at(collections[(index + 1) % collections.len()].clone());
+                    continue;
                 }
-                true
-            });
-
-            let total_expired = expired_ts.len() as u64;
-            if total_expired == 0 {
+            };
+            remaining -= scanned;
+            if remaining == 0 && !collections.is_empty() {
                 self.inner
                     .retention_sweeper
                     .write()
-                    .record_tick(&name, 0, 0, now_ms);
+                    .resume_at(collections[(index + 1) % collections.len()].clone());
+            }
+            if candidates.is_empty() {
+                self.inner
+                    .retention_sweeper
+                    .write()
+                    .record_tick(name, 0, 1, now_ms);
                 continue;
             }
 
-            let (effective_cutoff, pending) = if (total_expired as usize) <= batch_size {
-                (cutoff, 0u64)
-            } else {
-                // Tighten the cutoff to the (batch_size)-th oldest
-                // expired timestamp + 1 so DELETE matches roughly
-                // `batch_size` rows.
-                expired_ts.sort_unstable();
-                let nth = expired_ts[batch_size - 1];
-                (
-                    nth.saturating_add(1),
-                    total_expired.saturating_sub(batch_size as u64),
-                )
-            };
-
-            let stmt = format!(
-                "DELETE FROM {} WHERE {} < {}",
-                name, ts_column, effective_cutoff
+            let stmt = format!("DELETE FROM {} WHERE {} < {}", name, ts_column, cutoff);
+            let result = super::retention_sweeper::with_delete_candidates(
+                candidates,
+                name,
+                &ts_column,
+                || self.execute_query(&stmt),
             );
-            let deleted = match self.execute_query(&stmt) {
-                Ok(r) => r.affected_rows,
-                Err(_) => 0,
+            let (deleted, pending) = match result {
+                Ok(r) => (r.affected_rows, u64::from(scanned > 0)),
+                Err(_) => (0, 1),
             };
 
             self.inner
                 .retention_sweeper
                 .write()
-                .record_tick(&name, deleted, pending, now_ms);
+                .record_tick(name, deleted, pending, now_ms);
         }
+    }
+
+    /// Reclaim per-entity `WITH TTL` / `WITH EXPIRES AT` deadlines without a
+    /// metadata or collection scan. Current paged files restore the deadline
+    /// index from the resume trailer; legacy files build it in bounded ticks.
+    /// Only the primary materializes deletes, and every batch uses the regular
+    /// DELETE/WAL path.
+    pub fn sweep_individual_ttl_tick(&self, batch_size: usize) -> u64 {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+            .unwrap_or(0);
+        self.sweep_individual_ttl_tick_at(batch_size, now_ms)
+    }
+
+    pub(crate) fn sweep_individual_ttl_tick_at(&self, batch_size: usize, now_ms: u64) -> u64 {
+        if batch_size == 0 || self.inner.db.is_replica_role() {
+            return 0;
+        }
+        if self
+            .check_write(crate::runtime::write_gate::WriteKind::Maintenance)
+            .is_err()
+        {
+            return 0;
+        }
+
+        let store = self.inner.db.store();
+        let batch_size = if store.config().resident_memory_bytes_max.is_some() {
+            batch_size.min(super::retention_sweeper::DISK_RESIDENT_SWEEPER_BATCH)
+        } else {
+            batch_size
+        };
+        let mut collections = store.list_collections();
+        collections.sort();
+        if collections.is_empty() {
+            return 0;
+        }
+        if let Some(next) = self.inner.retention_sweeper.read().next_ttl_collection() {
+            if let Some(start) = collections.iter().position(|name| name == next) {
+                collections.rotate_left(start);
+            }
+        }
+
+        let mut remaining = batch_size;
+        let mut swept_total = 0u64;
+        for (index, collection) in collections.iter().enumerate() {
+            if remaining == 0 {
+                break;
+            }
+            let Some(manager) = store.get_collection(collection) else {
+                continue;
+            };
+            let started = std::time::Instant::now();
+            if !manager.metadata_expiry_projection_ready() {
+                let complete = self
+                    .inner
+                    .retention_sweeper
+                    .write()
+                    .rebuild_ttl_projection_tick(&store, collection, batch_size)
+                    .map(|(_, complete)| complete)
+                    .unwrap_or(false);
+                if !complete {
+                    let duration_ms =
+                        started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                    let mut state = self.inner.retention_sweeper.write();
+                    state.record_ttl_tick(collection, 0, 1, duration_ms, now_ms);
+                    state.resume_ttl_at(collections[(index + 1) % collections.len()].clone());
+                    break;
+                }
+            }
+            let mut candidates = manager.expired_metadata_ids(now_ms, remaining.saturating_add(1));
+            let has_more = candidates.len() > remaining;
+            candidates.truncate(remaining);
+            if candidates.is_empty() {
+                continue;
+            }
+            remaining = remaining.saturating_sub(candidates.len());
+
+            let statement = format!(
+                "DELETE FROM {} WHERE rid >= 0",
+                quote_maintenance_identifier(collection)
+            );
+            let result = super::retention_sweeper::with_ttl_delete_candidates(
+                candidates,
+                collection,
+                now_ms,
+                || self.execute_query(&statement),
+            );
+            let (swept, pending_estimate) = match result {
+                Ok(result) => (result.affected_rows, u64::from(has_more)),
+                Err(_) => (0, 1),
+            };
+            swept_total = swept_total.saturating_add(swept);
+            let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            self.inner.retention_sweeper.write().record_ttl_tick(
+                collection,
+                swept,
+                pending_estimate,
+                duration_ms,
+                now_ms,
+            );
+            if remaining == 0 {
+                self.inner
+                    .retention_sweeper
+                    .write()
+                    .resume_ttl_at(collections[(index + 1) % collections.len()].clone());
+            }
+        }
+        swept_total
     }
 
     pub fn refresh_due_materialized_views(&self) {
@@ -193,4 +288,8 @@ impl RedDBRuntime {
             let _ = self.execute_query(&stmt);
         }
     }
+}
+
+fn quote_maintenance_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }

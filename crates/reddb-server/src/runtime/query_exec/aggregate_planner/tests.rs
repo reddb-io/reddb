@@ -122,6 +122,69 @@ fn count_column_skips_nulls() {
 }
 
 #[test]
+fn borrowed_inputs_keep_extrema_after_the_source_buffer_is_reused() {
+    let plan = ast(
+        "g",
+        vec![
+            agg(AggregateOp::Min, 0, "lo"),
+            agg(AggregateOp::Max, 0, "hi"),
+        ],
+    );
+    let mut planner = AggregateQueryPlanner::new(&plan, 1).expect("valid plan");
+    let mut inputs = vec![Value::text("middle")];
+    for text in ["middle", "alpha", "zulu"] {
+        inputs[0] = Value::text(text);
+        planner
+            .push_inputs(Value::Integer(1), &inputs)
+            .expect("fold");
+    }
+    inputs.clear();
+    let rows = planner.finish().into_vec();
+    assert_eq!(
+        rows[0].aggregate_values,
+        vec![Value::text("alpha"), Value::text("zulu")]
+    );
+}
+
+#[test]
+fn borrowed_numeric_inputs_do_not_allocate_per_row() {
+    use crate::storage::no_malloc_hot_paths::measure_allocations;
+    let plan = ast(
+        "g",
+        vec![
+            agg(AggregateOp::CountStar, 0, "n"),
+            agg(AggregateOp::Sum, 0, "sum"),
+        ],
+    );
+    let mut planner = AggregateQueryPlanner::new(&plan, 1).expect("valid plan");
+    planner
+        .push_inputs(Value::Integer(1), &[Value::Integer(0)])
+        .expect("first group");
+    let (_, allocations) = measure_allocations(|| {
+        for value in 1..=1000 {
+            planner
+                .push_inputs(Value::Integer(1), &[Value::Integer(value)])
+                .expect("fold");
+        }
+    });
+    assert_eq!(allocations.allocs, 0, "{allocations:?}");
+    let rows = planner.finish().into_vec();
+    assert_eq!(
+        rows[0].aggregate_values,
+        vec![Value::Integer(1001), Value::Integer(500500)]
+    );
+    assert!(matches!(
+        AggregateQueryPlanner::new(&plan, 0)
+            .expect("valid plan")
+            .push_inputs(Value::Integer(1), &[]),
+        Err(PlanError::GroupLimitExceeded {
+            limit: 0,
+            current: 1
+        })
+    ));
+}
+
+#[test]
 fn sum_avg_min_max_basic() {
     let plan = ast(
         "k",

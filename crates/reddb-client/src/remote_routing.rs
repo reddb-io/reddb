@@ -380,6 +380,10 @@ impl RemoteRouter {
             if primary != address && !candidates.contains(&primary) {
                 candidates.push(primary.clone());
             }
+            // Connect the next writer before publishing its membership.
+            if self.endpoint(state, &primary).await.is_err() {
+                continue;
+            }
             state.health.update_membership(membership.clone());
             state.membership = membership;
             state.clients.retain(|address, client| {
@@ -528,7 +532,10 @@ impl RemoteRouter {
         params: &[Value],
         options: Option<&QueryOptions>,
     ) -> Result<QueryResult> {
-        let route = sql_route(sql);
+        let route = match sql_route(sql) {
+            SqlRoute::Replica if options.is_none() => SqlRoute::Primary,
+            route => route,
+        };
         if route == SqlRoute::Replica {
             self.wait_for_causal(options).await;
         }

@@ -48,6 +48,7 @@ export class RoutingClient {
     this.queues = new Map()
     this.streams = new Set()
     this.replicas = []
+    this.replicaLagMs = new Map()
     this.nextReplica = 0
     this.refreshAt = 0
     this.now = now
@@ -97,7 +98,11 @@ export class RoutingClient {
         // A replica bootstrap tells us where the primary is. Ask that primary
         // for its full authenticated advertisement in the same refresh.
         if (primary !== address && !candidates.includes(primary)) candidates.push(primary)
+        await this.endpoint(primary)
+        const replicaLagMs = new Map((Array.isArray(topology.replicas) ? topology.replicas.slice(0, 256) : [])
+          .map((replica) => [topologyAddress(replica.addr, this.protocol), replica.lag_ms]))
         this.primary = primary
+        this.replicaLagMs = replicaLagMs
         this.replicas = (Array.isArray(topology.replicas) ? topology.replicas.slice(0, 256) : [])
           .filter((replica) => replica.healthy === true && replica.rebootstrapping !== true)
           .map((replica) => topologyAddress(replica.addr, this.protocol))
@@ -167,15 +172,29 @@ export class RoutingClient {
     }
   }
 
+  queryWithOptions(sql, options, params) {
+    return this.call('query', { sql, params, readOptions: options ?? { consistency: 'strong' } })
+  }
+
   async call(method, params = {}) {
     if (this.closed) throw new RedDBError('CLOSED', 'connection is closed')
     if (this.sessionError) throw this.sessionError
     if (!this.transactionEndpoint && !this.sessionEndpoint && this.now() >= this.refreshAt) await this.refresh()
     const command = method === 'query' ? transactionCommand(params.sql ?? '') : null
-    const read = READ_METHODS.has(method) || method === 'query' && isReplicaQuery(params.sql)
+    const options = params.readOptions
+    if (options && (!['strong', 'local', 'bounded_staleness'].includes(options.consistency)
+      || options.consistency === 'bounded_staleness'
+        && (!Number.isFinite(options.maxLagMs) || options.maxLagMs < 0))) {
+      throw new RedDBError('CONSISTENCY_UNSUPPORTED', 'unsupported read consistency')
+    }
+    const read = READ_METHODS.has(method) || method === 'query' && options != null && isReplicaQuery(params.sql)
+    const replicas = options?.consistency === 'strong' ? []
+      : options?.consistency === 'bounded_staleness'
+        ? this.replicas.filter((replica) => this.replicaLagMs.get(replica) <= options.maxLagMs)
+        : this.replicas
     const address = this.transactionEndpoint ?? this.sessionEndpoint ?? (
-      read && !this.forcePrimary && this.replicas.length
-        ? this.replicas[this.nextReplica++ % this.replicas.length] : this.primary
+      read && !this.forcePrimary && replicas.length
+        ? replicas[this.nextReplica++ % replicas.length] : this.primary
     )
     if (command === 'BEGIN' || command === 'START TRANSACTION') this.transactionEndpoint = address
     if (method === 'query' && isSessionQuery(params.sql)) this.sessionEndpoint = address

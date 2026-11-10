@@ -35,4 +35,11 @@ pub const Error = error{
     // HTTP
     HttpStatus,
     HttpBadResponse,
+
+    // Embedded C ABI
+    EmbeddedUnavailable,
+    EmbeddedAbiMismatch,
+    EmbeddedOpen,
+    EmbeddedCall,
+    ConnectionClosed,
 };

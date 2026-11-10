@@ -143,19 +143,32 @@ components:
 
     PromoteResponse:
       type: object
-      required: [ok, holder_id, generation, acquired_at_ms, expires_at_ms, next_step]
+      required: [ok, holder_id, generation, acquired_at_ms, expires_at_ms, term, timeline, applied_lsn, next_step]
       properties:
         ok: { type: boolean }
         holder_id: { type: string }
         generation: { type: integer, format: int64 }
         acquired_at_ms: { type: integer, format: int64 }
         expires_at_ms: { type: integer, format: int64 }
+        term:
+          type: integer
+          format: int64
+          description: Replication term the promoted primary must use.
+        timeline:
+          type: integer
+          format: int64
+          description: Timeline recorded for this promotion.
+        applied_lsn:
+          type: integer
+          format: int64
+          description: Replica apply frontier accepted for promotion.
         next_step:
           type: string
           description: |
             Operator runbook hint. Promotion does NOT auto-flip the
             running role; the operator restarts with
-            RED_REPLICATION_MODE=primary.
+            REDDB_NODE_ROLE=primary and RED_REPLICATION_TERM set to
+            the returned term.
 
     HealthReport:
       type: object
@@ -266,7 +279,7 @@ paths:
   /health/ready:
     get:
       summary: Readiness probe.
-      description: 200 once WAL replay and restore-from-remote completed; 503 otherwise.
+      description: 200 once WAL replay and restore-from-remote completed and no timed-out handler remains on the blocking executor; 503 otherwise.
       security: []
       responses:
         "200": { description: Ready, content: { application/json: { schema: { $ref: '#/components/schemas/HealthReport' } } } }
@@ -369,10 +382,13 @@ paths:
       summary: Manual replica → primary promotion.
       description: |
         Hard checks: caller must be a replica, remote backend
-        configured, replica apply health is `ok`/`healthy`/`connecting`,
-        and lease can be acquired. Bumps lease generation and audits.
+        configured, replica apply health is `ok`/`healthy` or it is
+        reconnecting after a previously observed primary frontier, the
+        applied LSN covers that frontier, and the next-term lease can be
+        acquired. Bumps lease generation and audits.
         Does NOT auto-flip the running role — operator restarts with
-        `RED_REPLICATION_MODE=primary`.
+        `REDDB_NODE_ROLE=primary` and `RED_REPLICATION_TERM` set to the
+        returned term.
       requestBody:
         content:
           application/json:

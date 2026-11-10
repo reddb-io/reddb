@@ -166,6 +166,15 @@ pub struct PagedCursor<P: PageStore> {
     cursor: BTreeCursor<P>,
 }
 
+impl<P: PageStore> PagedCursor<P> {
+    /// Fork this cursor over the same pinned immutable generation.
+    pub fn fork(&self) -> Self {
+        Self {
+            cursor: self.cursor.fork_immutable(),
+        }
+    }
+}
+
 impl<P: PageStore> CollectionCursor for PagedCursor<P> {
     fn peek_id(&mut self) -> Result<Option<EntityId>, StoreError> {
         self.cursor

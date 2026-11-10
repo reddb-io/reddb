@@ -33,6 +33,51 @@ QUEUE READ tasks GROUP workers CONSUMER worker2 COUNT 5
 QUEUE ACK  tasks GROUP workers 'msg-id-123'
 ```
 
+## Batch delivery and ACK
+
+`QUEUE READ ... COUNT N` publishes unkeyed reservations and attempt counters in
+blocks of at most 256 messages. Messages with ordering keys retain sequential
+reservation so the existing per-key in-flight rule is preserved. Retry/DLQ
+transitions retain their existing policy. A large read may span several durable
+publications; the whole read is not a single transaction.
+
+Acknowledge multiple messages from one consumer group with:
+
+```sql
+QUEUE ACK tasks BATCH GROUP workers ('message-id-1', 'message-id-2')
+```
+
+The batch accepts 1 to 256 message IDs returned by `QUEUE READ`. Unknown or
+duplicate handles reject the batch before retirement. In autocommit, all
+retirements share one WAL publication. With `Strict` or `WalDurableGrouped`,
+success waits for durability; other modes retain their configured guarantees.
+WORK retires messages and their metadata; FANOUT retires only that group's state.
+Inside an explicit transaction, the existing queue transaction behavior applies:
+rollback restores message availability for redelivery, not the old reservation.
+Single-message ACK syntax remains supported.
+
+## Joining queued messages with business data
+
+Queue collections participate in ordinary collection joins. For example, if each
+message's payload is a recipient email address:
+
+```sql
+SELECT q.payload
+FROM email_jobs q
+JOIN recipients r ON q.payload = r.email
+WHERE r.opened = false
+```
+
+This is a read-only relevance query: it does not reserve, consume or acknowledge
+messages, and can include messages already in flight. Use the collection name
+as an ordinary source. The specialized `SELECT ... FROM QUEUE` inspection syntax
+does not currently compose directly with JOIN or a FROM subquery.
+
+A relevance result describes the query's visible state. Another transaction can
+change `recipients.opened` before a worker acts; this query is not an atomic
+"claim only if still relevant" operation. Workers must revalidate relevance and
+use the existing delivery/ACK and transaction contracts for their work.
+
 ## Queue Modes
 
 | Mode | Delivery | Internal group | Use case |

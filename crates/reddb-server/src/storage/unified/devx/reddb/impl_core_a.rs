@@ -180,7 +180,7 @@ fn operational_store_from_embedded_artifact(
     path: &Path,
     config: UnifiedStoreConfig,
 ) -> Result<Option<UnifiedStore>, Box<dyn std::error::Error>> {
-    let artifact = match crate::storage::EmbeddedRdbArtifact::open(path) {
+    let artifact = match crate::storage::EmbeddedRdbArtifact::try_open(path) {
         Ok(artifact) => artifact,
         Err(_) => return Ok(None),
     };
@@ -269,7 +269,9 @@ impl RedDB {
     fn bootstrap_replica_snapshot(
         primary_addr: &str,
         local_path: &Path,
-    ) -> Result<bool, Box<dyn std::error::Error>> {
+        replica_id: &str,
+        request_auth: &crate::replication::request_auth::ReplicaRequestAuth,
+    ) -> Result<Option<u64>, Box<dyn std::error::Error>> {
         let endpoint = if primary_addr.starts_with("http") {
             primary_addr.to_string()
         } else {
@@ -279,13 +281,19 @@ impl RedDB {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
+        let mut request = request_auth.request(crate::grpc::proto::Empty {});
+        request.metadata_mut().insert(
+            "x-reddb-replica-id",
+            replica_id.parse().map_err(|_| "invalid replica identity")?,
+        );
         let payload = runtime.block_on(async move {
             use crate::grpc::proto::red_db_client::RedDbClient;
-            use crate::grpc::proto::Empty;
-            let mut client = RedDbClient::connect(endpoint).await?;
-            let response = client
-                .replication_snapshot(tonic::Request::new(Empty {}))
-                .await?;
+            let max_message_bytes = crate::grpc::RedDBGrpcServer::max_message_bytes();
+            let mut client = RedDbClient::connect(endpoint)
+                .await?
+                .max_decoding_message_size(max_message_bytes)
+                .max_encoding_message_size(max_message_bytes);
+            let response = client.replication_snapshot(request).await?;
             Ok::<String, Box<dyn std::error::Error>>(response.into_inner().payload)
         })?;
 
@@ -294,8 +302,12 @@ impl RedDB {
             .get("snapshot_hex")
             .and_then(crate::json::Value::as_str)
         else {
-            return Ok(false);
+            return Ok(None);
         };
+        let snapshot_lsn = json
+            .get("snapshot_lsn")
+            .and_then(crate::json::Value::as_u64)
+            .ok_or("replication snapshot omitted its WAL position")?;
 
         let bytes = hex::decode(snapshot_hex)?;
         if let Some(parent) = local_path.parent() {
@@ -310,7 +322,7 @@ impl RedDB {
         let metadata_json_path =
             crate::physical::PhysicalMetadataFile::metadata_path_for(local_path);
         write_optional_snapshot_sidecar(&json, "metadata_json_hex", &metadata_json_path)?;
-        Ok(true)
+        Ok(Some(snapshot_lsn))
     }
 
     /// Construct an ephemeral RedDB instance backed by a unique tempfile.
@@ -329,6 +341,13 @@ impl RedDB {
 
     /// Open using the crate-level runtime options.
     pub fn open_with_options(options: &RedDBOptions) -> Result<Self, Box<dyn std::error::Error>> {
+        if options.read_only
+            && !options
+                .resolved_path(reddb_file::default_database_path())
+                .exists()
+        {
+            return Err("read-only database path does not exist".into());
+        }
         if options.bounded_disk_residency
             && (!embedded_single_file_selected(options)
                 || options.replication.role != crate::replication::ReplicationRole::Standalone
@@ -339,13 +358,23 @@ impl RedDB {
                 "bounded disk residency requires standalone single-file local storage".into(),
             );
         }
+        // Readers keep a shared fence across format probes until the native
+        // pager owns its lock. The probes themselves are nonblocking, including
+        // for writable opens: native writers hold the data lock for their lifetime.
+        let _read_only_open_lock = if options.read_only {
+            let file = File::open(options.resolved_path(reddb_file::default_database_path()))?;
+            fs2::FileExt::try_lock_shared(&file)?;
+            Some(file)
+        } else {
+            None
+        };
         // Tier wiring: flip the six tier-flag global toggles from the
         // resolved StorageLayout, then materialise the support
         // directories the layout demands (logs/wal/snapshots/etc).
         // Must run before any physical-layer call site reads the
         // toggles, so it sits at the top of open_with_options.
         options.apply_tier_defaults();
-        if !embedded_single_file_selected(options) {
+        if !options.read_only && !embedded_single_file_selected(options) {
             if let Some((_, paths)) = options.resolve_tiered_layout() {
                 if let Err(err) = paths.ensure_dirs() {
                     tracing::warn!(
@@ -369,10 +398,29 @@ impl RedDB {
             }
         }
 
+        let mut replica_bootstrap = None;
         if let ReplicationRole::Replica { primary_addr } = &options.replication.role {
+            let request_auth = crate::replication::request_auth::ReplicaRequestAuth::from_env()?;
             let local_path = options.resolved_path(reddb_file::default_database_path());
             if !local_path.exists() {
-                let _ = Self::bootstrap_replica_snapshot(primary_addr, &local_path);
+                let replica_id = request_auth
+                    .principal()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| crate::crypto::uuid::Uuid::new_v4().to_string());
+                let snapshot = Self::bootstrap_replica_snapshot(
+                    primary_addr,
+                    &local_path,
+                    &replica_id,
+                    &request_auth,
+                );
+                if request_auth.principal().is_some() {
+                    let snapshot_lsn = snapshot
+                        .map_err(|_| "authenticated replica snapshot bootstrap failed")?
+                        .ok_or("authenticated replica snapshot was unavailable")?;
+                    replica_bootstrap = Some((snapshot_lsn, replica_id));
+                } else if let Ok(Some(snapshot_lsn)) = snapshot {
+                    replica_bootstrap = Some((snapshot_lsn, replica_id));
+                }
             }
         }
 
@@ -464,15 +512,27 @@ impl RedDB {
 
         let path_buf = options.resolved_path(reddb_file::default_database_path());
         let store_config = store_config_from_options(options)?;
-        let embedded_store_config = store_config
-            .clone()
-            .with_embedded_wal_path(path_buf.clone());
+        // Bootstrapping runtime catalogs may update the resident view. A
+        // read-only open must never attach a writer to the source artifact.
+        let embedded_store_config = if options.read_only {
+            store_config.clone()
+        } else {
+            store_config
+                .clone()
+                .with_embedded_wal_path(path_buf.clone())
+        };
         // Taken before reading the snapshot: every writer holds the whole
         // store in memory and checkpoints it on close, so a second writer
         // process would silently discard the first one's commits.
         let embedded_writer_lock = if embedded_single_file_selected(options)
+            && !options.bounded_disk_residency
             && !options.read_only
             && (path_buf.exists() || options.create_if_missing)
+            && (!path_buf.exists()
+                || Self::is_binary_dump(&path_buf)?
+                // Detect the embedded container without validating/copying its
+                // snapshot a second time before the actual open below.
+                || crate::storage::EmbeddedRdbArtifact::try_open_strict_manifest(&path_buf).is_ok())
         {
             Some(reddb_file::EmbeddedRdbWriterLock::acquire(&path_buf)?)
         } else {
@@ -491,24 +551,40 @@ impl RedDB {
             }
             if path_buf.exists()
                 && (Self::is_binary_dump(&path_buf)?
-                    || crate::storage::EmbeddedRdbArtifact::open(&path_buf).is_ok())
+                    || crate::storage::EmbeddedRdbArtifact::try_open(&path_buf).is_ok())
             {
                 return Err("bounded disk residency requires a native paged database; restore legacy snapshots into an independent paged copy first".into());
             }
-            let store = UnifiedStore::open_with_config(&path_buf, store_config.clone())?;
+            let store = if options.read_only {
+                UnifiedStore::open_read_only_with_config(&path_buf, store_config.clone())?
+            } else {
+                UnifiedStore::open_with_config(&path_buf, store_config.clone())?
+            };
             Some((store, Some(path_buf.clone()), true))
         } else if embedded_single_file_selected(options) {
             if path_buf.exists() {
-                match crate::storage::EmbeddedRdbArtifact::open(&path_buf) {
-                    Ok(artifact) => {
-                        let store =
-                            match crate::storage::EmbeddedRdbArtifact::read_snapshot(&artifact)? {
-                                Some(snapshot) => UnifiedStore::load_from_bytes_with_config(
-                                    &snapshot,
-                                    embedded_store_config.clone(),
-                                )?,
-                                None => UnifiedStore::with_config(embedded_store_config.clone()),
-                            };
+                let validation_started = std::time::Instant::now();
+                match crate::storage::EmbeddedRdbArtifact::try_open_with_snapshot(&path_buf) {
+                    Ok((artifact, snapshot)) => {
+                        crate::storage::unified::store::trace_startup_phase(
+                            &path_buf,
+                            "embedded_snapshot_validation_and_read",
+                            validation_started,
+                        );
+                        let snapshot_decode_started = std::time::Instant::now();
+                        let store = match snapshot {
+                            Some(snapshot) => UnifiedStore::load_from_bytes_with_config(
+                                &snapshot,
+                                embedded_store_config.clone(),
+                            )?,
+                            None => UnifiedStore::with_config(embedded_store_config.clone()),
+                        };
+                        crate::storage::unified::store::trace_startup_phase(
+                            &path_buf,
+                            "embedded_snapshot_decode",
+                            snapshot_decode_started,
+                        );
+                        let wal_replay_started = std::time::Instant::now();
                         for payload in
                             crate::storage::EmbeddedRdbArtifact::read_wal_payloads(&artifact)?
                         {
@@ -516,6 +592,11 @@ impl RedDB {
                                 .apply_encoded_store_wal_action(&payload)
                                 .map_err(|err| format!("replay embedded rdb wal action: {err}"))?;
                         }
+                        crate::storage::unified::store::trace_startup_phase(
+                            &path_buf,
+                            "embedded_wal_replay",
+                            wal_replay_started,
+                        );
                         Some((store, Some(path_buf.clone()), false))
                     }
                     Err(_) if Self::is_binary_dump(&path_buf)? => {
@@ -527,13 +608,17 @@ impl RedDB {
                         })?;
                         let store = UnifiedStore::load_from_bytes_with_config(
                             &snapshot,
-                            store_config.clone(),
+                            embedded_store_config.clone(),
                         )
                         .map_err(|err| format!("load legacy embedded snapshot: {err}"))?;
-                        crate::storage::EmbeddedRdbArtifact::create_with_snapshot(
-                            &path_buf, &snapshot,
-                        )
-                        .map_err(|err| format!("promote legacy snapshot to embedded rdb: {err}"))?;
+                        if !options.read_only {
+                            crate::storage::EmbeddedRdbArtifact::create_with_snapshot(
+                                &path_buf, &snapshot,
+                            )
+                            .map_err(|err| {
+                                format!("promote legacy snapshot to embedded rdb: {err}")
+                            })?;
+                        }
                         Some((store, Some(path_buf.clone()), false))
                     }
                     Err(_) => None,
@@ -569,6 +654,12 @@ impl RedDB {
                     Some(path_buf),
                     false,
                 )
+            } else if options.read_only {
+                (
+                    UnifiedStore::open_read_only_with_config(&path_buf, store_config.clone())?,
+                    Some(path_buf),
+                    true,
+                )
             } else if let Some(store) =
                 operational_store_from_embedded_artifact(&path_buf, store_config.clone())?
             {
@@ -597,12 +688,25 @@ impl RedDB {
 
         let remote_key = options.remote_key.clone();
 
+        let store = Arc::new(store);
+        if let Some((snapshot_lsn, replica_id)) = &replica_bootstrap {
+            store.set_config_tree(
+                "red.replication",
+                &crate::json!({
+                    "last_applied_lsn": snapshot_lsn,
+                    "replica_id": replica_id,
+                }),
+            );
+        }
         // Initialize primary replication state if configured as primary.
         let replication = match &options.replication.role {
-            ReplicationRole::Primary => Some(Arc::new(PrimaryReplication::new_with_config(
-                path.as_deref(),
-                &options.replication,
-            ))),
+            ReplicationRole::Primary if !options.read_only => {
+                Some(Arc::new(PrimaryReplication::new_with_store(
+                    path.as_deref(),
+                    &options.replication,
+                    Arc::clone(&store),
+                )?))
+            }
             _ => None,
         };
 
@@ -622,8 +726,9 @@ impl RedDB {
             .cloned()
             .map(super::EphemeralDataPathCleanup::new);
 
-        Self {
-            store: Arc::new(store),
+        let db = Self {
+            store,
+            runtime: std::sync::OnceLock::new(),
             preprocessors: Arc::new(RwLock::new(Vec::new())),
             index_config: IndexConfig::default(),
             path,
@@ -648,7 +753,11 @@ impl RedDB {
             _ephemeral_cleanup: ephemeral_cleanup,
         }
         .with_initialized_metadata()
-        .map_err(|err| format!("initialize RedDB metadata: {err}").into())
+        .map_err(|err| format!("initialize RedDB metadata: {err}"))?;
+        if replica_bootstrap.is_some() {
+            db.flush_local_only()?;
+        }
+        Ok(db)
     }
 
     /// Flush changes to disk (if persistence is enabled).
@@ -661,6 +770,9 @@ impl RedDB {
     /// behaviour use `flush_local_only()` + `upload_to_remote_backend()`
     /// separately so the gate fits between the two halves.
     pub fn flush(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.options.read_only {
+            return Ok(());
+        }
         self.flush_local_only()?;
         self.upload_to_remote_backend()?;
         Ok(())
@@ -670,6 +782,22 @@ impl RedDB {
     /// shutdown / checkpoint paths where the runtime decides whether
     /// the remote upload is allowed (lease, dry-run, read-only).
     pub fn flush_local_only(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.flush_local_only_inner(false)
+    }
+
+    pub(crate) fn flush_local_after_runtime_snapshots(
+        &self,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.flush_local_only_inner(true)
+    }
+
+    fn flush_local_only_inner(
+        &self,
+        runtime_snapshots_durable: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.options.read_only {
+            return Ok(());
+        }
         #[cfg(test)]
         let qualification_started = std::time::Instant::now();
         let _vault_guard = self.store.vault_publication_lock.lock();
@@ -680,7 +808,11 @@ impl RedDB {
         flush_local_only_qualification_phase(&qualification_started, "ec-consolidation");
         if let Some(path) = &self.path {
             if self.paged_mode {
-                self.store.persist()?;
+                if runtime_snapshots_durable {
+                    self.store.persist_after_runtime_snapshots()?;
+                } else {
+                    self.store.persist()?;
+                }
             } else if embedded_single_file_selected(&self.options) {
                 let snapshot = self.store.to_binary_dump_bytes();
                 crate::storage::EmbeddedRdbArtifact::write_snapshot(path, &snapshot)?;
@@ -689,10 +821,8 @@ impl RedDB {
             }
             #[cfg(test)]
             flush_local_only_qualification_phase(&qualification_started, "store-persist");
-            self.publish_append_only_segments(path)?;
-            #[cfg(test)]
-            flush_local_only_qualification_phase(&qualification_started, "append-only-publication");
             self.persist_metadata()?;
+            self.remove_imported_metadata_sidecars(path)?;
             #[cfg(test)]
             flush_local_only_qualification_phase(&qualification_started, "metadata-publication");
             // Issue #674 — tie `vector.turbo` `.tv` snapshot dumps to
@@ -703,67 +833,6 @@ impl RedDB {
             // (`StorageLayout::Minimal`) has no snapshot path and is
             // a no-op.
             self.dump_turbo_snapshots(0);
-        }
-        Ok(())
-    }
-
-    fn publish_append_only_segments(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let manifest = reddb_file::OperationalManifest::for_db_path(path);
-        for contract in self
-            .collection_contracts()
-            .into_iter()
-            .filter(|contract| contract.append_only)
-        {
-            let Some(manager) = self.store.get_collection(&contract.name) else {
-                continue;
-            };
-            let published_rows = manifest.append_only_published_rows(&contract.name)?;
-            // The caller fences mutations. Retain the same physical ID order,
-            // but materialize only the unpublished tail, not its old payloads.
-            let entity_count = manager.count();
-            if published_rows >= entity_count as u64 {
-                continue;
-            }
-            let offset = usize::try_from(published_rows)
-                .expect("invariant: published prefix is below the entity count");
-            let (_, entities) = manager.page_in_id_order(offset, entity_count - offset);
-            if entities.is_empty() {
-                continue;
-            }
-            let next_segment_id = manifest.next_append_only_segment_id(&contract.name)?;
-            let segment_entities = entities.iter().collect::<Vec<_>>();
-            let (retention_min_ms, retention_max_ms) =
-                append_only_retention_bounds(&contract, &segment_entities);
-            let rows = segment_entities
-                .iter()
-                .map(|entity| {
-                    let metadata = manager.get_metadata(entity.id);
-                    reddb_file::AppendOnlySegmentRow {
-                        primary_key: entity.id.raw().to_be_bytes().to_vec(),
-                        payload:
-                            crate::storage::unified::store::UnifiedStore::serialize_entity_record(
-                                entity,
-                                metadata.as_ref(),
-                                reddb_file::STORE_VERSION_CURRENT,
-                            ),
-                    }
-                })
-                .collect::<Vec<_>>();
-            if rows.is_empty() {
-                continue;
-            }
-            let bytes = reddb_file::encode_append_only_segment(
-                reddb_file::AppendOnlySegmentCodec::Zstd,
-                &rows,
-            )?;
-            manifest.publish_append_only_segment_with_retention_bounds(
-                &contract.name,
-                next_segment_id,
-                reddb_file::AppendOnlySegmentCodec::Zstd,
-                &bytes,
-                retention_min_ms,
-                retention_max_ms,
-            )?;
         }
         Ok(())
     }
@@ -1253,9 +1322,9 @@ impl RedDB {
                 .as_ref()
                 .map(|(_, source)| source.as_str().to_string()),
             native_header_repair_policy,
-            metadata_sequence: sidecar
-                .as_ref()
-                .map(|(metadata, _)| metadata.superblock.sequence),
+            metadata_sequence: self
+                .physical_metadata()
+                .map(|metadata| metadata.superblock.sequence),
             native_sequence: native_state.as_ref().map(|state| state.header.sequence),
             native_metadata_last_loaded_from: native_state
                 .as_ref()
@@ -1400,6 +1469,41 @@ impl RedDB {
         )
     }
 
+    /// Read catalog inventory for only the requested collections. Declared
+    /// model/schema and manager counters stay on the metadata path; payload
+    /// observation is reserved for requested legacy collections without a
+    /// persisted contract.
+    pub fn try_catalog_model_snapshot_for_collections(
+        &self,
+        collection_names: &std::collections::HashSet<String>,
+        observe_legacy_payloads: bool,
+        read_bytes_max: usize,
+    ) -> Result<CatalogModelSnapshot, crate::storage::StoreError> {
+        let catalog = self.runtime_index_catalog();
+        let contracts = self.collection_contracts();
+        let declarations = self
+            .physical_metadata()
+            .map(|metadata| CatalogDeclarations {
+                operational_indexes: self
+                    .physical_indexes_from_declarations(metadata.indexes.clone()),
+                declared_indexes: metadata.indexes,
+                declared_graph_projections: metadata.graph_projections.clone(),
+                declared_analytics_jobs: metadata.analytics_jobs.clone(),
+                operational_graph_projections: metadata.graph_projections,
+                operational_analytics_jobs: metadata.analytics_jobs,
+            });
+        crate::catalog::try_snapshot_store_inventory_with_declarations(
+            "reddb",
+            self.store.as_ref(),
+            Some(&catalog),
+            declarations.as_ref(),
+            Some(contracts.as_slice()),
+            collection_names,
+            observe_legacy_payloads,
+            read_bytes_max,
+        )
+    }
+
     pub fn catalog_consistency_report(&self) -> CatalogConsistencyReport {
         consistency_report(&self.catalog_model_snapshot())
     }
@@ -1487,155 +1591,8 @@ impl RedDB {
     }
 }
 
-fn append_only_retention_bounds(
-    contract: &crate::physical::CollectionContract,
-    entities: &[&UnifiedEntity],
-) -> (Option<i64>, Option<i64>) {
-    let Some(ts_column) = crate::runtime::retention_filter::resolve_timestamp_column(contract)
-    else {
-        return (None, None);
-    };
-    let mut min_ts: Option<i64> = None;
-    let mut max_ts: Option<i64> = None;
-    for entity in entities {
-        let Some(ts) = append_only_entity_timestamp_ms(entity, &ts_column) else {
-            continue;
-        };
-        min_ts = Some(min_ts.map_or(ts, |min| min.min(ts)));
-        max_ts = Some(max_ts.map_or(ts, |max| max.max(ts)));
-    }
-    (min_ts, max_ts)
-}
-
-fn append_only_entity_timestamp_ms(entity: &UnifiedEntity, ts_column: &str) -> Option<i64> {
-    match ts_column {
-        "created_at" => entity
-            .data
-            .as_row()
-            .and_then(|row| row.get_field("created_at"))
-            .and_then(value_as_retention_ms)
-            .or(Some(entity.created_at as i64)),
-        "updated_at" => entity
-            .data
-            .as_row()
-            .and_then(|row| row.get_field("updated_at"))
-            .and_then(value_as_retention_ms)
-            .or(Some(entity.updated_at as i64)),
-        other => entity
-            .data
-            .as_row()
-            .and_then(|row| row.get_field(other))
-            .and_then(value_as_retention_ms),
-    }
-}
-
-fn value_as_retention_ms(value: &Value) -> Option<i64> {
-    match value {
-        Value::TimestampMs(t) => Some(*t),
-        Value::Timestamp(t) => Some(t.saturating_mul(1_000)),
-        Value::BigInt(t) => Some(*t),
-        Value::UnsignedInteger(t) => i64::try_from(*t).ok(),
-        Value::Integer(t) => Some(*t),
-        _ => None,
-    }
-}
-
 thread_local! {
     static QUALIFICATION_DISK_RESIDENCY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-mod append_only_publication_tests {
-    use super::*;
-    use crate::storage::RowData;
-
-    #[test]
-    fn already_published_append_only_checkpoint_does_not_clone_payloads() {
-        let directory = tempfile::tempdir().expect("checkpoint fixture");
-        let path = directory.path().join("append-only-memory.rdb");
-        let options = RedDBOptions::persistent(&path)
-            .with_memory_budget(64 * 1024 * 1024)
-            .with_storage_profile(crate::StorageDeployPreset::PrimaryReplicaDev.selection())
-            .expect("paged profile");
-        let runtime = crate::RedDBRuntime::with_options(options).expect("runtime");
-        runtime
-            .execute_query("CREATE TABLE checkpoint_events (id INTEGER, payload BLOB) APPEND ONLY")
-            .expect("append-only table");
-        let store = runtime.db().store();
-        let manager = store.get_collection("checkpoint_events").expect("source");
-        let schema = Arc::new(vec!["id".into(), "payload".into()]);
-        for id in 1..=16 {
-            let mut entity = UnifiedEntity::table_row(
-                EntityId::new(1000 + id),
-                "checkpoint_events",
-                id,
-                Vec::new(),
-            );
-            entity.data = EntityData::Row(RowData {
-                columns: vec![
-                    Value::Integer(id as i64),
-                    Value::Blob(vec![id as u8; 128 * 1024]),
-                ],
-                named: None,
-                schema: Some(Arc::clone(&schema)),
-            });
-            manager.insert(entity).expect("source row");
-        }
-        runtime.flush().expect("initial durable segment");
-        let manifest = reddb_file::OperationalManifest::for_db_path(&path);
-        assert_eq!(
-            manifest
-                .append_only_published_rows("checkpoint_events")
-                .expect("published count"),
-            16
-        );
-
-        let _publication = store.vault_publication_lock.lock();
-        let (result, unchanged_allocations) =
-            crate::storage::no_malloc_hot_paths::measure_allocations(|| {
-                runtime.db().publish_append_only_segments(&path)
-            });
-        result.expect("unchanged publication succeeds");
-        assert!(
-            unchanged_allocations.allocated_bytes < 256 * 1024,
-            "already published payloads must stay borrowed: {unchanged_allocations:?}"
-        );
-        assert_eq!(
-            manifest
-                .append_only_published_rows("checkpoint_events")
-                .expect("same published count"),
-            16
-        );
-        assert_eq!(manager.count(), 16);
-
-        let mut tail =
-            UnifiedEntity::table_row(EntityId::new(1017), "checkpoint_events", 17, Vec::new());
-        tail.data = EntityData::Row(RowData {
-            columns: vec![Value::Integer(17), Value::Blob(vec![17; 32])],
-            named: None,
-            schema: Some(Arc::clone(&schema)),
-        });
-        manager.insert(tail).expect("new unpublished row");
-        let (result, allocations) =
-            crate::storage::no_malloc_hot_paths::measure_allocations(|| {
-                runtime.db().publish_append_only_segments(&path)
-            });
-        result.expect("tail publication succeeds");
-        assert!(
-            allocations.allocated_bytes < 256 * 1024,
-            "tail publication must not clone previously published payloads: {allocations:?}"
-        );
-        assert_eq!(
-            manifest
-                .append_only_published_rows("checkpoint_events")
-                .expect("tail included"),
-            17
-        );
-        eprintln!(
-            "append-only publication allocation bytes: unchanged={} tail={}",
-            unchanged_allocations.allocated_bytes, allocations.allocated_bytes
-        );
-    }
 }
 
 #[cfg(test)]

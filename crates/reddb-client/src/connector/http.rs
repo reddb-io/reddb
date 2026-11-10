@@ -66,8 +66,34 @@ type Result<T> = std::result::Result<T, HttpError>;
 /// Synchronous: callers from an async context should wrap in
 /// `tokio::task::spawn_blocking`.
 pub fn query_one_shot(base_url: &str, sql: &str, auth: &Auth) -> Result<String> {
+    query_one_shot_body(base_url, serde_json::json!({ "query": sql }), auth)
+}
+
+/// Parameterized single-shot query using the same JSON bind vocabulary as
+/// the public HTTP client. MCP uses this path so caller-provided values never
+/// need to be interpolated into RQL before crossing the authenticated remote
+/// boundary.
+pub fn query_one_shot_with_params(
+    base_url: &str,
+    sql: &str,
+    params: &[crate::params::Value],
+    auth: &Auth,
+) -> Result<String> {
+    let params: Vec<serde_json::Value> = params
+        .iter()
+        .cloned()
+        .map(crate::params::Value::into_json_param)
+        .collect();
+    query_one_shot_body(
+        base_url,
+        serde_json::json!({ "query": sql, "params": params }),
+        auth,
+    )
+}
+
+fn query_one_shot_body(base_url: &str, body: serde_json::Value, auth: &Auth) -> Result<String> {
     let url = format!("{}/query", base_url.trim_end_matches('/'));
-    let body = serde_json::json!({ "query": sql }).to_string();
+    let body = body.to_string();
     let mut req = ureq::post(&url).header("content-type", "application/json");
     match auth {
         Auth::Anonymous => {}

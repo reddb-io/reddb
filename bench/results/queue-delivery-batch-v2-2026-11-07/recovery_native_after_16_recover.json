@@ -1,0 +1,37 @@
+{
+  "config": {
+    "engine": "reddb",
+    "red_ack_batch": true,
+    "host": "reddb-delivery-v2-native-after-1107",
+    "name": "recovery_native_after_16",
+    "batch": 16,
+    "operations": 32,
+    "bytes": 100,
+    "settle_ms": 2000,
+    "mode": "recover"
+  },
+  "status": "valid-diagnostic",
+  "classification": "shared-host-diagnostic",
+  "latency_contract": "whole batch through consume/ACK; never divided by batch size",
+  "ack_contract": "durable response",
+  "operations": 32,
+  "elapsed_seconds": 0.04778904899967529,
+  "operations_per_second": 669.6094747609945,
+  "batch_latency_ms": {
+    "p50": 18.871677999868552,
+    "p95": 28.906378999636217,
+    "p99": 28.906378999636217
+  },
+  "batch_samples_ms": [
+    28.906378999636217,
+    18.871677999868552
+  ],
+  "publication_batch_ms": [
+    0.0004109997462364845,
+    0.0006609998308704235
+  ],
+  "consume_ack_batch_ms": [
+    28.90596799988998,
+    18.871017000037682
+  ]
+}

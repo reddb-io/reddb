@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use reddb_wire::ConnectionTarget;
 use tokio::sync::Mutex;
 
-use crate::bookmark_routing::QueryOptions;
+use crate::bookmark_routing::{QueryOptions, ReadConsistency};
 use crate::error::{ClientError, ErrorCode, Result};
 use crate::params::Value;
 use crate::redwire::{Auth, ConnectOptions, RedWireClient};
@@ -24,8 +24,10 @@ pub(crate) trait Transport: std::fmt::Debug + Send + Sync {
     async fn query(&self, sql: &str) -> Result<QueryResult>;
 
     async fn query_with_options(&self, sql: &str, options: QueryOptions) -> Result<QueryResult> {
-        let _ = options;
-        self.query(sql).await
+        if matches!(options.consistency, ReadConsistency::Local) {
+            return self.query(sql).await;
+        }
+        Err(consistency_unsupported(self.name(), &options.consistency))
     }
 
     async fn query_with(&self, sql: &str, params: &[Value]) -> Result<QueryResult>;
@@ -172,6 +174,17 @@ impl Transport for EmbeddedAdapter {
 
     async fn query(&self, sql: &str) -> Result<QueryResult> {
         self.0.query(sql)
+    }
+
+    async fn query_with_options(&self, sql: &str, options: QueryOptions) -> Result<QueryResult> {
+        match options.consistency {
+            ReadConsistency::Causal { .. } => {
+                Err(consistency_unsupported(self.name(), &options.consistency))
+            }
+            ReadConsistency::Strong
+            | ReadConsistency::BoundedStaleness { .. }
+            | ReadConsistency::Local => self.query(sql).await,
+        }
     }
 
     async fn query_with(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
@@ -373,6 +386,15 @@ fn redwire_client(client: &mut Option<RedWireClient>) -> Result<&mut RedWireClie
         .ok_or_else(|| ClientError::new(ErrorCode::Network, "RedWire connection is closed"))
 }
 
+fn consistency_unsupported(transport: &str, consistency: &ReadConsistency) -> ClientError {
+    ClientError::new(
+        ErrorCode::ConsistencyUnsupported,
+        format!(
+            "the {transport} transport cannot enforce {consistency:?} read consistency; use gRPC cluster routing or request local consistency"
+        ),
+    )
+}
+
 fn json_value_to_serde(value: &JsonValue) -> serde_json::Value {
     match value {
         JsonValue::Null => serde_json::Value::Null,
@@ -390,5 +412,94 @@ fn json_value_to_serde(value: &JsonValue) -> serde_json::Value {
                 .map(|(key, value)| (key.clone(), json_value_to_serde(value)))
                 .collect(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use super::*;
+    use crate::bookmark_routing::{BookmarkTarget, CausalReadOptions};
+
+    #[derive(Debug, Default)]
+    struct LocalOnlyTransport {
+        queried: AtomicBool,
+    }
+
+    #[async_trait]
+    impl Transport for LocalOnlyTransport {
+        fn name(&self) -> &'static str {
+            "local-only-test"
+        }
+
+        async fn query(&self, sql: &str) -> Result<QueryResult> {
+            self.queried.store(true, Ordering::Release);
+            Ok(QueryResult {
+                statement: sql.to_owned(),
+                affected: 0,
+                columns: Vec::new(),
+                rows: Vec::new(),
+                notice: None,
+            })
+        }
+
+        async fn query_with(&self, _sql: &str, _params: &[Value]) -> Result<QueryResult> {
+            unreachable!("not used by the consistency contract")
+        }
+
+        async fn insert(&self, _collection: &str, _payload: &JsonValue) -> Result<InsertResult> {
+            unreachable!("not used by the consistency contract")
+        }
+
+        async fn bulk_insert(
+            &self,
+            _collection: &str,
+            _payloads: &[JsonValue],
+        ) -> Result<BulkInsertResult> {
+            unreachable!("not used by the consistency contract")
+        }
+
+        async fn delete(&self, _collection: &str, _rid: &str) -> Result<u64> {
+            unreachable!("not used by the consistency contract")
+        }
+
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn local_only_transport_executes_local_reads() {
+        let transport = LocalOnlyTransport::default();
+        let result = transport
+            .query_with_options("SELECT 1", QueryOptions::local())
+            .await
+            .expect("local consistency is supported");
+        assert_eq!(result.statement, "SELECT 1");
+        assert!(transport.queried.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn local_only_transport_rejects_unenforceable_consistency() {
+        let cases = [
+            QueryOptions::strong(),
+            QueryOptions::bounded_staleness(Duration::from_millis(50)),
+            QueryOptions::causal(
+                BookmarkTarget::new(1, 10),
+                CausalReadOptions::with_deadline(Duration::from_millis(10)),
+            ),
+        ];
+
+        for options in cases {
+            let transport = LocalOnlyTransport::default();
+            let error = transport
+                .query_with_options("SELECT 1", options)
+                .await
+                .expect_err("unsupported consistency must fail closed");
+            assert_eq!(error.code, ErrorCode::ConsistencyUnsupported);
+            assert!(!transport.queried.load(Ordering::Acquire));
+        }
     }
 }

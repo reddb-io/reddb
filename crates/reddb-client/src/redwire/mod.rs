@@ -177,6 +177,7 @@ impl ConnectOptions {
 pub struct RedWireClient {
     stream: Stream,
     next_correlation_id: u64,
+    usable: bool,
     #[allow(dead_code)]
     session_id: String,
     #[allow(dead_code)]
@@ -229,8 +230,7 @@ impl RedWireClient {
             protocol.as_bytes().to_vec(),
         )
         .map_err(frame_build_err)?;
-        io::write_frame(&mut self.stream, &request).await?;
-        let response = self.read_frame().await?;
+        let response = self.exchange(&request).await?;
         let payload =
             expect_result_or_error(response.kind, &response.payload).map_err(reply_err)?;
         reddb_wire::decode_topology(payload)
@@ -270,6 +270,7 @@ impl RedWireClient {
             } => Ok(Self {
                 stream,
                 next_correlation_id: 1,
+                usable: true,
                 session_id,
                 server_features,
             }),
@@ -305,8 +306,7 @@ impl RedWireClient {
     pub async fn query_raw(&mut self, sql: &str) -> Result<String> {
         let corr = self.next_corr();
         let req = build_query_frame(corr, sql).map_err(frame_build_err)?;
-        io::write_frame(&mut self.stream, &req).await?;
-        let resp = self.read_frame().await?;
+        let resp = self.exchange(&req).await?;
         let payload = expect_result_or_error(resp.kind, &resp.payload).map_err(reply_err)?;
         Ok(decode_text_payload(payload))
     }
@@ -326,6 +326,26 @@ impl RedWireClient {
         self.query_envelope(sql, params).await
     }
 
+    /// Execute a query and preserve the server's canonical JSON envelope.
+    ///
+    /// This is useful for result types such as `ASK`, whose nested evidence
+    /// and validation objects cannot be represented losslessly by the generic
+    /// row-oriented [`QueryResult`].
+    pub async fn query_envelope_json(
+        &mut self,
+        sql: &str,
+        params: &[crate::params::Value],
+    ) -> Result<serde_json::Value> {
+        if self.server_features & FEATURE_PARAMS == 0 {
+            return Err(ClientError::new(
+                ErrorCode::ParamsUnsupported,
+                "server did not advertise RedWire query-envelope support",
+            ));
+        }
+
+        self.query_envelope_value(sql, params).await
+    }
+
     /// Send `sql` on the `QueryWithParams` frame — the one whose reply is
     /// the full result envelope with records — and decode it. Shared by
     /// [`Self::query`] (empty `params`) and [`Self::query_with`].
@@ -334,17 +354,25 @@ impl RedWireClient {
         sql: &str,
         params: &[crate::params::Value],
     ) -> Result<QueryResult> {
+        Ok(QueryResult::from_envelope(
+            self.query_envelope_value(sql, params).await?,
+        ))
+    }
+
+    async fn query_envelope_value(
+        &mut self,
+        sql: &str,
+        params: &[crate::params::Value],
+    ) -> Result<serde_json::Value> {
         let wire_params = params.iter().map(param_to_redwire).collect::<Vec<_>>();
         let payload = encode_query_with_params(sql, &wire_params)
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("encode params: {e}")))?;
         let corr = self.next_corr();
         let req = build_query_with_params_frame(corr, payload).map_err(frame_build_err)?;
-        io::write_frame(&mut self.stream, &req).await?;
-        let resp = self.read_frame().await?;
+        let resp = self.exchange(&req).await?;
         let payload = expect_result_or_error(resp.kind, &resp.payload).map_err(reply_err)?;
-        let value = decode_query_result_payload(payload)
-            .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode result: {e}")))?;
-        Ok(QueryResult::from_envelope(value))
+        decode_query_result_payload(payload)
+            .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode result: {e}")))
     }
 
     /// Insert a single row. `payload` is a JSON object with column
@@ -368,8 +396,7 @@ impl RedWireClient {
     async fn send_insert_frame(&mut self, bytes: Vec<u8>) -> Result<BulkInsertResult> {
         let corr = self.next_corr();
         let req = build_bulk_insert_frame(corr, bytes).map_err(frame_build_err)?;
-        io::write_frame(&mut self.stream, &req).await?;
-        let resp = self.read_frame().await?;
+        let resp = self.exchange(&req).await?;
         let payload = expect_bulk_ok_or_error(resp.kind, &resp.payload).map_err(reply_err)?;
         let payload = decode_bulk_ok_payload(payload)
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode bulk_ok: {e}")))?;
@@ -386,8 +413,7 @@ impl RedWireClient {
         let corr = self.next_corr();
         let req =
             build_get_frame(corr, encode_key_payload(collection, id)).map_err(frame_build_err)?;
-        io::write_frame(&mut self.stream, &req).await?;
-        let resp = self.read_frame().await?;
+        let resp = self.exchange(&req).await?;
         let payload = expect_result_or_error(resp.kind, &resp.payload).map_err(reply_err)?;
         decode_get_result_payload(payload)
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode get: {e}")))
@@ -398,8 +424,7 @@ impl RedWireClient {
         let corr = self.next_corr();
         let req = build_delete_frame(corr, encode_key_payload(collection, id))
             .map_err(frame_build_err)?;
-        io::write_frame(&mut self.stream, &req).await?;
-        let resp = self.read_frame().await?;
+        let resp = self.exchange(&req).await?;
         let payload = expect_delete_ok_or_error(resp.kind, &resp.payload).map_err(reply_err)?;
         decode_delete_ok_affected(payload)
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode delete_ok: {e}")))
@@ -428,8 +453,7 @@ impl RedWireClient {
 
         let corr = self.next_corr();
         let req = build_bulk_insert_binary_frame(corr, payload).map_err(frame_build_err)?;
-        io::write_frame(&mut self.stream, &req).await?;
-        let resp = self.read_frame().await?;
+        let resp = self.exchange(&req).await?;
         let payload = expect_bulk_ok_or_error(resp.kind, &resp.payload).map_err(reply_err)?;
         decode_bulk_ok_count_payload(payload)
             .map_err(|e| ClientError::new(ErrorCode::Protocol, e.to_string()))
@@ -438,12 +462,14 @@ impl RedWireClient {
     pub async fn ping(&mut self) -> Result<()> {
         let corr = self.next_corr();
         let req = build_ping_frame(corr).map_err(frame_build_err)?;
-        io::write_frame(&mut self.stream, &req).await?;
-        let resp = self.read_frame().await?;
+        let resp = self.exchange(&req).await?;
         expect_pong_reply(resp.kind).map_err(reply_err)
     }
 
     pub async fn close(mut self) -> Result<()> {
+        if !self.usable {
+            return Ok(());
+        }
         let corr = self.next_corr();
         let bye = build_bye_frame(corr).map_err(frame_build_err)?;
         let _ = io::write_frame(&mut self.stream, &bye).await;
@@ -456,8 +482,26 @@ impl RedWireClient {
         c
     }
 
-    async fn read_frame(&mut self) -> Result<Frame> {
-        io::read_frame(&mut self.stream).await
+    async fn exchange(&mut self, request: &Frame) -> Result<Frame> {
+        if !self.usable {
+            return Err(ClientError::new(ErrorCode::Network, "RedWire connection has an interrupted request; open a new connection without replaying the write"));
+        }
+        // Cancellation or an I/O error leaves this false, including cancellation
+        // halfway through writing/reading a frame. Never reuse that byte stream.
+        self.usable = false;
+        io::write_frame(&mut self.stream, request).await?;
+        let response = io::read_frame(&mut self.stream).await?;
+        if response.correlation_id != request.correlation_id
+            || response.stream_id != request.stream_id
+            || response.flags.contains(Flags::MORE_FRAMES)
+        {
+            return Err(ClientError::new(
+                ErrorCode::Protocol,
+                "RedWire response does not complete the expected request",
+            ));
+        }
+        self.usable = true;
+        Ok(response)
     }
 }
 
@@ -500,6 +544,130 @@ mod tests {
     use super::param_to_redwire;
     use crate::{JsonValue, Value};
     use reddb_wire::query_with_params::ParamValue as WireValue;
+
+    #[tokio::test]
+    async fn mismatched_response_poisoning_prevents_another_request() {
+        use super::*;
+        let (client, server) = tokio::io::duplex(1024);
+        let mut client = RedWireClient {
+            stream: Box::pin(client),
+            next_correlation_id: 1,
+            usable: true,
+            session_id: String::new(),
+            server_features: 0,
+        };
+        let mut server: Stream = Box::pin(server);
+        let peer = tokio::spawn(async move {
+            let request = io::read_frame(&mut server).await.expect("request");
+            let reply = reddb_wire::redwire::build_reply_frame(
+                request.correlation_id + 1,
+                MessageKind::Pong,
+                Vec::new(),
+            )
+            .expect("build mismatched reply");
+            io::write_frame(&mut server, &reply)
+                .await
+                .expect("wrong response");
+            let mut byte = [0];
+            assert_eq!(
+                tokio::io::AsyncReadExt::read(&mut server, &mut byte)
+                    .await
+                    .expect("closed"),
+                0
+            );
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            assert_eq!(
+                client.ping().await.expect_err("wrong correlation").code,
+                ErrorCode::Protocol
+            );
+            assert_eq!(
+                client.ping().await.expect_err("poisoned connection").code,
+                ErrorCode::Network
+            );
+            client
+                .close()
+                .await
+                .expect("drop poisoned connection without another frame");
+            peer.await.expect("peer task");
+        })
+        .await
+        .expect("bounded protocol regression");
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_frame_write_poisoning_prevents_stream_reuse() {
+        use super::*;
+        // One byte fits; no reader drains it, so the first frame cannot finish.
+        let (client, _peer) = tokio::io::duplex(1);
+        let mut client = RedWireClient {
+            stream: Box::pin(client),
+            next_correlation_id: 1,
+            usable: true,
+            session_id: String::new(),
+            server_features: 0,
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), client.ping())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            client
+                .ping()
+                .await
+                .expect_err("partial frame cannot be reused")
+                .code,
+            ErrorCode::Network
+        );
+        client
+            .close()
+            .await
+            .expect("close without appending a Bye frame");
+    }
+
+    #[tokio::test]
+    async fn query_envelope_json_preserves_nested_ask_fields() {
+        use super::*;
+
+        let (client, server) = tokio::io::duplex(4096);
+        let mut client = RedWireClient {
+            stream: Box::pin(client),
+            next_correlation_id: 1,
+            usable: true,
+            session_id: String::new(),
+            server_features: FEATURE_PARAMS,
+        };
+        let mut server: Stream = Box::pin(server);
+        let expected = serde_json::json!({
+            "ok": true,
+            "statement": "ask",
+            "result": {
+                "records": [{
+                    "answer": "Only permitted rows",
+                    "sources_flat": [{"urn": "urn:row:1", "payload": "allowed"}],
+                    "validation": {"ok": true, "warnings": [], "errors": []}
+                }]
+            }
+        });
+        let response = serde_json::to_vec(&expected).expect("response JSON");
+        let peer = tokio::spawn(async move {
+            let request = io::read_frame(&mut server).await.expect("query request");
+            assert_eq!(request.kind, MessageKind::QueryWithParams);
+            let reply = Frame::new(MessageKind::Result, request.correlation_id, response);
+            io::write_frame(&mut server, &reply)
+                .await
+                .expect("query reply");
+        });
+
+        let actual = client
+            .query_envelope_json("ASK 'who is allowed?'", &[])
+            .await
+            .expect("canonical query envelope");
+
+        assert_eq!(actual, expected);
+        peer.await.expect("peer task");
+    }
 
     #[test]
     fn param_to_redwire_preserves_all_wire_variants() {

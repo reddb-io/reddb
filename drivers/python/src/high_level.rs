@@ -77,7 +77,7 @@ enum Backend {
 
 #[pyclass]
 pub struct RedDb {
-    backend: Backend,
+    backend: Option<Backend>,
     closed: bool,
 }
 
@@ -109,7 +109,7 @@ impl RedDb {
 
         let binds = collect_params(args, params)?;
 
-        match &self.backend {
+        match self.backend() {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => {
                 let qr = if binds.is_empty() {
@@ -164,7 +164,7 @@ impl RedDb {
         payload: &Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.ensure_open()?;
-        match &self.backend {
+        match self.backend() {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => {
                 let fields = pydict_to_fields(payload)?;
@@ -205,7 +205,7 @@ impl RedDb {
         payloads: &Bound<'py, PyList>,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.ensure_open()?;
-        match &self.backend {
+        match self.backend() {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => {
                 let mut total: u64 = 0;
@@ -265,7 +265,7 @@ impl RedDb {
         id: &str,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.ensure_open()?;
-        match &self.backend {
+        match self.backend() {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => {
                 let n = rt
@@ -303,7 +303,7 @@ impl RedDb {
         let collection = sql_identifier_path(collection)?;
         let rid = sql_rid_literal(rid)?;
         let sql = format!("SELECT * FROM {collection} WHERE rid = {rid} LIMIT 1");
-        match &self.backend {
+        match self.backend() {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => {
                 let qr = rt.query(&sql).map_err(|e| err("QUERY_ERROR", e))?;
@@ -360,7 +360,7 @@ impl RedDb {
         let order_sql = order_by.unwrap_or("rid ASC");
         let sql =
             format!("SELECT * FROM {collection}{where_sql} ORDER BY {order_sql} LIMIT {limit}");
-        let rows = match &self.backend {
+        let rows = match self.backend() {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => {
                 let qr = rt.query(&sql).map_err(|e| err("QUERY_ERROR", e))?;
@@ -387,7 +387,7 @@ impl RedDb {
     fn health<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         self.ensure_open()?;
         let out = PyDict::new(py);
-        match &self.backend {
+        match self.backend() {
             #[cfg(feature = "embedded")]
             Backend::Embedded(_) => {
                 out.set_item("ok", true)?;
@@ -421,7 +421,7 @@ impl RedDb {
     #[getter]
     fn cache(&self) -> PyResult<CacheClient> {
         self.ensure_open()?;
-        match &self.backend {
+        match self.backend() {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => Ok(CacheClient {
                 backend: CacheBackend::Embedded(rt.clone_runtime()),
@@ -436,7 +436,7 @@ impl RedDb {
     #[getter]
     fn documents(&self) -> PyResult<DocumentClient> {
         self.ensure_open()?;
-        match &self.backend {
+        match self.backend() {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => Ok(DocumentClient {
                 backend: HelperBackend::Embedded(rt.clone()),
@@ -451,7 +451,7 @@ impl RedDb {
     #[getter]
     fn kv(&self) -> PyResult<KvClient> {
         self.ensure_open()?;
-        match &self.backend {
+        match self.backend() {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => Ok(KvClient {
                 backend: HelperBackend::Embedded(rt.clone()),
@@ -466,7 +466,7 @@ impl RedDb {
     #[getter]
     fn queues(&self) -> PyResult<QueueClient> {
         self.ensure_open()?;
-        match &self.backend {
+        match self.backend() {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => Ok(QueueClient {
                 backend: HelperBackend::Embedded(rt.clone()),
@@ -489,7 +489,7 @@ impl RedDb {
     #[getter]
     fn tx(&self) -> PyResult<TxClient> {
         self.ensure_open()?;
-        match &self.backend {
+        match self.backend() {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => Ok(TxClient {
                 backend: HelperBackend::Embedded(rt.clone()),
@@ -515,7 +515,11 @@ impl RedDb {
             return Ok(());
         }
         self.closed = true;
-        match &self.backend {
+        let backend = self
+            .backend
+            .take()
+            .expect("an open RedDb connection must have a backend");
+        match backend {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => {
                 rt.checkpoint().map_err(|e| err("IO_ERROR", e))?;
@@ -542,6 +546,12 @@ impl RedDb {
 }
 
 impl RedDb {
+    fn backend(&self) -> &Backend {
+        self.backend
+            .as_ref()
+            .expect("ensure_open must run before accessing the backend")
+    }
+
     fn ensure_open(&self) -> PyResult<()> {
         if self.closed {
             return Err(err(
@@ -1276,7 +1286,7 @@ pub fn connect(uri: &str) -> PyResult<RedDb> {
         {
             let rt = EmbeddedRuntime::in_memory().map_err(|e| err("IO_ERROR", e))?;
             return Ok(RedDb {
-                backend: Backend::Embedded(rt),
+                backend: Some(Backend::Embedded(rt)),
                 closed: false,
             });
         }
@@ -1291,7 +1301,7 @@ pub fn connect(uri: &str) -> PyResult<RedDb> {
         {
             let rt = EmbeddedRuntime::open(rest.into()).map_err(|e| err("IO_ERROR", e))?;
             return Ok(RedDb {
-                backend: Backend::Embedded(rt),
+                backend: Some(Backend::Embedded(rt)),
                 closed: false,
             });
         }
@@ -1305,7 +1315,7 @@ pub fn connect(uri: &str) -> PyResult<RedDb> {
             .block_on(RedDBClient::connect(&endpoint, None))
             .map_err(|e| err("IO_ERROR", format!("grpc connect failed: {e}")))?;
         return Ok(RedDb {
-            backend: Backend::Grpc(Mutex::new(client)),
+            backend: Some(Backend::Grpc(Mutex::new(client))),
             closed: false,
         });
     }

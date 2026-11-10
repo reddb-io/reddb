@@ -7,7 +7,7 @@
 //! all three endpoints; the replicas are dumb counters.
 //!
 //! The client connects with a primary-only URI, calls
-//! `refresh_topology()` once, then dispatches 300 SELECT reads. The
+//! `refresh_topology()` once, then dispatches 300 explicitly local SELECT reads. The
 //! test asserts:
 //!
 //! 1. **Load shifted off the primary.** With discovery on, the
@@ -59,6 +59,7 @@ use std::time::Duration;
 
 use reddb_client::grpc::GrpcClient;
 use reddb_client::topology::{Clock, RefreshScheduler};
+use reddb_client::QueryOptions;
 use reddb_grpc_proto::red_db_server::{RedDb, RedDbServer};
 use reddb_grpc_proto::*;
 use reddb_wire::topology::{encode_topology, Endpoint, ReplicaInfo, Topology};
@@ -484,7 +485,9 @@ async fn high_level_grpc_and_grpcs_discover_without_manual_refresh() {
         let db = reddb_client::Reddb::connect(uri.as_str())
             .await
             .expect(protocol);
-        db.query("SELECT * FROM users").await.expect("replica read");
+        db.query_with_options("SELECT * FROM users", QueryOptions::local())
+            .await
+            .expect("replica read");
         assert_eq!(replica_count.query.load(Ordering::Relaxed), 1, "{protocol}");
         assert_eq!(primary_count.query.load(Ordering::Relaxed), 0, "{protocol}");
         db.query("UPDATE users SET name = 'updated'")
@@ -570,7 +573,10 @@ async fn topology_e2e_distributes_reads_across_discovered_replicas() {
 
     // 4) 300 reads. Distribution should be ~1/3 per endpoint.
     for _ in 0..N_READS {
-        client.query("select 1").await.expect("query");
+        client
+            .query_with_options("select 1", QueryOptions::local())
+            .await
+            .expect("query");
     }
     let p = primary_counters.query.load(Ordering::Relaxed);
     let a = replica_a_counters.query.load(Ordering::Relaxed);
@@ -746,7 +752,10 @@ async fn topology_e2e_deregister_reflected_within_refresh_interval() {
 
     // Issue 200 reads; replica_b's counter should stay at 0.
     for _ in 0..200 {
-        client.query("select 1").await.expect("query");
+        client
+            .query_with_options("select 1", QueryOptions::local())
+            .await
+            .expect("query");
     }
     let post_b = replica_b_counters.query.load(Ordering::Relaxed);
     assert_eq!(
@@ -786,7 +795,10 @@ async fn topology_e2e_force_primary_preserves_pre_prd_baseline() {
     client.refresh_topology().await.expect("refresh");
 
     for _ in 0..N_READS {
-        client.query("select 1").await.expect("query");
+        client
+            .query_with_options("select 1", QueryOptions::local())
+            .await
+            .expect("query");
     }
     assert_eq!(
         primary_counters.query.load(Ordering::Relaxed),
@@ -844,7 +856,10 @@ async fn topology_perf_capture() {
     let mut post_us = Vec::with_capacity(1_000);
     for _ in 0..1_000 {
         let t = Instant::now();
-        post_client.query("select 1").await.unwrap();
+        post_client
+            .query_with_options("select 1", QueryOptions::local())
+            .await
+            .unwrap();
         post_us.push(t.elapsed().as_micros());
     }
 
@@ -856,7 +871,10 @@ async fn topology_perf_capture() {
     let mut pre_us = Vec::with_capacity(1_000);
     for _ in 0..1_000 {
         let t = Instant::now();
-        pre_client.query("select 1").await.unwrap();
+        pre_client
+            .query_with_options("select 1", QueryOptions::local())
+            .await
+            .unwrap();
         pre_us.push(t.elapsed().as_micros());
     }
 

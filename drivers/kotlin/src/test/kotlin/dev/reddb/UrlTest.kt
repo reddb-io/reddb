@@ -69,7 +69,7 @@ class UrlTest {
 
     @Test
     fun recognisesEmbeddedInMemoryAliases() {
-        for (s in arrayOf("red:", "red:/", "red://", "red://memory", "red://memory/", "red://:memory", "red://:memory:")) {
+        for (s in arrayOf("memory://", "red:", "red:/", "red://", "red://memory", "red://memory/", "red://:memory", "red://:memory:")) {
             val u = Url.parse(s)
             assertEquals(Url.Kind.EMBEDDED_MEMORY, u.kind, "expected memory for $s")
             assertTrue(u.isEmbedded())
@@ -79,6 +79,13 @@ class UrlTest {
     @Test
     fun recognisesEmbeddedFileTriple() {
         val u = Url.parse("red:///var/lib/reddb/data.rdb")
+        assertEquals(Url.Kind.EMBEDDED_FILE, u.kind)
+        assertEquals("/var/lib/reddb/data.rdb", u.path)
+    }
+
+    @Test
+    fun recognisesCanonicalEmbeddedFile() {
+        val u = Url.parse("file:///var/lib/reddb/data.rdb")
         assertEquals(Url.Kind.EMBEDDED_FILE, u.kind)
         assertEquals("/var/lib/reddb/data.rdb", u.path)
     }
@@ -126,8 +133,8 @@ class UrlTest {
     fun portDefaultsTo5050() {
         assertEquals(5050, Url.parse("red://h").port)
         assertEquals(5050, Url.parse("reds://h").port)
-        assertEquals(5050, Url.parse("http://h").port)
-        assertEquals(5050, Url.parse("https://h").port)
+        assertEquals(5000, Url.parse("http://h").port)
+        assertEquals(55555, Url.parse("https://h").port)
     }
 
     @Test

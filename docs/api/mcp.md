@@ -1,6 +1,6 @@
 # MCP (AI Agent Integration)
 
-RedDB includes a built-in [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes 30 tools for AI agents. This allows LLMs and agent frameworks to interact with RedDB directly.
+RedDB includes a built-in [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes more than 40 embedded tools for AI agents. This allows LLMs and agent frameworks to interact with RedDB directly.
 
 ## Starting the MCP Server
 
@@ -10,6 +10,29 @@ red mcp --path ./data/reddb.rdb
 
 The MCP server communicates over stdio using the MCP protocol, compatible with Claude Desktop, Cursor, and other MCP clients.
 
+To connect the same stdio MCP bridge to a remote RedDB server, provide a
+connection URI and credentials:
+
+```bash
+red mcp --uri https://db.example --token "$REDDB_TOKEN"
+```
+
+Remote mode deliberately advertises only the tools implemented through the
+authenticated client connection: `reddb_query`, `reddb_collections`,
+`reddb_catalog`, `reddb_describe_collection`, `reddb_find_field`, and
+`reddb.ask`. HTTP, gRPC, and RedWire endpoints are supported. Cluster and
+WebSocket MCP client URLs are not supported yet.
+
+Bearer tokens and API keys require a TLS URI (`https://`, `reds://`, or
+`red+wss://`). HTTP Basic authentication is not supported; use a bearer token
+or API key instead.
+
+MCP sessions are read-only by default. `--allow-write` permits mutating RQL
+through `reddb_query`; `--allow-admin` additionally permits administrative
+statements. These client-side limits are defense in depth: the remote server
+still authenticates the credential and remains authoritative for tenant,
+IAM, RLS, collection policy, and query authorization.
+
 ## Available Tools
 
 ### Query & Collections
@@ -17,7 +40,10 @@ The MCP server communicates over stdio using the MCP protocol, compatible with C
 | Tool | Description |
 |:-----|:------------|
 | `reddb_query` | Execute a SQL or universal query (SELECT, INSERT, UPDATE, DELETE, graph) |
-| `reddb_collections` | List all collections in the database |
+| `reddb_collections` | List visible collection names (legacy-compatible array contract) |
+| `reddb_catalog` | List visible collections with model, schema, size, index, and attention metadata |
+| `reddb_describe_collection` | Describe the visible columns and constraints of one collection |
+| `reddb_find_field` | Find visible collections containing an exact field name |
 | `reddb_scan` | Scan entities from a collection with pagination |
 | `reddb_create_collection` | Create a new collection |
 | `reddb_drop_collection` | Drop a collection |
@@ -125,8 +151,9 @@ and 0-based in the array. Arity and gap errors surface as MCP tool errors.
 
 Use `reddb.ask` when an agent needs an answer grounded in RedDB data. The
 tool returns the canonical ASK envelope: `answer`, `sources_flat`,
-`citations`, `validation`, `cache_hit`, provider/model metadata, token counts,
-and `cost_usd`. Every factual claim in `answer` is expected to cite a marker
+`citations`, `validation`, `reasoning`, `exploratory_queries`, `final_query`,
+`final_query_params`, `cache_hit`, provider/model metadata, token counts, and
+`cost_usd`. Every factual claim in `answer` is expected to cite a marker
 like `[^1]`; that marker maps to `sources_flat[0].urn`. The citation contract
 is [ADR 0013](../../.red/adr/0013-ask-grounding-citations.md), tracked from
 [#392](https://github.com/reddb-io/reddb/issues/392).
@@ -168,6 +195,55 @@ Provider, model, determinism, and cache controls mirror the SQL ASK clauses:
 `ASK ... CACHE TTL` / `NOCACHE`. MCP progressive-response streaming is not
 enabled yet; `reddb.ask` returns the full non-streaming ASK response as one
 tool result.
+
+In remote mode, `reddb.ask` is rendered as the canonical `ASK` RQL statement
+and sent through the same authenticated connection as `reddb_query`. It does
+not create a second authorization identity: metadata discovery, retrieval,
+generated read-only queries, and the final answer remain subject to the
+connected user's tenant and policies.
+
+### Discover Schema
+
+Agents can inspect the catalog without constructing catalog queries or
+interpolating identifiers:
+
+```json
+{
+  "tool": "reddb_describe_collection",
+  "arguments": { "collection": "travelers" }
+}
+```
+
+```json
+{
+  "tool": "reddb_find_field",
+  "arguments": { "field": "passport_number" }
+}
+```
+
+Both tools use bound parameters. Their results contain only metadata visible
+to the connected identity.
+
+`reddb_catalog`, `reddb_describe_collection`, `reddb_find_field`, and
+`reddb_query` come from one protocol-neutral RedDB tool registry. MCP exposes
+that registry directly, while ASK projects its read-only agent profile and
+executes every call under the scope captured from the asking user. The embedded
+[ACP adapter](./acp.md) invokes that same ASK harness in a session protocol.
+`reddb_final_query` is deliberately ASK-only
+because it marks the terminal validation step of that harness, not a general
+database operation.
+
+When planner-first ASK is enabled, its bounded reasoning loop reuses the
+read-only subset of this tool vocabulary internally. Metadata calls,
+parameterized exploratory `reddb_query` calls, and one terminal
+`reddb_final_query` share the `ASK ... STEPS n` budget. Providers receive these
+as native typed tools; the last step is reserved for the final query. Every
+call runs with the ASK caller's principal, tenant, current statement snapshot,
+IAM, RLS, and collection
+policies; the database does not give the model a separate catalog or
+authorization path. Only final-query rows ground the answer. The result exposes
+an auditable action trace and both exploratory and final SQL without exposing
+private model chain-of-thought.
 
 ### Insert a Row
 
@@ -285,3 +361,5 @@ export REDDB_MCP_URI='reds://user:password@db.example:5050'
 > [!TIP]
 > Embedded `memory://` and `file://` modes run inside the `red` process. Remote
 > credentials stay in the host environment and are not written to `.mcp.json`.
+> Remote calls execute as that credential; MCP does not elevate the caller or
+> bypass server-side tenant, IAM, RLS, or collection policies.

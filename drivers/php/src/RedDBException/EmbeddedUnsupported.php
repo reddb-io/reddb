@@ -1,5 +1,5 @@
 <?php
-/** User asked for `red://`, `red:///path`, or `red://memory` but no embedded engine ships in this driver. */
+/** Embedded mode was requested but PHP FFI or the matching native RedDB library is unavailable. */
 
 declare(strict_types=1);
 

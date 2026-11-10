@@ -338,6 +338,20 @@ pub(crate) fn json_response(status: u16, value: JsonValue) -> HttpResponse {
     }
 }
 
+fn is_iam_policy_denial(message: &str) -> bool {
+    let has_marker =
+        message.contains("denied by IAM policy") || message.contains("denied by IAM column policy");
+    has_marker
+        && [
+            "principal=`",
+            "permission denied: principal=`",
+            "CREATE USER denied by IAM policy",
+            "ALTER USER denied by IAM policy",
+        ]
+        .iter()
+        .any(|prefix| message.starts_with(prefix))
+}
+
 /// Map a `RedDBError` to an HTTP status + display string.
 ///
 /// Single source of truth for the engine's error → HTTP-status table.
@@ -354,6 +368,9 @@ pub(crate) fn json_response(status: u16, value: JsonValue) -> HttpResponse {
 /// - `:payload:*` → 413
 pub(crate) fn map_runtime_error(err: &crate::api::RedDBError) -> (u16, String) {
     use crate::api::RedDBError::*;
+    if matches!(err, Query(message) if is_iam_policy_denial(message)) {
+        return (403, "forbidden".to_string());
+    }
     let msg = err.to_string();
     let status = match err {
         NotFound(_) => 404,
@@ -438,6 +455,18 @@ mod transport_tests {
             400
         );
         assert_eq!(map_runtime_error(&RedDBError::Query("x".into())).0, 400);
+        let policy_deny = map_runtime_error(&RedDBError::Query(
+            "permission denied: principal=`alice` action=`kv:write` resource=`kv:private.key` denied by IAM policy".into()
+        ));
+        assert_eq!(policy_deny, (403, "forbidden".to_string()));
+        assert_eq!(
+            map_runtime_error(&RedDBError::Query(
+                "parser input says denied by IAM policy".into()
+            ))
+            .0,
+            400,
+            "user-controlled query text must not be reclassified as authorization"
+        );
         assert_eq!(
             map_runtime_error(&RedDBError::Query(
                 "ask_primary_sync_unavailable: connect failed".into()

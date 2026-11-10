@@ -1,0 +1,18 @@
+{
+  "config": {
+    "engine": "reddb",
+    "red_ack_batch": true,
+    "host": "reddb-ackfast-v2-native-before-1107",
+    "name": "recovery_native_before_1",
+    "batch": 1,
+    "operations": 1,
+    "bytes": 100,
+    "settle_ms": 2000,
+    "mode": "empty"
+  },
+  "status": "valid-diagnostic",
+  "classification": "shared-host-diagnostic",
+  "latency_contract": "whole batch through consume/ACK; never divided by batch size",
+  "ack_contract": "durable response",
+  "verified_empty": true
+}

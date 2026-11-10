@@ -430,7 +430,7 @@ pub fn parse_with_limits(
             ));
         }
         return Ok(ConnectionTarget::File {
-            path: PathBuf::from(rest),
+            path: file_uri_path(rest),
         });
     }
 
@@ -544,6 +544,25 @@ pub fn parse_with_limits(
             format!("unsupported scheme: {}", parsed.scheme()),
         )),
     }
+}
+
+fn file_uri_path(path: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let bytes = path.as_bytes();
+        // RFC 8089 spells a Windows drive path as file:///C:/path. After
+        // removing `file://`, discard only the URI separator before a drive
+        // letter; retaining it produces the invalid Windows path `\C:\...`.
+        if bytes.len() >= 4
+            && bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && bytes[2] == b':'
+            && matches!(bytes[3], b'/' | b'\\')
+        {
+            return PathBuf::from(&path[1..]);
+        }
+    }
+    PathBuf::from(path)
 }
 
 /// Lowercase only the scheme portion (everything before the first

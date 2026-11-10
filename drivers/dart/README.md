@@ -220,8 +220,10 @@ Skipped by default and when `RED_SKIP_SMOKE=1` is set.
   sends a frame with the COMPRESSED flag the driver throws
   `CompressedButNoZstd`. The driver never sets that flag on outbound
   frames, so connections to a server with default config work fine.
-* `red://` (embedded) URIs raise `EmbeddedUnsupported` — the engine is
-  Rust-only; use one of the network transports.
+* On native Dart and Flutter targets, `memory://` and `file://` load the
+  version-matched shared RedDB ABI. Set `REDDB_FFI_LIBRARY` when it is not on
+  the platform library path. Browser builds keep returning
+  `EmbeddedUnsupported` because browsers cannot load native libraries.
 
 ## Running the tests
 

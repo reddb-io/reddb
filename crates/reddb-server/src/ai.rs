@@ -115,6 +115,79 @@ pub struct AiPromptResponse {
     pub stop_reason: Option<String>,
 }
 
+/// Provider-neutral chat message used by agentic ASK calls.
+///
+/// Tool calls and results stay structured across rounds instead of being
+/// flattened into prompt text. Provider adapters translate this transcript to
+/// their native wire format.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AiChatMessage {
+    System(String),
+    User(String),
+    Assistant {
+        content: Option<String>,
+        tool_calls: Vec<AiToolCall>,
+    },
+    ToolResult {
+        call_id: String,
+        name: String,
+        content: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AiToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: JsonValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AiToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: JsonValue,
+}
+
+/// Model-independent request consumed by the OpenAI and Anthropic adapters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AiChatRequest {
+    pub messages: Vec<AiChatMessage>,
+    pub tools: Vec<AiToolDefinition>,
+    pub temperature: Option<f32>,
+    pub seed: Option<u64>,
+    pub max_output_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AiChatResponse {
+    pub provider: &'static str,
+    pub model: String,
+    pub output_text: Option<String>,
+    pub tool_calls: Vec<AiToolCall>,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub stop_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenAiChatRequest {
+    pub api_key: String,
+    pub model: String,
+    pub api_base: String,
+    pub chat: AiChatRequest,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnthropicChatRequest {
+    pub api_key: String,
+    pub model: String,
+    pub api_base: String,
+    pub anthropic_version: String,
+    pub chat: AiChatRequest,
+}
+
 #[deprecated(
     since = "1.0.0",
     note = "use AiBatchClient::embed_batch for embeddings or openai_embeddings_async with AiTransport when token usage metadata is required"
@@ -313,6 +386,28 @@ pub async fn openai_prompt_async(
     } else {
         parse_openai_prompt_response(&response.body, &request.model)
     }
+}
+
+/// Async OpenAI-compatible chat with native function tools.
+pub async fn openai_chat_async(
+    transport: &crate::runtime::ai::transport::AiTransport,
+    request: OpenAiChatRequest,
+) -> RedDBResult<AiChatResponse> {
+    validate_chat_request(&request.model, &request.chat)?;
+    let url = format!(
+        "{}/chat/completions",
+        request.api_base.trim_end_matches('/')
+    );
+    let payload = build_openai_chat_payload(&request.model, &request.chat);
+    let http_req = crate::runtime::ai::transport::AiHttpRequest::post_json("openai", url, payload)
+        .model(request.model.clone())
+        .header("authorization", format!("Bearer {}", request.api_key));
+
+    let response = transport
+        .request(http_req)
+        .await
+        .map_err(|err| RedDBError::Query(err.to_string()))?;
+    parse_openai_chat_response(&response.body, &request.model)
 }
 
 /// Blocking OpenAI-compatible streaming prompt.
@@ -528,6 +623,32 @@ pub async fn anthropic_prompt_async(
     parse_anthropic_prompt_response(&response.body, &request.model)
 }
 
+/// Async Anthropic messages call with native tools.
+pub async fn anthropic_chat_async(
+    transport: &crate::runtime::ai::transport::AiTransport,
+    request: AnthropicChatRequest,
+) -> RedDBResult<AiChatResponse> {
+    if request.api_key.trim().is_empty() {
+        return Err(RedDBError::Query(
+            "Anthropic API key cannot be empty".to_string(),
+        ));
+    }
+    validate_chat_request(&request.model, &request.chat)?;
+    let url = format!("{}/messages", request.api_base.trim_end_matches('/'));
+    let payload = build_anthropic_chat_payload(&request.model, &request.chat);
+    let http_req =
+        crate::runtime::ai::transport::AiHttpRequest::post_json("anthropic", url, payload)
+            .model(request.model.clone())
+            .header("x-api-key", request.api_key)
+            .header("anthropic-version", request.anthropic_version);
+
+    let response = transport
+        .request(http_req)
+        .await
+        .map_err(|err| RedDBError::Query(err.to_string()))?;
+    parse_anthropic_chat_response(&response.body, &request.model)
+}
+
 /// Build an OpenAI-compatible embedding request payload.
 pub(crate) fn build_embedding_payload(model: &str, inputs: &[String]) -> String {
     build_openai_embedding_payload(model, inputs, None)
@@ -590,6 +711,269 @@ fn provider_error_message(body: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn validate_chat_request(model: &str, request: &AiChatRequest) -> RedDBResult<()> {
+    if model.trim().is_empty() {
+        return Err(RedDBError::Query("chat model cannot be empty".to_string()));
+    }
+    if request.messages.is_empty() {
+        return Err(RedDBError::Query(
+            "chat requires at least one message".to_string(),
+        ));
+    }
+    for tool in &request.tools {
+        if tool.name.trim().is_empty() {
+            return Err(RedDBError::Query(
+                "chat tool name cannot be empty".to_string(),
+            ));
+        }
+        if tool.input_schema.as_object().is_none() {
+            return Err(RedDBError::Query(format!(
+                "chat tool `{}` input schema must be an object",
+                tool.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn openai_tool_call_json(call: &AiToolCall) -> JsonValue {
+    let mut function = Map::new();
+    function.insert("name".to_string(), JsonValue::String(call.name.clone()));
+    function.insert(
+        "arguments".to_string(),
+        JsonValue::String(call.arguments.to_string_compact()),
+    );
+
+    let mut object = Map::new();
+    object.insert("id".to_string(), JsonValue::String(call.id.clone()));
+    object.insert(
+        "type".to_string(),
+        JsonValue::String("function".to_string()),
+    );
+    object.insert("function".to_string(), JsonValue::Object(function));
+    JsonValue::Object(object)
+}
+
+fn build_openai_chat_payload(model: &str, request: &AiChatRequest) -> String {
+    let mut object = Map::new();
+    object.insert("model".to_string(), JsonValue::String(model.to_string()));
+
+    let messages = request
+        .messages
+        .iter()
+        .map(|message| {
+            let mut item = Map::new();
+            match message {
+                AiChatMessage::System(content) => {
+                    item.insert("role".to_string(), JsonValue::String("system".to_string()));
+                    item.insert("content".to_string(), JsonValue::String(content.clone()));
+                }
+                AiChatMessage::User(content) => {
+                    item.insert("role".to_string(), JsonValue::String("user".to_string()));
+                    item.insert("content".to_string(), JsonValue::String(content.clone()));
+                }
+                AiChatMessage::Assistant {
+                    content,
+                    tool_calls,
+                } => {
+                    item.insert(
+                        "role".to_string(),
+                        JsonValue::String("assistant".to_string()),
+                    );
+                    item.insert(
+                        "content".to_string(),
+                        content
+                            .as_ref()
+                            .map(|value| JsonValue::String(value.clone()))
+                            .unwrap_or(JsonValue::Null),
+                    );
+                    if !tool_calls.is_empty() {
+                        item.insert(
+                            "tool_calls".to_string(),
+                            JsonValue::Array(
+                                tool_calls.iter().map(openai_tool_call_json).collect(),
+                            ),
+                        );
+                    }
+                }
+                AiChatMessage::ToolResult {
+                    call_id, content, ..
+                } => {
+                    item.insert("role".to_string(), JsonValue::String("tool".to_string()));
+                    item.insert(
+                        "tool_call_id".to_string(),
+                        JsonValue::String(call_id.clone()),
+                    );
+                    item.insert("content".to_string(), JsonValue::String(content.clone()));
+                }
+            }
+            JsonValue::Object(item)
+        })
+        .collect();
+    object.insert("messages".to_string(), JsonValue::Array(messages));
+
+    if !request.tools.is_empty() {
+        let tools = request
+            .tools
+            .iter()
+            .map(|tool| {
+                let mut function = Map::new();
+                function.insert("name".to_string(), JsonValue::String(tool.name.clone()));
+                function.insert(
+                    "description".to_string(),
+                    JsonValue::String(tool.description.clone()),
+                );
+                function.insert("parameters".to_string(), tool.input_schema.clone());
+                let mut item = Map::new();
+                item.insert(
+                    "type".to_string(),
+                    JsonValue::String("function".to_string()),
+                );
+                item.insert("function".to_string(), JsonValue::Object(function));
+                JsonValue::Object(item)
+            })
+            .collect();
+        object.insert("tools".to_string(), JsonValue::Array(tools));
+        object.insert(
+            "tool_choice".to_string(),
+            JsonValue::String("auto".to_string()),
+        );
+    }
+    if let Some(temperature) = request.temperature {
+        object.insert(
+            "temperature".to_string(),
+            JsonValue::Number(temperature as f64),
+        );
+    }
+    if let Some(seed) = request.seed {
+        object.insert("seed".to_string(), JsonValue::Number(seed as f64));
+    }
+    if let Some(max_output_tokens) = request.max_output_tokens {
+        object.insert(
+            "max_tokens".to_string(),
+            JsonValue::Number(max_output_tokens as f64),
+        );
+    }
+    JsonValue::Object(object).to_string_compact()
+}
+
+fn anthropic_text_block(text: &str) -> JsonValue {
+    let mut block = Map::new();
+    block.insert("type".to_string(), JsonValue::String("text".to_string()));
+    block.insert("text".to_string(), JsonValue::String(text.to_string()));
+    JsonValue::Object(block)
+}
+
+fn build_anthropic_chat_payload(model: &str, request: &AiChatRequest) -> String {
+    let mut object = Map::new();
+    object.insert("model".to_string(), JsonValue::String(model.to_string()));
+    object.insert(
+        "max_tokens".to_string(),
+        JsonValue::Number(request.max_output_tokens.unwrap_or(512) as f64),
+    );
+
+    let systems = request
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            AiChatMessage::System(content) => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !systems.is_empty() {
+        object.insert(
+            "system".to_string(),
+            JsonValue::String(systems.join("\n\n")),
+        );
+    }
+
+    let messages = request
+        .messages
+        .iter()
+        .filter_map(|message| {
+            let mut item = Map::new();
+            match message {
+                AiChatMessage::System(_) => return None,
+                AiChatMessage::User(content) => {
+                    item.insert("role".to_string(), JsonValue::String("user".to_string()));
+                    item.insert("content".to_string(), JsonValue::String(content.clone()));
+                }
+                AiChatMessage::Assistant {
+                    content,
+                    tool_calls,
+                } => {
+                    item.insert(
+                        "role".to_string(),
+                        JsonValue::String("assistant".to_string()),
+                    );
+                    let mut blocks = Vec::new();
+                    if let Some(content) = content.as_deref().filter(|value| !value.is_empty()) {
+                        blocks.push(anthropic_text_block(content));
+                    }
+                    for call in tool_calls {
+                        let mut block = Map::new();
+                        block.insert(
+                            "type".to_string(),
+                            JsonValue::String("tool_use".to_string()),
+                        );
+                        block.insert("id".to_string(), JsonValue::String(call.id.clone()));
+                        block.insert("name".to_string(), JsonValue::String(call.name.clone()));
+                        block.insert("input".to_string(), call.arguments.clone());
+                        blocks.push(JsonValue::Object(block));
+                    }
+                    item.insert("content".to_string(), JsonValue::Array(blocks));
+                }
+                AiChatMessage::ToolResult {
+                    call_id, content, ..
+                } => {
+                    item.insert("role".to_string(), JsonValue::String("user".to_string()));
+                    let mut block = Map::new();
+                    block.insert(
+                        "type".to_string(),
+                        JsonValue::String("tool_result".to_string()),
+                    );
+                    block.insert(
+                        "tool_use_id".to_string(),
+                        JsonValue::String(call_id.clone()),
+                    );
+                    block.insert("content".to_string(), JsonValue::String(content.clone()));
+                    item.insert(
+                        "content".to_string(),
+                        JsonValue::Array(vec![JsonValue::Object(block)]),
+                    );
+                }
+            }
+            Some(JsonValue::Object(item))
+        })
+        .collect();
+    object.insert("messages".to_string(), JsonValue::Array(messages));
+
+    if !request.tools.is_empty() {
+        let tools = request
+            .tools
+            .iter()
+            .map(|tool| {
+                let mut item = Map::new();
+                item.insert("name".to_string(), JsonValue::String(tool.name.clone()));
+                item.insert(
+                    "description".to_string(),
+                    JsonValue::String(tool.description.clone()),
+                );
+                item.insert("input_schema".to_string(), tool.input_schema.clone());
+                JsonValue::Object(item)
+            })
+            .collect();
+        object.insert("tools".to_string(), JsonValue::Array(tools));
+    }
+    if let Some(temperature) = request.temperature {
+        object.insert(
+            "temperature".to_string(),
+            JsonValue::Number(temperature as f64),
+        );
+    }
+    JsonValue::Object(object).to_string_compact()
 }
 
 fn build_openai_prompt_payload(
@@ -935,6 +1319,186 @@ fn parse_anthropic_prompt_response(
     })
 }
 
+fn parse_tool_arguments(value: &JsonValue, provider: &str) -> RedDBResult<JsonValue> {
+    if let Some(raw) = value.as_str() {
+        let parsed = parse_json(raw).map_err(|err| {
+            RedDBError::Query(format!(
+                "invalid {provider} tool arguments JSON response: {err}"
+            ))
+        })?;
+        return Ok(JsonValue::from(parsed));
+    }
+    if value.as_object().is_some() {
+        return Ok(value.clone());
+    }
+    Err(RedDBError::Query(format!(
+        "{provider} tool arguments must be a JSON object"
+    )))
+}
+
+fn parse_openai_chat_response(body: &str, requested_model: &str) -> RedDBResult<AiChatResponse> {
+    let parsed = parse_json(body)
+        .map_err(|err| RedDBError::Query(format!("invalid OpenAI chat JSON response: {err}")))?;
+    let json = JsonValue::from(parsed);
+    let model = json
+        .get("model")
+        .and_then(JsonValue::as_str)
+        .unwrap_or(requested_model)
+        .to_string();
+    let first_choice = json
+        .get("choices")
+        .and_then(JsonValue::as_array)
+        .and_then(|choices| choices.first())
+        .ok_or_else(|| RedDBError::Query("OpenAI chat response contains no choices".to_string()))?;
+    let message = first_choice.get("message").ok_or_else(|| {
+        RedDBError::Query("OpenAI chat response missing assistant message".to_string())
+    })?;
+    let output_text = message.get("content").and_then(|content| {
+        content
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| content.as_array().and_then(extract_text_from_parts))
+    });
+    let mut tool_calls = Vec::new();
+    for item in message
+        .get("tool_calls")
+        .and_then(JsonValue::as_array)
+        .unwrap_or(&[])
+    {
+        let id = item
+            .get("id")
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| RedDBError::Query("OpenAI tool call is missing `id`".to_string()))?;
+        let function = item.get("function").ok_or_else(|| {
+            RedDBError::Query("OpenAI tool call is missing `function`".to_string())
+        })?;
+        let name = function
+            .get("name")
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| RedDBError::Query("OpenAI tool call is missing `name`".to_string()))?;
+        let arguments = function.get("arguments").ok_or_else(|| {
+            RedDBError::Query("OpenAI tool call is missing `arguments`".to_string())
+        })?;
+        tool_calls.push(AiToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: parse_tool_arguments(arguments, "OpenAI")?,
+        });
+    }
+    if output_text.is_none() && tool_calls.is_empty() {
+        return Err(RedDBError::Query(
+            "OpenAI chat response contains neither text nor tool calls".to_string(),
+        ));
+    }
+
+    let prompt_tokens = json
+        .get("usage")
+        .and_then(|usage| usage.get("prompt_tokens"))
+        .and_then(JsonValue::as_i64)
+        .and_then(|value| u64::try_from(value).ok());
+    let completion_tokens = json
+        .get("usage")
+        .and_then(|usage| usage.get("completion_tokens"))
+        .and_then(JsonValue::as_i64)
+        .and_then(|value| u64::try_from(value).ok());
+    let total_tokens = json
+        .get("usage")
+        .and_then(|usage| usage.get("total_tokens"))
+        .and_then(JsonValue::as_i64)
+        .and_then(|value| u64::try_from(value).ok())
+        .or_else(|| match (prompt_tokens, completion_tokens) {
+            (Some(prompt), Some(completion)) => Some(prompt.saturating_add(completion)),
+            _ => None,
+        });
+    Ok(AiChatResponse {
+        provider: "openai",
+        model,
+        output_text,
+        tool_calls,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        stop_reason: first_choice
+            .get("finish_reason")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string),
+    })
+}
+
+fn parse_anthropic_chat_response(body: &str, requested_model: &str) -> RedDBResult<AiChatResponse> {
+    let parsed = parse_json(body)
+        .map_err(|err| RedDBError::Query(format!("invalid Anthropic chat JSON response: {err}")))?;
+    let json = JsonValue::from(parsed);
+    let content = json
+        .get("content")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| {
+            RedDBError::Query("Anthropic chat response missing 'content' array".to_string())
+        })?;
+    let output_text = extract_text_from_parts(content);
+    let mut tool_calls = Vec::new();
+    for block in content {
+        if block.get("type").and_then(JsonValue::as_str) != Some("tool_use") {
+            continue;
+        }
+        let id = block
+            .get("id")
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| RedDBError::Query("Anthropic tool call is missing `id`".to_string()))?;
+        let name = block
+            .get("name")
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| {
+                RedDBError::Query("Anthropic tool call is missing `name`".to_string())
+            })?;
+        let arguments = block.get("input").ok_or_else(|| {
+            RedDBError::Query("Anthropic tool call is missing `input`".to_string())
+        })?;
+        tool_calls.push(AiToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: parse_tool_arguments(arguments, "Anthropic")?,
+        });
+    }
+    if output_text.is_none() && tool_calls.is_empty() {
+        return Err(RedDBError::Query(
+            "Anthropic chat response contains neither text nor tool calls".to_string(),
+        ));
+    }
+    let prompt_tokens = json
+        .get("usage")
+        .and_then(|usage| usage.get("input_tokens"))
+        .and_then(JsonValue::as_i64)
+        .and_then(|value| u64::try_from(value).ok());
+    let completion_tokens = json
+        .get("usage")
+        .and_then(|usage| usage.get("output_tokens"))
+        .and_then(JsonValue::as_i64)
+        .and_then(|value| u64::try_from(value).ok());
+    Ok(AiChatResponse {
+        provider: "anthropic",
+        model: json
+            .get("model")
+            .and_then(JsonValue::as_str)
+            .unwrap_or(requested_model)
+            .to_string(),
+        output_text,
+        tool_calls,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: match (prompt_tokens, completion_tokens) {
+            (Some(prompt), Some(completion)) => Some(prompt.saturating_add(completion)),
+            _ => None,
+        },
+        stop_reason: json
+            .get("stop_reason")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string),
+    })
+}
+
 fn parse_openai_embedding_response(body: &str) -> RedDBResult<OpenAiEmbeddingResponse> {
     let parsed = parse_json(body).map_err(|err| {
         RedDBError::Query(format!("invalid OpenAI embeddings JSON response: {err}"))
@@ -1009,6 +1573,127 @@ fn parse_openai_embedding_response(body: &str) -> RedDBResult<OpenAiEmbeddingRes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn object(entries: Vec<(&str, JsonValue)>) -> JsonValue {
+        let mut map = Map::new();
+        for (key, value) in entries {
+            map.insert(key.to_string(), value);
+        }
+        JsonValue::Object(map)
+    }
+
+    fn chat_fixture() -> AiChatRequest {
+        AiChatRequest {
+            messages: vec![
+                AiChatMessage::System("system policy".to_string()),
+                AiChatMessage::User("find passport 123".to_string()),
+                AiChatMessage::Assistant {
+                    content: None,
+                    tool_calls: vec![AiToolCall {
+                        id: "call_1".to_string(),
+                        name: "reddb_find_field".to_string(),
+                        arguments: object(vec![(
+                            "field",
+                            JsonValue::String("passport_number".to_string()),
+                        )]),
+                    }],
+                },
+                AiChatMessage::ToolResult {
+                    call_id: "call_1".to_string(),
+                    name: "reddb_find_field".to_string(),
+                    content: "authorized result".to_string(),
+                },
+            ],
+            tools: vec![AiToolDefinition {
+                name: "reddb_find_field".to_string(),
+                description: "Find a visible field".to_string(),
+                input_schema: object(vec![("type", JsonValue::String("object".to_string()))]),
+            }],
+            temperature: Some(0.0),
+            seed: Some(7),
+            max_output_tokens: Some(256),
+        }
+    }
+
+    #[test]
+    fn openai_chat_uses_native_tool_wire_contract() {
+        let payload = build_openai_chat_payload("gpt-test", &chat_fixture());
+        let json = JsonValue::from(parse_json(&payload).expect("payload JSON"));
+
+        assert_eq!(
+            json.get("messages")
+                .and_then(JsonValue::as_array)
+                .and_then(|messages| messages.get(2))
+                .and_then(|message| message.get("tool_calls"))
+                .and_then(JsonValue::as_array)
+                .and_then(|calls| calls.first())
+                .and_then(|call| call.get("function"))
+                .and_then(|function| function.get("name"))
+                .and_then(JsonValue::as_str),
+            Some("reddb_find_field")
+        );
+        assert_eq!(
+            json.get("messages")
+                .and_then(JsonValue::as_array)
+                .and_then(|messages| messages.get(3))
+                .and_then(|message| message.get("tool_call_id"))
+                .and_then(JsonValue::as_str),
+            Some("call_1")
+        );
+        assert!(json.get("tools").and_then(JsonValue::as_array).is_some());
+    }
+
+    #[test]
+    fn anthropic_chat_uses_native_tool_wire_contract() {
+        let payload = build_anthropic_chat_payload("claude-test", &chat_fixture());
+        let json = JsonValue::from(parse_json(&payload).expect("payload JSON"));
+
+        assert_eq!(
+            json.get("system").and_then(JsonValue::as_str),
+            Some("system policy")
+        );
+        let messages = json
+            .get("messages")
+            .and_then(JsonValue::as_array)
+            .expect("messages");
+        assert_eq!(
+            messages[1]
+                .get("content")
+                .and_then(JsonValue::as_array)
+                .and_then(|content| content.first())
+                .and_then(|block| block.get("type"))
+                .and_then(JsonValue::as_str),
+            Some("tool_use")
+        );
+        assert_eq!(
+            messages[2]
+                .get("content")
+                .and_then(JsonValue::as_array)
+                .and_then(|content| content.first())
+                .and_then(|block| block.get("tool_use_id"))
+                .and_then(JsonValue::as_str),
+            Some("call_1")
+        );
+    }
+
+    #[test]
+    fn native_provider_responses_preserve_structured_tool_calls() {
+        let openai = parse_openai_chat_response(
+            r#"{"model":"gpt-test","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_9","type":"function","function":{"name":"reddb_final_query","arguments":"{\"sql\":\"SELECT 1\",\"params\":[],\"purpose\":\"answer\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":4}}"#,
+            "fallback",
+        )
+        .expect("OpenAI response");
+        assert_eq!(openai.tool_calls[0].name, "reddb_final_query");
+        assert_eq!(openai.total_tokens, Some(14));
+
+        let anthropic = parse_anthropic_chat_response(
+            r#"{"model":"claude-test","content":[{"type":"tool_use","id":"tool_2","name":"reddb_query","input":{"sql":"SELECT 1","params":[],"purpose":"inspect"}}],"stop_reason":"tool_use","usage":{"input_tokens":8,"output_tokens":3}}"#,
+            "fallback",
+        )
+        .expect("Anthropic response");
+        assert_eq!(anthropic.tool_calls[0].id, "tool_2");
+        assert_eq!(anthropic.total_tokens, Some(11));
+    }
 
     #[test]
     fn parse_openai_embedding_response_extracts_vectors() {

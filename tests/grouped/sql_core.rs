@@ -21,6 +21,9 @@ mod e2e_explain;
 #[path = "schema_query_core/e2e_h3_index.rs"]
 mod e2e_h3_index;
 
+#[path = "schema_query_core/e2e_native_sql_functions.rs"]
+mod e2e_native_sql_functions;
+
 #[path = "locking_concurrency/e2e_ddl_concurrency.rs"]
 mod e2e_ddl_concurrency;
 

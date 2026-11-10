@@ -310,7 +310,10 @@ fn format_upgrade_fences_both_superblocks_and_stops_after_io_failure() {
         page::PageType,
         pager::{NoWal, Pager, PagerConfig},
     };
-    use reddb_file::{PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE, PAGE_FILE_VERSION};
+    use reddb_file::{
+        file_format::PAGE_SECONDARY_INDEX_FILE_VERSION as WRITE_VERSION,
+        PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE,
+    };
 
     let create = || {
         let pager = Pager::open_owned(
@@ -326,11 +329,9 @@ fn format_upgrade_fences_both_superblocks_and_stops_after_io_failure() {
         .expect("create pager");
         pager
             .commit_superblock(|slot| {
-                reddb_file::set_database_header_version(slot, PAGE_FILE_VERSION - 1).map_err(
-                    |error| {
-                        reddb_engine::storage::pager::PagerError::InvalidDatabase(error.to_string())
-                    },
-                )
+                reddb_file::set_database_header_version(slot, WRITE_VERSION - 1).map_err(|error| {
+                    reddb_engine::storage::pager::PagerError::InvalidDatabase(error.to_string())
+                })
             })
             .expect("create one older-version slot");
         pager
@@ -341,7 +342,7 @@ fn format_upgrade_fences_both_superblocks_and_stops_after_io_failure() {
         .allocate_page(PageType::BTreeLeaf)
         .expect("dirty allocation");
     pager
-        .fence_file_format_version(PAGE_FILE_VERSION)
+        .fence_file_format_version(WRITE_VERSION)
         .expect("fence format");
     let bytes = pager
         .with_file(|file| file.durable.borrow().clone())
@@ -351,7 +352,7 @@ fn format_upgrade_fences_both_superblocks_and_stops_after_io_failure() {
         let slot = &bytes[start..start + PAGED_SUPERBLOCK_SLOT_SIZE];
         assert!(reddb_file::paged_superblock_slot_generation(slot, copy).is_some());
         let header = reddb_file::decode_database_header(slot).expect("header");
-        assert_eq!(header.version, PAGE_FILE_VERSION);
+        assert_eq!(header.version, WRITE_VERSION);
         assert_eq!(
             header.page_count, persisted_page_count,
             "format fence must not publish dirty allocator state"
@@ -371,7 +372,7 @@ fn format_upgrade_fences_both_superblocks_and_stops_after_io_failure() {
         .expect("either fenced copy can recover");
         assert_eq!(
             reopened.header().expect("fallback header").version,
-            PAGE_FILE_VERSION
+            WRITE_VERSION
         );
     }
 
@@ -384,7 +385,7 @@ fn format_upgrade_fences_both_superblocks_and_stops_after_io_failure() {
             })
             .expect("inject failure");
         assert!(
-            pager.fence_file_format_version(PAGE_FILE_VERSION).is_err(),
+            pager.fence_file_format_version(WRITE_VERSION).is_err(),
             "boundary {fail_at}"
         );
         pager

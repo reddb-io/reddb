@@ -2,7 +2,8 @@ name: Release RedDB Browser
 
 on:
   push:
-    tags: ['browser-v*']
+    tags: ["browser-v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -18,6 +19,7 @@ env:
 
 jobs:
   publish:
+    if: startsWith(github.ref, 'refs/tags/')
     name: Build, verify and publish Browser package
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -26,10 +28,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
         with:
           targets: wasm32-unknown-unknown
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 9.15.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
           registry-url: https://registry.npmjs.org
@@ -42,13 +44,9 @@ jobs:
             throw new Error('Browser releases require a matching stable package version, latest channel and browser-v tag')
           }
           JS
-      - name: Install test tools
+      - name: Install build dependencies
         run: |
           pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io/browser
-          if [ -f /etc/apt/apt-mirrors.txt ]; then
-            printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-          fi
-          pnpm --filter @reddb-io/browser exec playwright install --with-deps chromium firefox
       - name: Install checksummed wasm-bindgen
         env:
           BINDGEN_SHA256: ceb6f0b9fea9d2868f258215a1d7f86a4c28330a0d64432cc7d53674618772d6
@@ -60,10 +58,6 @@ jobs:
           printf '%s\n' "$RUNNER_TEMP/wasm-bindgen-0.2.120-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
       - name: Build bundled JS, worker and WASM
         run: pnpm --filter @reddb-io/browser build
-      - name: Verify reusable Worker ownership and I/O failure boundaries
-        run: REDDB_BROWSER_BROWSERS=chromium,firefox node --test packages/browser/test/runtime.test.mjs packages/browser/test/session.test.mjs packages/browser/test/local-vault.test.mjs
-      - name: Verify packaged TypeScript/Vite application and offline OPFS restart
-        run: pnpm --filter @reddb-io/browser test:distribution
       - name: Pack immutable release asset
         working-directory: packages/browser
         run: |

@@ -19,6 +19,12 @@ pub fn build(b: *std.Build) void {
         "zstd",
         "Link libzstd for compressed redwire frames (default: false)",
     ) orelse false;
+    const reddb_ffi_dir = b.option(
+        []const u8,
+        "reddb-ffi-dir",
+        "Root containing include/reddb.h and lib/reddb_ffi shared library",
+    );
+    const enable_embedded = reddb_ffi_dir != null;
 
     const reddb_mod = b.addModule("reddb", .{
         .root_source_file = b.path("src/reddb.zig"),
@@ -28,10 +34,16 @@ pub fn build(b: *std.Build) void {
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "enable_zstd", enable_zstd);
+    build_options.addOption(bool, "enable_embedded", enable_embedded);
     reddb_mod.addOptions("build_options", build_options);
 
     if (enable_zstd) {
         reddb_mod.linkSystemLibrary("zstd", .{});
+    }
+    if (reddb_ffi_dir) |root| {
+        reddb_mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ root, "lib" }) });
+        reddb_mod.linkSystemLibrary("reddb_ffi", .{});
+        reddb_mod.link_libc = true;
     }
 
     // Static library artifact — gives downstream consumers something
@@ -50,12 +62,32 @@ pub fn build(b: *std.Build) void {
         lib.root_module.linkSystemLibrary("zstd", .{});
         lib.root_module.link_libc = true;
     }
+    if (reddb_ffi_dir) |root| {
+        lib.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ root, "lib" }) });
+        lib.root_module.linkSystemLibrary("reddb_ffi", .{});
+        lib.root_module.link_libc = true;
+    }
     b.installArtifact(lib);
 
     // Test step — runs the in-file test blocks plus the explicit
     // suites under `tests/`. They share the same module so test
     // helpers can `@import("reddb")` for the public surface.
     const test_step = b.step("test", "Run all driver tests");
+
+    const connect_contract_step = b.step(
+        "connect-contract",
+        "Run URI routing and fail-closed connection tests",
+    );
+    const connect_contract = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/url_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    connect_contract.root_module.addImport("reddb", reddb_mod);
+    const run_connect_contract = b.addRunArtifact(connect_contract);
+    connect_contract_step.dependOn(&run_connect_contract.step);
 
     const test_files = [_][]const u8{
         "src/reddb.zig",
@@ -89,8 +121,31 @@ pub fn build(b: *std.Build) void {
             t.root_module.linkSystemLibrary("zstd", .{});
             t.root_module.link_libc = true;
         }
+        if (reddb_ffi_dir) |root| {
+            t.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ root, "lib" }) });
+            t.root_module.linkSystemLibrary("reddb_ffi", .{});
+            t.root_module.link_libc = true;
+        }
         const run_t = b.addRunArtifact(t);
         test_step.dependOn(&run_t.step);
+    }
+
+    if (reddb_ffi_dir) |root| {
+        const embedded_step = b.step("embedded-test", "Run the embedded single-file journey");
+        const embedded_test = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/embedded_test.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        embedded_test.root_module.addImport("reddb", reddb_mod);
+        embedded_test.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ root, "lib" }) });
+        embedded_test.root_module.linkSystemLibrary("reddb_ffi", .{});
+        embedded_test.root_module.link_libc = true;
+        const run_embedded = b.addRunArtifact(embedded_test);
+        embedded_step.dependOn(&run_embedded.step);
+        test_step.dependOn(&run_embedded.step);
     }
 
     const param_fixtures_step = b.step(

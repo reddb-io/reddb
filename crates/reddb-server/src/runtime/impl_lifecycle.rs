@@ -114,9 +114,17 @@ impl RedDBRuntime {
     }
 
     pub fn flush(&self) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        let publication = store.vault_publication_lock.lock();
         self.inner
             .db
-            .flush()
+            .flush_local_only()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.index_store_ref().clear_paged_btree_overlays();
+        drop(publication);
+        self.inner
+            .db
+            .upload_to_remote_backend()
             .map_err(|err| RedDBError::Internal(err.to_string()))
     }
 
@@ -234,19 +242,10 @@ impl RedDBRuntime {
                 Err(err) => RedDBError::Internal(err.to_string()),
             }
         })?);
-        // The RAM tier is sized from its share. L2's disk extent is not memory
-        // and keeps its own ceiling; only L1 and L2's resident metadata are
-        // accounted against `blob_cache_l1`.
-        let result_blob_cache_config = if embedded_single_file {
-            crate::storage::cache::BlobCacheConfig::default()
-        } else {
-            crate::storage::cache::BlobCacheConfig::default().with_l2_path(
-                reddb_file::layout::result_cache_l2_path(
-                    &options.resolved_path(reddb_file::default_database_path()),
-                ),
-            )
-        }
-        .with_l1_bytes_max(memory_shares.blob_cache_l1_bytes());
+        // Query results are disposable. Do not create a second persistent
+        // database outside the .rdb and its WAL for the cache.
+        let result_blob_cache_config = crate::storage::cache::BlobCacheConfig::default()
+            .with_l1_bytes_max(memory_shares.blob_cache_l1_bytes());
         let result_blob_cache =
             crate::storage::cache::BlobCache::open_with_l2(result_blob_cache_config).map_err(
                 |err| RedDBError::Internal(format!("open result Blob Cache L2 failed: {err:?}")),
@@ -400,7 +399,7 @@ impl RedDBRuntime {
                     // log must NOT land as a sibling. Route it to a
                     // process-unique temp location even when a data path is
                     // set; only the non-embedded case uses the data dir.
-                    let data_path = if embedded_single_file {
+                    let data_path = if embedded_single_file || options.read_only {
                         std::env::temp_dir()
                             .join("reddb-embedded-runtime")
                             .join(format!("audit-{}", std::process::id()))
@@ -411,8 +410,14 @@ impl RedDBRuntime {
                             .unwrap_or_else(|| std::env::temp_dir().join("reddb"))
                     };
                     let (audit_dest, _) = crate::api::tier_wiring::current_log_destinations();
+                    let audit_dest = if options.read_only {
+                        crate::storage::layout::LogDestination::Stderr
+                    } else {
+                        audit_dest
+                    };
                     if !matches!(audit_dest, crate::storage::layout::LogDestination::File(_))
                         && (embedded_single_file
+                            || options.read_only
                             || options
                                 .metadata
                                 .contains_key(crate::api::EPHEMERAL_RUNTIME_METADATA_KEY))
@@ -477,7 +482,7 @@ impl RedDBRuntime {
                     // never writes the slow-query log as a sibling of the
                     // `.rdb`. Route to a process-unique temp dir when embedded,
                     // regardless of the data path.
-                    let fallback_dir = if embedded_single_file {
+                    let fallback_dir = if embedded_single_file || options.read_only {
                         std::env::temp_dir()
                             .join("reddb-embedded-runtime")
                             .join(format!("slow-{}", std::process::id()))
@@ -497,6 +502,11 @@ impl RedDBRuntime {
                         .and_then(|s| s.parse::<u8>().ok())
                         .unwrap_or(100);
                     let (_, slow_dest) = crate::api::tier_wiring::current_log_destinations();
+                    let slow_dest = if options.read_only {
+                        crate::storage::layout::LogDestination::Stderr
+                    } else {
+                        slow_dest
+                    };
                     crate::telemetry::slow_query_logger::SlowQueryLogger::for_destination(
                         &slow_dest,
                         &fallback_dir,
@@ -597,6 +607,12 @@ impl RedDBRuntime {
             .max(runtime.config_u64("red.config.timeline.last_archived_lsn", 0));
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
         runtime.rehydrate_snapshot_xid_floor()?;
+        assert!(runtime
+            .inner
+            .db
+            .runtime
+            .set(super::WeakRuntime(Arc::downgrade(&runtime.inner)))
+            .is_ok());
         assert!(
             runtime
                 .inner
@@ -611,10 +627,10 @@ impl RedDBRuntime {
             .bootstrap_system_keyed_collections()
             .map_err(|err| RedDBError::Internal(format!("bootstrap system collections: {err}")))?;
         runtime.rehydrate_declared_column_schemas();
-        runtime.prepare_paged_counts()?;
-        // Registry restoration can checkpoint missing projections on any
-        // collection. Register every internal projector before that epoch.
+        // Registry restoration can checkpoint missing required projections.
+        // Register their projectors before that epoch.
         super::control_event_index::prepare(&runtime)?;
+        super::queue_storage_index::prepare(&runtime)?;
         runtime.rehydrate_runtime_index_registry()?;
         if runtime
             .db()
@@ -641,7 +657,8 @@ impl RedDBRuntime {
         // descriptors so `CREATE MATERIALIZED VIEW v AS …` survives a
         // restart. Runs after the system-keyed collections bootstrap
         // and before the API opens.
-        runtime.rehydrate_materialized_view_descriptors();
+        runtime.rehydrate_materialized_view_descriptors()?;
+        runtime.recover_store_forks()?;
         if let Some(repl) = &runtime.inner.db.replication {
             repl.wal_buffer.set_current_lsn(restored_cdc_lsn);
         }
@@ -899,6 +916,12 @@ impl RedDBRuntime {
         // exist. Idempotent and survives restarts via the WAL-backed contract.
         let _ = crate::application::topology_collections::ensure(&runtime);
 
+        // Bootstrapping topology can publish a metadata checkpoint. Register
+        // the optional COUNT projection only after that publication, so old
+        // data is not backfilled before readiness. Queries scan until the next
+        // checkpoint publishes the projection.
+        runtime.prepare_paged_counts()?;
+
         // #1369 — reserve a fixed internal-id floor so the first user-inserted
         // entity always receives a stable, documented `rid` (FIRST_USER_ENTITY_ID),
         // independent of how many internal collection-descriptor / config-default
@@ -1012,7 +1035,9 @@ impl RedDBRuntime {
                 .inner
                 .ec_registry
                 .load_from_config_store(runtime.inner.db.store().as_ref());
-            if !runtime.inner.ec_registry.async_configs().is_empty() {
+            if !runtime.inner.db.options().read_only
+                && !runtime.inner.ec_registry.async_configs().is_empty()
+            {
                 runtime.inner.ec_worker.start(
                     Arc::clone(&runtime.inner.ec_registry),
                     Arc::clone(&runtime.inner.db.store()),
@@ -1021,7 +1046,8 @@ impl RedDBRuntime {
         }
 
         if let (true, crate::replication::ReplicationRole::Replica { primary_addr }) = (
-            runtime.inner.db.options().replica_loop_enabled,
+            runtime.inner.db.options().replica_loop_enabled
+                && !runtime.inner.db.options().read_only,
             runtime.inner.db.options().replication.role.clone(),
         ) {
             let rt = runtime.clone();
@@ -1036,6 +1062,18 @@ impl RedDBRuntime {
         // remote, replica-loop spawn). Health probes flip from 503 to
         // 200 here; shutdown begins from this state.
         runtime.inner.lifecycle.mark_ready();
+
+        #[cfg(not(test))]
+        if runtime
+            .db()
+            .store()
+            .config()
+            .resident_memory_bytes_max
+            .is_some()
+            && !runtime.db().options().read_only
+        {
+            runtime.start_count_projection_worker();
+        }
 
         // Issue #583 slice 10 — ContinuousMaterializedView scheduler.
         // Low-priority background ticker that drains the cache's
@@ -1106,6 +1144,9 @@ impl RedDBRuntime {
                             inner,
                         };
                         rt.sweep_retention_tick(
+                            crate::runtime::retention_sweeper::DEFAULT_SWEEPER_BATCH,
+                        );
+                        rt.sweep_individual_ttl_tick(
                             crate::runtime::retention_sweeper::DEFAULT_SWEEPER_BATCH,
                         );
                     },
@@ -1265,10 +1306,15 @@ impl RedDBRuntime {
                 changed = true;
             }
             if self.inner.db.collection_contract(name).is_none() {
-                self.inner
-                    .db
-                    .save_collection_contract(system_keyed_collection_contract(name, model))
-                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                let contract = system_keyed_collection_contract(name, model);
+                if self.inner.db.options().read_only {
+                    self.inner.db.cache_read_only_bootstrap_contract(contract);
+                } else {
+                    self.inner
+                        .db
+                        .save_collection_contract(contract)
+                        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                }
                 changed = true;
             }
         }

@@ -20,10 +20,11 @@ use crate::mcp::{protocol, tools};
 use crate::presentation::entity_json::created_entity_output_json;
 use crate::presentation::entity_json::storage_value_to_json;
 use crate::presentation::query_result_json::{runtime_query_json, runtime_stats_json};
+use crate::runtime::agent_tools::{self, RedToolExecutor, ToolExecutionProfile, ToolParseMode};
 use crate::runtime::{
-    query_request::ParamValue, RedDBRuntime, RuntimeGraphCentralityAlgorithm,
-    RuntimeGraphCommunityAlgorithm, RuntimeGraphComponentsMode, RuntimeGraphDirection,
-    RuntimeGraphPathAlgorithm, RuntimeGraphTraversalStrategy,
+    RedDBRuntime, RuntimeGraphCentralityAlgorithm, RuntimeGraphCommunityAlgorithm,
+    RuntimeGraphComponentsMode, RuntimeGraphDirection, RuntimeGraphPathAlgorithm,
+    RuntimeGraphTraversalStrategy,
 };
 use crate::storage::EntityId;
 use reddb_types::Value;
@@ -315,8 +316,11 @@ impl McpServer {
         let result = tools::authorize_tool(name, tools::McpIdentityPosture::EmbeddedImplicitAdmin)
             .and_then(|_| self.check_tool_capability(name))
             .and_then(|_| match name {
-                "reddb_query" => self.tool_query(args),
+                agent_tools::QUERY_TOOL => self.tool_query(args),
                 "reddb_collections" => self.tool_collections(),
+                agent_tools::CATALOG_TOOL => self.tool_catalog(),
+                agent_tools::DESCRIBE_COLLECTION_TOOL => self.tool_describe_collection(args),
+                agent_tools::FIND_FIELD_TOOL => self.tool_find_field(args),
                 "reddb_insert_row" => self.tool_insert_row(args),
                 "reddb_insert_node" => self.tool_insert_node(args),
                 "reddb_insert_edge" => self.tool_insert_edge(args),
@@ -411,36 +415,7 @@ impl McpServer {
             ));
         }
 
-        // Optional positional `$N` bind parameters. MCP, stdio, and HTTP
-        // all decode through the Request module's transport-neutral codec.
-        if let Some(raw_params) = args.get("params") {
-            let arr = raw_params
-                .as_array()
-                .ok_or_else(|| "'params' must be an array".to_string())?;
-            let binds: Vec<Value> = arr
-                .iter()
-                .map(ParamValue::decode_json)
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .map(Value::from)
-                .collect();
-
-            // Bind inside the runtime's statement frame (#2183) so a
-            // parameterized MCP query keeps the same snapshot isolation and
-            // `AS OF` resolution as textual SQL.
-            let result = self
-                .runtime
-                .execute_query_with_params(sql, &binds)
-                .map_err(|e| format!("{}", e))?;
-            let json = runtime_query_json(&result, &None, &None);
-            return json_to_string(&json).map_err(|e| format!("serialization error: {}", e));
-        }
-
-        let uc = &self.runtime;
-        let result = uc.execute_query(sql).map_err(|e| format!("{}", e))?;
-
-        let json = runtime_query_json(&result, &None, &None);
-        json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
+        self.execute_common_tool(agent_tools::QUERY_TOOL, args)
     }
 
     fn tool_ask(&self, args: &JsonValue) -> Result<String, String> {
@@ -479,10 +454,32 @@ impl McpServer {
     }
 
     fn tool_collections(&self) -> Result<String, String> {
-        let uc = &self.runtime;
-        let collections = uc.db().collections();
+        let collections = self.runtime.db().collections();
         let json = JsonValue::Array(collections.into_iter().map(JsonValue::String).collect());
-        json_to_string(&json).map_err(|e| format!("serialization error: {}", e))
+        json_to_string(&json).map_err(|error| format!("serialization error: {error}"))
+    }
+
+    fn tool_catalog(&self) -> Result<String, String> {
+        self.execute_common_tool(agent_tools::CATALOG_TOOL, &JsonValue::Object(Map::new()))
+    }
+
+    fn tool_describe_collection(&self, args: &JsonValue) -> Result<String, String> {
+        self.execute_common_tool(agent_tools::DESCRIBE_COLLECTION_TOOL, args)
+    }
+
+    fn tool_find_field(&self, args: &JsonValue) -> Result<String, String> {
+        self.execute_common_tool(agent_tools::FIND_FIELD_TOOL, args)
+    }
+
+    fn execute_common_tool(&self, name: &str, args: &JsonValue) -> Result<String, String> {
+        let call = agent_tools::parse_call(name, args, ToolParseMode::Direct)
+            .map_err(|error| error.to_string())?;
+        let scope = self.runtime.ai_scope();
+        let result = RedToolExecutor::new(&self.runtime, &scope, ToolExecutionProfile::Direct)
+            .execute(&call)
+            .map_err(|error| error.to_string())?;
+        let json = runtime_query_json(&result, &None, &None);
+        json_to_string(&json).map_err(|error| format!("serialization error: {error}"))
     }
 
     fn tool_insert_row(&self, args: &JsonValue) -> Result<String, String> {
@@ -1957,6 +1954,55 @@ mod tests {
             .expect("reads stay available");
         srv.check_tool_capability("reddb_collections")
             .expect("introspection stays available");
+        srv.check_tool_capability("reddb_catalog")
+            .expect("catalog inspection stays available");
+        srv.check_tool_capability("reddb_describe_collection")
+            .expect("collection descriptions stay available");
+        srv.check_tool_capability("reddb_find_field")
+            .expect("field discovery stays available");
+        srv.check_tool_capability(crate::runtime::ai::mcp_ask_tool::TOOL_NAME)
+            .expect("grounded ASK stays available");
+    }
+
+    #[test]
+    fn metadata_tools_use_parameterized_catalog_queries() {
+        let srv = make_server();
+        srv.tool_query(&parse_json(
+            r#"{"sql":"CREATE TABLE people (id INTEGER PRIMARY KEY, passport_number TEXT)"}"#,
+        ))
+        .expect("create people table");
+        srv.tool_query(&parse_json(
+            r#"{"sql":"CREATE TABLE visits (id INTEGER PRIMARY KEY, arrived_at TIMESTAMP)"}"#,
+        ))
+        .expect("create visits table");
+
+        let collections = srv.tool_collections().expect("list collection names");
+        assert!(collections.contains("people"), "{collections}");
+        assert!(!collections.contains("table"), "{collections}");
+
+        let catalog = srv.tool_catalog().expect("list collection metadata");
+        assert!(catalog.contains("people"), "{catalog}");
+        assert!(catalog.contains("table"), "{catalog}");
+
+        let description = srv
+            .tool_describe_collection(&parse_json(r#"{"collection":"people"}"#))
+            .expect("describe people");
+        assert!(description.contains("passport_number"), "{description}");
+        assert!(description.contains("is_primary_key"), "{description}");
+
+        let matches = srv
+            .tool_find_field(&parse_json(r#"{"field":"passport_number"}"#))
+            .expect("find passport field");
+        assert!(matches.contains("people"), "{matches}");
+        assert!(!matches.contains("visits"), "{matches}");
+
+        let injected = srv
+            .tool_describe_collection(&parse_json(
+                r#"{"collection":"people' OR collection = 'visits"}"#,
+            ))
+            .expect("crafted collection remains a bind value");
+        assert!(!injected.contains("passport_number"), "{injected}");
+        assert!(!injected.contains("arrived_at"), "{injected}");
     }
 
     #[test]

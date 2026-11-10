@@ -60,10 +60,11 @@ class CompressedButNoZstd extends RedDBError {
 
 /// Caller used a `red://` URI that points at the embedded engine.
 class EmbeddedUnsupported extends RedDBError {
-  EmbeddedUnsupported()
-      : super(
+  EmbeddedUnsupported([
+    String message = 'embedded RedDB needs the native reddb_ffi library',
+  ]) : super(
           'EMBEDDED_UNSUPPORTED',
-          'embedded engine is Rust-only; use red:// or reds:// or http(s)://',
+          message,
         );
 }
 

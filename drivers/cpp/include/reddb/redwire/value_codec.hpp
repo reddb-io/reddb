@@ -37,5 +37,7 @@ inline std::vector<uint8_t> encode_query_with_params(
 
 std::string to_http_params_json(std::span<const reddb::Value> params);
 std::string to_http_query_body(std::string_view sql, std::span<const reddb::Value> params);
+std::string to_json_string(std::string_view value);
+std::string to_rpc_query_params(std::string_view sql, std::span<const reddb::Value> params);
 
 } // namespace reddb::redwire

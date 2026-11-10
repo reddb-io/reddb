@@ -1,6 +1,8 @@
 import 'dart:typed_data';
 
 import 'conn.dart';
+import 'embedded/embedded_conn_stub.dart'
+    if (dart.library.ffi) 'embedded/embedded_conn_native.dart';
 import 'errors.dart';
 import 'helpers.dart';
 import 'http/client.dart';
@@ -22,7 +24,7 @@ Future<Reddb> connect(
 }) async {
   final parsed = parseUri(uri);
   if (parsed.isEmbedded) {
-    throw EmbeddedUnsupported();
+    return Reddb._(await openEmbedded(parsed));
   }
   if (parsed.host == null) {
     throw InvalidUri("URI '$uri' is missing a host");

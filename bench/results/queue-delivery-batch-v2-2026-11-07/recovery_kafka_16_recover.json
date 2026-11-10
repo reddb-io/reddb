@@ -1,0 +1,37 @@
+{
+  "config": {
+    "engine": "kafka",
+    "red_ack_batch": false,
+    "host": "reddb-delivery-v2-kafka-1107",
+    "name": "recovery_kafka_16",
+    "batch": 16,
+    "operations": 32,
+    "bytes": 100,
+    "settle_ms": 2000,
+    "mode": "recover"
+  },
+  "status": "valid-diagnostic",
+  "classification": "shared-host-diagnostic",
+  "latency_contract": "whole batch through consume/ACK; never divided by batch size",
+  "ack_contract": "synchronous offset commit; records retained",
+  "operations": 32,
+  "elapsed_seconds": 0.259693648999928,
+  "operations_per_second": 123.22211237444962,
+  "batch_latency_ms": {
+    "p50": 13.258696999855601,
+    "p95": 246.41611600009128,
+    "p99": 246.41611600009128
+  },
+  "batch_samples_ms": [
+    246.41611600009128,
+    13.258696999855601
+  ],
+  "publication_batch_ms": [
+    0.0008920001164369751,
+    0.0005709998731617816
+  ],
+  "consume_ack_batch_ms": [
+    246.41522399997484,
+    13.25812599998244
+  ]
+}

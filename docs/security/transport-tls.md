@@ -471,7 +471,7 @@ distinguish federated identities from local credentials at a glance.
 | `drivers/cpp`              | yes         | yes  | yes       | yes         | OpenSSL 1.1.1+ / 3.0+                                                          |
 | `drivers/dotnet`           | yes         | yes  | yes       | yes         | `SslStream`                                                                    |
 | `drivers/php`              | yes         | yes  | yes       | yes         | `stream_socket_client` + `streamcontext`                                        |
-| `drivers/zig`              | yes (partial) | no  | partial   | yes         | Zig 0.13 std.crypto.tls is server-side only; mTLS planned in 0.14              |
+| `drivers/zig`              | yes (partial) | no  | partial   | yes         | Zig 0.14.1 client TLS works without ALPN; custom CA and mTLS remain planned     |
 | `drivers/dart`             | yes         | yes  | yes       | yes         | `dart:io` `SecureSocket`                                                       |
 
 > [!NOTE]

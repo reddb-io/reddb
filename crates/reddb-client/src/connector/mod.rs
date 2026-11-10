@@ -22,3 +22,29 @@ pub use reddb_grpc_proto::{
     BulkEntityReply as BulkCreateStatus, EntityReply as CreatedEntity, HealthReply as HealthStatus,
     OperationReply as OperationStatus, QueryReply as QueryResponse, RedDBClient,
 };
+
+/// Encode public client bind values for the dependency-light gRPC connector.
+pub fn params_to_grpc_values(params: &[crate::Value]) -> Vec<reddb_grpc_proto::QueryValue> {
+    use reddb_grpc_proto::query_value::Kind;
+    use reddb_grpc_proto::{QueryNull, QueryValue, QueryVector};
+
+    params
+        .iter()
+        .cloned()
+        .map(|value| {
+            let kind = match value {
+                crate::Value::Null => Kind::NullValue(QueryNull {}),
+                crate::Value::Bool(value) => Kind::BoolValue(value),
+                crate::Value::Int(value) => Kind::IntValue(value),
+                crate::Value::Float(value) => Kind::FloatValue(value),
+                crate::Value::Text(value) => Kind::TextValue(value),
+                crate::Value::Bytes(value) => Kind::BytesValue(value),
+                crate::Value::Vector(values) => Kind::VectorValue(QueryVector { values }),
+                crate::Value::Json(value) => Kind::JsonValue(value.to_json_string()),
+                crate::Value::Timestamp(value) => Kind::TimestampValue(value),
+                crate::Value::Uuid(value) => Kind::UuidValue(value.to_vec()),
+            };
+            QueryValue { kind: Some(kind) }
+        })
+        .collect()
+}

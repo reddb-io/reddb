@@ -3,6 +3,36 @@
 Status: accepted
 Date: 2026-07-05
 
+## 2026-11-06 implementation correction
+
+The external-manifest fork implementation is retired. Each new fork is an
+independent `.rdb` with its own WAL. Its parent catalog and lifecycle intent
+are keyed records in `red.storage.forks`; the child stores its origin there too.
+No `.ops`, JSON manifest, or per-collection file is published. Audit output
+remains an independent diagnostic sink.
+
+Creation checkpoints committed state, copies the database with a 1 MiB I/O
+buffer, initializes the child's ownership metadata, syncs it, and only then
+publishes the ready record in the parent's WAL. Cost: N bytes read + N bytes
+written, plus ordinary checkpoint/open costs under the selected storage profile.
+This is an eager independent copy, not the O(metadata) lazy design below.
+The child does not inherit the parent's fork catalog, replication slots, or
+ownership of exported backup files.
+
+Creation at the current committed LSN is supported. A historical/future LSN
+is rejected: relabeling today's checkpoint is not point-in-time recovery.
+Historical restore still requires a retained backup and WAL.
+
+Drop, detach and promotion have durable, restartable intent records. Detach
+releases the independent file from parent ownership. Promotion releases and
+returns that file as the replacement primary; operators reopen the server on
+the returned path. The serving parent's path/data are preserved for rollback;
+promotion does not replace a database under existing connections. Legacy
+external forks remain visible through read-only listing, but are never mutated
+or silently converted by this implementation.
+
+The remaining sections describe the superseded lazy-storage proposal.
+
 ## Context
 
 Neon-style database branching — fork a production store in O(metadata), run an

@@ -126,10 +126,11 @@ pub use btree_value_layout::{
 pub use clock::{Clock, SimClock, SystemClock};
 pub use column_block::{
     column_block_crc32, decode_column_block_frame, decode_column_block_granule_bloom_blob,
-    decode_column_block_granule_index_blob, encode_column_block_frame,
-    encode_column_block_granule_bloom_blob, encode_column_block_granule_index_blob,
-    peek_column_block_version, ColumnBlockColumn, ColumnBlockFrame, ColumnBlockFrameError,
-    ColumnBlockGranuleBloom, ColumnBlockGranuleIndex, ColumnBlockGranuleStats, ColumnBlockPart,
+    decode_column_block_granule_index_blob, decode_column_block_granule_index_view,
+    encode_column_block_frame, encode_column_block_granule_bloom_blob,
+    encode_column_block_granule_index_blob, peek_column_block_version, ColumnBlockColumn,
+    ColumnBlockFrame, ColumnBlockFrameError, ColumnBlockGranuleBloom, ColumnBlockGranuleIndex,
+    ColumnBlockGranuleIndexView, ColumnBlockGranuleStats, ColumnBlockPart,
     COLUMN_BLOCK_DIR_ENTRY_LEN, COLUMN_BLOCK_FOOTER_LEN, COLUMN_BLOCK_HEADER_LEN,
 };
 pub use control_store::{
@@ -171,9 +172,9 @@ pub use file_format::{
     PAGED_ENCRYPTION_KEY_CHECK_PLAINTEXT_SIZE, PAGED_ENCRYPTION_MARKER,
     PAGED_ENCRYPTION_MARKER_OFFSET, PAGED_ENCRYPTION_SALT_SIZE, PAGED_PAGE_HEADER_SIZE,
     PAGED_PAGE_SIZE, PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE,
-    PAGED_SUPERBLOCK_TRAILER_OFFSET, PAGED_SUPERBLOCK_ZONE_SIZE, PAGE_FILE_MAGIC,
-    PAGE_FILE_VERSION, VECTOR_BTREE_FORMAT_VERSION, VECTOR_BTREE_FORMAT_VERSION_V1,
-    VECTOR_BTREE_FORMAT_VERSION_V2,
+    PAGED_SUPERBLOCK_TRAILER_OFFSET, PAGED_SUPERBLOCK_ZONE_SIZE, PAGE_DWB_ZONE_FILE_VERSION,
+    PAGE_FILE_MAGIC, PAGE_FILE_VERSION, VECTOR_BTREE_FORMAT_VERSION,
+    VECTOR_BTREE_FORMAT_VERSION_V1, VECTOR_BTREE_FORMAT_VERSION_V2,
 };
 pub use graph_label_registry::{
     decode_graph_label_registry_frame, encode_graph_label_registry_frame, GraphLabelRegistryEntry,

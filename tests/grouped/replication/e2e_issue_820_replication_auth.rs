@@ -96,6 +96,20 @@ fn ack_request(
     )
 }
 
+fn anonymous_pull_request(replica_id: &str) -> tonic::Request<JsonPayloadRequest> {
+    tonic::Request::new(JsonPayloadRequest {
+        payload_json: format!(r#"{{"replica_id":"{replica_id}","since_lsn":0,"max_count":10}}"#),
+    })
+}
+
+fn anonymous_ack_request(replica_id: &str, applied_lsn: u64) -> tonic::Request<JsonPayloadRequest> {
+    tonic::Request::new(JsonPayloadRequest {
+        payload_json: format!(
+            r#"{{"replica_id":"{replica_id}","applied_lsn":{applied_lsn},"durable_lsn":{applied_lsn}}}"#
+        ),
+    })
+}
+
 #[tokio::test]
 async fn replication_stream_and_ack_require_capabilities_and_bind_ack_identity() {
     let runtime = RedDBRuntime::with_options(
@@ -221,4 +235,261 @@ async fn replication_stream_and_ack_require_capabilities_and_bind_ack_identity()
     assert_eq!(replica_a.last_acked_lsn, 10);
 
     h.abort();
+}
+
+#[tokio::test]
+async fn explicit_no_auth_mode_supports_the_replica_protocol() {
+    let runtime = RedDBRuntime::with_options(
+        RedDBOptions::in_memory().with_replication(ReplicationConfig::primary()),
+    )
+    .expect("runtime");
+    let store = Arc::new(AuthStore::new(AuthConfig {
+        enabled: false,
+        require_auth: false,
+        ..AuthConfig::default()
+    }));
+    let port = pick_port();
+    let server = RedDBGrpcServer::with_options(
+        runtime.clone(),
+        GrpcServerOptions {
+            bind_addr: format!("127.0.0.1:{port}"),
+            tls: None,
+        },
+        store,
+    );
+    let handle = tokio::spawn(async move {
+        let _ = server.serve().await;
+    });
+    wait_for_port(port, 5000).await;
+    let mut client = connect_client(port).await;
+
+    let pull = client
+        .pull_wal_records(anonymous_pull_request("replica_no_auth"))
+        .await
+        .expect("anonymous replica can pull when the primary is explicitly no-auth")
+        .into_inner();
+    let pull_body: serde_json::Value =
+        serde_json::from_str(&pull.payload).expect("pull response is JSON");
+    let current_lsn = pull_body["current_lsn"].as_u64().expect("current_lsn");
+
+    let ack = client
+        .ack_replica_lsn(anonymous_ack_request("replica_no_auth", current_lsn))
+        .await
+        .expect("anonymous replica can ack when the primary is explicitly no-auth")
+        .into_inner();
+    let ack_body: serde_json::Value =
+        serde_json::from_str(&ack.payload).expect("ack response is JSON");
+    assert_eq!(ack_body["replica_id"], "replica_no_auth");
+
+    let missing_id = client
+        .replication_snapshot(tonic::Request::new(Empty {}))
+        .await
+        .expect_err("anonymous snapshots must identify their stable replica slot");
+    assert_eq!(missing_id.code(), Code::InvalidArgument);
+
+    let mut snapshot_request = tonic::Request::new(Empty {});
+    snapshot_request.metadata_mut().insert(
+        "x-reddb-replica-id",
+        "replica_no_auth".parse().expect("metadata value"),
+    );
+    client
+        .replication_snapshot(snapshot_request)
+        .await
+        .expect("anonymous replica can bootstrap when it supplies its stable id");
+
+    let replica = runtime
+        .primary_replica_snapshots()
+        .into_iter()
+        .find(|replica| replica.id == "replica_no_auth")
+        .expect("one stable replica slot");
+    assert_eq!(replica.last_acked_lsn, current_lsn);
+    handle.abort();
+}
+
+/// Exercise the engine's own bootstrap and background follower, rather than
+/// hand-built requests that accidentally supply headers the follower omits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_replica_bootstraps_and_follows_authenticated_primary() {
+    let directory = tempfile::tempdir().expect("test directory");
+    let primary = RedDBRuntime::with_options(
+        RedDBOptions::persistent(directory.path().join("primary.rdb"))
+            .with_replication(ReplicationConfig::primary()),
+    )
+    .expect("primary runtime");
+    primary
+        .execute_query("CREATE TABLE replication_probe (id TEXT, value INTEGER)")
+        .expect("schema");
+    primary
+        .execute_query("INSERT INTO replication_probe (id, value) VALUES ('before', 1)")
+        .expect("seed");
+    // Hex encoding pushes this snapshot beyond tonic's 4 MiB client default.
+    primary
+        .execute_query("CREATE TABLE snapshot_payload (id TEXT, body TEXT)")
+        .expect("payload schema");
+    for index in 0..5 {
+        primary
+            .execute_query(&format!(
+                "INSERT INTO snapshot_payload (id, body) VALUES ('large-{index}', '{}')",
+                "x".repeat(450_000)
+            ))
+            .expect("payload seed");
+    }
+
+    let store = Arc::new(AuthStore::new(AuthConfig {
+        enabled: true,
+        require_auth: true,
+        ..AuthConfig::default()
+    }));
+    store
+        .create_user("follower", "test-password", Role::Read)
+        .expect("replica principal");
+    let key = store
+        .create_api_key("follower", "replication", Role::Read)
+        .expect("replica key");
+    install_policy(
+        &store,
+        "follower",
+        "follower_replication",
+        &["cluster:replication:stream", "cluster:replication:ack"],
+        "cluster:replication",
+    );
+    let port = pick_port();
+    let server = RedDBGrpcServer::with_options(
+        primary.clone(),
+        GrpcServerOptions {
+            bind_addr: format!("127.0.0.1:{port}"),
+            tls: None,
+        },
+        store,
+    );
+    let server_task = tokio::spawn(async move {
+        server.serve().await.expect("gRPC server");
+    });
+    wait_for_port(port, 5000).await;
+
+    struct EnvironmentGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for EnvironmentGuard {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+    let names = [
+        "REDDB_REPLICATION_USERNAME",
+        "REDDB_REPLICATION_API_KEY",
+        "REDDB_REPLICATION_USERNAME_FILE",
+        "REDDB_REPLICATION_API_KEY_FILE",
+    ];
+    let _environment = EnvironmentGuard(
+        names
+            .into_iter()
+            .map(|name| (name, std::env::var_os(name)))
+            .collect(),
+    );
+    unsafe {
+        std::env::set_var("REDDB_REPLICATION_USERNAME", "follower");
+        std::env::set_var("REDDB_REPLICATION_API_KEY", &key.key);
+        std::env::remove_var("REDDB_REPLICATION_USERNAME_FILE");
+        std::env::remove_var("REDDB_REPLICATION_API_KEY_FILE");
+    }
+
+    // A rejected bootstrap must not silently create an empty local database.
+    unsafe {
+        std::env::set_var("REDDB_REPLICATION_API_KEY", "rejected-test-key");
+    }
+    let rejected_path = directory.path().join("rejected.rdb");
+    let rejected_bootstrap_path = rejected_path.clone();
+    let rejected = tokio::task::spawn_blocking(move || {
+        RedDBRuntime::with_options(
+            RedDBOptions::persistent(rejected_bootstrap_path).with_replication(
+                ReplicationConfig::replica(format!("http://127.0.0.1:{port}")),
+            ),
+        )
+        .err()
+        .map(|error| error.to_string())
+    })
+    .await
+    .expect("rejected bootstrap task")
+    .expect("bad credentials must fail startup");
+    assert!(rejected.contains("authenticated replica snapshot bootstrap failed"));
+    assert!(!rejected.contains("rejected-test-key"));
+    assert!(!rejected_path.exists());
+    unsafe {
+        std::env::set_var("REDDB_REPLICATION_API_KEY", &key.key);
+    }
+
+    let replica_path = directory.path().join("replica.rdb");
+    let replica = tokio::task::spawn_blocking(move || {
+        RedDBRuntime::with_options(RedDBOptions::persistent(replica_path).with_replication(
+            ReplicationConfig::replica(format!("http://127.0.0.1:{port}")),
+        ))
+        .expect("authenticated snapshot bootstrap")
+    })
+    .await
+    .expect("bootstrap task");
+    assert_eq!(
+        replica
+            .execute_query("SELECT id FROM replication_probe")
+            .expect("snapshot rows")
+            .result
+            .records
+            .len(),
+        1
+    );
+    assert_eq!(
+        replica
+            .execute_query("SELECT id FROM snapshot_payload")
+            .expect("large snapshot imported")
+            .result
+            .records
+            .len(),
+        5
+    );
+    assert!(replica
+        .execute_query("INSERT INTO replication_probe (id, value) VALUES ('forbidden', 9)")
+        .is_err());
+
+    primary
+        .execute_query("INSERT INTO replication_probe (id, value) VALUES ('after', 2)")
+        .expect("insert");
+    primary
+        .execute_query("UPDATE replication_probe SET value = 3 WHERE id = 'after'")
+        .expect("update");
+    primary
+        .execute_query("DELETE FROM replication_probe WHERE id = 'before'")
+        .expect("delete");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    loop {
+        let found = replica
+            .execute_query("SELECT id FROM replication_probe WHERE id = 'after' AND value = 3")
+            .expect("replica query")
+            .result
+            .records
+            .len();
+        let total = replica
+            .execute_query("SELECT id FROM replication_probe")
+            .expect("replica total")
+            .result
+            .records
+            .len();
+        let acknowledged = primary
+            .primary_replica_snapshots()
+            .into_iter()
+            .any(|slot| slot.id == "follower" && slot.last_acked_lsn > 0);
+        if found == 1 && total == 1 && acknowledged {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "native replica must apply mutations and acknowledge as its credential identity"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    server_task.abort();
 }

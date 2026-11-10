@@ -399,7 +399,11 @@ pub(crate) fn execute_aggregate_query(
     // on the full scan path. Reuse the ordinary result assembly for aliases,
     // empty input, materialization admission and OFFSET/LIMIT semantics.
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
-    if effective_filter.is_none()
+    let count_projection_has_no_ttl = db.store().get_collection(table_name).is_none_or(|manager| {
+        manager.metadata_expiry_projection_ready() && manager.scheduled_metadata_expiry_count() == 0
+    });
+    if count_projection_has_no_ttl
+        && effective_filter.is_none()
         && !has_group_by
         && effective_table_having_filter(query).is_none()
         && query.order_by.is_empty()
@@ -460,6 +464,9 @@ pub(crate) fn execute_aggregate_query(
     crate::runtime::function_budget::try_scan_result(
         |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
+            if !db.entity_visible_at_read(table_name, entity) {
+                return Ok(true);
+            }
             // ── Lazy record materialisation ──────────────────────────────────
             // We defer `runtime_table_record_from_entity` until we actually
             // need it (complex filters, GROUP BY exprs or aggregate args that

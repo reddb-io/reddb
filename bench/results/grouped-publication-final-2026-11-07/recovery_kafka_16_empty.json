@@ -1,0 +1,17 @@
+{
+  "config": {
+    "engine": "kafka",
+    "host": "reddb-pub-final-kafka-1107",
+    "name": "recovery_kafka_16",
+    "batch": 16,
+    "operations": 1,
+    "bytes": 100,
+    "settle_ms": 2000,
+    "mode": "empty"
+  },
+  "status": "valid-diagnostic",
+  "classification": "shared-host-diagnostic",
+  "latency_contract": "whole batch through consume/ACK; never divided by batch size",
+  "ack_contract": "synchronous offset commit; records retained",
+  "verified_empty": true
+}

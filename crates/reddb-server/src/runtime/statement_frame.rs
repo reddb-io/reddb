@@ -908,7 +908,8 @@ impl ReadFrame for StatementExecutionFrame {
 /// (`SEARCH SIMILAR`, `SEARCH CONTEXT`, `ASK`).
 ///
 /// Issue #119 calls this struct `EffectiveScope`. It bundles the
-/// `(tenant, identity, role, visible_collections, snapshot)` tuple so
+/// `(tenant, structured principal, identity projection, role,
+/// visible_collections, snapshot)` tuple so
 /// every AI runtime entry can pass *one* value to `AuthorizedSearch`
 /// instead of re-reading thread-locals at every call site.
 ///
@@ -920,6 +921,7 @@ pub struct EffectiveScope {
     pub(crate) captured_snapshot: Option<SnapshotContext>,
     pub(crate) tenant: Option<String>,
     pub(crate) identity: Option<(String, Role)>,
+    pub(crate) auth_principal: Option<crate::auth::UserId>,
     pub(crate) snapshot: Snapshot,
     pub(crate) visible_collections: Option<HashSet<String>>,
 }
@@ -1006,6 +1008,7 @@ impl RedDBRuntime {
     pub(crate) fn ai_scope(&self) -> EffectiveScope {
         let tenant = super::impl_core::current_tenant();
         let identity = super::impl_core::current_auth_identity();
+        let auth_principal = super::execution_context::current_auth_principal();
         let captured_snapshot = super::execution_context::capture_current_snapshot();
         let snapshot = captured_snapshot.as_ref().map_or_else(
             || self.current_snapshot(),
@@ -1027,6 +1030,7 @@ impl RedDBRuntime {
             captured_snapshot,
             tenant,
             identity,
+            auth_principal,
             snapshot,
             visible_collections,
         }
@@ -1147,7 +1151,10 @@ impl RedDBRuntime {
     ) -> RedDBResult<(Snapshot, Option<Xid>, SnapshotRetentionGuard)> {
         match peek_top_level_as_of_with_table(query) {
             Some((spec, Some(table))) => {
-                if !table.starts_with("red_") && !self.vcs_is_versioned(&table)? {
+                if !table.starts_with("red_")
+                    && !table.starts_with("red.")
+                    && !self.vcs_is_versioned(&table)?
+                {
                     return Err(RedDBError::InvalidConfig(format!(
                         "AS OF requires a versioned collection — \
                          `{table}` has not opted in. \
@@ -1367,6 +1374,409 @@ mod tests {
         assert!(f.as_of_floor().is_none(), "live read has no AS OF floor");
         assert_eq!(f.snapshot().xid, rt.snapshot_manager().peek_next_xid() - 1);
         assert!(!f.snapshot().sees(rt.snapshot_manager().peek_next_xid(), 0));
+    }
+
+    #[test]
+    fn autocommit_snapshot_does_not_lose_rows_after_index_publication() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE frame_index_race (id INT PRIMARY KEY, status TEXT)")
+            .expect("create fixture");
+        rt.execute_query("INSERT INTO frame_index_race (id, status) VALUES (1, 'old'), (2, 'old')")
+            .expect("insert fixture");
+        rt.execute_query("CREATE INDEX frame_status_hash ON frame_index_race (status) USING HASH")
+            .expect("create index");
+        let sql = "SELECT id FROM frame_index_race WHERE status = 'old'";
+        let frame = StatementExecutionFrame::build(&rt, StatementIdentity::Text(sql))
+            .expect("capture autocommit snapshot");
+        rt.execute_query("UPDATE frame_index_race SET status = 'new' WHERE id = 1")
+            .expect("publish changed index entry");
+        let reddb_rql::ast::QueryExpr::Table(query) =
+            reddb_rql::modes::parse_multi(sql).expect("parse")
+        else {
+            panic!("expected table query");
+        };
+        let _guards = frame.install(&rt);
+        let records =
+            super::super::query_exec::table::execute_runtime_canonical_table_query_indexed(
+                &rt.db(),
+                &query,
+                Some(rt.index_store_ref()),
+            )
+            .expect("read captured snapshot");
+        let mut ids = records
+            .iter()
+            .map(|record| record.get("id").expect("id").to_string())
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(
+            ids,
+            ["1", "2"],
+            "current index omitted a visible historical row"
+        );
+    }
+
+    #[test]
+    fn captured_dml_snapshot_finds_rows_after_index_publication() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE frame_dml_race (id INT PRIMARY KEY, status TEXT)")
+            .expect("create fixture");
+        rt.execute_query("INSERT INTO frame_dml_race (id, status) VALUES (1, 'old'), (2, 'old')")
+            .expect("insert fixture");
+        rt.execute_query("CREATE INDEX frame_dml_status ON frame_dml_race (status) USING HASH")
+            .expect("create index");
+        let sql = "DELETE FROM frame_dml_race WHERE status = 'old'";
+        let frame = StatementExecutionFrame::build(&rt, StatementIdentity::Text(sql))
+            .expect("capture DML snapshot");
+        rt.execute_query("UPDATE frame_dml_race SET status = 'new' WHERE id = 1")
+            .expect("publish new indexed value");
+        let reddb_rql::ast::QueryExpr::Table(query) =
+            reddb_rql::modes::parse_multi("SELECT id FROM frame_dml_race WHERE status = 'old'")
+                .expect("parse filter")
+        else {
+            panic!("expected table query")
+        };
+        let filter = reddb_rql::sql_lowering::effective_table_filter(&query).expect("filter");
+        let _guards = frame.install(&rt);
+        let ids = super::super::dml_target_scan::DmlTargetScan::new(
+            &rt,
+            "frame_dml_race",
+            Some(&filter),
+            None,
+        )
+        .find_target_ids()
+        .expect("find DML targets");
+        assert_eq!(
+            ids.len(),
+            2,
+            "DML target scan must discover both snapshot-visible rows"
+        );
+    }
+
+    #[test]
+    fn captured_snapshot_survives_indexed_update_and_delete_for_range_queries() {
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE frame_range_race (id INT PRIMARY KEY, score INT)")
+            .expect("create fixture");
+        rt.execute_query("INSERT INTO frame_range_race (id, score) VALUES (1, 10), (2, 20)")
+            .expect("insert fixture");
+        rt.execute_query("CREATE INDEX frame_score_range ON frame_range_race (score)")
+            .expect("create index");
+        let sql = "SELECT id FROM frame_range_race WHERE score >= 10 AND score <= 20 ORDER BY id";
+        let frame = StatementExecutionFrame::build(&rt, StatementIdentity::Text(sql))
+            .expect("capture read snapshot");
+        rt.execute_query("UPDATE frame_range_race SET score = 99 WHERE id = 1")
+            .expect("update row");
+        rt.execute_query("DELETE FROM frame_range_race WHERE id = 2")
+            .expect("delete row");
+        let reddb_rql::ast::QueryExpr::Table(query) =
+            reddb_rql::modes::parse_multi(sql).expect("parse")
+        else {
+            panic!("expected table query");
+        };
+        let _guards = frame.install(&rt);
+        let records =
+            super::super::query_exec::table::execute_runtime_canonical_table_query_indexed(
+                &rt.db(),
+                &query,
+                Some(rt.index_store_ref()),
+            )
+            .expect("read captured snapshot");
+        let ids = records
+            .iter()
+            .map(|record| record.get("id").expect("id").to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["1", "2"]);
+    }
+
+    #[test]
+    fn dml_target_scan_does_not_retry_inside_stored_function_budget() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE dml_budget_guard (id INT, status TEXT)")
+            .expect("create fixture");
+        rt.execute_query("INSERT INTO dml_budget_guard (id, status) VALUES (1, 'old')")
+            .expect("insert fixture");
+        rt.execute_query("CREATE INDEX dml_budget_status ON dml_budget_guard (status) USING HASH")
+            .expect("create index");
+        let frame = StatementExecutionFrame::build(
+            &rt,
+            StatementIdentity::Text("DELETE FROM dml_budget_guard WHERE status = 'old'"),
+        )
+        .expect("capture snapshot");
+        let reddb_rql::ast::QueryExpr::Table(query) =
+            reddb_rql::modes::parse_multi("SELECT id FROM dml_budget_guard WHERE status = 'old'")
+                .expect("parse filter")
+        else {
+            panic!("expected table query")
+        };
+        let filter = reddb_rql::sql_lowering::effective_table_filter(&query).expect("filter");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        *rt.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+            if collection == "dml_budget_guard"
+                && phase == super::super::index_store::MutationTestPhase::DmlIndexLookupStarted
+            {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        let _budget = super::super::function_budget::Scope::enter(1_000, 10_000)
+            .expect("stored function budget");
+        let _guards = frame.install(&rt);
+        let ids = super::super::dml_target_scan::DmlTargetScan::new(
+            &rt,
+            "dml_budget_guard",
+            Some(&filter),
+            None,
+        )
+        .find_target_ids()
+        .expect("find DML targets");
+        assert_eq!(ids.len(), 1);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "bounded stored functions must not retry indexed discovery"
+        );
+        *rt.index_store_ref().mutation_hook.lock() = None;
+    }
+
+    #[test]
+    fn dml_index_lookup_retries_when_publication_races_target_selection() {
+        use std::sync::{mpsc, Arc, Mutex};
+        use std::time::Duration;
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        rt.execute_query("CREATE TABLE dml_lookup_race (id INT PRIMARY KEY, status TEXT)")
+            .expect("create fixture");
+        rt.execute_query("INSERT INTO dml_lookup_race (id, status) VALUES (1, 'old'), (2, 'old')")
+            .expect("insert fixture");
+        rt.execute_query("CREATE INDEX dml_lookup_status ON dml_lookup_race (status) USING HASH")
+            .expect("create index");
+        let frame = StatementExecutionFrame::build(
+            &rt,
+            StatementIdentity::Text("DELETE FROM dml_lookup_race WHERE status = 'old'"),
+        )
+        .expect("capture snapshot");
+        let reddb_rql::ast::QueryExpr::Table(query) =
+            reddb_rql::modes::parse_multi("SELECT id FROM dml_lookup_race WHERE status = 'old'")
+                .expect("parse filter")
+        else {
+            panic!("expected table query")
+        };
+        let filter = reddb_rql::sql_lowering::effective_table_filter(&query).expect("filter");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (published_tx, published_rx) = mpsc::channel();
+        let published_rx = Mutex::new(published_rx);
+        let first = std::sync::atomic::AtomicBool::new(true);
+        *rt.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+            if collection == "dml_lookup_race"
+                && phase == super::super::index_store::MutationTestPhase::DmlIndexLookupStarted
+                && first.swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                started_tx.send(()).expect("notify writer");
+                published_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("writer published");
+            }
+        }));
+        std::thread::scope(|scope| {
+            let writer_rt = &rt;
+            let writer = scope.spawn(move || {
+                started_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("lookup started");
+                writer_rt
+                    .execute_query("UPDATE dml_lookup_race SET status = 'new' WHERE id = 1")
+                    .expect("publish update");
+                published_tx.send(()).expect("release lookup");
+            });
+            let limits = super::super::resource_limits::ResourceLimits {
+                max_query_duration: Some(Duration::from_secs(30)),
+                ..Default::default()
+            };
+            let slots = std::sync::atomic::AtomicU64::new(0);
+            let _budget = super::super::query_budget::Scope::enter(&limits, &slots)
+                .expect("query deadline scope");
+            let _guards = frame.install(&rt);
+            let ids = super::super::dml_target_scan::DmlTargetScan::new(
+                &rt,
+                "dml_lookup_race",
+                Some(&filter),
+                None,
+            )
+            .find_target_ids()
+            .expect("find DML targets");
+            writer.join().expect("writer thread");
+            assert_eq!(
+                ids.len(),
+                2,
+                "racing publication must not omit a snapshot-visible row"
+            );
+        });
+        *rt.index_store_ref().mutation_hook.lock() = None;
+    }
+
+    #[test]
+    fn replica_replay_preserves_snapshots_across_insert_update_and_delete() {
+        use crate::replication::cdc::{change_record_from_entity, ChangeOperation};
+        use crate::replication::logical::{ApplyMode, LogicalChangeApplier};
+        reset_thread_locals();
+        let source = fresh_runtime();
+        let replica = fresh_runtime();
+        for rt in [&source, &replica] {
+            rt.execute_query("CREATE TABLE replica_snapshot (id INT, status TEXT)")
+                .expect("schema");
+        }
+        replica
+            .execute_query(
+                "CREATE INDEX replica_snapshot_status ON replica_snapshot (status) USING HASH",
+            )
+            .expect("index");
+        let sql = "SELECT id FROM replica_snapshot WHERE status = 'old'";
+        let capture = || {
+            StatementExecutionFrame::build(&replica, StatementIdentity::Text(sql)).expect("capture")
+        };
+        let read = |frame: &StatementExecutionFrame| {
+            let reddb_rql::ast::QueryExpr::Table(query) =
+                reddb_rql::modes::parse_multi(sql).expect("parse")
+            else {
+                panic!("table")
+            };
+            let _guards = frame.install(&replica);
+            super::super::query_exec::table::execute_runtime_canonical_table_query_indexed(
+                &replica.db(),
+                &query,
+                Some(replica.index_store_ref()),
+            )
+            .expect("snapshot read")
+            .len()
+        };
+        let empty = capture();
+        source
+            .execute_query("INSERT INTO replica_snapshot (id, status) VALUES (1, 'old')")
+            .expect("insert");
+        let applier = LogicalChangeApplier::new(0);
+        let replay = |lsn, op| {
+            let entity = source
+                .db()
+                .store()
+                .get_collection("replica_snapshot")
+                .unwrap()
+                .query_all(|entity| entity.xmax == 0)
+                .pop()
+                .unwrap();
+            applier
+                .apply(
+                    &replica.db(),
+                    &change_record_from_entity(
+                        lsn,
+                        1,
+                        op,
+                        "replica_snapshot",
+                        "table",
+                        &entity,
+                        12,
+                        None,
+                    ),
+                    ApplyMode::Replica,
+                )
+                .expect("replay");
+        };
+        replay(1, ChangeOperation::Insert);
+        assert_eq!(
+            read(&empty),
+            0,
+            "replay must not backdate an insert into an earlier snapshot"
+        );
+        let inserted = capture();
+        source
+            .execute_query("UPDATE replica_snapshot SET status = 'new' WHERE id = 1")
+            .expect("update");
+        replay(2, ChangeOperation::Update);
+        assert_eq!(read(&inserted), 1, "old version remains visible");
+        assert_eq!(read(&capture()), 0, "fresh snapshot uses the updated index");
+        // A snapshot of all rows must retain the deleted version as well.
+        let all_sql = "SELECT id FROM replica_snapshot";
+        let before_delete =
+            StatementExecutionFrame::build(&replica, StatementIdentity::Text(all_sql)).unwrap();
+        replay(3, ChangeOperation::Delete);
+        let reddb_rql::ast::QueryExpr::Table(query) =
+            reddb_rql::modes::parse_multi(all_sql).unwrap()
+        else {
+            panic!("table")
+        };
+        {
+            let _guards = before_delete.install(&replica);
+            assert_eq!(
+                super::super::query_exec::table::execute_runtime_canonical_table_query_indexed(
+                    &replica.db(),
+                    &query,
+                    Some(replica.index_store_ref())
+                )
+                .unwrap()
+                .len(),
+                1
+            );
+        }
+        assert_eq!(
+            replica.execute_query(all_sql).unwrap().result.records.len(),
+            0
+        );
+    }
+
+    #[test]
+    fn autocommit_index_reads_keep_old_rows_while_another_transaction_is_open() {
+        use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+        reset_thread_locals();
+        let rt = fresh_runtime();
+        let execute = |connection, sql: &str| {
+            set_current_connection_id(connection);
+            let result = rt.execute_query(sql);
+            clear_current_connection_id();
+            result.expect("statement")
+        };
+        execute(1, "CREATE TABLE active_writer_rows (id INT, status TEXT)");
+        execute(
+            1,
+            "INSERT INTO active_writer_rows (id, status) VALUES (1, 'old')",
+        );
+        execute(
+            1,
+            "CREATE INDEX active_writer_status ON active_writer_rows (status) USING HASH",
+        );
+        execute(2, "BEGIN");
+        execute(
+            2,
+            "UPDATE active_writer_rows SET status = 'new' WHERE id = 1",
+        );
+        assert_eq!(
+            execute(1, "SELECT id FROM active_writer_rows WHERE status = 'old'")
+                .result
+                .records
+                .len(),
+            1
+        );
+        assert_eq!(
+            execute(1, "SELECT id FROM active_writer_rows WHERE status = 'new'")
+                .result
+                .records
+                .len(),
+            0
+        );
+        execute(2, "ROLLBACK");
+        assert_eq!(
+            execute(1, "SELECT id FROM active_writer_rows WHERE status = 'old'")
+                .result
+                .records
+                .len(),
+            1
+        );
     }
 
     #[test]

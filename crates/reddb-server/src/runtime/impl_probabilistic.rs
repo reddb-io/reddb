@@ -87,7 +87,7 @@ struct ProbabilisticStateEntry {
 
 impl RedDBRuntime {
     pub(crate) fn load_probabilistic_state(&self) -> RedDBResult<()> {
-        let reject_legacy_hex = self.probabilistic_raw_encoding_marker();
+        let reject_legacy_hex = self.probabilistic_raw_encoding_marker()?;
         let mut migrated_legacy_hex = false;
         {
             let entries = self.latest_probabilistic_state_entries(
@@ -184,7 +184,7 @@ impl RedDBRuntime {
         }
 
         if migrated_legacy_hex {
-            self.persist_probabilistic_encoding_marker();
+            self.persist_probabilistic_encoding_marker()?;
         }
         self.apply_replayed_probabilistic_deltas()?;
         Ok(())
@@ -201,24 +201,24 @@ impl RedDBRuntime {
         };
         let mut latest: std::collections::HashMap<String, (u64, Option<Value>)> =
             std::collections::HashMap::new();
-        for entity in manager.query_all(|_| true) {
+        manager.try_for_each_entity(usize::MAX, |entity| {
             let EntityData::Row(row) = &entity.data else {
-                continue;
+                return true;
             };
             let Some(named) = &row.named else {
-                continue;
+                return true;
             };
             let Some(Value::Text(key)) = named.get("key") else {
-                continue;
+                return true;
             };
             let Some(encoded_name) = key.strip_prefix(prefix) else {
-                continue;
+                return true;
             };
             let value = match named.get("value") {
                 Some(Value::Blob(value)) => Some(Value::Blob(value.clone())),
                 Some(Value::Text(value)) => Some(Value::Text(value.clone())),
                 Some(Value::Null) => None,
-                _ => continue,
+                _ => return true,
             };
             let entity_id = entity.id.raw();
             match latest.get(encoded_name) {
@@ -227,7 +227,8 @@ impl RedDBRuntime {
                     latest.insert(encoded_name.to_string(), (entity_id, value));
                 }
             }
-        }
+            true
+        })?;
 
         let mut entries = Vec::new();
         for (encoded_name, (_, value)) in latest {
@@ -269,23 +270,23 @@ impl RedDBRuntime {
         Ok(entries)
     }
 
-    fn probabilistic_raw_encoding_marker(&self) -> bool {
+    fn probabilistic_raw_encoding_marker(&self) -> RedDBResult<bool> {
         let Some(manager) = self.inner.db.store().get_collection("red_config") else {
-            return false;
+            return Ok(false);
         };
         let mut latest: Option<(u64, bool)> = None;
-        for entity in manager.query_all(|_| true) {
+        manager.try_for_each_entity(usize::MAX, |entity| {
             let EntityData::Row(row) = &entity.data else {
-                continue;
+                return true;
             };
             let Some(named) = &row.named else {
-                continue;
+                return true;
             };
             let Some(Value::Text(key)) = named.get("key") else {
-                continue;
+                return true;
             };
             if key.as_ref() != PROB_ENCODING_MARKER_KEY {
-                continue;
+                return true;
             }
             let is_raw = matches!(
                 named.get("value"),
@@ -296,8 +297,9 @@ impl RedDBRuntime {
                 Some((existing_id, _)) if existing_id > entity_id => {}
                 _ => latest = Some((entity_id, is_raw)),
             }
-        }
-        latest.map(|(_, is_raw)| is_raw).unwrap_or(false)
+            true
+        })?;
+        Ok(latest.map(|(_, is_raw)| is_raw).unwrap_or(false))
     }
 
     fn persist_probabilistic_blob(
@@ -307,20 +309,46 @@ impl RedDBRuntime {
         bytes: &[u8],
     ) -> RedDBResult<()> {
         let key = format!("{prefix}{}", hex::encode(name.as_bytes()));
-        self.compact_config_key(&key);
+        self.compact_config_key(&key)?;
         self.insert_config_value(&key, Value::Blob(bytes.to_vec()))?;
-        self.persist_probabilistic_encoding_marker();
+        self.persist_probabilistic_encoding_marker()?;
         Ok(())
     }
 
     fn delete_probabilistic_blob(&self, prefix: &str, name: &str) -> RedDBResult<()> {
         let key = format!("{prefix}{}", hex::encode(name.as_bytes()));
-        self.compact_config_key(&key);
+        self.compact_config_key(&key)?;
         self.insert_config_value(&key, Value::Null)?;
         Ok(())
     }
 
     pub(crate) fn persist_probabilistic_snapshots(&self) -> RedDBResult<()> {
+        let replayed_names = self.inner.probabilistic.replayed_names.lock().clone();
+        for (kind, name) in replayed_names {
+            let (prefix, present) = match kind {
+                PROB_WAL_KIND_HLL => (
+                    PROB_HLL_STATE_PREFIX,
+                    self.inner.probabilistic.hlls.read().contains_key(&name),
+                ),
+                PROB_WAL_KIND_SKETCH => (
+                    PROB_SKETCH_STATE_PREFIX,
+                    self.inner.probabilistic.sketches.read().contains_key(&name),
+                ),
+                PROB_WAL_KIND_FILTER => (
+                    PROB_FILTER_STATE_PREFIX,
+                    self.inner.probabilistic.filters.read().contains_key(&name),
+                ),
+                _ => {
+                    return Err(RedDBError::Internal(
+                        "unknown probabilistic WAL kind".into(),
+                    ))
+                }
+            };
+            if !present {
+                self.append_probabilistic_drop_delta(kind, &name)?;
+                self.delete_probabilistic_blob(prefix, &name)?;
+            }
+        }
         let hll_snapshots: Vec<(String, Vec<u8>)> = {
             let hlls =
                 probabilistic_read(&self.inner.probabilistic.hlls, "probabilistic HLL store");
@@ -329,8 +357,16 @@ impl RedDBRuntime {
                 .collect()
         };
         for (name, bytes) in hll_snapshots {
+            self.append_probabilistic_snapshot_delta(PROB_WAL_KIND_HLL, &name, bytes.clone())?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_TEST_EXIT_AFTER_PROBABILISTIC_SNAPSHOT_WAL").is_some() {
+                std::process::exit(213);
+            }
             self.persist_probabilistic_blob(PROB_HLL_STATE_PREFIX, &name, &bytes)?;
-            self.append_probabilistic_snapshot_delta(PROB_WAL_KIND_HLL, &name, bytes)?;
+            #[cfg(test)]
+            if std::env::var_os("REDDB_TEST_EXIT_AFTER_PROBABILISTIC_SNAPSHOT_BLOB").is_some() {
+                std::process::exit(214);
+            }
         }
 
         let sketch_snapshots: Vec<(String, Vec<u8>)> = {
@@ -344,8 +380,8 @@ impl RedDBRuntime {
                 .collect()
         };
         for (name, bytes) in sketch_snapshots {
+            self.append_probabilistic_snapshot_delta(PROB_WAL_KIND_SKETCH, &name, bytes.clone())?;
             self.persist_probabilistic_blob(PROB_SKETCH_STATE_PREFIX, &name, &bytes)?;
-            self.append_probabilistic_snapshot_delta(PROB_WAL_KIND_SKETCH, &name, bytes)?;
         }
 
         let filter_snapshots: Vec<(String, Vec<u8>)> = {
@@ -359,8 +395,8 @@ impl RedDBRuntime {
                 .collect()
         };
         for (name, bytes) in filter_snapshots {
+            self.append_probabilistic_snapshot_delta(PROB_WAL_KIND_FILTER, &name, bytes.clone())?;
             self.persist_probabilistic_blob(PROB_FILTER_STATE_PREFIX, &name, &bytes)?;
-            self.append_probabilistic_snapshot_delta(PROB_WAL_KIND_FILTER, &name, bytes)?;
         }
 
         Ok(())
@@ -413,8 +449,126 @@ impl RedDBRuntime {
 
     fn apply_replayed_probabilistic_deltas(&self) -> RedDBResult<()> {
         let deltas = self.inner.db.store().take_replayed_probabilistic_deltas();
-        for (kind, operation, name, operands) in deltas {
+        // A later snapshot or drop replaces all prior state for that object.
+        // Ignore earlier deltas: its persisted base may already reflect the
+        // later operation, and sketch increments are not idempotent.
+        let mut reset_at = std::collections::HashMap::new();
+        for (index, (kind, operation, name, _)) in deltas.iter().enumerate() {
+            if matches!(*operation, PROB_WAL_OP_SNAPSHOT | PROB_WAL_OP_DROP) {
+                reset_at.insert((*kind, name.clone()), index);
+            }
+        }
+        for (index, (kind, operation, name, operands)) in deltas.into_iter().enumerate() {
+            if reset_at
+                .get(&(kind, name.clone()))
+                .is_some_and(|reset| index < *reset)
+            {
+                continue;
+            }
+            let present = match kind {
+                PROB_WAL_KIND_HLL => self.inner.probabilistic.hlls.read().contains_key(&name),
+                PROB_WAL_KIND_SKETCH => {
+                    self.inner.probabilistic.sketches.read().contains_key(&name)
+                }
+                PROB_WAL_KIND_FILTER => self.inner.probabilistic.filters.read().contains_key(&name),
+                _ => {
+                    return Err(RedDBError::Internal(
+                        "unknown probabilistic WAL kind".into(),
+                    ))
+                }
+            };
+            if matches!(operation, PROB_WAL_OP_ADD | PROB_WAL_OP_DELETE) && !present {
+                return Err(RedDBError::Internal(format!(
+                    "probabilistic WAL mutation has no base state for '{name}'"
+                )));
+            }
+            if operation == PROB_WAL_OP_DROP && !operands.is_empty() {
+                return Err(RedDBError::Internal(
+                    "invalid probabilistic WAL drop".into(),
+                ));
+            }
+            let filter_add = (kind == PROB_WAL_KIND_FILTER && operation == PROB_WAL_OP_ADD)
+                .then(|| operands.first().cloned())
+                .flatten();
             self.apply_replayed_probabilistic_delta(kind, operation, &name, operands)?;
+            if let Some(element) = filter_add {
+                if !self
+                    .inner
+                    .probabilistic
+                    .filters
+                    .read()
+                    .get(&name)
+                    .is_some_and(|filter| filter.contains(&element))
+                {
+                    return Err(RedDBError::Internal(
+                        "probabilistic WAL filter insert failed".into(),
+                    ));
+                }
+            }
+            self.inner
+                .probabilistic
+                .replayed_names
+                .lock()
+                .insert((kind, name));
+        }
+        Ok(())
+    }
+
+    /// Materialize runtime-owned WAL state on an isolated offline recovery copy.
+    pub(crate) fn persist_offline_probabilistic_recovery(
+        &self,
+        deltas: Vec<(u8, u8, String, Vec<Vec<u8>>)>,
+    ) -> RedDBResult<()> {
+        let mut touched = std::collections::BTreeSet::new();
+        for (kind, _, name, _) in deltas {
+            if !matches!(
+                kind,
+                PROB_WAL_KIND_HLL | PROB_WAL_KIND_SKETCH | PROB_WAL_KIND_FILTER
+            ) {
+                return Err(RedDBError::Internal(
+                    "unknown probabilistic WAL kind".into(),
+                ));
+            }
+            touched.insert((kind, name));
+        }
+        for (kind, name) in touched {
+            let (prefix, bytes) = match kind {
+                PROB_WAL_KIND_HLL => (
+                    PROB_HLL_STATE_PREFIX,
+                    self.inner
+                        .probabilistic
+                        .hlls
+                        .read()
+                        .get(&name)
+                        .map(|h| h.as_bytes().to_vec()),
+                ),
+                PROB_WAL_KIND_SKETCH => (
+                    PROB_SKETCH_STATE_PREFIX,
+                    self.inner
+                        .probabilistic
+                        .sketches
+                        .read()
+                        .get(&name)
+                        .map(|s| s.as_bytes()),
+                ),
+                PROB_WAL_KIND_FILTER => (
+                    PROB_FILTER_STATE_PREFIX,
+                    self.inner
+                        .probabilistic
+                        .filters
+                        .read()
+                        .get(&name)
+                        .map(|f| f.as_bytes()),
+                ),
+                _ => unreachable!("kind validated above"),
+            };
+            if let Some(bytes) = bytes {
+                self.append_probabilistic_snapshot_delta(kind, &name, bytes.clone())?;
+                self.persist_probabilistic_blob(prefix, &name, &bytes)?;
+            } else {
+                self.append_probabilistic_drop_delta(kind, &name)?;
+                self.delete_probabilistic_blob(prefix, &name)?;
+            }
         }
         Ok(())
     }
@@ -534,36 +688,32 @@ impl RedDBRuntime {
         Ok(())
     }
 
-    fn persist_probabilistic_encoding_marker(&self) {
-        self.compact_config_key(PROB_ENCODING_MARKER_KEY);
-        let _ = self.insert_config_value(
+    fn persist_probabilistic_encoding_marker(&self) -> RedDBResult<()> {
+        self.compact_config_key(PROB_ENCODING_MARKER_KEY)?;
+        self.insert_config_value(
             PROB_ENCODING_MARKER_KEY,
             Value::text(PROB_ENCODING_RAW_V1.to_string()),
-        );
+        )
     }
 
-    fn compact_config_key(&self, key: &str) {
+    fn compact_config_key(&self, key: &str) -> RedDBResult<()> {
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection("red_config") else {
-            return;
+            return Ok(());
         };
-        let ids: Vec<EntityId> = manager
-            .query_all(|_| true)
-            .into_iter()
-            .filter_map(|entity| {
-                let EntityData::Row(row) = &entity.data else {
-                    return None;
-                };
-                let named = row.named.as_ref()?;
-                let Some(Value::Text(candidate)) = named.get("key") else {
-                    return None;
-                };
-                (candidate.as_ref() == key).then_some(entity.id)
-            })
-            .collect();
+        let mut ids = Vec::new();
+        manager.try_for_each_entity(usize::MAX, |entity| {
+            if let EntityData::Row(row) = &entity.data {
+                if matches!(row.named.as_ref().and_then(|named| named.get("key")), Some(Value::Text(candidate)) if candidate.as_ref() == key) {
+                    ids.push(entity.id);
+                }
+            }
+            true
+        })?;
         for id in ids {
-            let _ = store.delete("red_config", id);
+            store.delete("red_config", id)?;
         }
+        Ok(())
     }
 
     fn insert_config_value(&self, key: &str, value: Value) -> RedDBResult<()> {
@@ -723,6 +873,10 @@ impl RedDBRuntime {
         if is_mutation {
             self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         }
+        // A runtime checkpoint takes this fence before serializing snapshots;
+        // keep mutations and their WAL records within the same boundary.
+        let store = self.inner.db.store();
+        let _publication = is_mutation.then(|| store.vault_publication_lock.lock());
         if let ProbabilisticCommand::CreateHll { name, .. }
         | ProbabilisticCommand::CreateSketch { name, .. }
         | ProbabilisticCommand::CreateFilter { name, .. } = cmd
@@ -762,12 +916,12 @@ impl RedDBRuntime {
                     name,
                     crate::catalog::CollectionModel::Hll,
                 )?;
-                self.persist_probabilistic_blob(PROB_HLL_STATE_PREFIX, name, hll.as_bytes())?;
                 self.append_probabilistic_snapshot_delta(
                     PROB_WAL_KIND_HLL,
                     name,
                     hll.as_bytes().to_vec(),
                 )?;
+                self.persist_probabilistic_blob(PROB_HLL_STATE_PREFIX, name, hll.as_bytes())?;
                 hlls.insert(name.clone(), hll);
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
@@ -901,12 +1055,12 @@ impl RedDBRuntime {
                     }
                     merged.merge(hll);
                 }
-                self.persist_probabilistic_blob(PROB_HLL_STATE_PREFIX, dest, merged.as_bytes())?;
                 self.append_probabilistic_snapshot_delta(
                     PROB_WAL_KIND_HLL,
                     dest,
                     merged.as_bytes().to_vec(),
                 )?;
+                self.persist_probabilistic_blob(PROB_HLL_STATE_PREFIX, dest, merged.as_bytes())?;
                 hlls.insert(dest.clone(), merged);
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
@@ -964,9 +1118,14 @@ impl RedDBRuntime {
                     }
                     return Err(RedDBError::NotFound(format!("HLL '{}' not found", name)));
                 }
+                self.inner
+                    .probabilistic
+                    .replayed_names
+                    .lock()
+                    .insert((PROB_WAL_KIND_HLL, name.clone()));
                 self.drop_probabilistic_catalog_entry(name)?;
-                self.delete_probabilistic_blob(PROB_HLL_STATE_PREFIX, name)?;
                 self.append_probabilistic_drop_delta(PROB_WAL_KIND_HLL, name)?;
+                self.delete_probabilistic_blob(PROB_HLL_STATE_PREFIX, name)?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("HLL '{}' dropped", name),
@@ -1005,15 +1164,15 @@ impl RedDBRuntime {
                 let sketch = crate::storage::primitives::count_min_sketch::CountMinSketch::new(
                     *width, *depth,
                 );
-                self.persist_probabilistic_blob(
-                    PROB_SKETCH_STATE_PREFIX,
-                    name,
-                    &sketch.as_bytes(),
-                )?;
                 self.append_probabilistic_snapshot_delta(
                     PROB_WAL_KIND_SKETCH,
                     name,
                     sketch.as_bytes(),
+                )?;
+                self.persist_probabilistic_blob(
+                    PROB_SKETCH_STATE_PREFIX,
+                    name,
+                    &sketch.as_bytes(),
                 )?;
                 sketches.insert(name.clone(), sketch);
                 Ok(RuntimeQueryResult::ok_message(
@@ -1097,15 +1256,15 @@ impl RedDBRuntime {
                         )));
                     }
                 }
-                self.persist_probabilistic_blob(
-                    PROB_SKETCH_STATE_PREFIX,
-                    dest,
-                    &merged.as_bytes(),
-                )?;
                 self.append_probabilistic_snapshot_delta(
                     PROB_WAL_KIND_SKETCH,
                     dest,
                     merged.as_bytes(),
+                )?;
+                self.persist_probabilistic_blob(
+                    PROB_SKETCH_STATE_PREFIX,
+                    dest,
+                    &merged.as_bytes(),
                 )?;
                 sketches.insert(dest.clone(), merged);
                 Ok(RuntimeQueryResult::ok_message(
@@ -1170,9 +1329,14 @@ impl RedDBRuntime {
                     }
                     return Err(RedDBError::NotFound(format!("SKETCH '{}' not found", name)));
                 }
+                self.inner
+                    .probabilistic
+                    .replayed_names
+                    .lock()
+                    .insert((PROB_WAL_KIND_SKETCH, name.clone()));
                 self.drop_probabilistic_catalog_entry(name)?;
-                self.delete_probabilistic_blob(PROB_SKETCH_STATE_PREFIX, name)?;
                 self.append_probabilistic_drop_delta(PROB_WAL_KIND_SKETCH, name)?;
+                self.delete_probabilistic_blob(PROB_SKETCH_STATE_PREFIX, name)?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("SKETCH '{}' dropped", name),
@@ -1209,15 +1373,15 @@ impl RedDBRuntime {
                 )?;
                 let filter =
                     crate::storage::primitives::cuckoo_filter::CuckooFilter::new(*capacity);
-                self.persist_probabilistic_blob(
-                    PROB_FILTER_STATE_PREFIX,
-                    name,
-                    &filter.as_bytes(),
-                )?;
                 self.append_probabilistic_snapshot_delta(
                     PROB_WAL_KIND_FILTER,
                     name,
                     filter.as_bytes(),
+                )?;
+                self.persist_probabilistic_blob(
+                    PROB_FILTER_STATE_PREFIX,
+                    name,
+                    &filter.as_bytes(),
                 )?;
                 filters.insert(name.clone(), filter);
                 Ok(RuntimeQueryResult::ok_message(
@@ -1371,9 +1535,14 @@ impl RedDBRuntime {
                     }
                     return Err(RedDBError::NotFound(format!("FILTER '{}' not found", name)));
                 }
+                self.inner
+                    .probabilistic
+                    .replayed_names
+                    .lock()
+                    .insert((PROB_WAL_KIND_FILTER, name.clone()));
                 self.drop_probabilistic_catalog_entry(name)?;
-                self.delete_probabilistic_blob(PROB_FILTER_STATE_PREFIX, name)?;
                 self.append_probabilistic_drop_delta(PROB_WAL_KIND_FILTER, name)?;
+                self.delete_probabilistic_blob(PROB_FILTER_STATE_PREFIX, name)?;
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("FILTER '{}' dropped", name),
@@ -1406,7 +1575,7 @@ fn parse_probabilistic_read_projection(
             label: probabilistic_projection_label(projection, "freq", index),
         }));
     }
-    if function.eq_ignore_ascii_case("CONTAINS") {
+    if function.eq_ignore_ascii_case("CONTAINS") && args.len() == 1 {
         let element = projection_single_text_arg(function, args)?;
         return Ok(Some(ProbabilisticReadProjection::Contains {
             element,
@@ -1627,5 +1796,153 @@ fn probabilistic_projection_form(projection: &ProbabilisticReadProjection) -> &'
         ProbabilisticReadProjection::Cardinality { .. } => "SELECT CARDINALITY",
         ProbabilisticReadProjection::Freq { .. } => "FREQ(...)",
         ProbabilisticReadProjection::Contains { .. } => "CONTAINS(...)",
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use crate::{RedDBOptions, RedDBRuntime};
+
+    #[test]
+    fn probabilistic_checkpoint_serializes_concurrent_mutations() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        let path = directory.path().join("data.rdb");
+        let options = RedDBOptions::persistent(&path)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true);
+        let runtime =
+            std::sync::Arc::new(RedDBRuntime::with_options(options.clone()).expect("runtime"));
+        runtime
+            .execute_query("CREATE SKETCH frequencies")
+            .expect("create sketch");
+        runtime.checkpoint().expect("baseline checkpoint");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let runtime = std::sync::Arc::clone(&runtime);
+            let barrier = std::sync::Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..10 {
+                    runtime
+                        .execute_query("SKETCH ADD frequencies 'red' 1")
+                        .expect("add");
+                }
+            }));
+        }
+        barrier.wait();
+        for _ in 0..3 {
+            runtime.checkpoint().expect("concurrent checkpoint");
+        }
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+        runtime.checkpoint().expect("final checkpoint");
+        runtime.graceful_shutdown(false).expect("shutdown");
+        drop(runtime);
+        let reopened = RedDBRuntime::with_options(options).expect("reopen");
+        let count = reopened
+            .execute_query("SKETCH COUNT frequencies 'red'")
+            .expect("sketch count");
+        assert_eq!(
+            count.result.records[0]
+                .get("estimate")
+                .expect("estimate")
+                .display_string(),
+            "20"
+        );
+        reopened
+            .graceful_shutdown(false)
+            .expect("reopened shutdown");
+    }
+
+    #[test]
+    fn probabilistic_snapshot_recovery_survives_interruption() {
+        const CHILD: &str = "REDDB_TEST_PROBABILISTIC_SNAPSHOT_PATH";
+        const TEST: &str = "runtime::impl_probabilistic::recovery_tests::probabilistic_snapshot_recovery_survives_interruption";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let options = RedDBOptions::persistent(std::path::PathBuf::from(path))
+                .with_memory_budget(64 * 1024 * 1024)
+                .with_bounded_disk_residency(true);
+            let runtime = RedDBRuntime::with_options(options).expect("runtime");
+            for query in [
+                "CREATE HLL visitors",
+                "CREATE SKETCH frequencies",
+                "CREATE FILTER seen",
+            ] {
+                runtime.execute_query(query).expect("create structure");
+            }
+            runtime.checkpoint().expect("baseline checkpoint");
+            for query in [
+                "HLL ADD visitors 'alice' 'bob' 'carol'",
+                "SKETCH ADD frequencies 'red' 3",
+                "FILTER ADD seen 'alice'",
+                "CREATE TABLE ordinary (id INT)",
+            ] {
+                runtime.execute_query(query).expect("acknowledged mutation");
+            }
+            let hook = std::env::var("REDDB_TEST_PROBABILISTIC_SNAPSHOT_HOOK").expect("fault hook");
+            std::env::set_var(hook, "1");
+            runtime.checkpoint().expect("fault injection");
+            panic!("snapshot interruption was not reached");
+        }
+        for (hook, code) in [
+            ("REDDB_TEST_EXIT_AFTER_PROBABILISTIC_SNAPSHOT_WAL", 213),
+            ("REDDB_TEST_EXIT_AFTER_PROBABILISTIC_SNAPSHOT_BLOB", 214),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary database");
+            let path = directory.path().join("data.rdb");
+            let child =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(CHILD, &path)
+                    .env("REDDB_TEST_PROBABILISTIC_SNAPSHOT_HOOK", hook)
+                    .output()
+                    .expect("child process");
+            assert_eq!(
+                child.status.code(),
+                Some(code),
+                "{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
+            let options = RedDBOptions::persistent(&path)
+                .with_memory_budget(64 * 1024 * 1024)
+                .with_bounded_disk_residency(true);
+            for _ in 0..2 {
+                let runtime = RedDBRuntime::with_options(options.clone()).expect("recover runtime");
+                let hll = runtime
+                    .execute_query("HLL COUNT visitors")
+                    .expect("HLL count");
+                assert_eq!(
+                    hll.result.records[0]
+                        .get("count")
+                        .expect("count")
+                        .display_string(),
+                    "3"
+                );
+                let sketch = runtime
+                    .execute_query("SKETCH COUNT frequencies 'red'")
+                    .expect("sketch count");
+                assert_eq!(
+                    sketch.result.records[0]
+                        .get("estimate")
+                        .expect("estimate")
+                        .display_string(),
+                    "3"
+                );
+                let filter = runtime
+                    .execute_query("FILTER CHECK seen 'alice'")
+                    .expect("filter check");
+                assert_eq!(
+                    filter.result.records[0]
+                        .get("exists")
+                        .expect("exists")
+                        .display_string(),
+                    "true"
+                );
+                runtime.checkpoint().expect("recovered checkpoint");
+                runtime.graceful_shutdown(false).expect("shutdown");
+            }
+        }
     }
 }

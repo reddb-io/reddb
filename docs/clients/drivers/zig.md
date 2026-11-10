@@ -4,7 +4,7 @@ Native Zig client for RedDB. Speaks the RedWire binary TCP protocol directly and
 
 - **Source:** [`drivers/zig/`](https://github.com/reddb-io/reddb/tree/main/drivers/zig) (build via `zig build`; not yet on a registry)
 - **Status:** Preview
-- **Zig:** 0.13.x (0.14-dev compatible with minor tweaks)
+- **Zig:** 0.14.1
 
 ## Build
 
@@ -14,6 +14,7 @@ zig build              # static library at zig-out/lib/libreddb.a
 zig build test         # all suites
 zig build -Dzstd=true  # force-enable zstd (default: auto-detect via pkg-config)
 zig build -Dzstd=false # disable zstd; compressed frames surface error.CompressedButNoZstd
+zig build -Dreddb-ffi-dir=/path/to/reddb-ffi # enable embedded mode
 ```
 
 ## Quickstart
@@ -96,10 +97,20 @@ bytes, vector, and JSON slices are borrowed for the duration of the call.
 | `red://host:5050`                              | RedWire (TCP) |
 | `reds://host:5050`                             | RedWire + TLS |
 | `red://host?proto=https`                       | HTTPS REST    |
-| `red:///abs/path/data.rdb`                     | embedded (n/a) |
-| `memory://`, `file:///path`, `grpc(s)://host`  | legacy aliases |
+| `red:///abs/path/data.rdb`, `file:///path`     | Embedded single-file |
+| `memory://`                                    | Embedded in-memory |
+| `grpc(s)://host`                               | Legacy aliases |
 
 Default port for `red://` / `reds://` is **5050** (see [ADR 0001](../../../.red/adr/0001-redwire-tcp-protocol.md)).
+
+Embedded mode uses the versioned shared ABI shipped with RedDB releases. Extract
+the ABI bundle so the directory passed to `-Dreddb-ffi-dir` contains
+`include/reddb.h` plus `lib/libreddb_ffi.so`, `lib/libreddb_ffi.dylib`, or the
+Windows DLL and import library under `lib/`. Put that `lib/` directory on the
+platform runtime loader path. The same `reddb.connect` API then
+opens memory or file databases. Durable state, WAL, and metadata remain in the
+one requested `.rdb` file, and a concurrent second writer is rejected. If the
+driver is built without the ABI, embedded URIs return `EmbeddedUnavailable`.
 
 ## Auth
 
@@ -107,8 +118,7 @@ Sync API; one connection = one socket. SCRAM, anonymous, and bearer auth support
 
 ## Limitations
 
-- **TLS / ALPN.** `std.crypto.tls.Client` in Zig 0.13 doesn't expose ALPN configuration. The driver still wraps the socket in TLS but doesn't advertise `redwire/1`. If your reverse proxy is strict about ALPN, use the [Rust driver](./rust.md) until Zig's stdlib catches up.
-- **Embedded mode.** No FFI to the engine — `red:///path` returns `error.UnsupportedScheme`.
+- **TLS / ALPN.** `std.crypto.tls.Client` in Zig 0.14.1 doesn't expose ALPN configuration. The driver still wraps the socket in TLS but doesn't advertise `redwire/1`. If your reverse proxy is strict about ALPN, use the [Rust driver](./rust.md) until Zig's stdlib catches up.
 - **gRPC / Postgres wire.** Not implemented. Use HTTPS or RedWire instead.
 
 ## Production checklist

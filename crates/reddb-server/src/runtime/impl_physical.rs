@@ -363,28 +363,8 @@ impl RedDBRuntime {
 
     pub fn apply_retention_policy(&self) -> RedDBResult<()> {
         self.check_write(crate::runtime::write_gate::WriteKind::Maintenance)?;
-        let now_ms = current_unix_ms_u64();
-        self.retire_expired_append_only_segments(now_ms)?;
-        let expired = self
-            .inner
-            .db
-            .ttl_expired_entities_now()
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        let store = self.inner.db.store();
-        for (collection, id) in expired {
-            let deleted = store
-                .delete(&collection, id)
-                .map_err(|err| RedDBError::Internal(err.to_string()))?;
-            if deleted {
-                store.context_index().remove_entity(id);
-                self.cdc_emit(
-                    crate::replication::cdc::ChangeOperation::Delete,
-                    &collection,
-                    id.raw(),
-                    "entity",
-                );
-            }
-        }
+        self.sweep_retention_tick(crate::runtime::retention_sweeper::DEFAULT_SWEEPER_BATCH);
+        self.sweep_individual_ttl_tick(crate::runtime::retention_sweeper::DEFAULT_SWEEPER_BATCH);
         self.inner
             .db
             .enforce_retention_policy()
@@ -392,57 +372,6 @@ impl RedDBRuntime {
         self.enforce_metrics_raw_retention()?;
         self.invalidate_result_cache();
         Ok(())
-    }
-
-    pub(crate) fn retire_expired_append_only_segments(&self, now_ms: u64) -> RedDBResult<u64> {
-        let Some(path) = self.inner.db.path() else {
-            return Ok(0);
-        };
-        let manifest = reddb_file::OperationalManifest::for_db_path(path);
-        let segments = manifest
-            .append_only_segments()
-            .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        if segments.is_empty() {
-            return Ok(0);
-        }
-
-        let mut total_retired = 0u64;
-        for contract in self
-            .inner
-            .db
-            .collection_contracts()
-            .into_iter()
-            .filter(|contract| contract.append_only)
-        {
-            let Some(retention_ms) = contract.retention_duration_ms else {
-                continue;
-            };
-            let cutoff = (now_ms as i64).saturating_sub(retention_ms as i64);
-            let mut retired_for_collection = 0u64;
-            for segment in segments
-                .iter()
-                .filter(|segment| segment.collection == contract.name)
-                .filter(|segment| segment.retention_max_ms.is_some_and(|max| max < cutoff))
-            {
-                manifest
-                    .begin_retire_append_only_segment(&segment.collection, segment.segment_id)
-                    .map_err(|err| RedDBError::Internal(err.to_string()))?;
-                if manifest
-                    .finish_retire_append_only_segment(&segment.collection, segment.segment_id)
-                    .map_err(|err| RedDBError::Internal(err.to_string()))?
-                {
-                    retired_for_collection = retired_for_collection.saturating_add(1);
-                }
-            }
-            if retired_for_collection > 0 {
-                self.inner
-                    .retention_sweeper
-                    .write()
-                    .record_segments_retired(&contract.name, retired_for_collection, now_ms);
-                total_retired = total_retired.saturating_add(retired_for_collection);
-            }
-        }
-        Ok(total_retired)
     }
 
     fn enforce_metrics_raw_retention(&self) -> RedDBResult<()> {
@@ -740,11 +669,4 @@ impl RedDBRuntime {
             }
         }
     }
-}
-
-fn current_unix_ms_u64() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }

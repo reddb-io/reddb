@@ -264,9 +264,11 @@ mod tests {
             (
                 "runtime/impl_kv.rs",
                 include_str!("../../runtime/impl_kv.rs"),
-                1,
+                2,
                 "non-versioned KV listings intentionally read physical rows; \
-                 versioned listings use the captured snapshot. Vault history/export \
+                 versioned listings use the captured snapshot. Cold tag invalidation \
+                 collects physical keys, then re-resolves each visible version before \
+                 selecting its tags and deletion identity. Vault history/export \
                  and point visibility are centralized in keyed_spine",
             ),
             (
@@ -287,19 +289,27 @@ mod tests {
             (
                 "runtime/impl_queue.rs",
                 include_str!("../../runtime/impl_queue.rs"),
-                10,
+                9,
                 "maintenance: red_queue_meta bookkeeping (config, groups, acks, \
-                 pending, dedup TTL reaper, gauge counts) — queue message bodies are \
+                 pending, gauge counts) — queue message bodies are \
                  read through scan. \
                  TODO(#2138 follow-up): QUEUE PENDING projects meta rows to clients",
             ),
             (
+                "runtime/queue_storage_index.rs",
+                include_str!("../../runtime/queue_storage_index.rs"),
+                1,
+                "maintenance: legacy dedup expiry cleanup observes physical rows \
+                 until its first index checkpoint; producer-key lookups retain \
+                 captured snapshot visibility",
+            ),
+            (
                 "runtime/primary_queue_store.rs",
                 include_str!("../../runtime/primary_queue_store.rs"),
-                3,
-                "maintenance: generic red_queue_meta read/delete helpers and the \
-                 next-position allocator, which must not collide with rows invisible \
-                 to the writer's snapshot",
+                2,
+                "maintenance: the generic red_queue_meta read helper and the \
+                 resident-only next-position fallback, which must not collide with \
+                 rows invisible to the writer's snapshot",
             ),
             (
                 "runtime/record_search.rs",

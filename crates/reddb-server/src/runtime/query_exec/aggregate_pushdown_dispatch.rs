@@ -20,7 +20,7 @@
 //! always safe; false positives would be incorrect.
 
 use super::aggregate_planner::{
-    AggregateExpr, AggregateOp, AggregateQueryAst, AggregateQueryPlanner, PlanError, ScanRow,
+    AggregateExpr, AggregateOp, AggregateQueryAst, AggregateQueryPlanner, PlanError,
 };
 use super::filter_compiled::{
     classify_field, resolve_kind, CompiledEntityFilter, CompiledEntityFilterDecision,
@@ -140,10 +140,14 @@ pub(super) fn try_execute_pushdown_aggregate(
 
     let groups_max = crate::runtime::materialization_limit::max_materialized_rows(db)?;
     let mut planner = AggregateQueryPlanner::new(&ast, groups_max).map_err(planner_error)?;
+    let mut agg_inputs = Vec::with_capacity(lowered.len());
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     crate::runtime::function_budget::try_scan_result(
         |visit| manager.try_scan_for_each(snapshot.as_ref(), usize::MAX, visit),
         |entity| {
+            if !db.entity_visible_at_read(table_name, entity) {
+                return Ok(true);
+            }
             if let Some(f) = compiled_filter.as_ref() {
                 if f.try_evaluate(entity)? != CompiledEntityFilterDecision::Match {
                     return Ok(true);
@@ -153,7 +157,7 @@ pub(super) fn try_execute_pushdown_aggregate(
                 Some(v) => v.into_owned(),
                 None => return Ok(true),
             };
-            let mut agg_inputs: Vec<Value> = Vec::with_capacity(lowered.len());
+            agg_inputs.clear();
             for slot in &lowered {
                 let value = match &slot.input_kind {
                     None => Value::Null,
@@ -165,10 +169,7 @@ pub(super) fn try_execute_pushdown_aggregate(
                 agg_inputs.push(value);
             }
             planner
-                .push(ScanRow {
-                    group_key,
-                    agg_inputs,
-                })
+                .push_inputs(group_key, &agg_inputs)
                 .map_err(planner_error)?;
             Ok(true)
         },

@@ -290,11 +290,14 @@ pub const KvClient = struct {
         defer self.allocator.free(body);
         const parsed = try firstRow(self.allocator, body);
         const row = parsed.row orelse return null;
-        return row.object.get("value");
+        defer freeClonedJson(self.allocator, row);
+        const value = row.object.get("value") orelse return null;
+        return try cloneJson(self.allocator, value);
     }
 
     pub fn exists(self: KvClient, key: []const u8, collection_opt: ?[]const u8) !ExistsResult {
         const v = try self.get(key, collection_opt);
+        defer if (v) |value| freeClonedJson(self.allocator, value);
         const present = if (v) |val| val != .null else false;
         return ExistsResult{ .exists = present };
     }
@@ -370,6 +373,7 @@ pub const QueueClient = struct {
         var res = QueuePushResult{ .affected = affected, .rid = null };
         const parsed = try firstRow(self.allocator, body);
         if (parsed.row) |row| {
+            defer freeClonedJson(self.allocator, row);
             if (row.object.get("rid")) |rid_v| {
                 if (try ridString(self.allocator, rid_v)) |rid| res.rid = rid;
             }
@@ -400,10 +404,20 @@ pub const QueueClient = struct {
         const body = try self.q.query(self.allocator, sql, &.{});
         defer self.allocator.free(body);
         const rows = try allRows(self.allocator, body);
-        defer self.allocator.free(rows);
-        var out = try self.allocator.alloc(json.Value, rows.len);
+        defer {
+            for (rows) |row| freeClonedJson(self.allocator, row);
+            self.allocator.free(rows);
+        }
+        const out = try self.allocator.alloc(json.Value, rows.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (out[0..initialized]) |value| freeClonedJson(self.allocator, value);
+            self.allocator.free(out);
+        }
         for (rows, 0..) |row, i| {
-            out[i] = row.object.get("payload") orelse json.Value{ .null = {} };
+            const payload = row.object.get("payload") orelse json.Value{ .null = {} };
+            out[i] = try cloneJson(self.allocator, payload);
+            initialized += 1;
         }
         return out;
     }
@@ -418,6 +432,7 @@ pub const QueueClient = struct {
         defer self.allocator.free(body);
         const parsed = try firstRow(self.allocator, body);
         const row = parsed.row orelse return 0;
+        defer freeClonedJson(self.allocator, row);
         const v = row.object.get("len") orelse return 0;
         return switch (v) {
             .integer => |n| n,

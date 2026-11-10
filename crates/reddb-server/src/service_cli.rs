@@ -326,6 +326,7 @@ impl ServerCommandConfig {
                 .unwrap_or(false)
             });
 
+        let replication_term = replication_term_from_env()?;
         options.replication = match self.role.as_str() {
             "primary" => ReplicationConfig::primary(),
             "replica" => {
@@ -342,7 +343,8 @@ impl ServerCommandConfig {
                 ReplicationConfig::replica(primary_addr)
             }
             _ => ReplicationConfig::standalone(),
-        };
+        }
+        .with_term(replication_term);
         options.storage_profile = self.storage_profile.validate()?;
 
         let no_auth = self.no_auth || env_truthy("REDDB_NO_AUTH") || env_truthy("REDDB_DEV");
@@ -458,10 +460,11 @@ impl ServerCommandConfig {
             }
         }
 
-        if options.remote_backend.is_some()
-            || options
-                .metadata
-                .contains_key(BACKUP_INTERVAL_META_CHECKPOINT)
+        // A remote backend can be lease-only. Only explicit backup-task
+        // configuration turns on the managed-backup storage constraint.
+        if options
+            .metadata
+            .contains_key(BACKUP_INTERVAL_META_CHECKPOINT)
         {
             let mut selection = options.storage_profile;
             selection.managed_backup = true;
@@ -513,6 +516,22 @@ fn env_truthy(name: &str) -> bool {
     env_nonempty(name)
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
+}
+
+fn replication_term_from_env() -> Result<u64, String> {
+    let raw =
+        env_nonempty("RED_REPLICATION_TERM").or_else(|| env_nonempty("REDDB_REPLICATION_TERM"));
+    parse_replication_term(raw.as_deref())
+}
+
+fn parse_replication_term(raw: Option<&str>) -> Result<u64, String> {
+    let Some(raw) = raw else {
+        return Ok(crate::replication::DEFAULT_REPLICATION_TERM);
+    };
+    raw.parse::<u64>()
+        .ok()
+        .filter(|term| *term > 0)
+        .ok_or_else(|| format!("RED_REPLICATION_TERM must be a positive integer, got `{raw}`"))
 }
 
 impl BootstrapConfig {
@@ -1930,6 +1949,9 @@ fn build_runtime_with_bootstrap(
             .ok();
     }
 
+    // Native wire listeners obtain their authentication authority from the
+    // runtime, including deployments without an HTTP or gRPC server object.
+    runtime.set_auth_store(Arc::clone(&auth_store));
     Ok((runtime, auth_store, telemetry_guard))
 }
 
@@ -2940,6 +2962,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn server_runtime_receives_the_bootstrapped_auth_authority() {
+        let mut options = RedDBOptions::in_memory();
+        options.auth.enabled = true;
+        let (runtime, store, _telemetry) =
+            build_runtime_with_telemetry(options, None).expect("server runtime");
+        let installed = runtime.auth_store().expect("runtime auth authority");
+        assert!(Arc::ptr_eq(&store, &installed));
+    }
+
+    #[test]
     fn runtime_workers_use_both_cores_on_small_instances() {
         assert_eq!(suggested_worker_count(1), 1);
         assert_eq!(suggested_worker_count(2), 2);
@@ -3176,6 +3208,7 @@ mod tests {
 
     #[test]
     fn required_auth_simple_preset_waits_for_durable_admin() {
+        let _guard = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
         let auth_store = Arc::new(AuthStore::new(crate::auth::AuthConfig {
             enabled: true,
@@ -3200,6 +3233,19 @@ mod tests {
         assert!(!config.to_db_options().unwrap().bounded_disk_residency);
         config.bounded_disk_residency = true;
         assert!(config.to_db_options().unwrap().bounded_disk_residency);
+    }
+
+    #[test]
+    fn replication_term_parser_defaults_and_rejects_unsafe_values() {
+        assert_eq!(
+            parse_replication_term(None).expect("default term"),
+            crate::replication::DEFAULT_REPLICATION_TERM
+        );
+        assert_eq!(parse_replication_term(Some("8")).expect("explicit term"), 8);
+        for raw in ["", "0", "-1", "abc"] {
+            let error = parse_replication_term(Some(raw)).expect_err("invalid term");
+            assert!(error.contains("positive integer"), "{error}");
+        }
     }
 
     fn no_auth_test_config(no_auth: bool) -> ServerCommandConfig {
@@ -3939,6 +3985,34 @@ mod tests {
         assert!(err.contains("operational-directory"), "got: {err}");
 
         clear_backup_env();
+    }
+
+    #[test]
+    fn lease_only_backend_preserves_primary_replica_single_file_storage() {
+        let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        clear_backup_env();
+        // SAFETY: env serialised by `no_auth_env_lock`.
+        unsafe {
+            std::env::set_var("RED_BACKEND", "fs");
+            std::env::set_var("RED_REMOTE_KEY", "lease-only-test");
+        }
+
+        let mut config = no_auth_test_config(false);
+        config.role = "primary".to_string();
+        config.storage_profile = crate::storage::StorageDeployPreset::PrimaryReplicaDev.selection();
+
+        let options = config.to_db_options().expect("lease-only backend options");
+        assert!(options.remote_backend_atomic.is_some());
+        assert_eq!(
+            options.storage_profile,
+            crate::storage::StorageDeployPreset::PrimaryReplicaDev.selection()
+        );
+
+        // SAFETY: env serialised by `no_auth_env_lock`.
+        unsafe {
+            std::env::remove_var("RED_BACKEND");
+            std::env::remove_var("RED_REMOTE_KEY");
+        }
     }
 
     #[test]

@@ -12,6 +12,7 @@
         "ext-openssl": "*"
     },
     "suggest": {
+        "ext-ffi": "Required for memory:// and file:// embedded connections.",
         "ext-zstd": "Required to decode redwire frames carrying the COMPRESSED flag (and to send compressed frames)."
     },
     "require-dev": {

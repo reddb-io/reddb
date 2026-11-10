@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use super::*;
 
-const TIMESERIES_META_COLLECTION: &str = "red_timeseries_meta";
-const TIMESERIES_SERIES_COLLECTION: &str = "red_timeseries_series";
-const TIMESERIES_TAG_INDEX_COLLECTION: &str = "red_timeseries_tag_index";
+const TIMESERIES_META_COLLECTION: &str = "red.timeseries.meta";
+const TIMESERIES_SERIES_COLLECTION: &str = "red.timeseries.series";
+const TIMESERIES_TAG_INDEX_COLLECTION: &str = "red.timeseries.tag_index";
 const DEFAULT_TIMESERIES_CHUNK_INTERVAL_NS: u64 = 86_400_000_000_000;
 const TIMESERIES_MAX_SERIES_GLOBAL_CONFIG: &str = "storage.time_series.max_series_per_collection";
 const DEFAULT_TIMESERIES_MAX_SERIES_PER_COLLECTION: usize = 1_000_000;

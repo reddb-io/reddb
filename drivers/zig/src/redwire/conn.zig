@@ -164,7 +164,7 @@ pub const Conn = struct {
     pub fn query(self: *Conn, sql: []const u8, params: anytype) ![]const u8 {
         const ParamType = @TypeOf(params);
         switch (@typeInfo(ParamType)) {
-            .Struct => |info| {
+            .@"struct" => |info| {
                 if (!info.is_tuple) @compileError("query params must be a tuple or []const Value");
                 const values = try self.allocator.alloc(value_codec.Value, info.fields.len);
                 defer self.allocator.free(values);
@@ -173,15 +173,15 @@ pub const Conn = struct {
                 }
                 return self.queryWithParams(sql, values);
             },
-            .Pointer => |ptr| {
+            .pointer => |ptr| {
                 switch (ptr.size) {
-                    .Slice => {
+                    .slice => {
                         if (ptr.child != value_codec.Value) @compileError("query params must be []const Value");
                         return self.queryWithParams(sql, params);
                     },
-                    .One => {
+                    .one => {
                         switch (@typeInfo(ptr.child)) {
-                            .Array => |array| {
+                            .array => |array| {
                                 if (array.child != value_codec.Value) {
                                     @compileError("query params must be a Value array pointer");
                                 }
@@ -265,24 +265,24 @@ pub const Conn = struct {
     }
 };
 
-fn nativeParamToValue(value: anytype) !value_codec.Value {
+pub fn nativeParamToValue(value: anytype) !value_codec.Value {
     const ValueType = @TypeOf(value);
     if (ValueType == value_codec.Value) return value;
 
     return switch (@typeInfo(ValueType)) {
-        .Null => .{ .@"null" = {} },
-        .Bool => .{ .@"bool" = value },
-        .Int, .ComptimeInt => .{ .int = std.math.cast(i64, value) orelse return error.ParamOutOfRange },
-        .Float, .ComptimeFloat => .{ .float = @as(f64, @floatCast(value)) },
-        .Optional => if (value) |payload| try nativeParamToValue(payload) else .{ .@"null" = {} },
-        .Pointer => |ptr| switch (ptr.size) {
-            .Slice => {
+        .null => .{ .null = {} },
+        .bool => .{ .bool = value },
+        .int, .comptime_int => .{ .int = std.math.cast(i64, value) orelse return error.ParamOutOfRange },
+        .float, .comptime_float => .{ .float = @as(f64, @floatCast(value)) },
+        .optional => if (value) |payload| try nativeParamToValue(payload) else .{ .null = {} },
+        .pointer => |ptr| switch (ptr.size) {
+            .slice => {
                 if (ptr.child != u8) @compileError("only []const u8 slices can bind as text");
                 return .{ .text = value };
             },
-            .One => {
+            .one => {
                 switch (@typeInfo(ptr.child)) {
-                    .Array => |array| {
+                    .array => |array| {
                         if (array.child != u8) @compileError("only string literals can bind as text");
                         return .{ .text = value[0..] };
                     },
@@ -327,7 +327,7 @@ pub fn connect(allocator: Allocator, opts: ConnectOptions) !*Conn {
     errdefer if (stream_owned) stream.close();
 
     if (opts.tls) {
-        // std.crypto.tls.Client in 0.13 doesn't expose ALPN
+        // std.crypto.tls.Client in 0.14 doesn't expose ALPN
         // configuration directly; we connect with the system roots
         // and document the limitation in the README. mTLS / custom
         // CA bundles are also deferred — TLS support here is a
@@ -336,7 +336,10 @@ pub fn connect(allocator: Allocator, opts: ConnectOptions) !*Conn {
         var bundle: std.crypto.Certificate.Bundle = .{};
         defer bundle.deinit(allocator);
         try bundle.rescan(allocator);
-        const tls_client = try std.crypto.tls.Client.init(sock, bundle, opts.host);
+        const tls_client = try std.crypto.tls.Client.init(sock, .{
+            .host = .{ .explicit = opts.host },
+            .ca = .{ .bundle = bundle },
+        });
         stream = .{ .tls = .{ .client = tls_client, .sock = sock } };
     }
 

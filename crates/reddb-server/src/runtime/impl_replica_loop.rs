@@ -97,6 +97,47 @@ mod tests {
     }
 
     #[test]
+    fn repeated_replication_health_does_not_persist_a_new_timestamp() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+        runtime.persist_replication_health("connecting", "primary unavailable", None, None);
+        runtime.inner.db.store().set_config_tree(
+            "red.replication",
+            &crate::json!({ "updated_at_unix_ms": 7 }),
+        );
+
+        runtime.persist_replication_health("connecting", "primary unavailable", None, None);
+
+        assert_eq!(
+            runtime.config_u64("red.replication.updated_at_unix_ms", 0),
+            7,
+            "an unchanged retry must not create durable storage churn"
+        );
+        runtime.persist_replication_health("healthy", "", Some(3), Some(1));
+        assert_ne!(
+            runtime.config_u64("red.replication.updated_at_unix_ms", 0),
+            7,
+            "a real health transition must still be persisted"
+        );
+    }
+
+    #[test]
+    fn reconnecting_replica_retains_the_last_observed_primary_frontier() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime boots");
+        runtime.persist_replication_health("healthy", "", Some(42), Some(7));
+
+        runtime.persist_replication_health("connecting", "primary unavailable", None, None);
+
+        assert_eq!(
+            runtime.config_u64("red.replication.last_seen_primary_lsn", 0),
+            42
+        );
+        assert_eq!(
+            runtime.config_u64("red.replication.last_seen_oldest_lsn", 0),
+            7
+        );
+    }
+
+    #[test]
     fn rebootstrap_ready_message_treats_reclone_as_executed_reclone_basebackup() {
         assert_eq!(
             rebootstrap_ready_message(reddb_file::ReplicaCatchupMode::Reclone, 42),
@@ -248,13 +289,14 @@ mod tests {
 }
 
 impl RedDBRuntime {
-    fn persist_replica_lsn(&self, lsn: u64) {
-        self.inner.db.store().set_config_tree(
+    fn persist_replica_lsn(&self, lsn: u64) -> RedDBResult<()> {
+        self.inner.db.store().try_set_config_tree(
             "red.replication",
             &crate::json!({
                 "last_applied_lsn": lsn
             }),
-        );
+        )?;
+        Ok(())
     }
 
     /// Resolve this replica's stable identity (issue #812). The primary keys
@@ -302,21 +344,37 @@ impl RedDBRuntime {
         oldest_available_lsn: Option<u64>,
         catchup_mode: Option<reddb_file::ReplicaCatchupMode>,
     ) {
+        let catchup_mode = catchup_mode
+            .map(reddb_file::ReplicaCatchupMode::as_str)
+            .unwrap_or("");
+        // A connection failure carries no new frontier. Preserve the last
+        // observed values so failover can distinguish a never-synced replica
+        // from one that was caught up immediately before the primary vanished.
+        let primary_lsn = primary_lsn
+            .unwrap_or_else(|| self.config_u64("red.replication.last_seen_primary_lsn", 0));
+        let oldest_available_lsn = oldest_available_lsn
+            .unwrap_or_else(|| self.config_u64("red.replication.last_seen_oldest_lsn", 0));
         // Issue #1243 — observe every persisted health transition for
         // reconnect telemetry. This is the single chokepoint the replica
         // loop routes all state changes through, so the counter sees each
         // link drop (`connecting`) and restore (`healthy`) exactly once.
         self.inner.replica_link_metrics.observe_state(state);
+        if self.config_string("red.replication.state", "") == state
+            && self.config_string("red.replication.last_error", "") == last_error
+            && self.config_string("red.replication.catchup_mode", "") == catchup_mode
+            && self.config_u64("red.replication.last_seen_primary_lsn", 0) == primary_lsn
+            && self.config_u64("red.replication.last_seen_oldest_lsn", 0) == oldest_available_lsn
+        {
+            return;
+        }
         self.inner.db.store().set_config_tree(
             "red.replication",
             &crate::json!({
                 "state": state,
                 "last_error": last_error,
-                "catchup_mode": catchup_mode
-                    .map(reddb_file::ReplicaCatchupMode::as_str)
-                    .unwrap_or(""),
-                "last_seen_primary_lsn": primary_lsn.unwrap_or(0),
-                "last_seen_oldest_lsn": oldest_available_lsn.unwrap_or(0),
+                "catchup_mode": catchup_mode,
+                "last_seen_primary_lsn": primary_lsn,
+                "last_seen_oldest_lsn": oldest_available_lsn,
                 "updated_at_unix_ms": SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -421,8 +479,36 @@ impl RedDBRuntime {
             }
         }
         // Issue #812 — stable identity sent on every WAL pull so the primary
-        // can self-register this replica and attribute pulls to it.
-        let replica_id = self.resolve_replica_id();
+        // can self-register this replica and attribute pulls to it. When the
+        // primary authenticates replication, its principal is also the slot
+        // identity; allowing those names to drift would let this process forge
+        // acknowledgements for another replica.
+        let request_auth = match crate::replication::request_auth::ReplicaRequestAuth::from_env() {
+            Ok(auth) => auth,
+            Err(message) => {
+                self.persist_replication_health("auth_error", message, None, None);
+                return;
+            }
+        };
+        let replica_id = if let Some(principal) = request_auth.principal() {
+            let configured = self.config_string("red.replication.replica_id", "");
+            if !configured.is_empty() && configured != principal {
+                self.persist_replication_health(
+                    "auth_error",
+                    "replica identity differs from replication credential principal",
+                    None,
+                    None,
+                );
+                return;
+            }
+            self.inner.db.store().set_config_tree(
+                "red.replication",
+                &crate::json!({ "replica_id": principal }),
+            );
+            principal.to_string()
+        } else {
+            self.resolve_replica_id()
+        };
 
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -440,7 +526,10 @@ impl RedDBRuntime {
                 match RedDbClient::connect(endpoint.clone()).await {
                     Ok(client) => {
                         self.persist_replication_health("connecting", "", None, None);
-                        break client;
+                        let max_message_bytes = crate::grpc::RedDBGrpcServer::max_message_bytes();
+                        break client
+                            .max_decoding_message_size(max_message_bytes)
+                            .max_encoding_message_size(max_message_bytes);
                     }
                     Err(_) => {
                         self.persist_replication_health(
@@ -501,6 +590,10 @@ impl RedDBRuntime {
                 since_lsn,
                 self.inner.replica_apply_metrics.clone(),
             );
+            // Register the replica and publish a healthy link state before
+            // entering the 30-second tail-follow wait on an empty primary.
+            // Every subsequent pull keeps the efficient await-data behavior.
+            let mut await_data = false;
 
             loop {
                 let payload = reddb_wire::replication::WalStreamOpen {
@@ -508,20 +601,29 @@ impl RedDBRuntime {
                     max_count,
                     replica_id: Some(replica_id.clone()),
                     term: self.current_replication_term(),
-                    await_data: true,
+                    await_data,
                     await_timeout_ms: 30_000,
                 };
-                let request = tonic::Request::new(JsonPayloadRequest {
+                let request = request_auth.request(JsonPayloadRequest {
                     payload_json: String::from_utf8(payload.encode_json_with_endpoints(Some(&self.routing_endpoints())))
                         .expect("invariant: WAL open encoder emits UTF-8 JSON"),
                 });
 
-                if let Ok(response) = client.pull_wal_records(request).await {
-                    let response = response.into_inner();
+                let pull_result = client.pull_wal_records(request).await;
+                if let Err(error) = &pull_result {
+                    self.persist_replication_health(
+                        "connecting",
+                        &format!("primary pull_wal_records request failed: {error}"),
+                        None,
+                        None,
+                    );
+                }
+                if let Ok(response) = pull_result {
                     if let Ok((chunk, endpoints)) = reddb_wire::replication::WalStreamChunk::decode_json_with_endpoints(
-                        response.payload.as_bytes(),
+                        response.into_inner().payload.as_bytes(),
                     )
                     {
+                        await_data = true;
                         self.cache_routing_primary_endpoints(endpoints);
                         let current_lsn = Some(chunk.current_lsn);
                         let oldest_available_lsn = chunk.oldest_available_lsn;
@@ -647,7 +749,7 @@ impl RedDBRuntime {
                         }
                         {
                             let mut batch_applied_lsn = None;
-                            let mut applied_relay_records: Vec<(u64, Vec<u8>)> = Vec::new();
+                            let mut applied_relay_records: Vec<(u64, &[u8])> = Vec::new();
                             let mut ack_failed = false;
                             for record in &chunk.records {
                                 let Ok(change) = ChangeRecord::decode(&record.data) else {
@@ -673,9 +775,8 @@ impl RedDBRuntime {
                                     Ok(crate::replication::logical::ApplyOutcome::Applied) => {
                                         self.invalidate_result_cache_for_table(&change.collection);
                                         since_lsn = since_lsn.max(change.lsn);
-                                        self.persist_replica_lsn(since_lsn);
                                         batch_applied_lsn = Some(since_lsn);
-                                        applied_relay_records.push((change.lsn, record.data.clone()));
+                                        applied_relay_records.push((change.lsn, &record.data));
                                     }
                                     Ok(_) => {
                                         // Idempotent / Skipped: no advance, no error.
@@ -768,6 +869,19 @@ impl RedDBRuntime {
                                     );
                                 }
                                 if !ack_failed {
+                                    if let Err(err) = self.persist_replica_lsn(applied_lsn) {
+                                        ack_failed = true;
+                                        self.persist_replication_health(
+                                            "cursor_error",
+                                            &format!(
+                                                "failed to persist replica apply cursor: {err}"
+                                            ),
+                                            current_lsn,
+                                            oldest_available_lsn,
+                                        );
+                                    }
+                                }
+                                if !ack_failed {
                                     let apply_errors = self.replica_apply_error_counts();
                                     let apply_errors_total =
                                         apply_errors.iter().map(|(_, count)| *count).sum::<u64>();
@@ -788,7 +902,7 @@ impl RedDBRuntime {
                                         apply_errors_total,
                                         divergence_total,
                                     };
-                                    let ack_request = tonic::Request::new(JsonPayloadRequest {
+                                    let ack_request = request_auth.request(JsonPayloadRequest {
                                         payload_json: String::from_utf8(ack_payload.encode_json())
                                             .unwrap_or_else(|_| "{}".to_string()),
                                     });
@@ -823,12 +937,6 @@ impl RedDBRuntime {
                         );
                     }
                 } else {
-                    self.persist_replication_health(
-                        "connecting",
-                        "primary pull_wal_records request failed",
-                        None,
-                        None,
-                    );
                     std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(250)));
                 }
             }

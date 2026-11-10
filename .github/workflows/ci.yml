@@ -1,29 +1,6 @@
 name: CI
 
 on:
-  merge_group:
-    types: [checks_requested]
-  push:
-    branches: [ main, develop ]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'CHANGELOG**'
-      - 'LICENSE**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '**/Cargo.toml'
-      - 'package.json'
-      - '**/package.json'
-      - 'pnpm-lock.yaml'
-      - 'drivers/python/pyproject.toml'
-  pull_request:
-    branches: [ main, develop ]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'CHANGELOG**'
-      - 'LICENSE**'
   workflow_dispatch:
     inputs:
       full_ci:
@@ -34,13 +11,17 @@ on:
 # Cost guard: new pushes cancel older runs on the same ref. Release-grade
 # validation lives in release.yml; CI push runs should stay quick.
 #
-# Cost policy (August 2026, Blacksmith bill): pushes and pull requests run the
-# trunk correctness lane on free standard runners for this public repository.
+# This public repository uses standard GitHub-hosted runners for all CI lanes.
 # Feature matrices, cross-platform builds, driver conformance, containers,
-# fuzz smoke, and packaging are release-adjacent and run on Blacksmith only
-# through `workflow_dispatch` with full_ci=true. Stable release builds remain
+# fuzz smoke, and packaging remain opt-in through `workflow_dispatch` with
+# full_ci=true. Stable release builds remain
 # authoritative in release.yml. rust-cache saves are restricted to non-PR runs
 # (save-if) so PR branches never persist multi-GB caches.
+
+      preview_platforms:
+        type: boolean
+        description: Show selected platforms without running builds, tests or publication
+        default: false
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -50,18 +31,82 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
   CARGO_INCREMENTAL: 0
 
+  ENABLE_LINUX_X64: ${{ vars.ENABLE_LINUX_X64 || 'true' }}
+  ENABLE_LINUX_ARM64: ${{ vars.ENABLE_LINUX_ARM64 || 'true' }}
+  ENABLE_WINDOWS_X64: ${{ vars.ENABLE_WINDOWS_X64 || 'true' }}
+  ENABLE_WINDOWS_ARM64: ${{ vars.ENABLE_WINDOWS_ARM64 || 'false' }}
+  ENABLE_MACOS_X64: ${{ vars.ENABLE_MACOS_X64 || 'false' }}
+  ENABLE_MACOS_ARM64: ${{ vars.ENABLE_MACOS_ARM64 || 'false' }}
+  ENABLE_LINUX_ARMV7: ${{ vars.ENABLE_LINUX_ARMV7 || 'false' }}
+  ENABLE_LINUX_X86: ${{ vars.ENABLE_LINUX_X86 || 'false' }}
 jobs:
   # Sentinel job — short-circuits everything else when the PR is a draft or from
   # Dependabot (Dependabot PRs run the dedicated dependabot.yml workflow instead).
+  platforms:
+    name: Select platforms
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions: {}
+    outputs:
+      linux_x64: ${{ steps.select.outputs.linux_x64 }}
+      linux_arm64: ${{ steps.select.outputs.linux_arm64 }}
+      windows_x64: ${{ steps.select.outputs.windows_x64 }}
+      windows_arm64: ${{ steps.select.outputs.windows_arm64 }}
+      macos_x64: ${{ steps.select.outputs.macos_x64 }}
+      macos_arm64: ${{ steps.select.outputs.macos_arm64 }}
+      linux_armv7: ${{ steps.select.outputs.linux_armv7 }}
+      linux_x86: ${{ steps.select.outputs.linux_x86 }}
+      any: ${{ steps.select.outputs.any }}
+      docker_platforms: ${{ steps.select.outputs.docker_platforms }}
+    steps:
+      - id: select
+        name: Filter platforms before allocating runners
+        shell: python
+        env:
+          PLATFORM_DEFAULTS: '{"linux_x64":true,"linux_arm64":true,"windows_x64":true,"windows_arm64":false,"macos_x64":false,"macos_arm64":false,"linux_armv7":false,"linux_x86":false}'
+          PLATFORM_AVAILABLE: '["linux_x64", "macos_arm64", "windows_x64"]'
+          PLATFORM_MATRICES: |
+            {}
+        run: |
+          import json
+          import os
+
+          defaults = json.loads(os.environ["PLATFORM_DEFAULTS"])
+          enabled = {}
+          for key in defaults:
+              name = "ENABLE_" + key.upper()
+              value = os.environ[name].lower()
+              if value not in ("true", "false"):
+                  raise SystemExit(f"{name} must be true or false, got {value!r}")
+              enabled[key] = value == "true"
+
+          matrices = json.loads(os.environ["PLATFORM_MATRICES"])
+          available = json.loads(os.environ["PLATFORM_AVAILABLE"])
+          output = {key: str(value).lower() for key, value in enabled.items()}
+          output["any"] = str(any(enabled[key] for key in available)).lower()
+          for job, entries in matrices.items():
+              selected = [entry["row"] for entry in entries if enabled[entry["flag"]]]
+              output["enabled_" + job] = str(bool(selected)).lower()
+              # A placeholder keeps GitHub's matrix schema valid when the job is skipped.
+              output["matrix_" + job] = json.dumps({"include": selected or [entries[0]["row"]]}, separators=(",", ":"))
+          docker = [target for key, target in (("linux_x64", "linux/amd64"), ("linux_arm64", "linux/arm64")) if enabled[key]]
+          output["docker_platforms"] = ",".join(docker)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
+              for key, value in output.items():
+                  handle.write(f"{key}={value}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as handle:
+              handle.write("### Selected platforms\n\n")
+              for key in available:
+                  handle.write(f"- {key}: {str(enabled[key]).lower()}\n")
   gate:
     name: gate
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    if: |
-      github.actor != 'dependabot[bot]' &&
-      (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    if: |-
+      ${{ !inputs.preview_platforms && ((github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) && (needs.platforms.outputs.any == 'true')) }}
     outputs:
       run_heavy: ${{ steps.classify.outputs.run_heavy }}
     steps:
@@ -86,6 +131,8 @@ jobs:
           fi
           echo "run_heavy=$run_heavy" >> "$GITHUB_OUTPUT"
 
+    needs:
+      - platforms
   serialization-lint:
     # Issue #180 / ADR 0010 — grep-based preflight that flags new
     # untyped serialization across the four boundaries hardened by
@@ -107,8 +154,10 @@ jobs:
     #      typed guard or land on the whitelist with a tracking
     #      issue, same as clippy.
     name: Lint (no untyped serialization)
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true'
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     continue-on-error: true
@@ -149,15 +198,17 @@ jobs:
     # it gives the feedback on every normal PR/push. Needs full tag history
     # (fetch-depth: 0) so the drift guard can see the published tags.
     name: Version integrity
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true'
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
       - name: Check version lock-step + drift guard
@@ -170,19 +221,25 @@ jobs:
     # release-blocking policy is owned by @filipeforattini (see
     # .github/CODEOWNERS for docs/conformance/ and scripts/verify-contract-matrix.mjs).
     name: Contract Matrix Gate
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true'
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
       - name: Verify every supported cell has a backing test
         run: node scripts/verify-contract-matrix.mjs
       - name: Contract-matrix tooling contract test
         run: node --test scripts/contract_matrix_contract.test.mjs
+      - name: Verify all official drivers account for all four deployment modes
+        run: node scripts/verify-deployment-mode-matrix.mjs
+      - name: Deployment-mode tooling contract test
+        run: node --test scripts/deployment_mode_matrix_contract.test.mjs
       - name: Installer checksum contract test
         run: node --test scripts/install_script_contract.test.mjs
       - name: Docs-shim ⇔ required-checks ⇔ ci.yml lock-step (#1307)
@@ -193,8 +250,10 @@ jobs:
     # This stays on the free correctness lane; broader cross-driver matrices
     # remain release-adjacent and opt in through full_ci.
     name: Driver Wire Conformance
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true'
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -225,7 +284,7 @@ jobs:
           REDDB_BENCH_ROUNDS: '3'
           REDDB_BENCH_SAMPLE_MS: '5'
         run: bun run bench-receive.ts > "$RUNNER_TEMP/bun-receive.json"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
       - name: Remote HTTP native Blob Cache regression
@@ -245,13 +304,15 @@ jobs:
     # doc drifts from the matrix — so a doc can never promise a feature the
     # matrix does not mark supported. Run `--write` locally to regenerate.
     name: Docs Match Contract Matrix
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true'
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
       - name: Check public docs match the contract matrix
@@ -261,8 +322,10 @@ jobs:
 
   helm-chart:
     name: Helm Chart
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true'
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -276,15 +339,17 @@ jobs:
     # the actual merged diff. The contract test always runs; the live diff
     # check activates when an AFK/CI caller supplies RED_AFK_VALIDATION_SIDECAR.
     name: AFK Validation Sidecar
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true'
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
       - name: Sidecar tooling contract test
@@ -302,10 +367,12 @@ jobs:
 
   quality:
     name: Quality (fmt, check, clippy)
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true'
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
@@ -317,17 +384,107 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
           save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: '0.14.1'
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.25'
+          cache-dependency-path: drivers/go/go.sum
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
+        with:
+          dotnet-version: '8.0.x'
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+        with:
+          sdk: stable
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.3'
+          extensions: curl, ffi, hash, json, openssl
       - name: Build workflow contracts
         run: node --test scripts/build_workflow_contract.test.mjs
       - run: cargo fmt --all -- --check
       - run: cargo check --locked --all
+      - name: Native ABI embedded single-file journey
+        run: |
+          cargo test --locked -p reddb-io-ffi
+          cargo build --locked -p reddb-io-ffi
+      - name: Go embedded single-file journey
+        working-directory: drivers/go
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: go test -run TestEmbeddedNativeABI -v .
+      - name: .NET embedded single-file journey
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: dotnet test drivers/dotnet/tests/Reddb.Tests/Reddb.Tests.csproj --filter FullyQualifiedName~EmbeddedTests
+      - name: Java embedded single-file journey
+        working-directory: drivers/java
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: ./gradlew test --tests dev.reddb.EmbeddedTest
+      - name: Kotlin embedded single-file journey
+        working-directory: drivers/kotlin
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: ./gradlew test --tests dev.reddb.EmbeddedTest
+      - name: Dart embedded single-file journey
+        working-directory: drivers/dart
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: |
+          dart pub get
+          dart test test/embedded_test.dart
+      - name: PHP embedded single-file journey
+        working-directory: drivers/php
+        env:
+          REDDB_EMBEDDED_SMOKE: '1'
+          REDDB_FFI_LIBRARY: ${{ github.workspace }}/target/debug/libreddb_ffi.so
+        run: |
+          composer install --no-interaction --no-progress
+          php -d ffi.enable=true vendor/bin/phpunit --filter EmbeddedTest
+      - name: C++ embedded single-file journey
+        run: |
+          ffi_library="$(find "$GITHUB_WORKSPACE/target/debug" -name 'libreddb_ffi.so' -print -quit)"
+          test -n "$ffi_library"
+          cmake -S drivers/cpp -B /tmp/reddb-cpp-embedded \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DREDDB_FFI_LIBRARY="$ffi_library"
+          cmake --build /tmp/reddb-cpp-embedded --target embedded_test -j2
+          LD_LIBRARY_PATH="$(dirname "$ffi_library")" \
+            ctest --test-dir /tmp/reddb-cpp-embedded -R '^embedded_test$' --output-on-failure
+      - name: Zig connection routing contract
+        working-directory: drivers/zig
+        run: |
+          zig build test --summary all
+          zig build connect-contract --summary all
+      - name: Zig embedded single-file journey
+        working-directory: drivers/zig
+        run: |
+          ffi_library="$(find "$GITHUB_WORKSPACE/target/debug" -name 'libreddb_ffi.so' -print -quit)"
+          test -n "$ffi_library"
+          ffi_root=/tmp/reddb-zig-ffi
+          mkdir -p "$ffi_root/include" "$ffi_root/lib"
+          cp "$GITHUB_WORKSPACE/crates/reddb-ffi/include/reddb.h" "$ffi_root/include/reddb.h"
+          cp "$ffi_library" "$ffi_root/lib/libreddb_ffi.so"
+          LD_LIBRARY_PATH="$ffi_root/lib" \
+            zig build embedded-test -Dreddb-ffi-dir="$ffi_root" --summary all
       - name: Scoped S3 credential rotation contracts
         run: |
           cargo check --locked --all --features backend-s3
@@ -339,7 +496,7 @@ jobs:
       - name: Generate command coverage matrix
         run: cargo run --locked -p reddb-io-server --bin command-coverage > command-coverage.md
       - name: Upload command coverage matrix
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: command-coverage-matrix
           path: command-coverage.md
@@ -355,8 +512,10 @@ jobs:
     # engine (`reddb-server`'s `RedDBRuntime`). It is the behavioral net
     # every later RQL-extraction slice must keep green.
     name: RQL Conformance (sqllogictest)
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true'
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -368,9 +527,9 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
@@ -388,8 +547,10 @@ jobs:
     # explicitly to catch breakage like the 37-error tonic/prost drift
     # that motivated this gate.
     name: Drivers / Python (cargo check)
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true'
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -402,7 +563,7 @@ jobs:
         with:
           version: '28.3'
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: drivers-python-rust-1.91.0
           cache-on-failure: "true"
@@ -432,8 +593,10 @@ jobs:
     # workspace with its own lockfile, so nothing else compiles it: build it
     # here and run the SDK's integration test against the real `.node`.
     name: Drivers / Node (addon build + e2e)
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true'
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -445,11 +608,11 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: drivers-node-rust-1.91.0
           cache-on-failure: "true"
@@ -476,9 +639,11 @@ jobs:
     # PLAN.md B5 — compile every supported feature combination that
     # operators may select for release artifacts.
     name: Feature Matrix (${{ matrix.features.label }})
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -502,7 +667,7 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: ubuntu-features-rust-1.91.0-${{ matrix.features.label }}
           cache-on-failure: "true"
@@ -513,8 +678,10 @@ jobs:
     # Release and debug outputs must not compete for the integration runner's
     # disk. Keep the size gate, with its own target directory and cache.
     name: red_client size budget
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true'
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -527,9 +694,9 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: ubuntu-client-size-v1
           cache-on-failure: "true"
@@ -552,8 +719,10 @@ jobs:
     # visible in the matrix; a shard above 2x the median is the signal to
     # revisit the assignment.
     name: Test Suite ${{ matrix.shard == 'unit' && 'unit' || format('shard ({0}/4)', matrix.shard) }}
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true'
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
@@ -580,9 +749,9 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           # Do not restore the old cache containing mixed release/test outputs.
           shared-key: ubuntu-tests-nodebug-v2
@@ -591,7 +760,7 @@ jobs:
           workspaces: |
             . -> target
             . -> target/persistent-tests
-      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2.87.5
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:
           tool: nextest
       - name: Prepare isolated temp dir
@@ -659,8 +828,12 @@ jobs:
     # protection. `always()` ensures a failed shard reaches this aggregate
     # instead of turning it into a misleading skipped success.
     name: Test Suite
-    needs: [gate, test-shards, client-size-budget]
-    if: always() && needs.gate.outputs.run_heavy == 'true'
+    needs:
+      - gate
+      - test-shards
+      - client-size-budget
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((always() && needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -671,9 +844,11 @@ jobs:
 
   driver-param-conformance:
     name: Driver Param Conformance
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -681,33 +856,33 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.x'
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: '1.25'
           cache-dependency-path: drivers/go/go.sum
-      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: '17'
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
         with:
           dotnet-version: '8.0.x'
       - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
         with:
           sdk: stable
-      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.3'
           extensions: curl, hash, json, openssl
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
-          version: '0.16.0'
+          version: '0.14.1'
       - name: JS RedWire parameter fixtures
         working-directory: drivers/js
         run: node --test test/redwire.params.test.mjs
@@ -753,9 +928,11 @@ jobs:
     # released API. The JS suite needs the `red` binary; the Python driver
     # statically links the engine, so `maturin develop` is self-contained.
     name: Driver Runnable Examples
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -766,16 +943,16 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: driver-runnable-examples-rust-1.91.0
           cache-on-failure: "true"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.x'
       - name: Build red (embedded engine for the JS SDK)
@@ -812,7 +989,7 @@ jobs:
           . .venv/bin/activate
           pip install --upgrade pip maturin pytest
           maturin develop
-          python -m pytest tests/test_readme_examples.py -q
+          python -m pytest tests/test_readme_examples.py tests/test_smoke.py -q
 
   publish-dry-run:
     # Catches crates.io packaging issues (missing include paths, stale
@@ -820,9 +997,11 @@ jobs:
     # time. `cargo package` with verify rebuilds the engine from the
     # tarball, so this also exercises the include manifest end-to-end.
     name: Publish Dry-Run (crates.io)
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -833,9 +1012,9 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: ubuntu-publish-dryrun-rust-1.91.0
           cache-on-failure: "true"
@@ -847,9 +1026,11 @@ jobs:
 
   containers:
     name: Container Stack
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -889,10 +1070,13 @@ jobs:
     # Runs the chaos tests plus backup/restore drills shipped in
     # the consolidated grouped test binaries. Failure is a release blocker.
     name: Chaos & Drill Suite
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
+    runs-on: ubuntu-24.04
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
     timeout-minutes: 25
-    needs: [gate, tests]
+    needs:
+      - gate
+      - tests
+      - platforms
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
@@ -902,14 +1086,14 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
           save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2.87.5
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:
           tool: nextest
       - name: Run chaos, drill, and persistence tests
@@ -927,10 +1111,13 @@ jobs:
     # backend (Floci) so the LocalBackend coverage doesn't mask
     # backend-specific failure modes.
     name: Chaos Suite (Floci S3 backend)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
+    runs-on: ubuntu-24.04
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
     timeout-minutes: 25
-    needs: [gate, tests]
+    needs:
+      - gate
+      - tests
+      - platforms
     env:
       RED_BACKEND: s3
       RED_S3_ENDPOINT: http://localhost:55466
@@ -945,7 +1132,7 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: ubuntu-rust-1.91.0
           cache-on-failure: "true"
@@ -996,9 +1183,11 @@ jobs:
     # test suite on Windows. Excludes Linux-only integration tests
     # (systemd install, mmap, Unix sockets) via cfg gates in the source.
     name: Windows (build + unit tests)
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
-    runs-on: blacksmith-8vcpu-windows-2025
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.windows_x64 == 'true')) }}
+    runs-on: windows-2025
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1006,7 +1195,7 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: windows-rust-1.91.0
           cache-on-failure: "true"
@@ -1030,9 +1219,11 @@ jobs:
     # Mirror of the Windows job for Darwin; keeps the cross-platform
     # story complete. Same scope — library build + unit tests.
     name: macOS (build + unit tests)
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
-    runs-on: blacksmith-6vcpu-macos-15
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.macos_arm64 == 'true')) }}
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1040,7 +1231,7 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: macos-rust-1.91.0
           cache-on-failure: "true"
@@ -1053,9 +1244,11 @@ jobs:
     # On-demand bounded smoke window (cost policy above); the long
     # exploration window lives in parser-fuzz-nightly.yml.
     name: Fuzz Parsers
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       FUZZ_PR_TIME_SECONDS: 30
@@ -1067,9 +1260,9 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # v1
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: ubuntu-fuzz-pr-smoke
           cache-on-failure: "true"
@@ -1098,7 +1291,7 @@ jobs:
           done
       - name: Upload fuzz crash artifacts
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: fuzz-crashes
           path: |
@@ -1108,9 +1301,11 @@ jobs:
 
   package:
     name: cargo package dry-run
-    needs: gate
-    if: needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - gate
+      - platforms
+    if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true' && github.event_name == 'workflow_dispatch' && inputs.full_ci) && (needs.platforms.outputs.linux_x64 == 'true')) }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1118,6 +1313,6 @@ jobs:
       - uses: ./.github/actions/install-protoc
         with:
           version: '28.3'
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: cargo package --workspace
         run: cargo package --workspace --allow-dirty --no-verify

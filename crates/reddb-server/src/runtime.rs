@@ -1490,6 +1490,18 @@ pub struct RedDBRuntime {
     inner: Arc<RuntimeInner>,
 }
 
+/// Storage replay can reach the owning runtime without keeping it alive.
+pub(crate) struct WeakRuntime(std::sync::Weak<RuntimeInner>);
+
+impl WeakRuntime {
+    pub(crate) fn upgrade(&self) -> Option<RedDBRuntime> {
+        self.0.upgrade().map(|inner| RedDBRuntime {
+            background_tasks: None,
+            inner,
+        })
+    }
+}
+
 impl RedDBRuntime {
     pub(crate) fn execution_admission(
         &self,
@@ -1568,6 +1580,7 @@ fn is_select_query_text(query: &str) -> bool {
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("select"))
 }
 
+pub(crate) mod agent_tools;
 pub mod ai;
 mod allocator_pressure;
 pub mod analytics_schema_registry;
@@ -1640,6 +1653,7 @@ mod impl_routing_topology;
 mod impl_runtime_index_registry;
 mod impl_telemetry_accessors;
 mod impl_tenant_registry;
+mod store_forks;
 pub(crate) use impl_queue::RedwireWaitOutcome;
 pub(crate) mod claim_telemetry;
 #[cfg(test)]
@@ -1658,6 +1672,8 @@ mod index_store;
 mod paged_btree_index;
 mod paged_count;
 mod paged_hash_index;
+#[cfg(test)]
+mod startup_io_budget;
 #[cfg(test)]
 pub(crate) use index_store::{IndexMethodKind as QualificationIndexMethodKind, MutationTestPhase};
 #[cfg(test)]
@@ -1703,6 +1719,7 @@ pub(crate) mod query_exec;
 pub(crate) mod query_latency_telemetry;
 pub mod query_request;
 pub(crate) mod queue_lifecycle;
+mod queue_storage_index;
 pub(crate) mod queue_telemetry;
 pub(crate) mod queue_wait_registry;
 pub mod quota_bucket;

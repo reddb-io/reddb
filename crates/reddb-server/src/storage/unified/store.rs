@@ -41,6 +41,16 @@ use crate::storage::engine::{BTree, BTreeError, Pager, PagerConfig, PhysicalFile
 use crate::storage::primitives::encoding::read_varu64;
 use reddb_types::types::Value;
 
+pub(crate) fn trace_startup_phase(path: &Path, phase: &'static str, started: std::time::Instant) {
+    tracing::debug!(
+        target: "reddb::storage::startup",
+        path = %path.display(),
+        phase,
+        elapsed = ?started.elapsed(),
+        "database startup phase completed"
+    );
+}
+
 pub use reddb_file::{
     is_supported_store_version, NativeCatalogCollectionSummary, NativeCatalogSummary,
     NativeExportSummary, NativeManifestEntrySummary, NativeManifestSummary,
@@ -312,6 +322,7 @@ pub struct UnifiedStore {
     pager: Option<Arc<Pager>>,
     /// Database file path (for paged mode)
     db_path: Option<PathBuf>,
+    operational_manifest: parking_lot::Mutex<Option<(PathBuf, reddb_file::OperationalManifest)>>,
     /// B-tree indices for O(log n) entity lookups by ID (per collection).
     /// Stored as `Arc<BTree>` so hot-path callers can clone the handle out
     /// under a read lock and release the map-level lock before doing the
@@ -321,6 +332,14 @@ pub struct UnifiedStore {
     btree_indices: RwLock<HashMap<String, Arc<BTree>>>,
     key_indices: RwLock<HashMap<String, PublishedKeyIndex>>,
     secondary_index_specs: RwLock<secondary_index::SecondaryIndexSpecs>,
+    /// Ephemeral guards for COUNT projections being built by this process.
+    /// Queries use them only to avoid waiting on that build's publication.
+    count_builds: RwLock<HashMap<String, std::sync::Weak<()>>>,
+    /// Bounded visibility postings recovered while a legacy catalog already
+    /// requires a complete identity scan. The next checkpoint consumes them.
+    count_projection_seeds: parking_lot::Mutex<HashMap<String, count_index::CountProjectionSeed>>,
+    /// Disposable, bounded expiration cursors; never authoritative metadata.
+    pub(crate) queue_dedup_cursors: parking_lot::Mutex<HashMap<[u8; 32], (u32, [u8; 49])>>,
     recovery_xid_summary: RwLock<Option<recovery_xid::RecoveryXidSummary>>,
     /// Reuse only a successfully published generation with the same live rows.
     checkpoint_versions: RwLock<HashMap<String, CheckpointVersion>>,
@@ -352,6 +371,7 @@ pub struct UnifiedStore {
     /// Reentrant because embedded checkpoint calls the snapshot encoder while
     /// holding the barrier, and storage maintenance may nest those calls.
     pub(crate) vault_publication_lock: parking_lot::ReentrantMutex<()>,
+    row_publications: row_publication::RowPublicationQueue,
     /// Live-only vault rows excluded from a reentrant WAL-full compaction.
     pub(crate) pending_vault_versions: RwLock<std::collections::HashSet<EntityId>>,
     /// Retain transaction outcomes through embedded snapshot-on-drop. Without
@@ -392,6 +412,8 @@ mod impl_pages;
 mod impl_vault_import;
 mod key_index;
 mod keyed_write;
+mod row_publication;
+pub(crate) use row_publication::RowPublication;
 mod mvcc_reclaim;
 pub(crate) use mvcc_reclaim::MvccReclaimCursor;
 pub(crate) mod count_index;
@@ -399,7 +421,7 @@ mod native_helpers;
 mod recovery_xid;
 pub mod secondary_index;
 
-pub(crate) use self::commit::DeferredStoreWalActions;
+pub(crate) use self::commit::{DeferredStoreWalActions, StoreWalCaptureGuard};
 use self::commit::{StoreCommitCoordinator, StoreWalAction};
 use self::native_helpers::*;
 

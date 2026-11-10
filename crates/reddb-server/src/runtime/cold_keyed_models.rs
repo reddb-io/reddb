@@ -7,6 +7,187 @@ use reddb_engine::storage::collection_read::{CollectionCursor, PagedCollection};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+#[test]
+fn mutable_scan_budget_is_shared_and_rotates_between_collections() {
+    let rt = RedDBRuntime::in_memory().unwrap();
+    rt.background_tasks.as_ref().unwrap().shutdown();
+    for name in ["events", "logs"] {
+        rt.execute_query(&format!(
+            "CREATE TABLE {name} (id INTEGER) WITH timestamps = true"
+        ))
+        .unwrap();
+        rt.execute_query(&format!("INSERT INTO {name} (id) VALUES (1), (2)"))
+            .unwrap();
+        let manager = rt.db().store().get_collection(name).unwrap();
+        for mut entity in manager.query_all(|_| true) {
+            entity.created_at = 1;
+            if let EntityData::Row(row) = &mut entity.data {
+                if let Some(named) = &mut row.named {
+                    named.insert("created_at".into(), Value::UnsignedInteger(1));
+                }
+                if let Some(schema) = &row.schema {
+                    let index = schema
+                        .iter()
+                        .position(|field| field == "created_at")
+                        .unwrap();
+                    row.columns[index] = Value::UnsignedInteger(1);
+                }
+            }
+            manager.update(entity).unwrap();
+        }
+        rt.execute_query(&format!("ALTER COLLECTION {name} SET RETENTION 1 d"))
+            .unwrap();
+    }
+    for expected in [[1, 2], [1, 1]] {
+        rt.sweep_retention_tick(1);
+        for name in ["events", "logs"] {
+            rt.execute_query(&format!("ALTER COLLECTION {name} UNSET RETENTION"))
+                .unwrap();
+        }
+        let counts = ["events", "logs"].map(|name| {
+            rt.execute_query(&format!("SELECT id FROM {name}"))
+                .unwrap()
+                .result
+                .records
+                .len()
+        });
+        assert_eq!(counts, expected);
+        for name in ["events", "logs"] {
+            rt.execute_query(&format!("ALTER COLLECTION {name} SET RETENTION 1 d"))
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn retention_scan_advances_past_live_rows_in_bounded_ticks() {
+    let rt = RedDBRuntime::in_memory().unwrap();
+    rt.background_tasks.as_ref().unwrap().shutdown();
+    rt.execute_query("CREATE TABLE events (id INTEGER) WITH timestamps = true")
+        .unwrap();
+    rt.execute_query("INSERT INTO events (id) VALUES (1), (2), (3), (4), (5), (6)")
+        .unwrap();
+    let manager = rt.db().store().get_collection("events").unwrap();
+    let mut entities = manager.query_all(|_| true);
+    entities.sort_by_key(|entity| entity.id);
+    for mut entity in entities.into_iter().skip(4) {
+        entity.created_at = 1;
+        if let EntityData::Row(row) = &mut entity.data {
+            if let Some(named) = &mut row.named {
+                named.insert("created_at".into(), Value::UnsignedInteger(1));
+            }
+            if let Some(schema) = &row.schema {
+                let index = schema
+                    .iter()
+                    .position(|field| field == "created_at")
+                    .unwrap();
+                row.columns[index] = Value::UnsignedInteger(1);
+            }
+        }
+        manager.update(entity).unwrap();
+    }
+    rt.execute_query("ALTER COLLECTION events SET RETENTION 1 d")
+        .unwrap();
+    for expected in [6, 6, 4] {
+        rt.sweep_retention_tick(2);
+        rt.execute_query("ALTER COLLECTION events UNSET RETENTION")
+            .unwrap();
+        assert_eq!(
+            rt.execute_query("SELECT id FROM events")
+                .unwrap()
+                .result
+                .records
+                .len(),
+            expected
+        );
+        rt.execute_query("ALTER COLLECTION events SET RETENTION 1 d")
+            .unwrap();
+    }
+}
+
+#[test]
+fn cold_retention_sweeps_persisted_rows_in_bounded_batches() {
+    for append_only in ["", "APPEND ONLY"] {
+        let directory = tempfile::tempdir().unwrap();
+        let options = RedDBOptions::persistent(directory.path().join("retention.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .unwrap();
+        {
+            let rt = RedDBRuntime::with_options(options.clone()).unwrap();
+            rt.background_tasks.as_ref().unwrap().shutdown();
+            rt.execute_query(&format!(
+                "CREATE TABLE events (id INTEGER) WITH timestamps = true {append_only}"
+            ))
+            .unwrap();
+            rt.execute_query("INSERT INTO events (id) VALUES (1), (2), (3), (4), (5)")
+                .unwrap();
+            let manager = rt.db().store().get_collection("events").unwrap();
+            for mut row in manager.query_all(|_| true) {
+                row.created_at = 1;
+                if let EntityData::Row(data) = &mut row.data {
+                    if let Some(named) = &mut data.named {
+                        named.insert("created_at".into(), Value::UnsignedInteger(1));
+                    }
+                    if let Some(schema) = &data.schema {
+                        let index = schema.iter().position(|name| name == "created_at").unwrap();
+                        data.columns[index] = Value::UnsignedInteger(1);
+                    }
+                    assert_eq!(
+                        data.get_field("created_at"),
+                        Some(&Value::UnsignedInteger(1))
+                    );
+                }
+                manager.update(row).unwrap();
+            }
+            rt.flush().unwrap();
+        }
+        for (previous, expected) in [(5, 3), (3, 1), (1, 0)] {
+            let rt = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+                RedDBRuntime::with_options(options.clone())
+            })
+            .unwrap();
+            rt.background_tasks.as_ref().unwrap().shutdown();
+            assert!(rt
+                .db()
+                .store()
+                .get_collection("events")
+                .unwrap()
+                .has_backing());
+            let before = rt.execute_query("SELECT id FROM events").unwrap();
+            assert_eq!(before.result.records.len(), previous, "before sweep");
+            rt.execute_query("ALTER COLLECTION events SET RETENTION 1 s")
+                .unwrap();
+            let mut remaining = previous;
+            for _ in 0..10 {
+                rt.sweep_retention_tick(2);
+                rt.execute_query("ALTER COLLECTION events UNSET RETENTION")
+                    .unwrap();
+                let next = rt
+                    .execute_query("SELECT id FROM events")
+                    .unwrap()
+                    .result
+                    .records
+                    .len();
+                assert!(next <= remaining && remaining - next <= 2);
+                remaining = next;
+                if remaining <= expected {
+                    break;
+                }
+                rt.execute_query("ALTER COLLECTION events SET RETENTION 1 s")
+                    .unwrap();
+            }
+            assert_eq!(
+                remaining, expected,
+                "cold cursor must advance past deleted versions"
+            );
+            rt.flush().unwrap();
+        }
+    }
+}
+
 fn runtime() -> (tempfile::TempDir, RedDBRuntime) {
     let directory = tempfile::tempdir().expect("cold model fixture");
     let options = RedDBOptions::persistent(directory.path().join("models.rdb"))
@@ -286,6 +467,73 @@ fn complete_runtime_cold_reopen_restores_unique_secondary_indexes() {
         .execute_query("SELECT COUNT(*) AS n FROM cold_indexed_rows")
         .expect("unchanged source rows");
     assert_eq!(result.result.records[0].get("n"), Some(&Value::Integer(2)));
+}
+
+#[test]
+fn repeated_cold_boot_reuses_published_index_pages() {
+    let directory = tempfile::tempdir().expect("cold growth fixture");
+    let path = directory.path().join("cold-growth.rdb");
+    let options = RedDBOptions::persistent(path.clone())
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_storage_profile(
+            crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+        )
+        .expect("profile");
+    let seed = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+    seed.execute_query("CREATE TABLE cold_growth_rows (id INTEGER, email TEXT)")
+        .expect("table");
+    seed.execute_query(
+        "CREATE UNIQUE INDEX cold_growth_email ON cold_growth_rows (email) USING HASH",
+    )
+    .expect("index");
+    for id in 0..512 {
+        seed.execute_query_with_params(
+            "INSERT INTO cold_growth_rows (id, email) VALUES ($1, $2)",
+            &[
+                Value::Integer(id),
+                Value::text(format!("cold-growth-{id:04}@example.test")),
+            ],
+        )
+        .expect("source row");
+    }
+    seed.flush().expect("seed checkpoint");
+    drop(seed);
+
+    let mut warmed_pages = 0;
+    let mut warmed_bytes = 0;
+    for boot in 0..8 {
+        let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options.clone())
+        })
+        .expect("cold runtime");
+        let count = runtime
+            .execute_query("SELECT COUNT(*) AS n FROM cold_growth_rows")
+            .expect("indexed source survives boot");
+        assert_eq!(count.result.records[0].get("n"), Some(&Value::Integer(512)));
+        runtime.flush().expect("cold checkpoint");
+        let pages = runtime
+            .db()
+            .store()
+            .pager()
+            .expect("paged store")
+            .page_count()
+            .expect("page count");
+        let bytes = std::fs::metadata(&path).expect("database file").len();
+        if boot == 2 {
+            warmed_pages = pages;
+            warmed_bytes = bytes;
+        } else if boot > 2 {
+            assert!(
+                pages <= warmed_pages + 32,
+                "unchanged cold boot grew from {warmed_pages} to {pages} pages at boot {boot}"
+            );
+            assert!(
+                bytes <= warmed_bytes + 32 * crate::storage::engine::PAGE_SIZE as u64,
+                "unchanged cold boot grew from {warmed_bytes} to {bytes} bytes at boot {boot}"
+            );
+        }
+        drop(runtime);
+    }
 }
 
 #[test]
@@ -1072,6 +1320,18 @@ fn cold_counter_mutations_keep_ttl_and_tags() {
             .tags_for_key("cold_counters", "item"),
         vec!["scope:prod"]
     );
+    store.persist().expect("publish tagged counter");
+    install_cold(&runtime, "cold_counters", 1);
+    let ops = super::impl_kv::KvAtomicOps::new(&runtime);
+    assert!(ops.try_tags_for_key("cold_counters", "item").is_err());
+    assert_eq!(
+        ops.invalidate_tags("cold_counters", &[])
+            .expect("empty tags are a no-op"),
+        0
+    );
+    assert!(ops
+        .invalidate_tags("cold_counters", &["scope:prod".into()])
+        .is_err());
 }
 
 #[test]
@@ -3589,4 +3849,38 @@ fn cold_queue_group_and_wait_cap_survive_checkpoint() {
         )
         .expect("persisted consumer group remains readable");
     assert!(read.result.records.is_empty());
+}
+
+#[test]
+fn cold_queue_projection_reads_backing_and_propagates_read_limits() {
+    let (_directory, runtime) = runtime();
+    runtime
+        .execute_query("CREATE QUEUE cold_projection")
+        .expect("queue");
+    for payload in [Value::text("first"), Value::text("x".repeat(32 * 1024))] {
+        runtime
+            .enqueue_event_payload("cold_projection", payload)
+            .expect("seed");
+    }
+    runtime.db().store().persist().expect("checkpoint");
+    install_indexed_cold(&runtime, "cold_projection", 4096);
+    assert!(
+        runtime
+            .execute_query("SELECT payload FROM QUEUE cold_projection LIMIT 10")
+            .is_err(),
+        "an unreadable cold message must not become an empty or partial result"
+    );
+    install_indexed_cold(&runtime, "cold_projection", 128 * 1024);
+    let result = runtime
+        .execute_query("SELECT payload FROM QUEUE cold_projection LIMIT 10")
+        .expect("retry");
+    assert_eq!(result.result.records.len(), 2);
+    assert_eq!(
+        result.result.records[0].get("payload"),
+        Some(&Value::text("first"))
+    );
+    assert_eq!(
+        result.result.records[1].get("payload"),
+        Some(&Value::text("x".repeat(32 * 1024)))
+    );
 }

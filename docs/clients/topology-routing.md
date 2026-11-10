@@ -60,8 +60,8 @@ replica and does not replace the server's write fencing or promotion policy.
 
 ## Request routing and consistency
 
-- Conservative, single-statement `SELECT` queries and read helpers can use
-  healthy replicas. Replicas undergoing rebootstrap are excluded.
+- Generic SQL `query`/`execute` calls use the primary. Explicit read APIs and
+  read helpers can use healthy replicas. Replicas undergoing rebootstrap are excluded.
   Rust additionally uses its existing RTT and circuit-breaker policy; JS uses
   round-robin selection among eligible replicas and falls back after read errors.
 - SQL mutations, explicit insert/delete helpers, locking reads, unknown
@@ -73,10 +73,23 @@ replica and does not replace the server's write fencing or promotion policy.
   moved to another node.
   In JS, interrupting a binary stream inside a transaction or pinned session
   closes that session; reconnect explicitly before further operations.
-- Ordinary replica reads are eventually consistent. Append `?route=primary`
-  for read-your-own-writes through the primary. Rust `QueryOptions` also supports
-  strong reads, bounded staleness, and causal bookmarks; a causal read never
+- Explicit local replica reads are eventually consistent. Append `?route=primary`
+  to keep all reads on the primary. Rust `query_with_options` supports
+  local, strong, bounded-staleness, and causal reads. JS `queryWithOptions`
+  supports `{ consistency: 'local' }`, `{ consistency: 'strong' }`, and
+  `{ consistency: 'bounded_staleness', maxLagMs: 50 }`. Unsupported consistency
+  requests fail with `CONSISTENCY_UNSUPPORTED`. A Rust causal read never
   selects a replica below the required applied LSN.
+
+For example, opt a SQL read into replica routing explicitly:
+
+```js
+const result = await db.queryWithOptions('SELECT * FROM users', { consistency: 'local' })
+```
+
+```rust
+let result = db.query_with_options("SELECT * FROM users", QueryOptions::local()).await?;
+```
 
 Connection failures invalidate discovery for the next operation. Proven reads
 can fall back to the primary. Writes are never automatically replayed: a lost

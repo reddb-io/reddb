@@ -65,6 +65,17 @@ std::map<std::string, std::string> parse_query(const std::string& q) {
     return out;
 }
 
+std::string embedded_file_path(std::string path) {
+#ifdef _WIN32
+    if (path.size() >= 4 && path[0] == '/' &&
+        std::isalpha(static_cast<unsigned char>(path[1])) && path[2] == ':' &&
+        (path[3] == '/' || path[3] == '\\')) {
+        path.erase(0, 1);
+    }
+#endif
+    return path;
+}
+
 // scheme://[user[:pass]@]host[:port][/path][?query]
 struct RawUri {
     std::string scheme;
@@ -161,21 +172,35 @@ ParsedUri parse_uri(const std::string& uri) {
                          "connect() requires a URI string (e.g. 'red://localhost:5050')");
     }
 
-    // ---- Embedded variants → not supported in C++ driver. -------------
+    // Embedded aliases are parsed independently of whether this build linked
+    // the optional engine. This keeps URI semantics stable across packages.
     if (uri == "memory://" || uri == "memory:" ||
         uri == "red://" || uri == "red:" || uri == "red:/" ||
         uri == "red://memory" || uri == "red://memory/" ||
         uri == "red://:memory" || uri == "red://:memory:") {
-        throw RedDBError(ErrorCode::EmbeddedUnsupported,
-                         "embedded URIs are not supported by the C++ driver: '" + uri + "'");
+        ParsedUri out;
+        out.kind = UrlKind::Embedded;
+        out.original_uri = uri;
+        return out;
     }
     if (starts_with(uri, "red:///")) {
-        throw RedDBError(ErrorCode::EmbeddedUnsupported,
-                         "embedded path URIs are not supported by the C++ driver: '" + uri + "'");
+        ParsedUri out;
+        out.kind = UrlKind::Embedded;
+        out.path = uri.substr(std::strlen("red://"));
+        out.original_uri = uri;
+        return out;
     }
     if (starts_with(uri, "file://")) {
-        throw RedDBError(ErrorCode::EmbeddedUnsupported,
-                         "file:// URIs are not supported by the C++ driver: '" + uri + "'");
+        std::string path = uri.substr(std::strlen("file://"));
+        if (path.empty()) {
+            throw RedDBError(ErrorCode::InvalidUri,
+                             "file:// URI is missing a path: '" + uri + "'");
+        }
+        ParsedUri out;
+        out.kind = UrlKind::Embedded;
+        out.path = embedded_file_path(std::move(path));
+        out.original_uri = uri;
+        return out;
     }
 
     auto raw = raw_parse(uri);

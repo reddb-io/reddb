@@ -221,6 +221,13 @@ TEST(ValueCodec, HttpParamsUseJsonEnvelopesForTaggedValues) {
               R"([null,true,42,1.5,"txt",{"$bytes":"aGk="},[1,2],{"a":1,"b":2},{"$ts":1700000000},{"$uuid":"00112233-4455-6677-8899-aabbccddeeff"}])");
 }
 
+TEST(ValueCodec, RpcQueryParamsEscapeSqlAndPreserveTypedParams) {
+    std::array<Value, 2> params = {Value::int64(42), Value("a\nb")};
+    EXPECT_EQ(to_rpc_query_params("SELECT \"value\" = $1", params),
+              R"({"sql":"SELECT \"value\" = $1","params":[42,"a\nb"]})");
+    EXPECT_EQ(to_json_string("a\"b"), R"("a\"b")");
+}
+
 TEST(ValueCodec, SharedParameterFixturesMatchManifest) {
     const std::string manifest = read_fixture_manifest();
     const std::array<const char*, 22> names = {

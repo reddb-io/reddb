@@ -94,24 +94,32 @@ impl RedDBRuntime {
         // inventory before their first resident-to-disk publication too.
         self.prepare_paged_counts()?;
         self.persist_probabilistic_snapshots()?;
-        self.inner.db.flush_local_only().map_err(|err| {
-            // Issue #205 — local flush failure is a CheckpointFailed
-            // operator-grade event. The local-flush path also covers
-            // the WAL fsync we depend on, so a failure here doubles as
-            // the WalFsyncFailed signal for the runtime entry point.
-            let msg = err.to_string();
-            crate::telemetry::operator_event::OperatorEvent::CheckpointFailed {
-                lsn: 0,
-                error: msg.clone(),
-            }
-            .emit_global();
-            crate::telemetry::operator_event::OperatorEvent::WalFsyncFailed {
-                path: "<flush_local_only>".to_string(),
-                error: msg.clone(),
-            }
-            .emit_global();
-            RedDBError::Engine(msg)
-        })?;
+        self.inner
+            .db
+            .flush_local_after_runtime_snapshots()
+            .map_err(|err| {
+                // Issue #205 — local flush failure is a CheckpointFailed
+                // operator-grade event. The local-flush path also covers
+                // the WAL fsync we depend on, so a failure here doubles as
+                // the WalFsyncFailed signal for the runtime entry point.
+                let msg = err.to_string();
+                crate::telemetry::operator_event::OperatorEvent::CheckpointFailed {
+                    lsn: 0,
+                    error: msg.clone(),
+                }
+                .emit_global();
+                crate::telemetry::operator_event::OperatorEvent::WalFsyncFailed {
+                    path: "<flush_local_only>".to_string(),
+                    error: msg.clone(),
+                }
+                .emit_global();
+                RedDBError::Engine(msg)
+            })?;
+        // The checkpoint now contains every mutation fenced above. Rebase the
+        // ordered live overlay while publication is still exclusive so a
+        // concurrent writer cannot be cleared after its WAL change.
+        self.index_store_ref().clear_paged_btree_overlays();
+        self.inner.probabilistic.replayed_names.lock().clear();
         drop(publication);
         let checkpoint_lsn = self.cdc_current_lsn();
         self.inner
@@ -251,6 +259,51 @@ impl RedDBRuntime {
                 }
             })?;
         Ok(self.inner.db.try_catalog_model_snapshot(read_bytes)?)
+    }
+
+    /// Fallible catalog inventory scoped to known collection names. This keeps
+    /// filtered `red.collections` queries from decoding every unrelated
+    /// collection before their predicate is applied.
+    pub(crate) fn try_catalog_for_collections(
+        &self,
+        collection_names: &std::collections::HashSet<String>,
+        observe_legacy_payloads: bool,
+    ) -> RedDBResult<CatalogModelSnapshot> {
+        if self
+            .inner
+            .db
+            .store()
+            .config()
+            .resident_memory_bytes_max
+            .is_none()
+        {
+            return Ok(self.inner.db.try_catalog_model_snapshot_for_collections(
+                collection_names,
+                observe_legacy_payloads,
+                usize::MAX,
+            )?);
+        }
+        let read_bytes = usize::try_from(self.memory_budget().resolved_bytes / 16)
+            .unwrap_or(usize::MAX)
+            .clamp(1, 16 * 1024 * 1024);
+        let _scratch = self
+            .try_reserve_query_buffer(read_bytes * 2)
+            .ok_or_else(|| {
+                self.memory_accounting().record_admission_denied();
+                RedDBError::MaterializationLimitExceeded {
+                    executor: "catalog",
+                    limit: usize::try_from(self.memory_budget().resolved_bytes)
+                        .unwrap_or(usize::MAX),
+                    current: usize::try_from(self.memory_accounting().total_used_bytes())
+                        .unwrap_or(usize::MAX)
+                        .saturating_add(1),
+                }
+            })?;
+        Ok(self.inner.db.try_catalog_model_snapshot_for_collections(
+            collection_names,
+            observe_legacy_payloads,
+            read_bytes,
+        )?)
     }
 
     pub fn catalog_consistency_report(&self) -> crate::catalog::CatalogConsistencyReport {

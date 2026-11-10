@@ -36,6 +36,8 @@ impl RedDBRuntime {
             return Ok(DeleteBatchResult::default());
         }
 
+        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
+
         let store = self.db().store();
         let Some(manager) = store.get_collection(collection) else {
             return Ok(DeleteBatchResult::default());
@@ -225,6 +227,15 @@ impl RedDBRuntime {
         entity: &UnifiedEntity,
         filter: Option<&Filter>,
     ) -> RedDBResult<bool> {
+        if let Some(now_ms) = super::retention_sweeper::ttl_expiry_now_ms() {
+            if !self
+                .db()
+                .try_entity_expired_at(collection, entity, now_ms)
+                .map_err(|error| RedDBError::Internal(error.to_string()))?
+            {
+                return Ok(false);
+            }
+        }
         let Some(filter) = filter else {
             return Ok(true);
         };

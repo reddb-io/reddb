@@ -147,17 +147,25 @@ The Rust gRPC URI also accepts explicit bootstrap hosts:
 
 The `reddb-io-client` Rust driver accepts a comma-separated host list
 in the URI authority. The first entry is the primary; subsequent
-entries are read replicas. Writes always go to the primary; reads
-round-robin across the replicas.
+entries are read replicas. Writes and arbitrary `query()` calls always go to
+the primary. Replica routing is opt-in through `query_with_options`, because
+RedDB has effectful statements that a client cannot safely classify from their
+first SQL keyword.
 
 ```rust
 // Rust — built into `reddb_client::Reddb::connect` under `--features grpc`.
+use reddb_client::QueryOptions;
+
 let db = Reddb::connect(
     "grpc://primary.svc:55055,replica1.svc:55055,replica2.svc:55055",
 ).await?;
 
-db.insert("users", &payload).await?;   // → primary
-db.query("SELECT * FROM users").await?; // → round-robin replica
+db.insert("users", &payload).await?; // → primary
+db.query("SELECT * FROM users").await?; // → primary (safe default)
+db.query_with_options(
+    "SELECT * FROM users",
+    QueryOptions::local(),
+).await?; // → health-aware replica selection
 ```
 
 Each entry can carry its own `:port`. Entries without a port inherit
@@ -173,11 +181,9 @@ let strict = Reddb::connect(
 ).await?;
 ```
 
-The host list is a bootstrap hint. Server advertisements update the membership;
-healthy, non-rebootstrapping replicas are eligible for ordinary reads. SQL
-mutations and transactions stay on the primary. Ordinary replica reads are
-eventually consistent; use `route=primary` or Rust `QueryOptions` when a read
-requires stronger freshness.
+The router observes endpoint latency and failures. Strong, causal, bounded
+staleness, and local reads must be requested explicitly; a transport that
+cannot enforce the option fails closed instead of silently weakening it.
 
 ### gRPC (legacy bridge — explicit opt-out)
 

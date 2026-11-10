@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use reddb_server::api::RedDBOptions;
 use reddb_server::runtime::RedDBRuntime;
-use reddb_server::storage::query::unified::UnifiedRecord;
 use reddb_types::Value as SchemaValue;
 
 use crate::error::{ClientError, ErrorCode, Result};
@@ -307,8 +306,23 @@ pub fn query_result_from_runtime(qr: &reddb_server::runtime::RuntimeQueryResult)
         qr.result.columns.clone()
     };
 
-    let rows: Vec<Vec<(String, ValueOut)>> =
-        qr.result.records.iter().map(record_to_pairs).collect();
+    let rows = qr
+        .result
+        .records
+        .iter()
+        .map(|record| {
+            columns
+                .iter()
+                .map(|column| {
+                    let value = record
+                        .get(column)
+                        .map(schema_value_to_value_out)
+                        .unwrap_or(ValueOut::Null);
+                    (column.clone(), value)
+                })
+                .collect()
+        })
+        .collect();
 
     QueryResult {
         statement: qr.statement_type.to_string(),
@@ -317,16 +331,6 @@ pub fn query_result_from_runtime(qr: &reddb_server::runtime::RuntimeQueryResult)
         rows,
         notice: qr.notice.clone(),
     }
-}
-
-fn record_to_pairs(record: &UnifiedRecord) -> Vec<(String, ValueOut)> {
-    let mut entries: Vec<(&str, &SchemaValue)> =
-        record.iter_fields().map(|(k, v)| (k.as_ref(), v)).collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
-    entries
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), schema_value_to_value_out(v)))
-        .collect()
 }
 
 fn schema_value_to_value_out(v: &SchemaValue) -> ValueOut {

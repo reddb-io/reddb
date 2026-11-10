@@ -99,6 +99,25 @@ read-only inspection remains possible. Default new files retain version 1.0.3.
 The capability flag is a host storage contract, not runtime activation. Preserve a
 preparation copy for downgrade; no downgrade writer may reinterpret these counters.
 
+Native read-only opens acquire a shared file lock and reject an active writer.
+They open the pager without write permission, restore double-write and checkpoint
+before-images into a private page overlay, and replay committed WAL changes into
+the resident view. They do not checkpoint, consume WAL, reclaim pages, migrate the
+manifest, clean up pending drops, or start a primary replication spool. Pending
+collection drops are reflected in the reader's view without deleting artifacts.
+Repeated opens leave source file contents and modification times unchanged.
+Result caching stays in memory; audit and slow-query logs use the existing
+process-temporary destinations outside the database directory.
+
+With bounded disk residency enabled, compatible published indexes and collection
+backings remain paged. Without it, read-only opens hydrate collections, including
+prepared files. Missing secondary projections use the existing scan fallback;
+read-only boot never publishes a replacement index. Recovery images are pinned
+separately from the evictable page cache and included in resident page accounting.
+Their count is capped at the configured page-cache slots, with a minimum of one
+complete DWB frame. Recovery exceeding that cap fails without modifying the
+source; increase the page-cache allowance or recover an independent writable copy.
+
 Cost sketch: legacy preparation makes bounded-memory record passes for counters
 and key candidates; prepared boot reads O(metadata + tree height + short WAL). Scans retain
 O(dirty IDs + one decoded row), and a changed collection's checkpoint currently

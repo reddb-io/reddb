@@ -19,12 +19,12 @@ pub use backing::PagedEntityCursor;
 mod graph_index_merge;
 
 use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use super::entity::{EntityId, EntityKind, UnifiedEntity};
-use super::metadata::{Metadata, MetadataFilter};
+use super::metadata::{Metadata, MetadataFilter, MetadataValue};
 use super::segment::{
     GraphEntityKind, GrowingSegment, SegmentConfig, SegmentError, SegmentId, SegmentScanCursor,
     SegmentState, UnifiedSegment, ZoneColPred,
@@ -198,6 +198,90 @@ pub struct PhysicalScanCursor {
     source: usize,
 }
 
+#[derive(Default)]
+struct MetadataExpiryIndex {
+    by_deadline: BTreeSet<(u64, EntityId)>,
+    by_entity: HashMap<EntityId, u64>,
+}
+
+impl MetadataExpiryIndex {
+    fn replace(&mut self, entity_id: EntityId, deadline_ms: Option<u64>) {
+        if let Some(previous_ms) = self.by_entity.remove(&entity_id) {
+            self.by_deadline.remove(&(previous_ms, entity_id));
+        }
+        if let Some(deadline_ms) = deadline_ms {
+            self.by_deadline.insert((deadline_ms, entity_id));
+            self.by_entity.insert(entity_id, deadline_ms);
+        }
+    }
+
+    fn expired(&self, now_ms: u64, limit: usize) -> Vec<EntityId> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        self.by_deadline
+            .range(..=(now_ms, EntityId::new(u64::MAX)))
+            .map(|(_, entity_id)| *entity_id)
+            .take(limit)
+            .collect()
+    }
+
+    fn scheduled_count(&self) -> usize {
+        self.by_entity.len()
+    }
+
+    fn entries(&self) -> Vec<(u64, EntityId)> {
+        self.by_deadline.iter().copied().collect()
+    }
+
+    fn replace_all(&mut self, entries: &[(u64, EntityId)]) {
+        self.by_deadline.clear();
+        self.by_entity.clear();
+        for &(deadline_ms, entity_id) in entries {
+            self.by_deadline.insert((deadline_ms, entity_id));
+            self.by_entity.insert(entity_id, deadline_ms);
+        }
+    }
+}
+
+fn metadata_u64(value: &MetadataValue) -> Option<u64> {
+    match value {
+        MetadataValue::Int(value) if *value >= 0 => Some(*value as u64),
+        MetadataValue::Timestamp(value) => Some(*value),
+        MetadataValue::Float(value)
+            if value.is_finite()
+                && value.is_sign_positive()
+                && value.fract().abs() < f64::EPSILON
+                && *value <= u64::MAX as f64 =>
+        {
+            Some(value.trunc() as u64)
+        }
+        MetadataValue::String(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
+fn metadata_expiry_deadline_ms(entity: &UnifiedEntity, metadata: &Metadata) -> Option<u64> {
+    let absolute_ms = metadata.get("_expires_at").and_then(metadata_u64);
+    let ttl_ms = metadata.get("_ttl_ms").and_then(metadata_u64).or_else(|| {
+        metadata
+            .get("_ttl")
+            .and_then(metadata_u64)
+            .and_then(|seconds| seconds.checked_mul(1_000))
+    });
+    let relative_ms = ttl_ms.map(|ttl_ms| {
+        entity
+            .created_at
+            .saturating_mul(1_000)
+            .saturating_add(ttl_ms)
+    });
+    match (absolute_ms, relative_ms) {
+        (Some(absolute_ms), Some(relative_ms)) => Some(absolute_ms.min(relative_ms)),
+        (Some(deadline_ms), None) | (None, Some(deadline_ms)) => Some(deadline_ms),
+        (None, None) => None,
+    }
+}
+
 impl PhysicalScanCursor {
     #[doc(hidden)]
     pub fn finished(&self) -> bool {
@@ -237,6 +321,14 @@ pub struct SegmentManager {
     /// Bulk-inserted entities skip this map; their segment is found by sequential scan
     /// of growing + sealed segments in get()/update()/delete().
     entity_segment: RwLock<HashMap<EntityId, SegmentId>>,
+    /// Absolute deadlines derived from per-entity TTL metadata. Current paged
+    /// files persist this projection in their resume trailer; older files
+    /// rebuild it in bounded maintenance ticks. Sweeps are O(log N + batch).
+    metadata_expiry: RwLock<MetadataExpiryIndex>,
+    /// False only while an older paged generation is being inventoried in
+    /// bounded background ticks. New stores and versioned resume projections
+    /// start complete, including the empty case.
+    metadata_expiry_projection_ready: AtomicBool,
     /// Shared column schema: column_name → index in Vec<Value>.
     /// Populated on first bulk_insert. Enables columnar storage (Vec instead of HashMap per row).
     column_schema: RwLock<Option<Arc<Vec<String>>>>,
@@ -282,6 +374,8 @@ impl SegmentManager {
             retired: RwLock::new(Vec::new()),
             archived: RwLock::new(Vec::new()),
             entity_segment: RwLock::new(HashMap::new()),
+            metadata_expiry: RwLock::new(MetadataExpiryIndex::default()),
+            metadata_expiry_projection_ready: AtomicBool::new(true),
             column_schema: RwLock::new(None),
             recovery_row_schemas: RwLock::new(Vec::new()),
             stats: RwLock::new(ManagerStats::default()),
@@ -1197,6 +1291,8 @@ impl SegmentManager {
     ) -> Result<(), SegmentError> {
         self.materialize_backing_entity(entity.id)?;
         let entity_id = entity.id;
+        let deadline_ms =
+            metadata.and_then(|metadata| metadata_expiry_deadline_ms(&entity, metadata));
         let mut entity = Some(entity);
 
         // Try growing segment directly (covers bulk-inserted entities without entity_segment map)
@@ -1206,6 +1302,7 @@ impl SegmentManager {
                 growing.update(entity.take().expect("entity already moved"))?;
                 if let Some(metadata) = metadata {
                     growing.set_metadata(entity_id, metadata.clone())?;
+                    self.metadata_expiry.write().replace(entity_id, deadline_ms);
                 }
                 return Ok(());
             }
@@ -1220,6 +1317,7 @@ impl SegmentManager {
                     growing.update(entity.take().expect("entity already moved"))?;
                     if let Some(metadata) = metadata {
                         growing.set_metadata(entity_id, metadata.clone())?;
+                        self.metadata_expiry.write().replace(entity_id, deadline_ms);
                     }
                     return Ok(());
                 }
@@ -1227,7 +1325,11 @@ impl SegmentManager {
         }
 
         if let Some(entity) = entity.take() {
-            return self.rewrite_sealed_entity_into_growing(entity, metadata);
+            self.rewrite_sealed_entity_into_growing(entity, metadata)?;
+            if metadata.is_some() {
+                self.metadata_expiry.write().replace(entity_id, deadline_ms);
+            }
+            return Ok(());
         }
 
         Err(SegmentError::NotFound(entity_id))
@@ -1285,6 +1387,8 @@ impl SegmentManager {
     ) -> Result<(), SegmentError> {
         self.materialize_backing_entity(entity.id)?;
         let entity_id = entity.id;
+        let deadline_ms =
+            metadata.and_then(|metadata| metadata_expiry_deadline_ms(&entity, metadata));
         let mut entity = Some(entity);
 
         if let Some(growing_arc) = self.growing.read().as_ref() {
@@ -1296,6 +1400,7 @@ impl SegmentManager {
                 )?;
                 if let Some(metadata) = metadata {
                     growing.set_metadata(entity_id, metadata.clone())?;
+                    self.metadata_expiry.write().replace(entity_id, deadline_ms);
                 }
                 return Ok(());
             }
@@ -1312,6 +1417,7 @@ impl SegmentManager {
                     )?;
                     if let Some(metadata) = metadata {
                         growing.set_metadata(entity_id, metadata.clone())?;
+                        self.metadata_expiry.write().replace(entity_id, deadline_ms);
                     }
                     return Ok(());
                 }
@@ -1319,7 +1425,11 @@ impl SegmentManager {
         }
 
         if let Some(entity) = entity.take() {
-            return self.rewrite_sealed_entity_into_growing(entity, metadata);
+            self.rewrite_sealed_entity_into_growing(entity, metadata)?;
+            if metadata.is_some() {
+                self.metadata_expiry.write().replace(entity_id, deadline_ms);
+            }
+            return Ok(());
         }
 
         Err(SegmentError::NotFound(entity_id))
@@ -1341,7 +1451,18 @@ impl SegmentManager {
             let mut growing = growing_arc.write();
             if growing.state().is_writable() {
                 match growing.update_hot_batch_with_metadata(items.iter().copied()) {
-                    Ok(()) => return Ok(()),
+                    Ok(()) => {
+                        let mut expiry = self.metadata_expiry.write();
+                        for (entity, _, metadata) in &items {
+                            if let Some(metadata) = metadata {
+                                expiry.replace(
+                                    entity.id,
+                                    metadata_expiry_deadline_ms(entity, metadata),
+                                );
+                            }
+                        }
+                        return Ok(());
+                    }
                     Err(SegmentError::NotFound(_)) => {}
                     Err(other) => return Err(other),
                 }
@@ -1360,6 +1481,7 @@ impl SegmentManager {
         let deleted = self.delete_resident(id)?;
         if deleted {
             self.remember_backing_delete(id);
+            self.metadata_expiry.write().replace(id, None);
         }
         Ok(deleted)
     }
@@ -1462,6 +1584,10 @@ impl SegmentManager {
         }
 
         if deleted_ids.len() == ids.len() {
+            let mut expiry = self.metadata_expiry.write();
+            for id in &deleted_ids {
+                expiry.replace(*id, None);
+            }
             return Ok(deleted_ids);
         }
 
@@ -1473,6 +1599,13 @@ impl SegmentManager {
             }
             if self.delete(id)? {
                 deleted_ids.push(id);
+            }
+        }
+
+        if !deleted_ids.is_empty() {
+            let mut expiry = self.metadata_expiry.write();
+            for id in &deleted_ids {
+                expiry.replace(*id, None);
             }
         }
 
@@ -1518,6 +1651,14 @@ impl SegmentManager {
     /// Set metadata for an entity
     pub fn set_metadata(&self, id: EntityId, metadata: Metadata) -> Result<(), SegmentError> {
         self.materialize_backing_entity(id)?;
+        let entity = self.get(id).ok_or(SegmentError::NotFound(id))?;
+        let deadline_ms = metadata_expiry_deadline_ms(&entity, &metadata);
+        self.set_metadata_resident(id, metadata)?;
+        self.metadata_expiry.write().replace(id, deadline_ms);
+        Ok(())
+    }
+
+    fn set_metadata_resident(&self, id: EntityId, metadata: Metadata) -> Result<(), SegmentError> {
         // Fast path: probe growing segment directly — covers entities inserted via
         // insert() which no longer writes to entity_segment.
         if let Some(growing_arc) = self.growing.read().as_ref() {
@@ -1544,6 +1685,50 @@ impl SegmentManager {
         }
 
         Err(SegmentError::NotFound(id))
+    }
+
+    /// Return at most `limit` entity IDs whose persisted TTL metadata is due.
+    /// The index is ordered by absolute deadline, so this does no entity scan.
+    pub fn expired_metadata_ids(&self, now_ms: u64, limit: usize) -> Vec<EntityId> {
+        self.metadata_expiry.read().expired(now_ms, limit)
+    }
+
+    /// Number of entities carrying a valid absolute or relative TTL deadline.
+    pub fn scheduled_metadata_expiry_count(&self) -> usize {
+        self.metadata_expiry.read().scheduled_count()
+    }
+
+    pub fn metadata_expiry_entries(&self) -> Vec<(u64, EntityId)> {
+        self.metadata_expiry.read().entries()
+    }
+
+    pub fn restore_metadata_expiry_projection(&self, entries: &[(u64, EntityId)], ready: bool) {
+        self.metadata_expiry.write().replace_all(entries);
+        self.metadata_expiry_projection_ready
+            .store(ready, Ordering::Release);
+    }
+
+    pub fn metadata_expiry_projection_ready(&self) -> bool {
+        self.metadata_expiry_projection_ready
+            .load(Ordering::Acquire)
+    }
+
+    pub fn mark_metadata_expiry_projection_ready(&self) {
+        self.metadata_expiry_projection_ready
+            .store(true, Ordering::Release);
+    }
+
+    pub fn remove_metadata_expiry(&self, entity_id: EntityId) {
+        self.metadata_expiry.write().replace(entity_id, None);
+    }
+
+    /// Rebuild the volatile deadline projection while recovery is already
+    /// decoding a persisted record. This does not materialize the entity.
+    pub fn restore_metadata_expiry(&self, entity: &UnifiedEntity, metadata: Option<&Metadata>) {
+        let deadline_ms = (entity.xmax == 0)
+            .then(|| metadata.and_then(|value| metadata_expiry_deadline_ms(entity, value)))
+            .flatten();
+        self.metadata_expiry.write().replace(entity.id, deadline_ms);
     }
 
     /// Check if growing segment should be sealed
@@ -2255,6 +2440,38 @@ impl SegmentManager {
         best.map(|(_, projected)| projected)
     }
 
+    /// Indexed resident producer-dedup lookup; disk candidates are merged by
+    /// the store. The callback borrows rows under the segment read guard.
+    #[doc(hidden)]
+    pub fn visit_queue_dedup(
+        &self,
+        queue: &str,
+        key: Option<&str>,
+        now: u64,
+        snapshot: Option<&SnapshotContext>,
+        mut visit: impl FnMut(&UnifiedEntity) -> bool,
+    ) {
+        let mut visible = |entity: &UnifiedEntity| {
+            (key.is_some() && !Self::scan_entity_visible(snapshot, entity)) || visit(entity)
+        };
+        if let Some(growing) = self.growing.read().as_ref() {
+            if !growing
+                .read()
+                .visit_queue_dedup(queue, key, now, &mut visible)
+            {
+                return;
+            }
+        }
+        for segment in self.sealed.read().iter() {
+            if !segment
+                .read()
+                .visit_queue_dedup(queue, key, now, &mut visible)
+            {
+                return;
+            }
+        }
+    }
+
     /// Collect visible graph items, pruning only under the segment read guard.
     #[doc(hidden)]
     pub fn scan_graph_kind(
@@ -2266,6 +2483,64 @@ impl SegmentManager {
             |segment| segment.may_contain_graph_kind(kind),
             |entity| Self::scan_entity_visible(snapshot, entity) && kind.matches(&entity.kind),
         )
+    }
+
+    /// Hydrate one bounded graph batch at a time. Payloads and policy callbacks
+    /// leave storage locks; pinned cursors survive sealing and consolidation.
+    /// Work is charged for pruned sources and every inspected physical slot.
+    #[doc(hidden)]
+    pub fn scan_graph_batches(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        kind: GraphEntityKind,
+        mut before_work: impl FnMut() -> bool,
+        mut consume: impl FnMut(Vec<UnifiedEntity>) -> bool,
+    ) -> bool {
+        let segments = {
+            let growing = self.growing.read();
+            let sealed = self.sealed.read();
+            let mut segments = Vec::with_capacity(sealed.len() + usize::from(growing.is_some()));
+            for segment in growing.iter().chain(sealed.iter()) {
+                if !before_work() {
+                    return false;
+                }
+                let view = segment.read();
+                if view.may_contain_graph_kind(kind) {
+                    segments.push((Arc::clone(segment), view.scan_cursor()));
+                }
+            }
+            segments
+        };
+        let mut ids = [EntityId::new(0); super::segment::SCAN_BATCH_SIZE];
+        for (segment, mut cursor) in segments {
+            while !cursor.finished() {
+                let mut count = 0;
+                {
+                    let view = segment.read();
+                    if !view.scan_batch(&mut cursor, &mut before_work, &mut |id| {
+                        ids[count] = id;
+                        count += 1;
+                    }) {
+                        return false;
+                    }
+                }
+                if !before_work() {
+                    return false;
+                }
+                // Hydration groups lookups by their current segment. Restore the
+                // cursor's order when an update moved a candidate between sources.
+                let mut batch = vec![None; count];
+                self.for_each_id(&ids[..count], |position, entity| {
+                    if kind.matches(&entity.kind) && Self::scan_entity_visible(snapshot, entity) {
+                        batch[position] = Some(entity.clone());
+                    }
+                });
+                if !before_work() || !consume(batch.into_iter().flatten().collect()) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Visit visible candidates in segments that may contain the requested kind.
@@ -3741,6 +4016,17 @@ mod tests {
                         .map(|item| item.id)
                         .collect();
                     assert_eq!(actual, expected);
+                    let mut batched = HashSet::new();
+                    assert!(manager.scan_graph_batches(
+                        view,
+                        kind,
+                        || true,
+                        |batch| {
+                            batched.extend(batch.into_iter().map(|item| item.id));
+                            true
+                        }
+                    ));
+                    assert_eq!(batched, expected);
                     let mut visited = 0;
                     let mut candidates = HashSet::new();
                     manager.scan_graph_candidates_for_each(
@@ -4190,6 +4476,107 @@ mod tests {
     }
 
     #[test]
+    fn metadata_expiry_index_is_bounded_rekeyed_and_removed_with_entity() {
+        let manager = SegmentManager::new("sessions");
+        let mut first = UnifiedEntity::table_row(EntityId::new(1), "sessions", 1, vec![]);
+        first.created_at = 10;
+        let mut second = UnifiedEntity::table_row(EntityId::new(2), "sessions", 2, vec![]);
+        second.created_at = 20;
+        manager.insert(first).expect("first session");
+        manager.insert(second).expect("second session");
+
+        let mut relative = Metadata::new();
+        relative.set("_ttl_ms", MetadataValue::Int(5_000));
+        manager
+            .set_metadata(EntityId::new(1), relative)
+            .expect("relative TTL");
+        let mut absolute = Metadata::new();
+        absolute.set("_expires_at", MetadataValue::Timestamp(30_000));
+        manager
+            .set_metadata(EntityId::new(2), absolute)
+            .expect("absolute expiry");
+
+        assert_eq!(manager.scheduled_metadata_expiry_count(), 2);
+        assert_eq!(
+            manager.expired_metadata_ids(30_000, 1),
+            vec![EntityId::new(1)],
+            "the deadline index must stop at the requested batch"
+        );
+        assert_eq!(
+            manager.expired_metadata_ids(30_000, 2),
+            vec![EntityId::new(1), EntityId::new(2)]
+        );
+
+        let mut postponed = Metadata::new();
+        postponed.set("_expires_at", MetadataValue::Timestamp(60_000));
+        manager
+            .set_metadata(EntityId::new(1), postponed)
+            .expect("postpone expiry");
+        assert_eq!(
+            manager.expired_metadata_ids(30_000, 2),
+            vec![EntityId::new(2)],
+            "metadata replacement must remove the stale deadline"
+        );
+
+        assert!(manager.delete(EntityId::new(2)).expect("delete session"));
+        assert!(manager
+            .expired_metadata_ids(u64::MAX, 2)
+            .contains(&EntityId::new(1)));
+        assert!(!manager
+            .expired_metadata_ids(u64::MAX, 2)
+            .contains(&EntityId::new(2)));
+        assert_eq!(manager.scheduled_metadata_expiry_count(), 1);
+    }
+
+    #[test]
+    #[ignore = "qualification: one million TTL deadlines"]
+    fn qualification_million_ttl_backlog_drains_in_bounded_batches() {
+        const ROWS: u64 = 1_000_000;
+        const BATCH: usize = 1_000;
+        const LOAD_BATCH: u64 = 10_000;
+        let manager = SegmentManager::new("ttl_million");
+        for first in (1..=ROWS).step_by(LOAD_BATCH as usize) {
+            let last = first.saturating_add(LOAD_BATCH - 1).min(ROWS);
+            manager
+                .bulk_insert(
+                    (first..=last)
+                        .map(|id| {
+                            UnifiedEntity::table_row(EntityId::new(id), "ttl_million", id, vec![])
+                        })
+                        .collect(),
+                )
+                .expect("million-row TTL fixture");
+        }
+        assert_eq!(manager.count(), ROWS as usize);
+        let entries = (1..=ROWS)
+            .map(|id| (1, EntityId::new(id)))
+            .collect::<Vec<_>>();
+        manager.restore_metadata_expiry_projection(&entries, true);
+        assert_eq!(manager.scheduled_metadata_expiry_count(), ROWS as usize);
+
+        let started = std::time::Instant::now();
+        let mut drained = 0u64;
+        loop {
+            let batch = manager.expired_metadata_ids(1, BATCH);
+            assert!(batch.len() <= BATCH);
+            if batch.is_empty() {
+                break;
+            }
+            drained += batch.len() as u64;
+            for entity_id in batch {
+                manager.remove_metadata_expiry(entity_id);
+            }
+        }
+
+        assert_eq!(drained, ROWS);
+        assert_eq!(manager.scheduled_metadata_expiry_count(), 0);
+        eprintln!(
+            "ttl_deadlines={ROWS} batch={BATCH} drain_ms={}",
+            started.elapsed().as_millis()
+        );
+    }
+
+    #[test]
     fn test_manager_query_by_kind() {
         let manager = SegmentManager::new("test");
 
@@ -4280,6 +4667,60 @@ mod tests {
             assert!(ticks < 1_000, "consolidation failed to converge");
         }
         ticks
+    }
+
+    #[test]
+    fn graph_batches_bound_payloads_and_hydrate_current_entities_after_sealing() {
+        let manager = SegmentManager::new("graph");
+        let node =
+            |id| UnifiedEntity::graph_node(EntityId::new(id), "graph", "node", HashMap::new());
+        manager
+            .bulk_insert((1..=1024).map(node).collect())
+            .expect("nodes");
+        let mut hidden = node(1025);
+        hidden.set_xmax(5);
+        manager.insert(hidden).expect("hidden version");
+        manager
+            .insert(UnifiedEntity::vector(EntityId::new(1026), "graph", vec![]))
+            .expect("mixed kind");
+        let mut work = 0;
+        let mut delivered = 0;
+        assert!(!manager.scan_graph_batches(
+            None,
+            GraphEntityKind::Node,
+            || {
+                work += 1;
+                work < 100
+            },
+            |batch| {
+                delivered += batch.len();
+                true
+            }
+        ));
+        assert_eq!(delivered, 0, "cancelled partial batch must not escape");
+        let mut seen = Vec::new();
+        assert!(manager.scan_graph_batches(None, GraphEntityKind::Node, || true, |batch| {
+            assert!(batch.len() <= super::super::segment::SCAN_BATCH_SIZE);
+            assert!(manager.growing.try_write().is_some(), "no topology guard");
+            assert!(manager.sealed.try_write().is_some(), "no sealed guard");
+            if seen.is_empty() {
+                manager.force_seal().expect("seal during delivery");
+                manager.insert(node(2000)).expect("append beyond captured boundary");
+                let mut updated = node(900);
+                if let EntityKind::GraphNode(node) = &mut updated.kind {
+                    node.label = "updated".into();
+                }
+                manager.update(updated).expect("update unread candidate");
+            }
+            for entity in batch {
+                if entity.id.raw() == 900 {
+                    assert!(matches!(&entity.kind, EntityKind::GraphNode(node) if node.label == "updated"));
+                }
+                seen.push(entity.id.raw());
+            }
+            true
+        }));
+        assert_eq!(seen, (1..=1024).collect::<Vec<_>>());
     }
 
     #[test]

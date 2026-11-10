@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -149,10 +149,10 @@ impl BlobCacheL2 {
         Some(Entry {
             size: payload.len(),
             bytes: Arc::<[u8]>::from(payload),
-            content_metadata: BTreeMap::new(),
+            content_metadata: None,
             tags: BTreeSet::new(),
             dependencies: BTreeSet::new(),
-            visited: true,
+            visited: std::sync::atomic::AtomicBool::new(true),
             expires_at_unix_ms: record.expires_at_unix_ms,
             priority: record.priority,
             version: record.version,

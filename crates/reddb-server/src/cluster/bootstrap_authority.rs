@@ -526,7 +526,7 @@ mod tests {
         let reopened = Vault::with_certificate(&pager, &kp.certificate_hex()).unwrap();
         let loaded = reopened.load(&pager).unwrap().unwrap();
         assert!(loaded.bootstrapped);
-        assert_eq!(loaded.master_secret, Some(kp.master_secret));
+        assert_eq!(loaded.master_secret, Some(kp.master_secret.clone()));
 
         drop(pager);
         let _ = std::fs::remove_dir_all(&tmp_dir);

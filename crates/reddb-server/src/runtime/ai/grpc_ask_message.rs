@@ -258,6 +258,10 @@ mod tests {
     fn sample_result() -> AskResult {
         AskResult {
             answer: "The capital is Lisbon [^1].".to_string(),
+            reasoning: crate::json::Value::Null,
+            exploratory_queries: crate::json::Value::Array(Vec::new()),
+            final_query: None,
+            final_query_params: crate::json::Value::Array(Vec::new()),
             sources_flat: vec![SourceRow {
                 urn: "urn:reddb:row:cities/42".to_string(),
                 payload: "{\"name\":\"Lisbon\"}".to_string(),

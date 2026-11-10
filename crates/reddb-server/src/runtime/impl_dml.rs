@@ -444,6 +444,7 @@ impl RedDBRuntime {
         query: &InsertQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &query.table,
@@ -2261,6 +2262,9 @@ impl RedDBRuntime {
             ));
         }
 
+        // Cover the interval from post-image preparation through storage and
+        // secondary-index publication. Target selection above remains indexed.
+        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
         if needs_rmw_lock {
             let result = self.execute_update_inner_tracked_locked(
                 raw_query,
@@ -2962,6 +2966,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        let maintenance_limit = super::retention_sweeper::take_delete_limit();
         let topology_lock = self
             .index_store_ref()
             .collection_topology_lock(&query.table);
@@ -2974,7 +2979,7 @@ impl RedDBRuntime {
             self,
             &query.table,
             effective_filter.as_ref(),
-            None,
+            maintenance_limit,
         );
         let ids_to_delete = {
             let _topology_guard = topology_lock.read();
