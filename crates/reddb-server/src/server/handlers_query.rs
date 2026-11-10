@@ -100,7 +100,7 @@ impl RedDBServer {
                     object.insert("validation".to_string(), validation.clone());
                     return json_response(422, crate::json::Value::Object(object));
                 }
-                if err.to_string().contains("commit policy timed out") {
+                if matches!(&err, RedDBError::CommitUncertain { .. }) {
                     return json_error(504, err.to_string());
                 }
                 // Issue #769 — an aggregating executor blew its
@@ -1904,6 +1904,7 @@ pub(crate) fn constant_time_str_eq(a: &str, b: &str) -> bool {
 pub(crate) fn ndjson_error_code(err: &crate::api::RedDBError) -> &'static str {
     use crate::api::RedDBError::*;
     match err {
+        CommitUncertain { .. } => "commit_uncertain",
         NotFound(_) => "not_found",
         ReadOnly(_) => "read_only",
         InvalidConfig(_) => "invalid_config",

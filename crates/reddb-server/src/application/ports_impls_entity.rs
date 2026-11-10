@@ -1643,7 +1643,7 @@ impl RedDBRuntime {
             applied.metadata.as_ref(),
             true,
             changed_columns,
-        );
+        )?;
         Ok(())
     }
 
@@ -1828,7 +1828,7 @@ impl RedDBRuntime {
             &input.collection,
             id.raw(),
             "graph_node",
-        );
+        )?;
         Ok(CreateEntityOutput {
             id,
             entity: db.store().get(&input.collection, id),
@@ -1894,7 +1894,7 @@ impl RedDBRuntime {
             &input.collection,
             id.raw(),
             "graph_edge",
-        );
+        )?;
         Ok(CreateEntityOutput {
             id,
             entity: db.store().get(&input.collection, id),
@@ -2004,7 +2004,7 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
     }
 
     runtime.invalidate_result_cache();
-    runtime.cdc_emit_insert_batch_no_cache_invalidate(&collection, &ids, "table");
+    runtime.cdc_emit_insert_batch_no_cache_invalidate(&collection, &ids, "table")?;
 
     Ok(ids
         .into_iter()
@@ -2403,7 +2403,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             &input.collection,
             id.raw(),
             "vector",
-        );
+        )?;
         Ok(CreateEntityOutput {
             id,
             entity: db.store().get(&input.collection, id),
@@ -2491,7 +2491,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             &input.collection,
             id.raw(),
             "document",
-        );
+        )?;
         Ok(CreateEntityOutput {
             id,
             entity: db.store().get(&input.collection, id),
@@ -2697,7 +2697,7 @@ impl RuntimeEntityPort for RedDBRuntime {
                 &input.collection,
                 input.id.raw(),
                 "entity",
-            );
+            )?;
         }
         Ok(DeleteEntityOutput {
             deleted,

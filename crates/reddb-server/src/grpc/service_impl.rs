@@ -3089,7 +3089,21 @@ impl RedDb for GrpcRuntime {
         };
         let mut entries = Vec::with_capacity(records.len());
         let mut max_sent_lsn = since_lsn;
+        // JSON hex doubles each payload; reserve envelope/protobuf/routing
+        // overhead and never split a transaction record across replies.
+        let budget = crate::grpc::RedDBGrpcServer::max_message_bytes().saturating_sub(64 * 1024);
+        let mut response_bytes = 0usize;
         for (lsn, data) in &records {
+            let bytes = data.len().saturating_mul(2).saturating_add(96);
+            if bytes > budget.saturating_sub(response_bytes) {
+                if entries.is_empty() {
+                    return Err(Status::resource_exhausted(
+                        "logical record exceeds replication response limit",
+                    ));
+                }
+                break;
+            }
+            response_bytes += bytes;
             entries.push(reddb_wire::replication::WalStreamRecord {
                 lsn: *lsn,
                 data: data.as_ref().to_vec(),

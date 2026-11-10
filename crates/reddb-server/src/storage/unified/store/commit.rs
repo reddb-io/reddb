@@ -129,6 +129,10 @@ impl Drop for StoreWalCaptureGuard<'_> {
 }
 
 impl DeferredStoreWalActions {
+    pub(crate) fn push(&mut self, action: StoreWalAction) {
+        self.actions.push(action);
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.actions.is_empty()
     }

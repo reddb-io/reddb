@@ -450,6 +450,10 @@ impl RedDBRuntime {
                 pending_kv_watch_events: parking_lot::RwLock::new(HashMap::new()),
                 pending_vault_writes: parking_lot::RwLock::new(HashMap::new()),
                 pending_store_wal_actions: parking_lot::RwLock::new(HashMap::new()),
+                pending_logical_records: parking_lot::Mutex::new(HashMap::new()),
+                pending_commit_policies: parking_lot::Mutex::new(HashMap::new()),
+                logical_publication: parking_lot::ReentrantMutex::new(()),
+                logical_allocated_lsn: std::sync::atomic::AtomicU64::new(0),
                 pending_claim_locks: parking_lot::RwLock::new(HashMap::new()),
                 queue_wait_registry: std::sync::Arc::new(
                     crate::runtime::queue_wait_registry::QueueWaitRegistry::new(),
@@ -686,6 +690,10 @@ impl RedDBRuntime {
             .unwrap_or(0)
             .max(runtime.config_u64("red.config.timeline.last_archived_lsn", 0));
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
+        runtime
+            .inner
+            .logical_allocated_lsn
+            .store(restored_cdc_lsn, std::sync::atomic::Ordering::Release);
         runtime.rehydrate_snapshot_xid_floor()?;
         assert!(runtime
             .inner
@@ -742,6 +750,7 @@ impl RedDBRuntime {
         if let Some(repl) = &runtime.inner.db.replication {
             repl.wal_buffer.set_current_lsn(restored_cdc_lsn);
         }
+        runtime.recover_transactional_replication()?;
 
         // Save system info to red_config on boot
         {

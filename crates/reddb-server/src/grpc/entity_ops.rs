@@ -257,6 +257,9 @@ pub(crate) fn entity_reply_from_output(output: CreateEntityOutput) -> EntityRepl
 
 pub(crate) fn entity_error_to_status(err: crate::api::RedDBError) -> Status {
     match err {
+        error @ crate::api::RedDBError::CommitUncertain { .. } => {
+            Status::deadline_exceeded(error.to_string())
+        }
         crate::api::RedDBError::NotFound(msg) => Status::not_found(msg),
         // PLAN.md Phase 4.1 — operator-pinned cap exceeded. gRPC
         // doesn't have a 1:1 status for "storage full" or "rate

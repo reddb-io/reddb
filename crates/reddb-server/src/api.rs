@@ -861,6 +861,12 @@ pub enum RedDBError {
     FeatureNotEnabled(String),
     NotFound(String),
     ReadOnly(String),
+    /// The local commit is durable, but the requested replica durability was
+    /// not confirmed. Retrying the mutation may execute it a second time.
+    CommitUncertain {
+        lsn: u64,
+        detail: String,
+    },
     InvalidOperation(String),
     Engine(String),
     Catalog(String),
@@ -920,6 +926,8 @@ impl fmt::Display for RedDBError {
             Self::FeatureNotEnabled(msg) => write!(f, "feature disabled: {msg}"),
             Self::NotFound(msg) => write!(f, "not found: {msg}"),
             Self::ReadOnly(msg) => write!(f, "read-only violation: {msg}"),
+            Self::CommitUncertain { lsn, detail } => write!(f,
+                "commit_uncertain: commit policy timed out at lsn {lsn}: {detail}; local commit is durable; replica durability is unconfirmed"),
             Self::InvalidOperation(msg) => write!(f, "INVALID_OPERATION: {msg}"),
             Self::Engine(msg) => write!(f, "engine error: {msg}"),
             Self::Catalog(msg) => write!(f, "catalog error: {msg}"),

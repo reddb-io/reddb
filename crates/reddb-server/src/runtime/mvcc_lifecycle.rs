@@ -137,6 +137,12 @@ impl RedDBRuntime {
             return f();
         }
 
+        let logical_start = self
+            .inner
+            .pending_logical_records
+            .lock()
+            .get(&conn_id)
+            .map_or(0, |pending| pending.len());
         let capture = DmlWalCapture::begin();
         let result = f();
         let captured = capture.finish();
@@ -145,7 +151,12 @@ impl RedDBRuntime {
                 self.record_pending_store_wal_actions(conn_id, captured);
                 Ok(value)
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                if let Some(records) = self.inner.pending_logical_records.lock().get_mut(&conn_id) {
+                    records.truncate(logical_start);
+                }
+                Err(err)
+            }
         }
     }
 
@@ -228,26 +239,31 @@ impl RedDBRuntime {
             return;
         }
         let mut guard = self.inner.pending_store_wal_actions.write();
-        guard.entry(conn_id).or_default().extend(actions);
+        guard
+            .entry(conn_id)
+            .or_default()
+            .push((self.current_xid().unwrap_or(0), actions));
     }
 
     pub(crate) fn flush_pending_store_wal_actions(&self, conn_id: u64) -> RedDBResult<()> {
-        let Some(actions) = self
+        let groups = self
             .inner
             .pending_store_wal_actions
             .write()
             .remove(&conn_id)
-        else {
-            return Ok(());
-        };
-        self.inner
-            .db
-            .store()
-            .append_deferred_store_wal_actions(actions)
-            .map_err(|err| RedDBError::Internal(err.to_string()))
+            .unwrap_or_default();
+        let mut actions = crate::storage::unified::DeferredStoreWalActions::default();
+        for (xid, group) in groups {
+            if !self.snapshot_manager().is_aborted(xid) {
+                actions.extend(group);
+            }
+        }
+        self.commit_transactional_replication(conn_id, actions)
     }
 
     pub(crate) fn discard_pending_store_wal_actions(&self, conn_id: u64) {
+        self.inner.pending_commit_policies.lock().remove(&conn_id);
+        self.inner.pending_logical_records.lock().remove(&conn_id);
         self.inner
             .pending_store_wal_actions
             .write()
@@ -602,12 +618,17 @@ impl RedDBRuntime {
                 manager.remove_metadata_expiry(id);
             }
             store.context_index().remove_entity(id);
-            self.cdc_emit(
-                crate::replication::cdc::ChangeOperation::Delete,
-                &collection,
-                id.raw(),
-                "entity",
-            );
+            self.invalidate_result_cache_for_table(&collection);
+            // Primary CDC identities are allocated before the durable outbox
+            // captures their restart frontier.
+            if self.inner.db.replication.is_none() {
+                self.inner.cdc.emit(
+                    crate::replication::cdc::ChangeOperation::Delete,
+                    &collection,
+                    id.raw(),
+                    "entity",
+                );
+            }
         }
     }
 
