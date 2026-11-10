@@ -266,12 +266,17 @@ impl RedDBRuntime {
         let Some(primary) = &self.inner.db.replication else {
             return Ok(());
         };
+        let publishes_new = records
+            .last()
+            .is_some_and(|record| record.lsn > primary.current_logical_lsn());
         for record in records {
             primary
                 .try_append_logical_record(record.lsn, record.encode())
                 .map_err(|error| RedDBError::Internal(error.to_string()))?;
         }
-        replication_crash_point("after_projection");
+        if publishes_new {
+            replication_crash_point("after_projection");
+        }
         Ok(())
     }
 

@@ -329,11 +329,22 @@ fn oversized_transaction_cannot_commit_a_partial_source_or_projection() {
         .with_replication(ReplicationConfig::primary());
     let primary = RedDBRuntime::with_options(options.clone()).unwrap();
     primary
-        .execute_query("CREATE TABLE bounded (id INT, payload TEXT)")
+        .execute_query("CREATE TABLE bounded (id INT, payload BLOB)")
         .unwrap();
     set_current_connection_id(9040);
     primary.execute_query("BEGIN").unwrap();
-    let payload = reddb_types::Value::text("x".repeat(3 * 1024 * 1024));
+    // Incompressible bytes exercise the encoded-record limit, not the value
+    // compressor's best case for a repeated string.
+    let mut seed = 1u64;
+    let bytes = (0..3 * 1024 * 1024)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        })
+        .collect();
+    let payload = reddb_types::Value::Blob(bytes);
     let error = primary
         .execute_query_with_params(
             "INSERT INTO bounded (id, payload) VALUES (1, $1)",
