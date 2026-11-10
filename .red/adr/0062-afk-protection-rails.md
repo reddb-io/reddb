@@ -2,6 +2,8 @@
 
 Status: accepted
 Date: 2026-06-22
+Amended: 2026-11-10 — removed the per-file line-count gate; the
+function-level lint remains.
 
 Implements the protection layer discussed in `.red/agents/domain.md` →
 "reddb is a database engine; correctness is more important than convenience."
@@ -28,9 +30,8 @@ What we already have (don't duplicate):
 
 - ADR 0059 — `main` is protected; CI is a hard gate with `enforce_admins`.
 - `[workspace.lints.clippy]` — `unwrap_used` (deny), `too_many_lines` warn
-  at 200 (`clippy.toml`), `cast_possible_truncation` warn. House limits
-  are 2000/file and 200/function; the 2000/file half has no clippy lint
-  and is enforced by the drift-guard below.
+  at 200 (`clippy.toml`), `cast_possible_truncation` warn. There is no
+  repository-wide per-file line-count restriction.
 - `scripts/lint-no-untyped-serialization.sh` + whitelist — six
   boundary-discipline categories.
 - `scripts/check-afk-validation-diff.mjs` — AFK validation sidecar vs diff.
@@ -83,27 +84,19 @@ overrides remain possible.
 Hard gate before merge. Rejects the attempt on any of:
 
 1. **Scope drift** — more than 25 files changed in the diff.
-2. **Per-file size** — any file ADDED or MODIFIED in the diff whose
-   post-merge line count exceeds **2000 lines** is blocked. This is
-   the file-shape half of the house limit (2000 per file, 200 per
-   function). The function half (200) is enforced by
-   `clippy::too_many_lines` (warn at threshold 200 in `clippy.toml`)
-   plus the backpressure `cargo clippy -D warnings` run; clippy
-   doesn't have a per-file-size lint, so the drift-guard is the only
-   enforcement point for the 2000/file half.
-3. **Protected paths** — modifications (not additions) under
+2. **Protected paths** — modifications (not additions) under
    `docs/conformance/`, `testdata/conformance/`, the contract matrix
    scripts, or `.red/adr/`. New ADRs and new conformance fixtures are
    legitimate flow; only edits to existing files trigger the gate
    (mirrors what CODEOWNERS rejects anyway, as a local fast-fail).
-4. **New `.unwrap()`** — added `.unwrap()` in a file NOT on
+3. **New `.unwrap()`** — added `.unwrap()` in a file NOT on
    `scripts/lint-untyped-serialization-whitelist.txt`.
-5. **New Cargo dep** — added `name = ...` in `Cargo.toml` without a
+4. **New Cargo dep** — added `name = ...` in `Cargo.toml` without a
    `# track: issue-XXXX` comment on the same line.
 
-Thresholds are deliberately conservative — a drift-guard that fires
-too often gets disabled. Tune UP only after looking at a month of
-false positives.
+The scope threshold is deliberately conservative — a drift-guard that
+fires too often gets disabled. Tune UP only after looking at a month
+of false positives.
 
 ### 4. `backpressure` (list of gates)
 
@@ -159,10 +152,9 @@ git-state cleanup. A broken `on_idle` only logs — by design.
   dropped from `.red/agents/triage-labels.md` without a matching
   update to `afk-pre-pick.sh`, issues will silently fail to be
   picked. Document the link.
-- The drift-guard's thresholds live in `scripts/afk-pre-merge.sh`,
-  not in `.red/config.yaml`. We chose script > config because the
-  guard has regex and needs to be unit-testable without booting the
-  harness.
+- The drift-guard's scope threshold lives in `scripts/afk-pre-merge.sh`,
+  not in `.red/config.yaml`. We chose script > config because the guard
+  has regex and needs to be unit-testable without booting the harness.
 
 ## Failure mode hierarchy (the AFK loop contract)
 
