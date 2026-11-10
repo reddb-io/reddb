@@ -69,6 +69,7 @@ impl Entry {
             Arc::clone(&self.bytes),
             self.content_metadata.clone(),
             self.version,
+            self.expires_at_unix_ms,
         )
     }
 
@@ -77,6 +78,7 @@ impl Entry {
             Arc::clone(&self.bytes),
             self.content_metadata.clone(),
             self.version,
+            self.expires_at_unix_ms,
             window_remaining_ms,
         )
     }

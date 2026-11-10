@@ -16,7 +16,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use indexmap::Equivalent;
 use parking_lot::RwLock;
@@ -120,6 +120,7 @@ pub struct BlobCacheHit {
     pub(super) bytes: Arc<[u8]>,
     pub(super) content_metadata: Option<Arc<BTreeMap<String, String>>>,
     pub(super) version: Option<u64>,
+    pub(super) expires_at_unix_ms: Option<u64>,
     /// `Some(remaining_ms)` when the hit came from the stale-while-revalidate
     /// window of an `ExtendedTtlPolicy`; `None` when the entry was fresh.
     /// Boolean staleness is just `.is_some()`.
@@ -131,11 +132,13 @@ impl BlobCacheHit {
         bytes: Arc<[u8]>,
         content_metadata: Option<Arc<BTreeMap<String, String>>>,
         version: Option<u64>,
+        expires_at_unix_ms: Option<u64>,
     ) -> Self {
         Self {
             bytes,
             content_metadata,
             version,
+            expires_at_unix_ms,
             stale_window_remaining_ms: None,
         }
     }
@@ -144,12 +147,14 @@ impl BlobCacheHit {
         bytes: Arc<[u8]>,
         content_metadata: Option<Arc<BTreeMap<String, String>>>,
         version: Option<u64>,
+        expires_at_unix_ms: Option<u64>,
         window_remaining_ms: u64,
     ) -> Self {
         Self {
             bytes,
             content_metadata,
             version,
+            expires_at_unix_ms,
             stale_window_remaining_ms: Some(window_remaining_ms),
         }
     }
@@ -173,6 +178,17 @@ impl BlobCacheHit {
     /// Optional CAS / freshness version stamped on `put`.
     pub fn version(&self) -> Option<u64> {
         self.version
+    }
+
+    /// Absolute hard-expiry deadline attached to this value, if any.
+    pub fn expires_at_unix_ms(&self) -> Option<u64> {
+        self.expires_at_unix_ms
+    }
+
+    /// Remaining hard TTL at `now_ms`. `None` means the entry does not expire.
+    pub fn remaining_ttl_ms_at(&self, now_ms: u64) -> Option<u64> {
+        self.expires_at_unix_ms
+            .map(|expires_at| expires_at.saturating_sub(now_ms))
     }
 
     /// `true` when the hit was served from the stale-while-revalidate window
@@ -659,6 +675,7 @@ pub struct BlobCache {
     dependency_index: RwLock<HashMap<ScopedLabel, HashSet<BlobCacheKey>>>,
     l2: Option<Arc<BlobCacheL2>>,
     bytes_in_use: AtomicUsize,
+    sweep_shard_cursor: AtomicUsize,
     stats: AtomicStats,
     /// Optional async L2->L1 promotion pool (issue #193). When `None`,
     /// `get` performs the L1 promotion synchronously on the read path.
@@ -713,6 +730,7 @@ impl BlobCache {
             dependency_index: RwLock::new(HashMap::new()),
             l2: l2.map(Arc::new),
             bytes_in_use: AtomicUsize::new(0),
+            sweep_shard_cursor: AtomicUsize::new(0),
             stats: AtomicStats::new(),
             promotion_pool: OnceLock::new(),
         })
@@ -986,6 +1004,54 @@ impl BlobCache {
         self.exists_at(namespace, key, unix_now_ms())
     }
 
+    /// Replace a live entry's expiry with a relative TTL.
+    pub fn expire(&self, namespace: &str, key: &str, ttl_ms: u64) -> Result<bool, CacheError> {
+        let now_ms = unix_now_ms();
+        self.update_expiry(namespace, key, Some(now_ms.saturating_add(ttl_ms)), now_ms)
+    }
+
+    /// Replace a live entry's expiry with an absolute Unix-millisecond deadline.
+    pub fn expire_at(
+        &self,
+        namespace: &str,
+        key: &str,
+        expires_at_unix_ms: u64,
+    ) -> Result<bool, CacheError> {
+        self.update_expiry(namespace, key, Some(expires_at_unix_ms), unix_now_ms())
+    }
+
+    /// Remove expiry from a live entry without rewriting its value or tags.
+    pub fn persist(&self, namespace: &str, key: &str) -> Result<bool, CacheError> {
+        self.update_expiry(namespace, key, None, unix_now_ms())
+    }
+
+    fn update_expiry(
+        &self,
+        namespace: &str,
+        key: &str,
+        expires_at_unix_ms: Option<u64>,
+        now_ms: u64,
+    ) -> Result<bool, CacheError> {
+        if !self.namespace_exists(namespace) {
+            return Ok(false);
+        }
+        let cache_key = BlobCacheKey::new(namespace, key);
+        let namespace_generation = self.current_generation(namespace);
+        let shard_index = self.shard_index(&cache_key);
+        let mut shard = self.shards[shard_index].write();
+        let l1_live = shard.can_update_expiry(&cache_key, now_ms, namespace_generation);
+        let l2_updated = match &self.l2 {
+            Some(l2) => {
+                l2.update_expiry(&cache_key, namespace_generation, now_ms, expires_at_unix_ms)?
+            }
+            None => false,
+        };
+        if l1_live {
+            shard.update_expiry(&cache_key, expires_at_unix_ms, now_ms);
+        }
+        Ok(l1_live || l2_updated)
+    }
+
     fn exists_at(&self, namespace: &str, key: &str, now_ms: u64) -> CachePresence {
         let namespace_generation = self.current_generation(namespace);
         let shard_idx = self.shard_index_parts(namespace, key);
@@ -1237,6 +1303,95 @@ impl BlobCache {
         }
     }
 
+    /// Remove a bounded rotating slice of expired L1 entries.
+    ///
+    /// This is the storage primitive behind the cache sweeper. It never
+    /// locks more than one shard at a time and preserves its cursor between
+    /// calls so a small recurring budget eventually covers the whole cache.
+    pub(crate) fn sweep_expired_l1(
+        &self,
+        entries_limit: Option<usize>,
+        millis_limit: Option<u32>,
+    ) -> BlobCacheSweepOutcome {
+        let started = Instant::now();
+        let time_limit = millis_limit.map(|millis| Duration::from_millis(u64::from(millis)));
+        let now_ms = unix_now_ms();
+        let hard_entries_limit = entries_limit.unwrap_or(usize::MAX);
+        let shard_count = self.shards.len();
+        let first_shard = self.sweep_shard_cursor.fetch_add(1, Ordering::Relaxed) % shard_count;
+        let mut outcome = BlobCacheSweepOutcome::default();
+        let mut completed_all_shards = true;
+
+        for offset in 0..shard_count {
+            if outcome.entries_scanned >= hard_entries_limit
+                || time_limit.is_some_and(|limit| started.elapsed() >= limit)
+            {
+                completed_all_shards = false;
+                break;
+            }
+            let shard_index = (first_shard + offset) % shard_count;
+            let remaining = hard_entries_limit - outcome.entries_scanned;
+            // Keep generations stable while this shard is inspected. A clone
+            // taken before the loop could race with flush + fresh put and
+            // incorrectly classify the fresh generation as stale.
+            let namespace_generations = self.namespace_generations.read();
+            let mut shard = self.shards[shard_index].write();
+            let sweep = shard.sweep_expired(
+                now_ms,
+                &namespace_generations,
+                remaining,
+                started,
+                time_limit,
+            );
+            // Finish removal bookkeeping under the shard publication lock.
+            // Otherwise a concurrent put could publish a fresh value for the
+            // same key before the old tag/dependency indexes or L2 record are
+            // removed, making the cleanup erase the fresh entry's metadata.
+            for (key, entry, _) in &sweep.removed {
+                self.record_removed_entry(key, entry);
+                if let Some(l2) = &self.l2 {
+                    l2.delete_key(key);
+                }
+            }
+            drop(shard);
+            drop(namespace_generations);
+
+            outcome.entries_scanned += sweep.entries_scanned;
+            completed_all_shards &= sweep.completed_cycle;
+            for (namespace, scanned) in sweep.scanned_by_namespace {
+                outcome
+                    .by_namespace
+                    .entry(namespace)
+                    .or_default()
+                    .entries_scanned += scanned;
+            }
+            for (key, entry, expired) in sweep.removed {
+                let entry_size_bytes = u64::try_from(entry.size).unwrap_or(u64::MAX);
+                let namespace_stats = outcome
+                    .by_namespace
+                    .entry(key.namespace.clone())
+                    .or_default();
+                namespace_stats.entries_evicted += 1;
+                namespace_stats.bytes_reclaimed = namespace_stats
+                    .bytes_reclaimed
+                    .saturating_add(entry_size_bytes);
+                outcome.entries_evicted += 1;
+                outcome.expirations += usize::from(expired);
+                outcome.bytes_reclaimed = outcome.bytes_reclaimed.saturating_add(entry_size_bytes);
+            }
+        }
+
+        if outcome.expirations > 0 {
+            let expirations = u64::try_from(outcome.expirations).unwrap_or(u64::MAX);
+            self.stats
+                .expirations
+                .fetch_add(expirations, Ordering::Relaxed);
+        }
+        outcome.completed = completed_all_shards;
+        outcome.elapsed_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        outcome
+    }
+
     // -- Async promotion (issue #193) ---------------------------------------
 
     /// Initialize the async L2->L1 promotion pool. Must be called on an
@@ -1471,7 +1626,7 @@ impl BlobCache {
                 .is_some_and(|l2| l2.has_namespace(namespace))
     }
 
-    fn current_generation(&self, namespace: &str) -> u64 {
+    pub(crate) fn current_generation(&self, namespace: &str) -> u64 {
         self.namespace_generations
             .read()
             .get(namespace)
@@ -1679,6 +1834,24 @@ impl BlobCache {
             }
         }
     }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct BlobCacheSweepOutcome {
+    pub(crate) entries_scanned: usize,
+    pub(crate) entries_evicted: usize,
+    pub(crate) expirations: usize,
+    pub(crate) bytes_reclaimed: u64,
+    pub(crate) elapsed_ms: u32,
+    pub(crate) completed: bool,
+    pub(crate) by_namespace: BTreeMap<String, BlobCacheNamespaceSweep>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct BlobCacheNamespaceSweep {
+    pub(crate) entries_scanned: usize,
+    pub(crate) entries_evicted: usize,
+    pub(crate) bytes_reclaimed: u64,
 }
 
 fn unix_now_ms() -> u64 {

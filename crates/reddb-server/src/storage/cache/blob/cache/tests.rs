@@ -394,6 +394,63 @@ fn ttl_and_absolute_expiry_use_earliest_deadline() {
 }
 
 #[test]
+fn expiry_can_be_replaced_or_removed_without_rewriting_the_entry() {
+    let cache = small_cache(128);
+    cache
+        .put(
+            "n",
+            "session",
+            BlobCachePut::new(b"value".to_vec()).with_tags(["auth"]),
+        )
+        .expect("cache fixture put");
+
+    assert!(cache.expire("n", "session", 60_000).expect("expiry update"));
+    let hit = cache.get("n", "session").expect("live after expiry update");
+    assert_eq!(hit.value(), b"value");
+    assert!(hit.remaining_ttl_ms_at(unix_now_ms()).is_some());
+
+    assert!(cache.persist("n", "session").expect("remove expiry"));
+    let hit = cache.get("n", "session").expect("live after persist");
+    assert_eq!(hit.expires_at_unix_ms(), None);
+    assert_eq!(
+        cache.invalidate_tags("n", &["auth"]),
+        1,
+        "tags survive TTL changes"
+    );
+    assert!(!cache
+        .expire("n", "missing", 10)
+        .expect("missing expiry update is a clean miss"));
+}
+
+#[test]
+fn expiry_update_reaches_l2_only_entries() {
+    let path = l2_path("expiry-update");
+    let cache = l2_cache(&path);
+    cache
+        .put(
+            "n",
+            "cold",
+            BlobCachePut::new(b"value".to_vec())
+                .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never)),
+        )
+        .expect("L2-only fixture put");
+
+    assert!(cache.expire("n", "cold", 60_000).expect("L2 expiry update"));
+    let hit = cache.get("n", "cold").expect("L2 entry remains readable");
+    assert!(hit.remaining_ttl_ms_at(unix_now_ms()).is_some());
+    assert!(cache.persist("n", "cold").expect("remove L2 expiry"));
+    assert_eq!(
+        cache
+            .get("n", "cold")
+            .expect("L2 entry remains after persist")
+            .expires_at_unix_ms(),
+        None
+    );
+    drop(cache);
+    remove_l2(&path);
+}
+
+#[test]
 fn per_entry_max_blob_bytes_rejects_large_blob() {
     let cache = small_cache(128);
     let policy = BlobCachePolicy::default().max_blob_bytes(2);

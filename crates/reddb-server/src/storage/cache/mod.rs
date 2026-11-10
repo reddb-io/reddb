@@ -54,6 +54,10 @@ pub use result::{
     ResultCacheStats,
 };
 pub use spill::{SpillConfig, SpillError, SpillManager, SpillStats, SpillableGraph};
+pub use sweeper::{
+    BlobCacheSweeper, NamespaceFlushReport, NamespaceSweepStats, OrphanReport, SweepLimit,
+    SweepReport,
+};
 
 // ---------------------------------------------------------------------------
 // L2 Blob Cache backup helpers (issue #148 follow-up)

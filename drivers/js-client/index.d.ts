@@ -108,15 +108,41 @@ export interface CachePutOptions {
 
 export type CacheExistsStatus = 'present' | 'absent' | 'maybe'
 
+export interface CacheEntryResult {
+  key: string
+  value: Uint8Array | null
+  size_bytes: number | null
+  ttl_ms: number | null
+  expires_at_unix_ms: number | null
+  version: number | null
+  stale: boolean
+}
+
+export interface CacheHitResult extends CacheEntryResult {
+  value: Uint8Array
+  size_bytes: number
+}
+
+export interface CachePutEntry extends CachePutOptions {
+  key: string
+  value: Uint8Array | Buffer | string
+}
+
 export class CacheClient {
   get(namespace: string, key: string): Promise<Uint8Array | null>
+  getEntry(namespace: string, key: string): Promise<CacheHitResult | null>
+  getMany(namespace: string, keys: string[]): Promise<CacheEntryResult[]>
   put(
     namespace: string,
     key: string,
     value: Uint8Array | Buffer | string,
     opts?: CachePutOptions,
   ): Promise<void>
+  putMany(namespace: string, entries: CachePutEntry[]): Promise<number>
   exists(namespace: string, key: string): Promise<CacheExistsStatus>
+  expire(namespace: string, key: string, ttl_ms: number): Promise<boolean>
+  expireAt(namespace: string, key: string, expires_at_unix_ms: number): Promise<boolean>
+  persist(namespace: string, key: string): Promise<boolean>
   invalidate(namespace: string, key: string): Promise<void>
   invalidatePrefix(namespace: string, prefix: string): Promise<number>
   invalidateTags(namespace: string, tags: string[]): Promise<number>

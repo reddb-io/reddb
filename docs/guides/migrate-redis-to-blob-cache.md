@@ -1,6 +1,6 @@
 # Migrating from Redis to RedDB Blob Cache
 
-Status: 2026-05-06 — first cut. Companion to
+Status: 2026-11-09 — current remote API. Companion to
 [ADR 0006 — Tiered Blob Cache](../../.red/adr/0006-tiered-blob-cache.md) and
 [`docs/guides/cache-comparison.md`](./cache-comparison.md).
 
@@ -28,17 +28,18 @@ patterns we see most often in cache-shaped Redis workloads.
 
 | Redis op                  | RedDB Blob Cache equivalent                                                                      |
 |---------------------------|--------------------------------------------------------------------------------------------------|
-| `GET key`                 | `BlobCache::get(namespace, key)`                                                                 |
-| `SET key value`           | `BlobCache::put(namespace, key, value, BlobCachePolicy::default())`                              |
-| `SET key value EX 60`     | `BlobCache::put(... ttl_ms: Some(60_000) ...)`                                                   |
+| `GET key`                 | `db.cache.get(namespace, key)`                                                                   |
+| `SET key value`           | `db.cache.put(namespace, key, value)`                                                            |
+| `SET key value EX 60`     | `db.cache.put(namespace, key, value, { ttl_ms: 60_000 })`                                        |
 | `SETEX key 60 value`      | same                                                                                             |
-| `DEL key`                 | `BlobCache::invalidate_key(namespace, key)`                                                      |
-| `EXPIRE key 60`           | not directly; re-put with new TTL                                                                |
-| `EXISTS key`              | `BlobCache::exists(namespace, key)`                                                              |
-| `TTL key`                 | not exposed; introspect via stats                                                                |
+| `DEL key`                 | `db.cache.invalidate(namespace, key)`                                                            |
+| `EXPIRE key 60`           | `db.cache.expire(namespace, key, 60_000)`                                                        |
+| `EXISTS key`              | `db.cache.exists(namespace, key)`                                                                |
+| `TTL key`                 | `db.cache.getEntry(namespace, key).ttl_ms`                                                       |
 | `INCR key`                | NOT supported (Blob Cache is opaque bytes; use KV for counters)                                  |
 | `KEYS pattern`            | `invalidate_prefix` for bulk ops; no enumeration                                                 |
-| `MGET key1 key2`          | sequential `get` calls; no batch primitive yet                                                   |
+| `MGET key1 key2`          | `db.cache.getMany(namespace, keys)`                                                              |
+| `MSET key1 value1 ...`    | `db.cache.putMany(namespace, entries)`                                                           |
 | `EVAL Lua script`         | NOT supported                                                                                    |
 | `MULTI/EXEC`              | NOT supported (no transactions on cache)                                                         |
 | `SUBSCRIBE channel`       | NOT supported (no pub/sub)                                                                       |
@@ -64,11 +65,9 @@ A few notes on rows that look one-to-one but are not:
   using `KEYS` to *invalidate*, this is the migration target. If you
   were using `KEYS` to *enumerate*, that is a different design problem
   — Blob Cache will not help; consider KV with a real index instead.
-- **`MGET`.** No batch primitive yet; sequential `get` is the
-  workaround. Most application caches see this as an L1-resident
-  pattern where the per-call cost is dominated by lock acquisition,
-  not network. If you have a real multi-key fan-out workload that
-  needs amortized batching, open an issue with the read pattern.
+- **`MGET` / `MSET`.** Remote batches accept 1–256 items and up to 8 MiB of
+  decoded values. `putMany` validates the complete request before writing but
+  is not transactional if a storage/version error occurs during execution.
 
 ---
 
@@ -90,15 +89,13 @@ behavior you get from `BlobCachePolicy::default().ttl_ms(600_000)` —
 the entry will fall out at the 600-second mark even if you read it
 every second.
 
-Idle TTL (`idle_ttl_ms`, sliding expiry) is in the ADR (§ "Cache
-policy") as a follow-up axis, gated on real demand. If you depend on
-sliding expiry semantics for sessions or hot-key keep-alive, do one of
-the following until the follow-up lands:
+The native engine policy has idle TTL, but the remote HTTP API does not expose
+it. If you depend on sliding expiry semantics for sessions or hot-key
+keep-alive, do one of the following:
 
-1. **Re-put on read.** When your read path returns a cache hit, issue
-   a `put` with the same value and a fresh `ttl_ms`. This is exactly
-   what Redis is doing internally for LRU touch, but explicit. The
-   cost is one extra L1 write per hit on a hot key.
+1. **Refresh on read.** When your read path returns a cache hit, issue
+   `expire(namespace, key, ttl_ms)`. This updates the deadline without
+   rewriting the value.
 2. **Use a longer hard TTL with stale-while-revalidate logic in the
    caller.** This is appropriate when "occasional staleness up to
    `T`" is more tolerable than "occasional cold miss".
@@ -120,64 +117,47 @@ The common reasons applications use Redis pub/sub *for caching* are
 cache-bust fan-out, coalescing live update streams, and unrelated
 coordination signals. Migration workarounds:
 
-- **Cache-bust fan-out** — use dependency invalidation or namespace
-  flush on the writer side. The same engine that processes the write
-  also processes the invalidation, so no separate fan-out channel is
-  needed for writes that go through RedDB. See ADR 0006 §
-  "Invalidation" and the cache comparison guide § "Invalidation
-  primitives". Note the per-node contract from ADR 0008: in a
-  single-writer / read-replica topology this works as expected; in
-  multi-writer treat each node as a separate cache surface.
+- **Cache-bust fan-out** — use tags, prefixes or namespace flush on the writer
+  side. These invalidations affect only the addressed RedDB node; the public
+  cache API does not provide cluster fan-out.
 - **Live update streams** — not a cache problem. RedDB has separate
   queue primitives; do not bend Blob Cache around streams.
 - **Unrelated coordination signals** — keep using a coordination
   primitive outside the cache; running both Redis-as-broker and
   RedDB Blob Cache is a reasonable end state.
 
-Where pub/sub was used purely as a cache-bust signal and dependency
-invalidation does not cover it (e.g., an external system writes to
-RedDB out-of-band), the workaround is **poll-based generation
-checks**: the writer bumps a namespace generation through
-`invalidate_namespace`; pollers compare the cached generation against
-the current one and drop their L1 view when it moves. Strictly worse
-than pub/sub on latency, but correct and it does not invent a new
-module.
+Where pub/sub was used as a cross-node cache-bust signal, keep a real fan-out
+channel or route cache traffic and invalidation to one sticky node. Namespace
+generations are internal and are not a cross-node notification mechanism.
 
 ---
 
 ## Pipelining
 
-Redis pipelining batches commands across a single connection so the
-client pays one round-trip cost for many ops. RedDB Blob Cache does
-not have an explicit pipeline primitive yet.
+Redis pipelining batches arbitrary commands across a single connection. RedDB
+does not provide an arbitrary pipeline, but it has explicit `getMany` and
+`putMany` operations for the common remote cache path.
 
 In practice the operations that motivated Redis pipelines fall into
 two buckets when ported to Blob Cache:
 
-- **Bulk invalidations.** Already O(1) on the foreground path through
-  `invalidate_prefix` or `invalidate_namespace`. One call replaces a
-  pipeline of `DEL` per key.
-- **Bulk reads / writes.** No batch primitive yet. The L1 hit path
-  is process-local when embedded — no network round-trip to amortize
-  — so the win from a hypothetical batch primitive is smaller than
-  against Redis. For network-fronted use a batch primitive may land
-  later; track the issue when it opens.
+- **Bulk invalidations.** Namespace flush is O(1) on the foreground path.
+  Prefix/tag invalidation is one API call but still performs bounded local
+  cache work; it is not an O(1) keyspace operation.
+- **Bulk reads / writes.** `getMany` and `putMany` amortize HTTP overhead for
+  up to 256 items per request.
 
-If your existing Redis pipelining is doing several `DEL` after a
-domain write, that is exactly the `invalidate_dependencies` workload.
-Move the dependency declaration to the `put` site and the dependency
-invalidation to the writer; the per-key `DEL` storm goes away.
+If your existing Redis pipeline issues several `DEL` calls after a domain
+write, group entries under a tag/prefix or flush their namespace explicitly.
+Dependency registration is currently engine-internal, not a remote API.
 
 ---
 
 ## Cluster-mode
 
-Redis Cluster shards the keyspace by hash slot across many nodes,
-with client-side or proxy-side routing. RedDB's future productive
-cluster model uses hash slots for user-data sharding, but Blob Cache
-MVP does not expose Redis-compatible cluster-mode cache slots. The
-shipping topology for this guide is **single-primary plus read
-replicas**, with cache state replicated **per-node**.
+Redis Cluster shards the keyspace by hash slot across many nodes, with
+client-side or proxy-side routing. Blob Cache does not expose compatible cache
+slots, and its entries are not replicated with database data.
 
 Concretely:
 
@@ -186,15 +166,11 @@ Concretely:
   per-shard memory, RedDB Blob Cache MVP does not match that scale
   point. The cache comparison guide flags this honestly under
   "Massive horizontal cluster scale-out".
-- **Invalidation.** Per-node, by ADR 0008. The writer's node
-  processes the invalidation. In a single-writer topology, downstream
-  read replicas serve from their own L1/L2 and are subject to
-  per-node staleness windows. Cluster-wide invalidation propagation
-  is its own future ADR; do not assume it.
-- **Failover.** Cache state on a failed node is regenerable from
-  origin on the surviving node. Backups are opt-in (cache
-  comparison guide § "Per-namespace byte limits, replication,
-  backup"); the default is "skip; refill on first miss".
+- **Invalidation.** Per-node. A read replica has an independent L1 and does not
+  receive the writer's cache invalidation. Use sticky routing or an external
+  coherence mechanism.
+- **Failover.** Cache state on a failed node is regenerated from origin on the
+  surviving node. The normal server cache is memory-only and is not backed up.
 
 If your Redis migration is explicitly chasing cluster-mode horizontal
 scale, stop here. Blob Cache is not the right target for that

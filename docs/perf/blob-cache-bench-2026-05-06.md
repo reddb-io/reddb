@@ -5,6 +5,11 @@ keeps the workload definitions, baseline configuration, the
 SIEVE → W-TinyLFU migration trigger, and the result tables produced by
 the session below.
 
+> Methodology warning: the shipped harness calls Blob Cache through its
+> in-process Rust API while Redis crosses loopback TCP. These numbers are
+> useful for engine regression and upper-bound analysis, but they are not an
+> apples-to-apples comparison of the public RedDB HTTP API against Redis.
+
 Tracking issue: #149 — *"Blob Cache: benchmark impact against result
 cache and Redis"*.
 
@@ -67,10 +72,9 @@ in the session header when the bench runs.
     (durability-comparable variant for the L2 / restart-warm
     scenarios where the RedDB blob cache is paying for fsync ordering
     too).
-- Transport: localhost loopback TCP (`127.0.0.1:6379`). No unix
-  socket variant — keeps the comparison apples-to-apples with the
-  RedDB embedded gRPC / native call path which also crosses a
-  socket-or-equivalent boundary at the public API layer.
+- Transport: Redis uses localhost loopback TCP (`127.0.0.1:6379`); RedDB uses
+  an in-process native call. This deliberately measures different layers and
+  must not be presented as remote API latency parity.
 - Two client modes per scenario:
   - **Single-shot** — one RTT per `GET` / `SET`. Models the
     application-cache call shape.

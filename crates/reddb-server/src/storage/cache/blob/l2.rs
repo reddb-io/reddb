@@ -259,6 +259,42 @@ impl BlobCacheL2 {
             .map_or(0, |record| record.byte_len)
     }
 
+    pub(super) fn update_expiry(
+        &self,
+        key: &BlobCacheKey,
+        namespace_generation: u64,
+        now_ms: u64,
+        expires_at_unix_ms: Option<u64>,
+    ) -> Result<bool, CacheError> {
+        let encoded_key = encode_l2_key(&key.namespace, &key.key);
+        let metadata = self.metadata.write();
+        let Some(encoded_record) = metadata
+            .get(&encoded_key)
+            .map_err(|err| CacheError::L2Io(err.to_string()))?
+        else {
+            return Ok(false);
+        };
+        let mut record =
+            L2Record::decode(&encoded_record).map_err(|err| CacheError::L2Io(err.to_string()))?;
+        if record.namespace_generation != namespace_generation || record.is_expired_at(now_ms) {
+            return Ok(false);
+        }
+        record.expires_at_unix_ms = expires_at_unix_ms;
+        let _ = metadata.delete(&encoded_key);
+        metadata
+            .insert(&encoded_key, &record.encode())
+            .map_err(|err| CacheError::L2Io(err.to_string()))?;
+        let new_root = metadata.root_page_id();
+        drop(metadata);
+
+        let mut control = self.control.write();
+        control.metadata_root = new_root;
+        control
+            .write(&self.control_path)
+            .map_err(|err| CacheError::L2Io(err.to_string()))?;
+        Ok(true)
+    }
+
     pub(super) fn delete_key(&self, key: &BlobCacheKey) -> Option<u64> {
         let encoded_key = encode_l2_key(&key.namespace, &key.key);
         let metadata = self.metadata.write();

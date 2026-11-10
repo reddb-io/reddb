@@ -53,6 +53,7 @@ impl Drop for RuntimeBackgroundTasks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::cache::{BlobCachePolicy, BlobCachePut};
     use crate::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
     use std::sync::mpsc;
     use std::time::Duration;
@@ -154,5 +155,36 @@ mod tests {
         );
         drop(runtime);
         RedDBRuntime::with_options(options).expect("reopen after final checkpoint");
+    }
+
+    #[test]
+    fn blob_cache_worker_reclaims_unread_expired_entries() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        runtime
+            .result_blob_cache()
+            .put(
+                "sessions",
+                "expired",
+                BlobCachePut::new(b"payload".to_vec())
+                    .with_policy(BlobCachePolicy::default().expires_at_unix_ms(1)),
+            )
+            .expect("cache put");
+        assert_eq!(runtime.result_blob_cache().stats().entries(), 1);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while runtime.result_blob_cache().stats().entries() != 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let stats = runtime.result_blob_cache().stats();
+        assert_eq!(
+            stats.entries(),
+            0,
+            "background sweep must physically remove the entry"
+        );
+        assert_eq!(stats.bytes_in_use(), 0);
+        assert_eq!(stats.expirations(), 1);
     }
 }

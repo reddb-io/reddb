@@ -12,6 +12,23 @@
 use super::impl_config_secret::seed_storage_deploy_config;
 use super::*;
 
+fn boot_cache_u64(
+    store: &crate::storage::UnifiedStore,
+    env: &HashMap<String, String>,
+    key: &str,
+    default: u64,
+) -> u64 {
+    if let Some(value) = env.get(key).and_then(|value| value.parse::<u64>().ok()) {
+        return value;
+    }
+    match store.get_config(key) {
+        Some(reddb_types::Value::UnsignedInteger(value)) => value,
+        Some(reddb_types::Value::Integer(value)) => u64::try_from(value).unwrap_or(default),
+        Some(reddb_types::Value::Text(value)) => value.parse::<u64>().unwrap_or(default),
+        _ => default,
+    }
+}
+
 /// Convert the rows produced by a materialized-view body into
 /// `UnifiedEntity` table rows targeting the backing collection.
 /// Issue #595 slice 9c — feeds `UnifiedStore::refresh_collection`.
@@ -242,14 +259,39 @@ impl RedDBRuntime {
                 Err(err) => RedDBError::Internal(err.to_string()),
             }
         })?);
+        let env_config_overrides = crate::runtime::config_overlay::collect_env_overrides();
         // Query results are disposable. Do not create a second persistent
         // database outside the .rdb and its WAL for the cache.
+        let cache_l1_share = memory_shares.blob_cache_l1_bytes();
+        let cache_l1_default = u64::try_from(cache_l1_share).unwrap_or(u64::MAX);
+        let configured_l1 = usize::try_from(boot_cache_u64(
+            db.store().as_ref(),
+            &env_config_overrides,
+            "cache.blob.l1_bytes_max",
+            cache_l1_default,
+        ))
+        .map_err(|_| RedDBError::InvalidConfig("cache.blob.l1_bytes_max is too large".into()))?;
+        let configured_namespaces = usize::try_from(boot_cache_u64(
+            db.store().as_ref(),
+            &env_config_overrides,
+            "cache.blob.max_namespaces",
+            u64::try_from(crate::storage::cache::DEFAULT_BLOB_MAX_NAMESPACES).unwrap_or(u64::MAX),
+        ))
+        .map_err(|_| RedDBError::InvalidConfig("cache.blob.max_namespaces is too large".into()))?;
+        if configured_namespaces == 0 {
+            return Err(RedDBError::InvalidConfig(
+                "cache.blob.max_namespaces must be greater than zero".into(),
+            ));
+        }
         let result_blob_cache_config = crate::storage::cache::BlobCacheConfig::default()
-            .with_l1_bytes_max(memory_shares.blob_cache_l1_bytes());
-        let result_blob_cache =
-            crate::storage::cache::BlobCache::open_with_l2(result_blob_cache_config).map_err(
-                |err| RedDBError::Internal(format!("open result Blob Cache L2 failed: {err:?}")),
-            )?;
+            // The cache-specific setting may reserve less memory, but never
+            // escapes the process-wide memory budget.
+            .with_l1_bytes_max(configured_l1.min(cache_l1_share))
+            .with_max_namespaces(configured_namespaces);
+        let result_blob_cache = crate::storage::cache::BlobCache::open_with_l2(
+            result_blob_cache_config,
+        )
+        .map_err(|err| RedDBError::Internal(format!("open result Blob Cache failed: {err:?}")))?;
         let storage_ready_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -337,7 +379,7 @@ impl RedDBRuntime {
                     crate::runtime::retention_sweeper::RetentionSweeperState::new(),
                 ),
                 transaction_state: crate::runtime::transaction_state::TransactionState::new(),
-                env_config_overrides: crate::runtime::config_overlay::collect_env_overrides(),
+                env_config_overrides,
                 lock_manager: Arc::new({
                     // Sourced from the matrix: Tier B key
                     // `concurrency.locking.deadlock_timeout_ms`
@@ -988,6 +1030,38 @@ impl RedDBRuntime {
                 );
         }
 
+        // Blob Cache expiration is active maintenance, not a read-path side
+        // effect. Each pulse scans a rotating bounded slice so expired keys
+        // release their L1 budget even when they are never accessed again.
+        // A dedicated low-priority worker keeps this work isolated from query
+        // execution workers.
+        {
+            let weak = Arc::downgrade(&runtime.inner);
+            runtime
+                .background_tasks
+                .as_ref()
+                .expect("foreground runtime")
+                .spawn(
+                    std::thread::Builder::new().name("reddb-cache-sweeper".into()),
+                    move |stopped| loop {
+                        std::thread::park_timeout(std::time::Duration::from_millis(250));
+                        if stopped.load(AtomicOrdering::Acquire) {
+                            break;
+                        }
+                        let Some(inner) = weak.upgrade() else {
+                            break;
+                        };
+                        let _ = crate::storage::cache::sweeper::BlobCacheSweeper::sweep_expired(
+                            &inner.result_blob_cache,
+                            crate::storage::cache::sweeper::SweepLimit::Either {
+                                entries: 512,
+                                millis: 5,
+                            },
+                        );
+                    },
+                );
+        }
+
         // Start backup scheduler if enabled via red_config
         {
             let store = runtime.inner.db.store();
@@ -1406,6 +1480,54 @@ impl RedDBRuntime {
         &self,
     ) -> Option<Arc<crate::auth::browser_token::BrowserTokenAuthority>> {
         self.inner.browser_token_authority.read().clone()
+    }
+}
+
+#[cfg(test)]
+mod cache_boot_tests {
+    use super::*;
+
+    #[test]
+    fn persisted_cache_limits_apply_on_next_boot_within_memory_budget() {
+        let directory = tempfile::tempdir().expect("cache config fixture");
+        let options = RedDBOptions::persistent(directory.path().join("cache-config.rdb"))
+            .with_memory_budget(64 * 1024 * 1024);
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("initial runtime");
+        runtime.db().store().set_config_tree(
+            "cache.blob",
+            &crate::json!({
+                "l1_bytes_max": 1024 * 1024,
+                "max_namespaces": 7
+            }),
+        );
+        runtime.flush().expect("persist cache config");
+        drop(runtime);
+
+        let reopened = RedDBRuntime::with_options(options).expect("configured runtime");
+        let stats = reopened.result_blob_cache().stats();
+        assert_eq!(stats.l1_bytes_max(), 1024 * 1024);
+        assert_eq!(stats.max_namespaces(), 7);
+    }
+
+    #[test]
+    fn zero_cache_namespace_limit_is_rejected_on_boot() {
+        let directory = tempfile::tempdir().expect("cache config fixture");
+        let options = RedDBOptions::persistent(directory.path().join("cache-config-zero.rdb"));
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("initial runtime");
+        runtime
+            .db()
+            .store()
+            .set_config_tree("cache.blob.max_namespaces", &crate::json!(0));
+        runtime.flush().expect("persist cache config");
+        drop(runtime);
+
+        let error = match RedDBRuntime::with_options(options) {
+            Ok(_) => panic!("zero limit must fail boot"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("cache.blob.max_namespaces must be greater than zero"));
     }
 }
 

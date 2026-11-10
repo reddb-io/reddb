@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 
@@ -19,6 +20,7 @@ pub(super) struct Shard {
     slots: Vec<Option<BlobCacheKey>>,
     free_slots: Vec<usize>,
     hand: usize,
+    sweep_hand: usize,
     pub(super) bytes: usize,
 }
 
@@ -30,6 +32,7 @@ impl Shard {
             slots: Vec::new(),
             free_slots: Vec::new(),
             hand: 0,
+            sweep_hand: 0,
             bytes: 0,
         }
     }
@@ -182,6 +185,46 @@ impl Shard {
         })
     }
 
+    pub(super) fn can_update_expiry(
+        &self,
+        key: &BlobCacheKey,
+        now_ms: u64,
+        namespace_generation: u64,
+    ) -> bool {
+        self.entries.get(key).is_some_and(|entry| {
+            if entry.namespace_generation != namespace_generation {
+                return false;
+            }
+            if entry.extended.is_active() {
+                !matches!(
+                    EffectiveExpiry::compute(
+                        entry.expires_at_unix_ms,
+                        now_ms,
+                        entry.last_access_unix_ms,
+                        &entry.extended,
+                    ),
+                    ExpiryDecision::Expired
+                )
+            } else {
+                !entry.is_expired_at(now_ms)
+            }
+        })
+    }
+
+    pub(super) fn update_expiry(
+        &mut self,
+        key: &BlobCacheKey,
+        expires_at_unix_ms: Option<u64>,
+        now_ms: u64,
+    ) {
+        let entry = self
+            .entries
+            .get_mut(key)
+            .expect("live expiry target exists");
+        entry.expires_at_unix_ms = expires_at_unix_ms;
+        entry.last_access_unix_ms = now_ms;
+    }
+
     pub(super) fn insert(&mut self, key: BlobCacheKey, mut entry: Entry) -> InsertOutcome {
         self.l2_second_hit_markers.remove(&key);
         let old_entry = if let Some(old) = self.entries.shift_remove(&key) {
@@ -297,6 +340,75 @@ impl Shard {
             .collect()
     }
 
+    /// Scan a bounded, rotating slice of this shard and remove entries whose
+    /// effective expiry has elapsed. The independent cursor prevents a small
+    /// maintenance budget from repeatedly visiting only the first keys.
+    pub(super) fn sweep_expired(
+        &mut self,
+        now_ms: u64,
+        namespace_generations: &HashMap<String, u64>,
+        entries_limit: usize,
+        started: Instant,
+        time_limit: Option<Duration>,
+    ) -> ShardSweep {
+        let mut sweep = ShardSweep::default();
+        if self.entries.is_empty() || entries_limit == 0 {
+            sweep.completed_cycle = self.entries.is_empty();
+            return sweep;
+        }
+
+        let slots_at_start = self.slots.len();
+        let mut slots_visited = 0usize;
+        while slots_visited < slots_at_start && sweep.entries_scanned < entries_limit {
+            if time_limit.is_some_and(|limit| started.elapsed() >= limit) {
+                break;
+            }
+            if self.sweep_hand >= self.slots.len() {
+                self.sweep_hand = 0;
+            }
+            let slot = self.sweep_hand;
+            self.sweep_hand = (self.sweep_hand + 1) % self.slots.len();
+            slots_visited += 1;
+
+            let Some(key) = self.slots[slot].clone() else {
+                continue;
+            };
+            let Some(entry) = self.entries.get(&key) else {
+                continue;
+            };
+            sweep.entries_scanned += 1;
+            *sweep
+                .scanned_by_namespace
+                .entry(key.namespace.clone())
+                .or_default() += 1;
+
+            let stale_generation = entry.namespace_generation
+                != namespace_generations
+                    .get(&key.namespace)
+                    .copied()
+                    .unwrap_or(0);
+            let expired = if entry.extended.is_active() {
+                matches!(
+                    EffectiveExpiry::compute(
+                        entry.expires_at_unix_ms,
+                        now_ms,
+                        entry.last_access_unix_ms,
+                        &entry.extended,
+                    ),
+                    ExpiryDecision::Expired
+                )
+            } else {
+                entry.is_expired_at(now_ms)
+            };
+            if stale_generation || expired {
+                let entry = self.remove(&key).expect("sweep candidate exists");
+                sweep.removed.push((key, entry, expired));
+            }
+        }
+        sweep.completed_cycle = slots_visited == slots_at_start;
+        sweep
+    }
+
     pub(super) fn entry_has_any_tag(&self, key: &BlobCacheKey, labels: &HashSet<String>) -> bool {
         self.entries
             .get(key)
@@ -328,6 +440,14 @@ impl Shard {
             self.hand = (self.hand + 1) % self.slots.len();
         }
     }
+}
+
+#[derive(Default)]
+pub(super) struct ShardSweep {
+    pub(super) entries_scanned: usize,
+    pub(super) scanned_by_namespace: std::collections::HashMap<String, usize>,
+    pub(super) removed: Vec<(BlobCacheKey, Entry, bool)>,
+    pub(super) completed_cycle: bool,
 }
 
 pub(super) enum Lookup {
