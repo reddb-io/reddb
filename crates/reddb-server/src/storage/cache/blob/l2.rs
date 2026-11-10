@@ -655,7 +655,8 @@ fn generation_key(namespace: &str) -> Vec<u8> {
     // An encoded cache key declares a key length after the namespace.  The
     // marker declares a nonempty key but carries no bytes, so it cannot collide.
     let mut key = vec![0; 16];
-    key.extend_from_slice(&(namespace.len() as u16).to_le_bytes());
+    let namespace_len = u16::try_from(namespace.len()).unwrap_or(u16::MAX);
+    key.extend_from_slice(&namespace_len.to_le_bytes());
     key.extend_from_slice(namespace.as_bytes());
     key.extend_from_slice(&u16::MAX.to_le_bytes());
     key
