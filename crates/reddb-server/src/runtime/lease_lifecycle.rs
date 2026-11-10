@@ -438,9 +438,15 @@ mod tests {
     #[test]
     fn successor_acquire_cannot_leave_expired_predecessor_writable() {
         let (mut lifecycle, gate, _audit, drain, prefix) = build_lifecycle("expiry");
-        Arc::get_mut(&mut lifecycle).unwrap().ttl_ms = 1_000;
-        lifecycle.try_acquire().unwrap();
-        let first = lifecycle.current_lease().unwrap();
+        Arc::get_mut(&mut lifecycle)
+            .expect("invariant: test owns the only lifecycle reference")
+            .ttl_ms = 1_000;
+        lifecycle
+            .try_acquire()
+            .expect("first writer acquires lease");
+        let first = lifecycle
+            .current_lease()
+            .expect("acquire publishes the current lease");
         let remaining = first
             .expires_at_ms
             .saturating_sub(crate::utils::now_unix_millis());
@@ -448,7 +454,7 @@ mod tests {
         let successor = lifecycle
             .store
             .try_acquire_for_term("main", "writer-2", 60_000, 1)
-            .unwrap();
+            .expect("successor acquires expired lease");
         assert!(successor.generation > first.generation);
         assert!(gate
             .check(crate::runtime::write_gate::WriteKind::Dml)
@@ -456,18 +462,21 @@ mod tests {
         assert!(lifecycle.refresh().is_err());
         assert_eq!(drain.load(Ordering::SeqCst), 1);
         assert!(lifecycle.current_lease().is_none());
-        lifecycle.store.release(&successor).unwrap();
+        lifecycle
+            .store
+            .release(&successor)
+            .expect("successor lease releases cleanly");
         let _ = std::fs::remove_dir_all(prefix);
     }
 
     #[test]
     fn refresh_cannot_reopen_a_released_gate() {
         let (lifecycle, gate, _audit, _drain, prefix) = build_lifecycle("release-race");
-        lifecycle.try_acquire().unwrap();
+        lifecycle.try_acquire().expect("writer acquires lease");
         let worker = lifecycle.clone();
         let refresh = std::thread::spawn(move || worker.refresh());
-        lifecycle.release().unwrap();
-        let _ = refresh.join().unwrap();
+        lifecycle.release().expect("lease release succeeds");
+        let _ = refresh.join().expect("refresh worker does not panic");
         assert_eq!(gate.lease_state(), LeaseGateState::NotHeld);
         assert!(lifecycle.current_lease().is_none());
         let _ = std::fs::remove_dir_all(prefix);
@@ -476,37 +485,45 @@ mod tests {
     #[test]
     fn renewal_installs_a_new_local_deadline() {
         let (lifecycle, gate, _audit, _drain, prefix) = build_lifecycle("renewal");
-        lifecycle.try_acquire().unwrap();
+        lifecycle.try_acquire().expect("writer acquires lease");
         gate.grant_lease_until(Instant::now() + Duration::from_millis(100));
-        lifecycle.refresh().unwrap();
+        lifecycle.refresh().expect("lease refresh succeeds");
         std::thread::sleep(Duration::from_millis(120));
         assert_eq!(gate.lease_state(), LeaseGateState::Held);
-        lifecycle.release().unwrap();
+        lifecycle.release().expect("lease release succeeds");
         let _ = std::fs::remove_dir_all(prefix);
     }
 
     #[test]
     fn minimum_configured_ttl_schedules_refresh_before_expiry() {
         let (mut lifecycle, gate, _audit, _drain, prefix) = build_lifecycle("short-ttl");
-        Arc::get_mut(&mut lifecycle).unwrap().ttl_ms = 1_000;
-        lifecycle.try_acquire().unwrap();
+        Arc::get_mut(&mut lifecycle)
+            .expect("invariant: test owns the only lifecycle reference")
+            .ttl_ms = 1_000;
+        lifecycle.try_acquire().expect("writer acquires lease");
         let delay = lifecycle.refresh_delay();
         assert!(delay < Duration::from_millis(334));
         assert!(delay < gate.lease_remaining());
         // A slow acquire/refresh response must shorten the next sleep too.
         gate.grant_lease_until(Instant::now() + Duration::from_millis(90));
         assert!(lifecycle.refresh_delay() <= Duration::from_millis(30));
-        lifecycle.release().unwrap();
+        lifecycle.release().expect("lease release succeeds");
         let _ = std::fs::remove_dir_all(prefix);
     }
 
     #[test]
     fn local_deadline_accounts_for_backend_timestamp_quantization() {
         let (mut lifecycle, _gate, _audit, _drain, prefix) = build_lifecycle("quantization");
-        Arc::get_mut(&mut lifecycle).unwrap().ttl_ms = 1;
+        Arc::get_mut(&mut lifecycle)
+            .expect("invariant: test owns the only lifecycle reference")
+            .ttl_ms = 1;
         assert!(lifecycle.request_deadline().is_err());
-        Arc::get_mut(&mut lifecycle).unwrap().ttl_ms = 1_000;
-        let deadline = lifecycle.request_deadline().unwrap();
+        Arc::get_mut(&mut lifecycle)
+            .expect("invariant: test owns the only lifecycle reference")
+            .ttl_ms = 1_000;
+        let deadline = lifecycle
+            .request_deadline()
+            .expect("one-second TTL has a conservative deadline");
         assert!(deadline.saturating_duration_since(Instant::now()) <= Duration::from_millis(999));
         let _ = std::fs::remove_dir_all(prefix);
     }
@@ -514,7 +531,8 @@ mod tests {
     #[test]
     fn delayed_acquire_response_never_opens_admission() {
         let (mut lifecycle, gate, _audit, _drain, prefix) = build_lifecycle("delayed-acquire");
-        let lifecycle_mut = Arc::get_mut(&mut lifecycle).unwrap();
+        let lifecycle_mut = Arc::get_mut(&mut lifecycle)
+            .expect("invariant: test owns the only lifecycle reference");
         lifecycle_mut.ttl_ms = 2;
         lifecycle_mut.current_term = Arc::new(|| {
             std::thread::sleep(Duration::from_millis(5));
