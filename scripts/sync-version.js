@@ -336,6 +336,7 @@ function apply(target) {
       if (!json[field]) continue
       for (const name of Object.keys(json[field])) {
         if (name.startsWith('@reddb-io/internal-')) json[field][name] = 'workspace:^'
+        if (name === '@reddb-io/client') json[field][name] = version
       }
     }
     updated = JSON.stringify(json, null, 2) + '\n'
