@@ -91,6 +91,10 @@ impl LeaseLifecycle {
         self.ttl_ms
     }
 
+    pub(crate) fn refresh_delay(&self) -> Duration {
+        self.write_gate.lease_remaining() / 3
+    }
+
     pub fn current_lease(&self) -> Option<WriterLease> {
         self.current.lock().expect("poisoned lease mutex").clone()
     }
@@ -246,8 +250,17 @@ impl LeaseLifecycle {
     fn request_deadline(&self) -> RedDBResult<Instant> {
         // Charge all backend latency against the lease, including a delayed
         // response; using response time would incorrectly extend ownership.
+        // The backend expiry is truncated to whole wall-clock milliseconds.
+        // Subtract its quantization so our precise clock never grants longer.
+        let ttl = self
+            .ttl_ms
+            .checked_sub(1)
+            .filter(|ttl| *ttl > 0)
+            .ok_or_else(|| {
+                RedDBError::InvalidOperation("writer lease TTL must exceed 1 ms".into())
+            })?;
         Instant::now()
-            .checked_add(Duration::from_millis(self.ttl_ms))
+            .checked_add(Duration::from_millis(ttl))
             .ok_or_else(|| RedDBError::InvalidOperation("writer lease TTL is too large".into()))
     }
 
@@ -469,6 +482,47 @@ mod tests {
         std::thread::sleep(Duration::from_millis(120));
         assert_eq!(gate.lease_state(), LeaseGateState::Held);
         lifecycle.release().unwrap();
+        let _ = std::fs::remove_dir_all(prefix);
+    }
+
+    #[test]
+    fn minimum_configured_ttl_schedules_refresh_before_expiry() {
+        let (mut lifecycle, gate, _audit, _drain, prefix) = build_lifecycle("short-ttl");
+        Arc::get_mut(&mut lifecycle).unwrap().ttl_ms = 1_000;
+        lifecycle.try_acquire().unwrap();
+        let delay = lifecycle.refresh_delay();
+        assert!(delay < Duration::from_millis(334));
+        assert!(delay < gate.lease_remaining());
+        // A slow acquire/refresh response must shorten the next sleep too.
+        gate.grant_lease_until(Instant::now() + Duration::from_millis(90));
+        assert!(lifecycle.refresh_delay() <= Duration::from_millis(30));
+        lifecycle.release().unwrap();
+        let _ = std::fs::remove_dir_all(prefix);
+    }
+
+    #[test]
+    fn local_deadline_accounts_for_backend_timestamp_quantization() {
+        let (mut lifecycle, _gate, _audit, _drain, prefix) = build_lifecycle("quantization");
+        Arc::get_mut(&mut lifecycle).unwrap().ttl_ms = 1;
+        assert!(lifecycle.request_deadline().is_err());
+        Arc::get_mut(&mut lifecycle).unwrap().ttl_ms = 1_000;
+        let deadline = lifecycle.request_deadline().unwrap();
+        assert!(deadline.saturating_duration_since(Instant::now()) <= Duration::from_millis(999));
+        let _ = std::fs::remove_dir_all(prefix);
+    }
+
+    #[test]
+    fn delayed_acquire_response_never_opens_admission() {
+        let (mut lifecycle, gate, _audit, _drain, prefix) = build_lifecycle("delayed-acquire");
+        let lifecycle_mut = Arc::get_mut(&mut lifecycle).unwrap();
+        lifecycle_mut.ttl_ms = 2;
+        lifecycle_mut.current_term = Arc::new(|| {
+            std::thread::sleep(Duration::from_millis(5));
+            1
+        });
+        assert!(lifecycle.try_acquire().is_err());
+        assert_eq!(gate.lease_state(), LeaseGateState::NotHeld);
+        assert!(lifecycle.current_lease().is_none());
         let _ = std::fs::remove_dir_all(prefix);
     }
 

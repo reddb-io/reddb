@@ -338,6 +338,13 @@ impl WriteGate {
         )
     }
 
+    pub(crate) fn lease_remaining(&self) -> std::time::Duration {
+        self.lease_deadline
+            .read()
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap_or_default()
+    }
+
     /// Issue #519 — install the archive-lag pause threshold and the
     /// baseline "last archive observed at" stamp. Threshold `0`
     /// disables auto-pause; subsequent `record_archive_success` /
@@ -760,6 +767,7 @@ mod tests {
             read_only: AtomicBool::new(read_only),
             role,
             lease: AtomicU8::new(LeaseGateState::NotRequired as u8),
+            lease_deadline: parking_lot::RwLock::new(None),
             auto_paused: AtomicBool::new(false),
             last_archive_at_ms: AtomicU64::new(0),
             pause_threshold_secs: AtomicU64::new(0),
@@ -1005,6 +1013,7 @@ mod tests {
             read_only: AtomicBool::new(false),
             role: ReplicationRole::Primary,
             lease: AtomicU8::new(LeaseGateState::NotRequired as u8),
+            lease_deadline: parking_lot::RwLock::new(None),
             auto_paused: AtomicBool::new(false),
             last_archive_at_ms: AtomicU64::new(0),
             pause_threshold_secs: AtomicU64::new(0),
