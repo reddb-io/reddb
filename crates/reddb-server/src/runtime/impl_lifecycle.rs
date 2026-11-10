@@ -387,6 +387,8 @@ impl RedDBRuntime {
                     std::collections::VecDeque::new(),
                     true,
                     0,
+                    HashSet::new(),
+                    None,
                 )),
                 ask_answer_cache_entries: parking_lot::RwLock::new((
                     HashSet::new(),

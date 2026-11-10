@@ -721,6 +721,91 @@ fn blob_result_cache_keeps_unrelated_entries_after_table_write() {
 }
 
 #[test]
+fn blob_result_cache_defers_l2_for_frequently_written_tables() {
+    let path = temp_db_path("result-cache-changing-table");
+    let query = "SELECT id FROM items ORDER BY id";
+    {
+        let rt = persistent_runtime(&path);
+        exec(
+            &rt,
+            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
+        );
+        exec(&rt, "CREATE TABLE items (id INT)");
+        exec(&rt, "INSERT INTO items (id) VALUES (1)");
+        assert_eq!(selected_ids(&rt, query), vec![1]);
+        exec(&rt, "INSERT INTO items (id) VALUES (2)");
+        let stats = rt.result_blob_cache().stats();
+        assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+        assert_eq!(
+            rt.result_blob_cache().stats().insertions(),
+            stats.insertions(),
+            "a result immediately following invalidation should stay in memory"
+        );
+        exec(&rt, "INSERT INTO items (id) VALUES (3)");
+        assert_eq!(
+            rt.result_blob_cache().stats().namespace_flushes(),
+            stats.namespace_flushes(),
+            "an in-memory-only entry should not trigger another L2 flush"
+        );
+        assert_eq!(selected_ids(&rt, query), vec![1, 2, 3]);
+        rt.checkpoint()
+            .expect("checkpoint while result is volatile");
+    }
+    {
+        let rt = persistent_runtime(&path);
+        let before = rt.result_cache_metrics();
+        assert_eq!(
+            selected_ids(&rt, query),
+            vec![1, 2, 3],
+            "restart must recompute instead of returning an older L2 result"
+        );
+        let after = rt.result_cache_metrics();
+        assert_eq!(
+            after.1 - before.1,
+            1,
+            "volatile result must not survive restart"
+        );
+    }
+}
+
+#[test]
+fn blob_result_cache_promotes_volatile_result_after_writes_stop() {
+    let path = temp_db_path("result-cache-quiet-table");
+    let query = "SELECT id FROM items ORDER BY id";
+    {
+        let rt = persistent_runtime(&path);
+        exec(
+            &rt,
+            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
+        );
+        exec(&rt, "CREATE TABLE items (id INT)");
+        exec(&rt, "INSERT INTO items (id) VALUES (1)");
+        assert_eq!(selected_ids(&rt, query), vec![1]);
+        exec(&rt, "INSERT INTO items (id) VALUES (2)");
+        assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let before = rt.result_blob_cache().stats().insertions();
+        assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+        assert_eq!(
+            rt.result_blob_cache().stats().insertions(),
+            before + 1,
+            "a hit after the quiet period should publish to L2"
+        );
+        rt.checkpoint().expect("checkpoint promoted result");
+    }
+    {
+        let rt = persistent_runtime(&path);
+        let before = rt.result_cache_metrics();
+        assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+        assert_eq!(
+            rt.result_cache_metrics().0 - before.0,
+            1,
+            "promoted result should rehydrate after restart"
+        );
+    }
+}
+
+#[test]
 fn blob_result_cache_invalidates_entries_evicted_from_tracking() {
     let rt = runtime();
     exec(

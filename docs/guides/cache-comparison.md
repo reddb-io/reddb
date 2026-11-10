@@ -60,8 +60,10 @@ ADR 0006 in flight it becomes an adapter over Blob Cache when
 application SQL callers see does not change; the storage underneath does.
 Tenant and auth identity stay part of the key. Table writes flush the
 result-cache namespace when a dependency matches or L2 entries are untracked;
-otherwise unrelated results stay cached. The normal runtime cache is
-backed by the single-file L2 and can rehydrate eligible entries after restart.
+otherwise unrelated results stay cached. After a matching invalidation, new
+results remain in memory during frequent writes; a hit after one second of
+quiet promotes them to the single-file L2 with their remaining TTL. Restart
+before promotion recomputes the result.
 
 Page Cache and Entity Cache are internal acceleration structures.
 They are listed here only so readers stop trying to use them as

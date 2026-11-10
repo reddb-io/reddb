@@ -80,10 +80,12 @@ tenant and auth identity, so scoped callers do not share cached rows.
    preserves unrelated results when every L2 entry is tracked; otherwise it
    flushes the namespace to protect untracked durable entries.
 
-When `runtime.result_cache.backend = 'blob_cache'`, cacheable results
-are written as Blob Cache payloads, not only in-memory sidecars. A clean
-runtime restart can rehydrate eligible entries from L2 until their
-30-second TTL expires. Statements rejected by the normal safety gate
+When `runtime.result_cache.backend = 'blob_cache'`, eligible results can
+be rehydrated from L2 after restart until their TTL expires. Following
+invalidation by a table write, new results are kept only in memory while
+matching writes continue. A cache hit at least one second after the last
+matching invalidation promotes the result to L2 with its remaining TTL.
+A restart before promotion recomputes the result. Statements rejected by the normal safety gate
 still do not persist: volatile builtins, active-transaction reads,
 oversized result sets, vault results, and pre-serialized fast paths are
 recomputed instead.

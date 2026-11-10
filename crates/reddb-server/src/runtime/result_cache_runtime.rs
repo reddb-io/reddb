@@ -13,6 +13,7 @@ const RESULT_CACHE_ENABLED_KEY: &str = "runtime.result_cache.enabled";
 const RESULT_CACHE_TTL_KEY: &str = "runtime.result_cache.ttl_seconds";
 const RESULT_CACHE_CAPACITY_KEY: &str = "runtime.result_cache.capacity_entries";
 const RESULT_CACHE_PAYLOAD_MAGIC: &[u8; 8] = b"RDRC0001";
+const RESULT_CACHE_WRITE_QUIET_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeResultCacheBackend {
@@ -418,6 +419,68 @@ impl RedDBRuntime {
     }
 
     fn get_blob_result_cache_entry_from_blob_cache(&self, key: &str) -> Option<RuntimeQueryResult> {
+        let promote = {
+            let cache = self.inner.result_blob_entries.read();
+            if cache.4.contains(key) {
+                let entry = cache.0.get(key)?;
+                if entry.cached_at.elapsed().as_secs() >= self.result_cache_ttl_secs() {
+                    return None;
+                }
+                if cache
+                    .5
+                    .is_some_and(|until| std::time::Instant::now() < until)
+                {
+                    return Some(entry.result.clone());
+                }
+                true
+            } else {
+                false
+            }
+        };
+        // Persist a volatile hit only after writes have stopped. Invalidation
+        // and publication share this lock, so a delayed promotion cannot
+        // reintroduce a value from before an acknowledged table write.
+        if promote {
+            let mut cache = self.inner.result_blob_entries.write();
+            if cache.4.contains(key) {
+                let entry = cache.0.get(key)?.clone();
+                let ttl = self.result_cache_ttl_secs();
+                let elapsed = entry.cached_at.elapsed();
+                if elapsed.as_secs() >= ttl {
+                    return None;
+                }
+                if cache
+                    .5
+                    .is_some_and(|until| std::time::Instant::now() < until)
+                {
+                    return Some(entry.result);
+                }
+                let remaining = std::time::Duration::from_secs(ttl).saturating_sub(elapsed);
+                let ttl_ms = u64::try_from(remaining.as_millis())
+                    .unwrap_or(u64::MAX)
+                    .max(1);
+                let policy = crate::storage::cache::BlobCachePolicy::default()
+                    .ttl_ms(ttl_ms)
+                    .priority(200);
+                let bytes = encode_result_cache_payload(&entry)
+                    .unwrap_or_else(|| result_cache_fingerprint(&entry.result).into_bytes());
+                let put = crate::storage::cache::BlobCachePut::new(bytes)
+                    .with_dependencies(entry.scopes.iter().cloned())
+                    .with_policy(policy);
+                if self
+                    .inner
+                    .result_blob_cache
+                    .put(RESULT_CACHE_BLOB_NAMESPACE, key, put)
+                    .is_ok()
+                {
+                    cache.4.remove(key);
+                } else {
+                    cache.2 = true;
+                }
+                cache.3 = cache.3.wrapping_add(1);
+                return Some(entry.result);
+            }
+        }
         let (hit, revision) = {
             let cache = self.inner.result_blob_entries.read();
             let hit = self
@@ -435,7 +498,7 @@ impl RedDBRuntime {
         if cache.3 != revision {
             return None;
         }
-        let (ref mut map, ref mut order, ref mut untracked, _) = *cache;
+        let (ref mut map, ref mut order, ref mut untracked, ..) = *cache;
         let new_entry = RuntimeResultCacheEntry {
             result: result.clone(),
             cached_at: std::time::Instant::now(),
@@ -453,6 +516,10 @@ impl RedDBRuntime {
         }
         let evicted = trim_result_cache(map, order, self.result_cache_capacity());
         *untracked |= evicted > 0;
+        if evicted > 0 {
+            let (ref map, _, _, _, ref mut volatile_keys, _) = *cache;
+            volatile_keys.retain(|key| map.contains_key(key));
+        }
         drop(cache);
         self.record_result_cache_evictions(evicted);
         Some(result)
@@ -537,11 +604,15 @@ impl RedDBRuntime {
             .with_dependencies(dependencies)
             .with_policy(policy);
         let mut cache = self.inner.result_blob_entries.write();
-        if self
-            .inner
-            .result_blob_cache
-            .put(RESULT_CACHE_BLOB_NAMESPACE, key, put)
-            .is_err()
+        let volatile = cache
+            .5
+            .is_some_and(|until| std::time::Instant::now() < until);
+        if !volatile
+            && self
+                .inner
+                .result_blob_cache
+                .put(RESULT_CACHE_BLOB_NAMESPACE, key, put)
+                .is_err()
         {
             // An unsuccessful L2 publication may have left an entry behind.
             cache.2 = true;
@@ -549,8 +620,13 @@ impl RedDBRuntime {
             return;
         }
 
+        if volatile {
+            cache.4.insert(key.to_string());
+        } else {
+            cache.4.remove(key);
+        }
         let capacity = self.result_cache_capacity();
-        let (ref mut map, ref mut order, ref mut untracked, ref mut revision) = *cache;
+        let (ref mut map, ref mut order, ref mut untracked, ref mut revision, ..) = *cache;
         // Single hash lookup: drive the LRU-order push_back only on Vacant.
         match map.entry(key.to_string()) {
             Entry::Occupied(mut slot) => {
@@ -564,6 +640,10 @@ impl RedDBRuntime {
         let evicted = trim_result_cache(map, order, capacity);
         *untracked |= evicted > 0;
         *revision = revision.wrapping_add(1);
+        if evicted > 0 {
+            let (ref map, _, _, _, ref mut volatile_keys, _) = *cache;
+            volatile_keys.retain(|key| map.contains_key(key));
+        }
         drop(cache);
         self.record_result_cache_evictions(evicted);
     }
@@ -659,6 +739,8 @@ impl RedDBRuntime {
         let mut blob_entries = self.inner.result_blob_entries.write();
         blob_entries.0.clear();
         blob_entries.1.clear();
+        blob_entries.4.clear();
+        blob_entries.5 = None;
         blob_entries.2 = self.invalidate_blob_result_namespace();
         blob_entries.3 = blob_entries.3.wrapping_add(1);
         if clear_embedded {
@@ -694,22 +776,46 @@ impl RedDBRuntime {
                 .0
                 .values()
                 .any(|entry| entry.scopes.contains(table));
-            if blob_entries.2 || has_match {
+            let has_durable_match = blob_entries
+                .0
+                .iter()
+                .any(|(key, entry)| entry.scopes.contains(table) && !blob_entries.4.contains(key));
+            if blob_entries.2 || has_durable_match {
                 blob_entries.0.clear();
                 blob_entries.1.clear();
+                blob_entries.4.clear();
                 blob_entries.2 = self.invalidate_blob_result_namespace();
                 blob_entries.3 = blob_entries.3.wrapping_add(1);
                 if self.inner.embedded_single_file {
                     self.invalidate_embedded_result_cache();
                 }
+            } else if has_match {
+                blob_entries
+                    .0
+                    .retain(|_, entry| !entry.scopes.contains(table));
+                let (ref map, ref mut order, _, ref mut revision, ref mut volatile_keys, _) =
+                    *blob_entries;
+                order.retain(|key| map.contains_key(key));
+                volatile_keys.retain(|key| map.contains_key(key));
+                *revision = revision.wrapping_add(1);
+            }
+            if has_match {
+                blob_entries.5 = Some(std::time::Instant::now() + RESULT_CACHE_WRITE_QUIET_PERIOD);
             }
         } else {
             let mut blob_entries = self.inner.result_blob_entries.write();
-            let (ref mut blob_map, ref mut blob_order, ref mut untracked, ref mut revision) =
-                *blob_entries;
+            let (
+                ref mut blob_map,
+                ref mut blob_order,
+                ref mut untracked,
+                ref mut revision,
+                ref mut volatile_keys,
+                _,
+            ) = *blob_entries;
             if blob_map.values().any(|entry| entry.scopes.contains(table)) {
                 blob_map.retain(|_, entry| !entry.scopes.contains(table));
                 blob_order.retain(|key| blob_map.contains_key(key));
+                volatile_keys.retain(|key| blob_map.contains_key(key));
                 *untracked = true;
                 *revision = revision.wrapping_add(1);
                 if self.inner.embedded_single_file {

@@ -1170,6 +1170,9 @@ struct RuntimeInner {
         bool,
         // Detect writes or invalidations while decoding an L2 hit.
         u64,
+        // Results kept in memory while their tables are changing.
+        HashSet<String>,
+        Option<std::time::Instant>,
     )>,
     ask_answer_cache_entries:
         parking_lot::RwLock<(HashSet<String>, std::collections::VecDeque<String>)>,
