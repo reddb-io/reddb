@@ -71,6 +71,8 @@ replica and does not replace the server's write fencing or promotion policy.
   Session commands and multi-statement SQL keep the connection on that endpoint.
 - Streams remain on the primary. A cursor or an in-progress stream is never
   moved to another node.
+  In JS, interrupting a binary stream inside a transaction or pinned session
+  closes that session; reconnect explicitly before further operations.
 - Ordinary replica reads are eventually consistent. Append `?route=primary`
   for read-your-own-writes through the primary. Rust `QueryOptions` also supports
   strong reads, bounded staleness, and causal bookmarks; a causal read never

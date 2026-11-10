@@ -54,6 +54,7 @@ export class RoutingClient {
     this.forcePrimary = forcePrimary
     this.transactionEndpoint = null
     this.sessionEndpoint = null
+    this.sessionError = null
     this.refreshing = null
     this.closed = false
     this.binaryQueryParams = client.binaryQueryParams === true
@@ -155,7 +156,10 @@ export class RoutingClient {
       const client = await this.endpoint(address)
       if (!client.binaryQueryParams) return await client.call(method, params)
       const previous = this.queues.get(address) ?? Promise.resolve()
-      const result = previous.then(() => client.call(method, params))
+      const result = previous.then(() => {
+        if (this.sessionError) throw this.sessionError
+        return client.call(method, params)
+      })
       this.queues.set(address, result.catch(() => {}))
       return await result
     } finally {
@@ -165,6 +169,7 @@ export class RoutingClient {
 
   async call(method, params = {}) {
     if (this.closed) throw new RedDBError('CLOSED', 'connection is closed')
+    if (this.sessionError) throw this.sessionError
     if (!this.transactionEndpoint && !this.sessionEndpoint && this.now() >= this.refreshAt) await this.refresh()
     const command = method === 'query' ? transactionCommand(params.sql ?? '') : null
     const read = READ_METHODS.has(method) || method === 'query' && isReplicaQuery(params.sql)
@@ -200,14 +205,24 @@ export class RoutingClient {
     const { session, finish } = await this.openStream('streamSelect', options)
     return {
       async *[Symbol.asyncIterator]() {
-        try { yield* session }
+        let completed = false
+        try {
+          for await (const frame of session) {
+            // The public Node/Web wrappers stop consuming at the terminal
+            // frame; release before yielding rather than waiting for next().
+            if (frame.type === 'end') { completed = true; await finish() }
+            yield frame
+            if (frame.type === 'end') return
+          }
+          completed = true
+        }
         catch (error) { await finish(error); throw error }
-        finally { await finish() }
+        finally { await finish(undefined, !completed) }
       },
       async cancel(reason) {
         try { return await session.cancel(reason) }
         catch (error) { await finish(error); throw error }
-        finally { await finish() }
+        finally { await finish(undefined, true) }
       },
     }
   }
@@ -227,13 +242,14 @@ export class RoutingClient {
       async cancel(reason) {
         try { return await session.cancel(reason) }
         catch (error) { await finish(error); throw error }
-        finally { await finish() }
+        finally { await finish(undefined, true) }
       },
     }
   }
 
   async openStream(method, options) {
     if (this.closed) throw new RedDBError('CLOSED', 'connection is closed')
+    if (this.sessionError) throw this.sessionError
     if (this.now() >= this.refreshAt) await this.refresh()
     const pinned = this.transactionEndpoint ?? this.sessionEndpoint
     const address = pinned ?? this.primary
@@ -246,16 +262,22 @@ export class RoutingClient {
     this.active.set(address, (this.active.get(address) ?? 0) + 1)
     const stop = async () => {
       try { await session?.cancel() }
-      finally { await finish() }
+      finally { await finish(undefined, true) }
     }
-    const finish = async (error) => {
+    const finish = async (error, aborted = false) => {
       if (finished) return
       finished = true
       this.streams.delete(stop)
       if (connectionError(error)) this.refreshAt = 0
       this.active.set(address, this.active.get(address) - 1)
-      unlock?.()
-      if (!pinned) await client?.close()
+      try {
+        if (pinned && client?.binaryQueryParams && (error || aborted)) {
+          // StreamCancel does not drain terminal frames. Retire this session
+          // rather than let its next query consume a stale stream reply.
+          this.sessionError = new RedDBError('SESSION_CLOSED', 'binary session closed after an interrupted stream')
+          await client.close()
+        } else if (!pinned) await client?.close()
+      } finally { unlock?.() }
     }
     this.streams.add(stop)
     try {

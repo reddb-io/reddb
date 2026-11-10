@@ -2,6 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { RoutingClient } from '../src/core/routing.js'
 import { isReplicaQuery, transactionCommand, topologyAddress, decodeTopology } from '../src/core/topology.js'
+import { RedDB as NodeRedDB } from '../src/index.js'
+import { RedDB as BrowserRedDB } from '../src/index.browser.js'
 
 for (const protocol of ['red', 'reds', 'grpc', 'grpcs', 'http', 'https', 'ws', 'wss']) {
   test(`${protocol}: discovers replicas, routes SQL mutations and pins transactions`, async () => {
@@ -179,5 +181,68 @@ test('transaction streams hold the pinned binary connection until completion', a
   assert.equal(resolved, false)
   assert.deepEqual(await Array.fromAsync(stream), ['row'])
   await pending
+  await client.close()
+})
+
+for (const RedDB of [NodeRedDB, BrowserRedDB]) {
+  test(`${RedDB === NodeRedDB ? 'Node' : 'browser'} stream terminal frame releases the transaction connection`, { timeout: 1000 }, async () => {
+    const primary = 'red://primary:5050'
+    const transport = {
+      binaryQueryParams: true,
+      async call(method) {
+        if (method === 'topology') return { version: 1, primary: { addr: primary }, replicas: [] }
+        return 'query'
+      },
+      async streamSelect() {
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'row', value: { id: 1 } }
+            yield { type: 'end', value: {} }
+          },
+          async cancel() {},
+        }
+      },
+      async close() {},
+    }
+    const client = await new RoutingClient(primary, transport, async () => transport, 'red').initialize()
+    const db = new RedDB(client)
+    await client.call('query', { sql: 'BEGIN' })
+    assert.deepEqual(await Array.fromAsync(db.stream('SELECT 1')), [{ id: 1 }])
+    assert.equal(client.streams.size, 0)
+    assert.equal(await client.call('query', { sql: 'SELECT 1' }), 'query')
+    await db.close()
+  })
+}
+
+test('cancelled pinned binary stream cannot leave stale frames for a later query', async () => {
+  const primary = 'red://primary:5050'
+  let queries = 0
+  let closed = 0
+  let dials = 0
+  const transport = {
+    binaryQueryParams: true,
+    async call(method) {
+      if (method === 'topology') return { version: 1, primary: { addr: primary }, replicas: [] }
+      queries++
+    },
+    async streamSelect() {
+      return {
+        async *[Symbol.asyncIterator]() { yield { type: 'row', value: 1 } },
+        async cancel() {},
+      }
+    },
+    async close() { closed++ },
+  }
+  const client = await new RoutingClient(primary, transport, async () => { dials++; return transport }, 'red').initialize()
+  await client.call('query', { sql: 'SET search_path = tenant' })
+  const stream = await client.streamSelect({})
+  const queryBeforeCancel = client.call('query', { sql: 'SELECT 1' })
+  await stream.cancel()
+  await assert.rejects(queryBeforeCancel, { code: 'SESSION_CLOSED' })
+  await assert.rejects(client.call('query', { sql: 'SELECT 1' }), { code: 'SESSION_CLOSED' })
+  await assert.rejects(client.streamSelect({}), { code: 'SESSION_CLOSED' })
+  assert.equal(queries, 1)
+  assert.equal(dials, 1, 'only the initial discovery connection was opened')
+  assert.ok(closed >= 2, 'discovery and interrupted session were closed')
   await client.close()
 })
