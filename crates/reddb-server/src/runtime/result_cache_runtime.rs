@@ -853,6 +853,79 @@ mod crash_tests {
     const CHILD_PATH: &str = "REDDB_RESULT_CACHE_COMMIT_GAP_TEST_PATH";
 
     #[test]
+    fn promotion_gate_does_not_block_hits_and_orders_invalidation() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        for sql in [
+            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
+            "CREATE TABLE promotion_gate (id INT)",
+            "INSERT INTO promotion_gate (id) VALUES (1)",
+            "SELECT id FROM promotion_gate ORDER BY id",
+            "INSERT INTO promotion_gate (id) VALUES (2)",
+            "SELECT id FROM promotion_gate ORDER BY id",
+        ] {
+            runtime.execute_query(sql).expect("prepare volatile result");
+        }
+
+        let guard = runtime.inner.result_blob_promotion.lock();
+        let reader = runtime.clone();
+        let (read_tx, read_rx) = mpsc::channel();
+        let reader_thread = std::thread::spawn(move || {
+            let rows = reader
+                .execute_query("SELECT id FROM promotion_gate ORDER BY id")
+                .expect("cached read")
+                .result
+                .records
+                .len();
+            read_tx.send(rows).expect("report read");
+        });
+        let read = read_rx.recv_timeout(Duration::from_secs(3));
+        drop(guard);
+        reader_thread.join().expect("reader thread");
+        assert_eq!(read.expect("hit blocked by promotion gate"), 2);
+
+        let (published_tx, published_rx) = mpsc::channel();
+        *runtime.index_store_ref().mutation_hook.lock() =
+            Some(Arc::new(move |collection, phase| {
+                if collection == "promotion_gate"
+                    && phase == super::super::index_store::MutationTestPhase::StoragePublished
+                {
+                    published_tx.send(()).expect("report publication");
+                }
+            }));
+        let guard = runtime.inner.result_blob_promotion.lock();
+        let writer = runtime.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer_thread = std::thread::spawn(move || {
+            let result = writer.execute_query("INSERT INTO promotion_gate (id) VALUES (3)");
+            done_tx.send(result.is_ok()).expect("report write");
+        });
+        let published = published_rx.recv_timeout(Duration::from_secs(3));
+        let completed_early = done_rx.recv_timeout(Duration::from_millis(100));
+        drop(guard);
+        assert!(published.is_ok(), "write did not reach storage publication");
+        assert!(
+            matches!(completed_early, Err(mpsc::RecvTimeoutError::Timeout)),
+            "invalidation must wait for an in-flight promotion"
+        );
+        assert!(done_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("writer did not finish"));
+        writer_thread.join().expect("writer thread");
+        assert_eq!(
+            runtime
+                .execute_query("SELECT id FROM promotion_gate ORDER BY id")
+                .expect("read after write")
+                .result
+                .records
+                .len(),
+            3
+        );
+    }
+
+    #[test]
     #[ignore = "crash-gap reproducer; run explicitly until durable invalidation is atomic"]
     fn committed_insert_before_cache_invalidation_does_not_recover_stale_result() {
         if let Some(path) = std::env::var_os(CHILD_PATH) {
