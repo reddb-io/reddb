@@ -255,12 +255,254 @@ fn ask_stream_events_from_runtime_result(
     Ok(events)
 }
 
+const WAL_STREAM_VERSION: u32 = 1;
+const DEFAULT_WAL_STREAM_CHUNK_BYTES: usize = 1024 * 1024;
+const WAL_STREAM_ENVELOPE_RESERVE: usize = 64 * 1024;
+
+struct PreparedWalPull {
+    primary: Arc<crate::replication::primary::PrimaryReplication>,
+    replica_id: Option<String>,
+    since_lsn: u64,
+    max_count: usize,
+    current_lsn: u64,
+    oldest_available_lsn: Option<u64>,
+    partial_resync: bool,
+    partial_resync_count: u64,
+    needs_rebootstrap: bool,
+    invalidation_reason: Option<String>,
+    catchup: Option<reddb_wire::replication::CatchupModeReply>,
+}
+
+async fn prepare_wal_pull(
+    grpc: &GrpcRuntime,
+    open: reddb_wire::replication::WalStreamOpen,
+    routing_endpoints: Option<reddb_wire::routing::RoutingEndpoints>,
+) -> Result<PreparedWalPull, Status> {
+    let primary =
+        grpc.runtime.db().replication.clone().ok_or_else(|| {
+            Status::failed_precondition("this instance is not a replication primary")
+        })?;
+    let handshake = crate::replication::StreamHandshake::new(
+        open.replica_id.as_deref().unwrap_or("<anonymous>"),
+        open.term,
+    );
+    let fence = crate::replication::TermFence::new(crate::replication::MemoryTermStore::seeded(
+        grpc.runtime.current_replication_term(),
+    ));
+    match fence
+        .admit_stream_handshake(&handshake)
+        .map_err(|err| crate::grpc::control_support::internal_status(&err))?
+    {
+        crate::replication::FenceVerdict::Fenced(err) => {
+            return Err(Status::failed_precondition(err.to_string()));
+        }
+        crate::replication::FenceVerdict::Adopt { new_term } => {
+            return Err(Status::failed_precondition(format!(
+                "replication stream term {new_term} is ahead of primary term {}",
+                grpc.runtime.current_replication_term()
+            )));
+        }
+        crate::replication::FenceVerdict::Admit { .. } => {}
+    }
+
+    let mut since_lsn = open.since_lsn;
+    let max_count = open.max_count.min(
+        grpc.runtime
+            .db()
+            .options()
+            .replication
+            .max_batch_size
+            .max(1),
+    );
+    let await_timeout_ms = open.await_timeout_ms.clamp(1, 30_000);
+    let mut current_lsn = primary.current_logical_lsn();
+    let mut oldest_available_lsn = primary
+        .logical_wal_spool
+        .as_ref()
+        .and_then(|spool| spool.oldest_lsn().ok().flatten())
+        .or_else(|| primary.wal_buffer.oldest_lsn());
+    let replica_id = open.replica_id;
+    let mut partial_resync = false;
+
+    if let Some(id) = &replica_id {
+        primary.ensure_replica_registered(id, since_lsn);
+        if let Some(endpoints) = routing_endpoints {
+            grpc.runtime.register_routing_endpoints(id, endpoints);
+        }
+        match primary.plan_replica_resume(id, since_lsn, oldest_available_lsn) {
+            crate::replication::primary::ResumeMode::FullRebootstrap { cause } => {
+                let available_from_lsn = oldest_available_lsn.unwrap_or(current_lsn);
+                let partial_resync_count = primary.partial_resync_count();
+                let catchup = grpc
+                    .runtime
+                    .primary_replica_catchup_mode(available_from_lsn, since_lsn)
+                    .map_err(to_status)?
+                    .map(|mode| reddb_wire::replication::CatchupModeReply {
+                        mode: file_catchup_mode_to_wire(mode),
+                        available_from_lsn: Some(available_from_lsn),
+                        replica_lsn: Some(since_lsn),
+                        reason: Some(cause.as_str().to_string()),
+                    });
+                return Ok(PreparedWalPull {
+                    primary,
+                    replica_id,
+                    since_lsn,
+                    max_count,
+                    current_lsn,
+                    oldest_available_lsn,
+                    partial_resync: false,
+                    partial_resync_count,
+                    needs_rebootstrap: true,
+                    invalidation_reason: Some(cause.as_str().to_string()),
+                    catchup,
+                });
+            }
+            crate::replication::primary::ResumeMode::PartialResync { resume_lsn } => {
+                since_lsn = resume_lsn;
+                partial_resync = true;
+            }
+        }
+    }
+
+    if open.await_data && current_lsn <= since_lsn {
+        let primary_for_wait = primary.clone();
+        let timeout = std::time::Duration::from_millis(await_timeout_ms);
+        grpc_spawn_blocking(&grpc.runtime, move || {
+            primary_for_wait.wait_for_logical_lsn_after(since_lsn, timeout)
+        })
+        .await?;
+        current_lsn = primary.current_logical_lsn();
+        oldest_available_lsn = primary
+            .logical_wal_spool
+            .as_ref()
+            .and_then(|spool| spool.oldest_lsn().ok().flatten())
+            .or_else(|| primary.wal_buffer.oldest_lsn());
+    }
+
+    let partial_resync_count = primary.partial_resync_count();
+
+    Ok(PreparedWalPull {
+        primary,
+        replica_id,
+        since_lsn,
+        max_count,
+        current_lsn,
+        oldest_available_lsn,
+        partial_resync,
+        partial_resync_count,
+        needs_rebootstrap: false,
+        invalidation_reason: None,
+        catchup: None,
+    })
+}
+
+fn read_wal_records_bounded(
+    primary: &crate::replication::primary::PrimaryReplication,
+    since_lsn: u64,
+    max_count: usize,
+    max_payload_bytes: usize,
+) -> Result<Vec<(u64, Arc<[u8]>)>, Status> {
+    if let Some(spool) = &primary.logical_wal_spool {
+        return spool
+            .read_since_bounded(since_lsn, max_count, max_payload_bytes)
+            .map_err(|error| crate::grpc::control_support::internal_status(&error))
+            .map(|records| {
+                records
+                    .into_iter()
+                    .map(|(lsn, data)| (lsn, Arc::from(data.into_boxed_slice())))
+                    .collect()
+            });
+    }
+    Ok(primary
+        .wal_buffer
+        .read_since_shared_bounded(since_lsn, max_count, max_payload_bytes))
+}
+
+fn grpc_wal_record(lsn: u64, data: Arc<[u8]>) -> GrpcWalStreamRecord {
+    GrpcWalStreamRecord {
+        lsn,
+        data: bytes::Bytes::from_owner(data),
+    }
+}
+
+fn take_wal_stream_chunk(
+    metadata: &GrpcWalStreamChunk,
+    records: &mut std::collections::VecDeque<(u64, Arc<[u8]>)>,
+    max_chunk_bytes: usize,
+) -> Result<GrpcWalStreamChunk, Status> {
+    let mut chunk = metadata.clone();
+    while let Some((lsn, data)) = records.front() {
+        let record = grpc_wal_record(*lsn, Arc::clone(data));
+        let record_len = record.encoded_len();
+        let encoded_len = chunk
+            .encoded_len()
+            .saturating_add(1)
+            .saturating_add(prost::length_delimiter_len(record_len))
+            .saturating_add(record_len);
+        if encoded_len > max_chunk_bytes {
+            if chunk.records.is_empty() {
+                return Err(Status::resource_exhausted(format!(
+                    "logical record at LSN {lsn} exceeds WAL stream chunk limit"
+                )));
+            }
+            break;
+        }
+        records.pop_front();
+        chunk.records.push(record);
+    }
+    Ok(chunk)
+}
+
+fn grpc_wal_catchup(
+    catchup: Option<&reddb_wire::replication::CatchupModeReply>,
+) -> Option<GrpcWalCatchup> {
+    catchup.map(|catchup| GrpcWalCatchup {
+        mode: catchup.mode.as_str().to_string(),
+        available_from_lsn: catchup.available_from_lsn,
+        replica_lsn: catchup.replica_lsn,
+        reason: catchup.reason.clone(),
+    })
+}
+
+pub(crate) fn wire_wal_catchup(
+    catchup: Option<GrpcWalCatchup>,
+) -> Result<Option<reddb_wire::replication::CatchupModeReply>, Status> {
+    catchup
+        .map(|catchup| {
+            let mode = reddb_wire::replication::CatchupMode::parse(&catchup.mode)
+                .ok_or_else(|| Status::data_loss("primary returned an unknown catchup mode"))?;
+            Ok(reddb_wire::replication::CatchupModeReply {
+                mode,
+                available_from_lsn: catchup.available_from_lsn,
+                replica_lsn: catchup.replica_lsn,
+                reason: catchup.reason,
+            })
+        })
+        .transpose()
+}
+
+pub(crate) fn validated_routing_endpoints<I>(endpoints: I) -> reddb_wire::routing::RoutingEndpoints
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    endpoints
+        .into_iter()
+        .filter_map(|(protocol, address)| {
+            reddb_wire::routing::routing_endpoint(&protocol, &address)
+                .map(|normalized| (protocol, normalized))
+        })
+        .collect()
+}
+
 #[tonic::async_trait]
 impl RedDb for GrpcRuntime {
     type KvWatchStream =
         Pin<Box<dyn tokio_stream::Stream<Item = Result<KvWatchEvent, Status>> + Send + 'static>>;
     type AskStreamStream =
         Pin<Box<dyn tokio_stream::Stream<Item = Result<AskStreamEvent, Status>> + Send + 'static>>;
+    type StreamWalRecordsStream = Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<GrpcWalStreamChunk, Status>> + Send + 'static>,
+    >;
 
     async fn health(&self, _request: Request<Empty>) -> Result<Response<HealthReply>, Status> {
         let report = self.native_use_cases().health();
@@ -2955,6 +3197,150 @@ impl RedDb for GrpcRuntime {
         Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
     }
 
+    async fn stream_wal_records(
+        &self,
+        request: Request<GrpcWalStreamRequest>,
+    ) -> Result<Response<Self::StreamWalRecordsStream>, Status> {
+        let request = request.into_inner();
+        if request.version != WAL_STREAM_VERSION {
+            return Err(Status::failed_precondition(format!(
+                "unsupported WAL stream version {}; expected {WAL_STREAM_VERSION}",
+                request.version
+            )));
+        }
+        if request.max_count == 0 {
+            return Err(Status::invalid_argument("max_count must be positive"));
+        }
+        let server_budget = crate::grpc::RedDBGrpcServer::max_message_bytes()
+            .saturating_sub(WAL_STREAM_ENVELOPE_RESERVE);
+        let requested_chunk_bytes = usize::try_from(request.max_chunk_bytes)
+            .map_err(|_| Status::invalid_argument("max_chunk_bytes is too large"))?;
+        let max_chunk_bytes = if requested_chunk_bytes == 0 {
+            DEFAULT_WAL_STREAM_CHUNK_BYTES.min(server_budget)
+        } else {
+            requested_chunk_bytes.min(server_budget)
+        };
+        if max_chunk_bytes == 0 {
+            return Err(Status::failed_precondition(
+                "gRPC message limit leaves no WAL stream payload budget",
+            ));
+        }
+
+        let max_count = usize::try_from(request.max_count)
+            .map_err(|_| Status::invalid_argument("max_count is too large"))?;
+        let open = reddb_wire::replication::WalStreamOpen {
+            since_lsn: request.since_lsn,
+            max_count,
+            replica_id: request.replica_id.filter(|id| !id.is_empty()),
+            term: request.term,
+            await_data: request.await_data,
+            await_timeout_ms: request.await_timeout_ms,
+        };
+        let routing_endpoints = validated_routing_endpoints(request.routing_endpoints);
+        let routing_endpoints = (!routing_endpoints.is_empty()).then_some(routing_endpoints);
+        let prepared = prepare_wal_pull(self, open, routing_endpoints).await?;
+        let primary_endpoints: std::collections::HashMap<String, String> =
+            self.runtime.routing_endpoints().into_iter().collect();
+        let catchup = grpc_wal_catchup(prepared.catchup.as_ref());
+        let metadata_probe = GrpcWalStreamChunk {
+            version: WAL_STREAM_VERSION,
+            records: Vec::new(),
+            current_lsn: prepared.current_lsn,
+            oldest_available_lsn: prepared.oldest_available_lsn,
+            partial_resync: prepared.partial_resync,
+            partial_resync_count: prepared.partial_resync_count,
+            needs_rebootstrap: prepared.needs_rebootstrap,
+            invalidation_reason: prepared.invalidation_reason.clone(),
+            catchup: catchup.clone(),
+            primary_endpoints: primary_endpoints.clone(),
+        };
+        let metadata_bytes = metadata_probe.encoded_len();
+        if metadata_bytes > max_chunk_bytes {
+            return Err(Status::resource_exhausted(
+                "WAL stream metadata exceeds requested chunk limit",
+            ));
+        }
+        let primary = prepared.primary;
+        let replica_id = prepared.replica_id;
+        let mut since_lsn = prepared.since_lsn;
+        let mut remaining_count = prepared.max_count;
+        let max_payload_bytes = max_chunk_bytes.saturating_sub(metadata_bytes);
+        let primary_for_read = Arc::clone(&primary);
+        let first_records = if metadata_probe.needs_rebootstrap {
+            Vec::new()
+        } else {
+            grpc_spawn_blocking(&self.runtime, move || {
+                read_wal_records_bounded(
+                    &primary_for_read,
+                    since_lsn,
+                    remaining_count,
+                    max_payload_bytes,
+                )
+            })
+            .await??
+        };
+        let mut pending = std::collections::VecDeque::from(first_records);
+        let first_chunk = take_wal_stream_chunk(&metadata_probe, &mut pending, max_chunk_bytes)?;
+        let runtime = self.runtime.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            let mut next_chunk = first_chunk;
+            loop {
+                let sent_count = next_chunk.records.len();
+                let max_sent_lsn = next_chunk.records.last().map(|record| record.lsn);
+                let Ok(permit) = tx.reserve().await else {
+                    return;
+                };
+                permit.send(Ok(next_chunk));
+                if let (Some(replica_id), Some(lsn)) = (&replica_id, max_sent_lsn) {
+                    primary.note_replica_pull(replica_id, lsn);
+                }
+                if sent_count == 0 {
+                    return;
+                }
+                since_lsn = max_sent_lsn.unwrap_or(since_lsn);
+                remaining_count = remaining_count.saturating_sub(sent_count);
+                if remaining_count == 0 {
+                    return;
+                }
+                if pending.is_empty() {
+                    let primary_for_read = Arc::clone(&primary);
+                    pending = match grpc_spawn_blocking(&runtime, move || {
+                        read_wal_records_bounded(
+                            &primary_for_read,
+                            since_lsn,
+                            remaining_count,
+                            max_payload_bytes,
+                        )
+                    })
+                    .await
+                    {
+                        Ok(Ok(records)) => std::collections::VecDeque::from(records),
+                        Ok(Err(error)) | Err(error) => {
+                            let _ = tx.send(Err(error)).await;
+                            return;
+                        }
+                    };
+                }
+                if pending.is_empty() {
+                    return;
+                }
+                next_chunk =
+                    match take_wal_stream_chunk(&metadata_probe, &mut pending, max_chunk_bytes) {
+                        Ok(chunk) => chunk,
+                        Err(error) => {
+                            let _ = tx.send(Err(error)).await;
+                            return;
+                        }
+                    };
+            }
+        });
+
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
+    }
+
     async fn pull_wal_records(
         &self,
         request: Request<JsonPayloadRequest>,
@@ -3881,6 +4267,176 @@ impl RedDb for GrpcRuntime {
 mod tests {
     use super::*;
     use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
+    use tokio_stream::StreamExt;
+
+    fn grpc_primary_with_wal(records: &[(u64, Vec<u8>)]) -> GrpcRuntime {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory()
+                .with_replication(crate::replication::ReplicationConfig::primary()),
+        )
+        .expect("primary runtime");
+        let db = runtime.db();
+        let primary = db.replication.as_ref().expect("primary replication");
+        for (lsn, data) in records {
+            primary.append_logical_record(*lsn, data.clone());
+        }
+        RedDBGrpcServer::new(runtime).grpc_runtime()
+    }
+
+    fn wal_stream_request(max_chunk_bytes: u32) -> GrpcWalStreamRequest {
+        GrpcWalStreamRequest {
+            version: WAL_STREAM_VERSION,
+            since_lsn: 0,
+            max_count: 10,
+            replica_id: Some("binary-stream-test".to_string()),
+            term: crate::replication::DEFAULT_REPLICATION_TERM,
+            await_data: false,
+            await_timeout_ms: 1,
+            routing_endpoints: Default::default(),
+            max_chunk_bytes,
+        }
+    }
+
+    #[tokio::test]
+    async fn binary_wal_stream_is_byte_bounded_and_preserves_payloads() {
+        let expected = vec![
+            (1, vec![0x11; 600]),
+            (2, vec![0x22; 600]),
+            (3, vec![0x33; 600]),
+        ];
+        let service = grpc_primary_with_wal(&expected);
+
+        let response = RedDb::stream_wal_records(&service, Request::new(wal_stream_request(1024)))
+            .await
+            .expect("binary WAL stream");
+        let mut stream = response.into_inner();
+        let mut actual = Vec::new();
+        let mut chunk_count = 0;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.expect("WAL chunk");
+            assert_eq!(chunk.version, WAL_STREAM_VERSION);
+            assert!(
+                chunk.encoded_len() <= 1024,
+                "encoded chunk exceeded byte bound: {}",
+                chunk.encoded_len()
+            );
+            actual.extend(
+                chunk
+                    .records
+                    .into_iter()
+                    .map(|record| (record.lsn, record.data.to_vec())),
+            );
+            chunk_count += 1;
+        }
+
+        assert_eq!(actual, expected);
+        assert_eq!(chunk_count, 3, "each 600-byte record needs its own chunk");
+    }
+
+    #[tokio::test]
+    async fn binary_wal_stream_rejects_a_record_larger_than_the_chunk_budget() {
+        let service = grpc_primary_with_wal(&[(1, vec![0x55; 2048])]);
+
+        let error =
+            match RedDb::stream_wal_records(&service, Request::new(wal_stream_request(1024))).await
+            {
+                Ok(_) => panic!("oversized record must fail without splitting"),
+                Err(error) => error,
+            };
+
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+        assert!(error.message().contains("logical record at LSN 1"));
+    }
+
+    #[tokio::test]
+    async fn binary_wal_stream_rejects_an_unknown_protocol_version() {
+        let service = grpc_primary_with_wal(&[]);
+        let mut request = wal_stream_request(1024);
+        request.version = WAL_STREAM_VERSION + 1;
+
+        let error = match RedDb::stream_wal_records(&service, Request::new(request)).await {
+            Ok(_) => panic!("unknown protocol version must fail closed"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn binary_wal_stream_never_sends_records_with_rebootstrap_notice() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory().with_replication(
+            crate::replication::ReplicationConfig::primary().with_slot_retention_max_lag_lsn(1),
+        ))
+        .expect("primary runtime");
+        let db = runtime.db();
+        let primary = db.replication.as_ref().expect("primary replication");
+        primary.ensure_replica_registered("binary-stream-test", 0);
+        for lsn in 1..=3 {
+            primary.append_logical_record(
+                lsn,
+                vec![u8::try_from(lsn).expect("fixture LSN fits in u8"); 32],
+            );
+        }
+        primary.enforce_retention_limits(0);
+        let service = RedDBGrpcServer::new(runtime).grpc_runtime();
+
+        let response = RedDb::stream_wal_records(&service, Request::new(wal_stream_request(1024)))
+            .await
+            .expect("rebootstrap stream");
+        let chunks: Vec<_> = response
+            .into_inner()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .expect("rebootstrap chunks");
+
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].needs_rebootstrap);
+        assert!(chunks[0].records.is_empty());
+    }
+
+    #[test]
+    fn protobuf_wal_payload_avoids_legacy_hex_amplification() {
+        let data = vec![0xab; 1024];
+        let protobuf = GrpcWalStreamChunk {
+            version: WAL_STREAM_VERSION,
+            records: vec![GrpcWalStreamRecord {
+                lsn: 1,
+                data: bytes::Bytes::copy_from_slice(&data),
+            }],
+            current_lsn: 1,
+            oldest_available_lsn: Some(1),
+            partial_resync: false,
+            partial_resync_count: 0,
+            needs_rebootstrap: false,
+            invalidation_reason: None,
+            catchup: None,
+            primary_endpoints: Default::default(),
+        };
+        let legacy = reddb_wire::replication::WalStreamChunk {
+            records: vec![reddb_wire::replication::WalStreamRecord { lsn: 1, data }],
+            current_lsn: 1,
+            oldest_available_lsn: Some(1),
+            partial_resync: false,
+            partial_resync_count: 0,
+            needs_rebootstrap: false,
+            invalidation_reason: None,
+            catchup: None,
+        };
+
+        assert!(protobuf.encoded_len() < legacy.encode_json().len());
+    }
+
+    #[test]
+    fn protobuf_wal_record_reuses_the_primary_arc_payload() {
+        let payload: Arc<[u8]> = Arc::from(vec![0x7f; 128].into_boxed_slice());
+        let payload_ptr = payload.as_ptr();
+
+        let record = grpc_wal_record(1, payload);
+
+        assert_eq!(record.data.as_ptr(), payload_ptr);
+    }
 
     fn ask_runtime_result(answer_tokens_json: Option<&str>) -> RuntimeQueryResult {
         let mut result = UnifiedResult::with_columns(vec![

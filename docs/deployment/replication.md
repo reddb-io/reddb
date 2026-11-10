@@ -73,6 +73,25 @@ increases response size; stores exceeding that limit need an explicitly sized
 limit on both ends or an independently validated recovery path. Raising the
 limit does not replace recovery, restart and failover verification.
 
+### Binary WAL data plane
+
+Native replicas use the versioned `StreamWalRecords` gRPC stream. WAL payloads
+are protobuf `bytes`, not JSON hex, and every emitted message is bounded by both
+the replica's requested chunk limit (1 MiB by default) and the server's gRPC
+message ceiling. The primary also keeps the existing record-count limit. A
+single logical record that cannot fit is rejected with `RESOURCE_EXHAUSTED`
+instead of being split across messages, preserving its atomic envelope.
+
+The producer has a capacity-one channel, so a slow or disconnected replica
+cannot make the server accumulate an entire catch-up response in memory. The
+replica applies one bounded chunk, persists its cursor, then acknowledges the
+durable LSN before requesting more. During rolling upgrades it falls back to
+the legacy JSON pull only when the primary reports `UNIMPLEMENTED`; permission,
+authentication, corruption, and size failures never trigger a downgrade. WAL
+acknowledgments and control messages retain their existing JSON contracts.
+The reproducible encoding benchmark and its qualification boundary are recorded
+in [Binary WAL stream microbenchmark](../perf/binary-wal-stream-2026-11-10.md).
+
 ## How It Works
 
 1. Writes go to the primary

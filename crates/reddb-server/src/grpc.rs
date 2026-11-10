@@ -40,6 +40,7 @@ use crate::runtime::{
 use crate::storage::unified::devx::refs::{NodeRef, TableRef};
 use crate::storage::unified::{Metadata, MetadataValue};
 use crate::storage::{EntityData, EntityId, UnifiedEntity};
+use prost::Message;
 use reddb_types::Value;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::metadata::MetadataMap;
@@ -62,7 +63,9 @@ use proto::{
     JsonPayloadRequest, KvWatchEvent, KvWatchRequest, ManifestRequest, OperationReply,
     PayloadReply, PrepareQueryReply, PrepareQueryRequest, QueryReply, QueryRequest, QueryValue,
     ScanEntity, ScanReply, ScanRequest, StatsReply, TopologyReply, TopologyRequest,
-    UpdateEntityRequest, Validation, ValidationItem,
+    UpdateEntityRequest, Validation, ValidationItem, WalCatchup as GrpcWalCatchup,
+    WalStreamChunk as GrpcWalStreamChunk, WalStreamRecord as GrpcWalStreamRecord,
+    WalStreamRequest as GrpcWalStreamRequest,
 };
 
 pub(crate) mod catalog_dispatch;
