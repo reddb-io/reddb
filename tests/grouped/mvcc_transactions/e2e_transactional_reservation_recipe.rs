@@ -434,7 +434,10 @@ fn reservation_commit_has_no_wal_prefix_with_claim_without_key_or_work() {
     let new_batches = &batches[before_batches..];
     let reservation_batch = new_batches
         .iter()
-        .filter(|actions| batch_entity_payload_contains_text(actions, "reserve-wal"))
+        .filter(|actions| {
+            batch_entity_payload_contains_text(actions, "reserve-wal")
+                && batch_mutates_collection(actions, "inventory_units")
+        })
         .next()
         .expect("the reservation transaction must create a durable commit batch");
     assert!(

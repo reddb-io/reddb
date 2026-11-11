@@ -402,7 +402,12 @@ impl StatementExecutionFrame {
         identity_source: StatementIdentity<'_>,
     ) -> RedDBResult<Self> {
         let query = identity_source.text();
-        let (cache_data_epoch, cache_revision) = runtime.result_cache_snapshot();
+        let (cache_data_epoch, cache_revision) = match identity_source {
+            StatementIdentity::Text(query) if statement_kind(query) == "read" => {
+                runtime.result_cache_snapshot()
+            }
+            StatementIdentity::Text(_) | StatementIdentity::Expr(_) => (None, 0),
+        };
         if let StatementIdentity::Expr(expr) = identity_source {
             reject_unresolvable_as_of(expr)?;
         }

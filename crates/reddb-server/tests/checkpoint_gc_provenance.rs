@@ -117,9 +117,16 @@ fn aborted_update_removals_preserve_earlier_wal_projection() {
             .expect("paged profile")
     };
     let runtime = RedDBRuntime::with_options(options()).expect("runtime");
-    runtime
-        .execute_query("SET CONFIG runtime.mvcc.autovacuum.enabled = false")
-        .expect("pause background GC");
+    for query in [
+        "SET CONFIG runtime.result_cache.enabled = false",
+        "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+    ] {
+        runtime.execute_query(query).expect("isolate checkpoint GC");
+    }
+    assert!(
+        !runtime.db().store().result_cache_format_fenced(),
+        "disabling the cache before the first read must not initialize its durable format"
+    );
     runtime
         .execute_query("CREATE TABLE gc_absent (id INT,n INT)")
         .expect("table");

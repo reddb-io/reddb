@@ -841,6 +841,24 @@ mod crash_tests {
     }
 
     #[test]
+    fn non_read_statements_do_not_initialize_result_cache_format() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        for sql in [
+            "CREATE TABLE cache_format_gate (id INT)",
+            "INSERT INTO cache_format_gate (id) VALUES (1)",
+            "BEGIN",
+            "ROLLBACK",
+        ] {
+            runtime.execute_query(sql).expect("non-read statement");
+            assert!(!runtime.db().store().result_cache_format_fenced(), "{sql}");
+        }
+        runtime
+            .execute_query("SELECT id FROM cache_format_gate")
+            .expect("read statement");
+        assert!(runtime.db().store().result_cache_format_fenced());
+    }
+
+    #[test]
     fn promotion_gate_does_not_block_hits_and_orders_invalidation() {
         use std::sync::mpsc;
         use std::time::Duration;
