@@ -2052,11 +2052,20 @@ fn small_budget_denies_live_entity_growth_didactically_and_keeps_serving() {
         1,
         "denial must be per-operation, not a shutdown"
     );
-    rt.execute_query("CREATE TABLE still_writable (id INT)")
-        .expect("within-budget writes keep serving after a denial");
+    drop(readback);
 
     assert_eq!(budget_unsigned(&rt, "admissions_denied"), 1);
-    assert!(budget_unsigned(&rt, "high_water_bytes") <= budget);
+    let high_water = budget_unsigned(&rt, "high_water_bytes");
+    assert!(
+        high_water <= budget,
+        "admitted memory reached {high_water} bytes over budget {budget}"
+    );
+
+    // Metadata growth is not part of the admission contract above. Prove the
+    // runtime remains writable only after sampling that contract, so the
+    // background sampler cannot race this DDL into its high-water value.
+    rt.execute_query("CREATE TABLE still_writable (id INT)")
+        .expect("runtime remains writable after a denial");
 
     cleanup_scope();
 }
