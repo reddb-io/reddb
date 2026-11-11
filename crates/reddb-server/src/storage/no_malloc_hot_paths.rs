@@ -549,7 +549,7 @@ fn measure_blob_cache_promote_on_second_hit_l1_hit() -> AllocationCount {
     let tmp = tempfile::tempdir().expect("blob cache l2 tempdir");
     let cache = BlobCache::open_with_l2(
         BlobCacheConfig::default()
-            .with_l1_bytes_max(128)
+            .with_l1_bytes_max(4 * 1024)
             .with_shard_count(1)
             .with_max_namespaces(4)
             .with_l2_path(tmp.path().join("cache.rdb")),
@@ -565,6 +565,11 @@ fn measure_blob_cache_promote_on_second_hit_l1_hit() -> AllocationCount {
         .unwrap();
     assert!(cache.get("sessions", "abc").is_some());
     assert!(cache.get("sessions", "abc").is_some());
+    assert_eq!(
+        cache.stats().entries(),
+        1,
+        "second L2 hit must remain in L1"
+    );
 
     let (hit, count) = measure_allocations(|| cache.get("sessions", "abc"));
 

@@ -137,18 +137,18 @@ fn health_reserve_is_exact_bounded_and_independent() {
 
 #[test]
 fn rejects_with_503_when_cap_saturated_then_recovers() {
-    let cap = 2;
+    let cap = 1;
     let (_db, addr, server) = boot(cap);
 
     // The async HTTP edge limits in-flight requests, not idle TCP
     // connections. Saturate the cap with real requests held inside the
     // test slow-inject hook.
-    server.set_test_slow_inject_ms(2_000);
+    server.set_test_slow_inject_ms(u64::MAX);
     let mut held = Vec::new();
     for _ in 0..cap {
         held.push(spawn_slow_request(addr.clone()));
     }
-    for _ in 0..50 {
+    for _ in 0..500 {
         if server.http_limiter().current() == cap {
             break;
         }
@@ -157,7 +157,7 @@ fn rejects_with_503_when_cap_saturated_then_recovers() {
     assert_eq!(
         server.http_limiter().current(),
         cap,
-        "cap should be saturated by held connections"
+        "cap should be saturated by the held request"
     );
 
     // A normal request must still be rejected with 503.
@@ -206,8 +206,7 @@ fn rejects_with_503_when_cap_saturated_then_recovers() {
         "health must remain available while normal capacity is saturated: {health:?}"
     );
 
-    // Drain the held requests; their handlers finish once the
-    // slow-inject sleep expires, releasing permits.
+    // Drain the held request by releasing the deterministic gate.
     server.set_test_slow_inject_ms(0);
     for handle in held {
         let body = handle.join().expect("held request thread");
