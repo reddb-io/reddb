@@ -537,7 +537,9 @@ jobs:
       - platforms
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # A cold build plus all 8k+ unit tests exceeded 20 minutes while still
+    # making steady progress. Per-test hangs remain bounded by nextest.
+    timeout-minutes: 30
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache

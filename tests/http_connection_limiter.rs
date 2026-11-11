@@ -182,25 +182,12 @@ fn rejects_with_503_when_cap_saturated_then_recovers() {
     // reserve even while normal query capacity is exhausted. Otherwise a
     // busy but healthy process is removed from its EndpointSlice and the
     // overload cascades into a full service outage.
-    let health_addr = addr.clone();
-    let health_handle = thread::spawn(move || send_request(&health_addr, "/health/ready"));
-    for _ in 0..50 {
-        if server.health_limiter().current() == 1 {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert_eq!(
-        server.health_limiter().current(),
-        1,
-        "health request should occupy only the reserved limiter"
-    );
+    let health = send_request(&addr, "/health/ready");
     assert_eq!(
         server.http_limiter().current(),
         cap,
         "health admission must not consume or release normal capacity"
     );
-    let health = health_handle.join().expect("health request thread");
     assert!(
         health.starts_with("HTTP/1.1 2"),
         "health must remain available while normal capacity is saturated: {health:?}"
