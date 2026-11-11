@@ -272,6 +272,10 @@ mod tests {
     #[test]
     fn paged_count_concurrent_readers_writes_and_checkpoints_finish() {
         let (_directory, runtime, _options) = fixture();
+        // Keep the concurrency window focused on COUNT, writes and
+        // checkpoints. Activating the durable result-cache format is a
+        // one-time structural checkpoint and belongs before the barrier.
+        assert_eq!(count(&runtime), 12);
         let (send, receive) = std::sync::mpsc::channel();
         let start = Arc::new(std::sync::Barrier::new(5));
         let mut workers = Vec::new();

@@ -726,6 +726,22 @@ impl UnifiedStore {
         // children and the manifest that forgets old roots have been synced.
         publish_paged_metadata(pager, metadata)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        // PAGE_RESULT_CACHE_FILE_VERSION predates the disk-resident cache
+        // catalog. Publish the complete resume metadata first, then promote
+        // the header so the next boot may trust and reuse its derived roots.
+        if self.config.resident_memory_bytes_max.is_some()
+            && pager
+                .header()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                .version
+                == reddb_file::file_format::PAGE_RESULT_CACHE_FILE_VERSION
+        {
+            pager
+                .fence_file_format_version(
+                    reddb_file::file_format::PAGE_RESULT_CACHE_DISK_FILE_VERSION,
+                )
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        }
         *self.recovery_xid_summary.write() = next_xid_summary;
         self.ownership_catalog_epoch
             .store(catalog_epoch, Ordering::Release);

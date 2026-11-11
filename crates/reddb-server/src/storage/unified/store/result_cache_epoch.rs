@@ -147,11 +147,16 @@ impl UnifiedStore {
             self.result_cache_epoch.id.store(id.raw(), Ordering::SeqCst);
             self.result_cache_epoch.epoch.store(epoch, Ordering::SeqCst);
             let format_fenced = if let Some(pager) = self.pager() {
-                pager
+                let version = pager
                     .header()
                     .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
-                    .version
-                    >= reddb_file::file_format::PAGE_RESULT_CACHE_FILE_VERSION
+                    .version;
+                let required = if self.config().resident_memory_bytes_max.is_some() {
+                    reddb_file::file_format::PAGE_RESULT_CACHE_DISK_FILE_VERSION
+                } else {
+                    reddb_file::file_format::PAGE_RESULT_CACHE_FILE_VERSION
+                };
+                version >= required
             } else {
                 self.result_cache_snapshot_format_current()
             };
