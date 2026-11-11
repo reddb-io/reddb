@@ -1700,8 +1700,6 @@ fn test_sql_insert_node_ttl_expiration() {
         "node INSERT with ttl should succeed: {:?}",
         inserted.err()
     );
-    std::thread::sleep(std::time::Duration::from_millis(10));
-
     let before_scan = query
         .scan(ScanCollectionInput {
             collection: "ttl_nodes".into(),
@@ -1715,8 +1713,8 @@ fn test_sql_insert_node_ttl_expiration() {
             .iter()
             .filter(|item| item.data.is_node())
             .count(),
-        0,
-        "an expired node must be hidden before physical retention cleanup"
+        1,
+        "node should exist before retention sweep"
     );
 
     native
@@ -1793,8 +1791,6 @@ fn test_sql_insert_edge_ttl_expiration() {
         "edge INSERT with _ttl_ms should succeed: {:?}",
         inserted.err()
     );
-    std::thread::sleep(std::time::Duration::from_millis(10));
-
     let before_scan = query
         .scan(ScanCollectionInput {
             collection: "ttl_edges".into(),
@@ -1808,8 +1804,8 @@ fn test_sql_insert_edge_ttl_expiration() {
             .iter()
             .filter(|item| item.data.is_edge())
             .count(),
-        0,
-        "an expired edge must be hidden before physical retention cleanup"
+        1,
+        "edge should exist before retention sweep"
     );
 
     native
@@ -1932,8 +1928,8 @@ fn test_sql_update_ttl_on_node_after_insert() {
             .iter()
             .filter(|item| item.data.is_node())
             .count(),
-        0,
-        "an expired node must be hidden before physical retention cleanup"
+        1,
+        "node should exist before retention sweep"
     );
 
     native

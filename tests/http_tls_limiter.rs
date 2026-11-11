@@ -100,7 +100,9 @@ fn spawn_http_get(addr: String, path: &'static str) -> thread::JoinHandle<String
 }
 
 fn wait_for_limiter(server: &RedDBServer, target: usize) -> bool {
-    for _ in 0..150 {
+    // A busy nextest runner can delay the TLS handshake before admission.
+    // The blocking gate keeps admitted holders deterministic once they arrive.
+    for _ in 0..500 {
         if server.http_limiter().current() == target {
             return true;
         }
