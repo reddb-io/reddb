@@ -4,7 +4,9 @@
 //! It reads only matching digest postings plus resident changes; full raw keys
 //! are rechecked, so a digest collision cannot create a match. No posting map is
 //! hydrated on reopen. Missing generations use a fallible bounded physical scan.
-use super::index_store::{bounded_hash_index_key, RegisteredIndex};
+use super::index_store::{
+    bounded_hash_index_key, bounded_hash_index_key_from, index_field_value_from, RegisteredIndex,
+};
 use super::{RedDBRuntime, RuntimeInner};
 use crate::storage::unified::hash_index::{HashCandidates, HashIndexError, PagedHashIndex};
 use crate::storage::unified::store::secondary_index::{
@@ -41,30 +43,42 @@ impl HashProjection {
         let EntityData::Row(row) = &entity.data else {
             return Ok(None);
         };
-        let selected = |name: &str| {
-            name == "body"
-                || self
-                    .columns
-                    .iter()
-                    .any(|column| column == name || column.split('.').next() == Some(name))
-        };
-        let fields: Vec<_> = if let Some(named) = &row.named {
-            named
-                .iter()
-                .filter(|(name, _)| selected(name))
-                .map(|(name, value)| (name.clone(), value.clone()))
-                .collect()
+        if let Some(named) = &row.named {
+            bounded_hash_index_key_from(
+                &self.columns,
+                bytes_max.min(self.key_bytes_max),
+                |column| index_field_value_from(column, |name| named.get(name)),
+            )
         } else if let Some(schema) = row.schema.as_ref().or(self.schema.as_ref()) {
-            schema
-                .iter()
-                .zip(&row.columns)
-                .filter(|(name, _)| selected(name))
-                .map(|(name, value)| (name.clone(), value.clone()))
-                .collect()
+            bounded_hash_index_key_from(
+                &self.columns,
+                bytes_max.min(self.key_bytes_max),
+                |column| {
+                    index_field_value_from(column, |name| {
+                        schema
+                            .iter()
+                            .position(|candidate| candidate == name)
+                            .and_then(|position| row.columns.get(position))
+                    })
+                },
+            )
         } else {
-            Vec::new()
-        };
-        bounded_hash_index_key(&self.columns, &fields, bytes_max.min(self.key_bytes_max))
+            Ok(None)
+        }
+    }
+
+    fn probe_workspace_factor(&self) -> usize {
+        if self.columns.len() > 1
+            || self.columns.iter().any(|column| column.contains('.'))
+            || self
+                .schema
+                .as_ref()
+                .is_none_or(|schema| schema.iter().any(|column| column == "body"))
+        {
+            3
+        } else {
+            2
+        }
     }
 }
 
@@ -185,7 +199,7 @@ impl RuntimeHashIndex {
         // Admission samples managers; finish it before taking publication or
         // source locks. The output owner outlives both scanning and this runtime.
         let (_scratch, read_bytes_max) = runtime
-            .reserve_index_probe_with_limit(limit)
+            .reserve_index_probe_with_limit(limit, self.projection.probe_workspace_factor())
             .map_err(read_error)?;
         let matches = |entity: &UnifiedEntity| -> Result<bool, HashIndexError> {
             let required_bytes = crate::storage::unified::memory_size::entity_bytes(entity);
@@ -578,7 +592,7 @@ mod tests {
         let available = accounting.budget().resolved_bytes - accounting.total_used_bytes();
         let headroom = (row_bytes
             .max(64 * 1024)
-            .saturating_mul(3)
+            .saturating_mul(2)
             .saturating_add(4096)) as u64;
         assert!(
             available > headroom,

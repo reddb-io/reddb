@@ -2191,7 +2191,19 @@ pub(crate) fn index_field_value<'a>(
     fields: &'a [(String, Value)],
     column: &str,
 ) -> Option<Cow<'a, Value>> {
-    if let Some((_, Value::Json(bytes))) = fields.iter().find(|(field, _)| field == "body") {
+    index_field_value_from(column, |name| {
+        fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value)
+    })
+}
+
+pub(crate) fn index_field_value_from<'a>(
+    column: &str,
+    mut field_value: impl FnMut(&str) -> Option<&'a Value>,
+) -> Option<Cow<'a, Value>> {
+    if let Some(Value::Json(bytes)) = field_value("body") {
         // Single-source document: an index on a bare or dotted document field
         // (`score`, `location.gps`) is backed by the body, not a stored column.
         // The ROOT segment must be offset-read from the binary `body`
@@ -2221,7 +2233,7 @@ pub(crate) fn index_field_value<'a>(
             }
         }
     }
-    if let Some((_, value)) = fields.iter().find(|(field, _)| field == column) {
+    if let Some(value) = field_value(column) {
         return Some(Cow::Borrowed(value));
     }
     if !column.contains('.') {
@@ -2233,7 +2245,7 @@ pub(crate) fn index_field_value<'a>(
     if tail.is_empty() {
         return None;
     }
-    let (_, root_value) = fields.iter().find(|(field, _)| field == root)?;
+    let root_value = field_value(root)?;
     super::join_filter::resolve_runtime_document_path_from_value(root_value, tail).map(Cow::Owned)
 }
 
@@ -2406,31 +2418,51 @@ pub(crate) fn bounded_hash_index_key(
     fields: &[(String, Value)],
     bytes_max: usize,
 ) -> Result<Option<Vec<u8>>, crate::storage::StoreError> {
+    bounded_hash_index_key_from(columns, bytes_max, |column| {
+        index_field_value(fields, column)
+    })
+}
+
+pub(crate) fn bounded_hash_index_key_from<'a>(
+    columns: &[String],
+    bytes_max: usize,
+    mut value_for: impl FnMut(&str) -> Option<Cow<'a, Value>>,
+) -> Result<Option<Vec<u8>>, crate::storage::StoreError> {
+    if columns.is_empty() {
+        return Ok(None);
+    }
+    let composite = columns.len() > 1;
     let mut bytes = 0u64;
+    let mut key = Vec::new();
     for column in columns {
-        let Some(value) = index_field_value(fields, column) else {
+        let Some(value) = value_for(column) else {
             return Ok(None);
         };
-        if columns.len() > 1 && matches!(value.as_ref(), Value::Null) {
+        if composite && matches!(value.as_ref(), Value::Null) {
             return Ok(None);
         }
         let component = value_to_bytes_len(value.as_ref());
-        if columns.len() > 1 && component > u32::MAX as u64 {
+        if composite && component > u32::MAX as u64 {
             return Err(crate::storage::StoreError::Serialization(
                 "HASH component exceeds its canonical length prefix".into(),
             ));
         }
         bytes = bytes
             .saturating_add(component)
-            .saturating_add(if columns.len() > 1 { 4 } else { 0 });
+            .saturating_add(if composite { 4 } else { 0 });
         if bytes > bytes_max as u64 {
             return Err(crate::storage::StoreError::ReadLimitExceeded {
                 required_bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
                 limit_bytes: bytes_max,
             });
         }
+        let component = value_to_bytes(value.as_ref());
+        if composite {
+            key.extend_from_slice(&(component.len() as u32).to_le_bytes());
+        }
+        key.extend_from_slice(&component);
     }
-    Ok(hash_index_key(columns, fields))
+    Ok(Some(key))
 }
 
 /// Key a standalone UNIQUE index reserves for `fields`, or `None` when the row

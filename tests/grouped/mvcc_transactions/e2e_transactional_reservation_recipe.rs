@@ -13,6 +13,7 @@ use reddb::api::DurabilityMode;
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
 use reddb::storage::wal::{WalReader, WalRecord};
 use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
+use reddb_engine::storage::store_wal::StoreWalAction;
 use reddb_types::Value;
 
 const TRANSACTIONS_DOC: &str = include_str!("../../../docs/query/transactions.md");
@@ -197,6 +198,35 @@ fn batch_contains_text(actions: &[Vec<u8>], needle: &str) -> bool {
     actions
         .iter()
         .any(|action| action_contains_text(action, needle))
+}
+
+fn batch_entity_payload_contains_text(actions: &[Vec<u8>], needle: &str) -> bool {
+    actions.iter().any(|bytes| {
+        let action = StoreWalAction::decode(bytes).expect("store WAL action decodes");
+        match action {
+            StoreWalAction::UpsertEntityRecord { record, .. } => {
+                action_contains_text(&record, needle)
+            }
+            StoreWalAction::BulkUpsertEntityRecords { records, .. }
+            | StoreWalAction::RefreshCollection { records, .. } => records
+                .iter()
+                .any(|record| action_contains_text(record, needle)),
+            _ => false,
+        }
+    })
+}
+
+fn batch_mutates_collection(actions: &[Vec<u8>], expected: &str) -> bool {
+    actions.iter().any(|bytes| {
+        let action = StoreWalAction::decode(bytes).expect("store WAL action decodes");
+        match action {
+            StoreWalAction::UpsertEntityRecord { collection, .. }
+            | StoreWalAction::DeleteEntityRecord { collection, .. }
+            | StoreWalAction::BulkUpsertEntityRecords { collection, .. }
+            | StoreWalAction::RefreshCollection { collection, .. } => collection == expected,
+            _ => false,
+        }
+    })
 }
 
 /// Corrupt one selected WAL record by dropping its last byte and every later
@@ -405,7 +435,7 @@ fn reservation_commit_has_no_wal_prefix_with_claim_without_key_or_work() {
     let new_batches = &batches[before_batches..];
     let reservation_batches = new_batches
         .iter()
-        .filter(|actions| batch_contains_text(actions, "reserve-wal"))
+        .filter(|actions| batch_entity_payload_contains_text(actions, "reserve-wal"))
         .collect::<Vec<_>>();
     assert_eq!(
         reservation_batches.len(),
@@ -414,15 +444,15 @@ fn reservation_commit_has_no_wal_prefix_with_claim_without_key_or_work() {
     );
     let reservation_batch = reservation_batches[0];
     assert!(
-        batch_contains_text(reservation_batch, "inventory_units"),
+        batch_mutates_collection(reservation_batch, "inventory_units"),
         "commit batch must include the claimed resource table"
     );
     assert!(
-        batch_contains_text(reservation_batch, "reservation_idempotency"),
+        batch_mutates_collection(reservation_batch, "reservation_idempotency"),
         "commit batch must include the idempotency key table"
     );
     assert!(
-        batch_contains_text(reservation_batch, "reservation_work"),
+        batch_mutates_collection(reservation_batch, "reservation_work"),
         "commit batch must include downstream queue work"
     );
 }

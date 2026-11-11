@@ -58,6 +58,7 @@ impl RedDBRuntime {
 
 #[cfg(test)]
 mod tests {
+    use super::super::memory_admission::MemoryReservation;
     use crate::storage::memory_pools::MemoryPool;
     use crate::{RedDBOptions, RedDBRuntime};
 
@@ -156,12 +157,15 @@ mod tests {
             .used_bytes(MemoryPool::QueryBuffers)
     }
 
-    fn leave_headroom(runtime: &RedDBRuntime, bytes: usize) -> super::QueryBufferReservation {
+    fn leave_headroom<'runtime>(
+        runtime: &'runtime RedDBRuntime,
+        bytes: usize,
+    ) -> MemoryReservation<'runtime> {
         runtime.refresh_memory_accounting();
         let available =
             runtime.memory_budget().resolved_bytes - runtime.memory_accounting().total_used_bytes();
         runtime
-            .try_reserve_query_buffer(available as usize - bytes)
+            .try_reserve_memory_growth(available - bytes as u64)
             .unwrap()
     }
 

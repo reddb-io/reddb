@@ -334,11 +334,13 @@ impl RedDBRuntime {
     pub(super) fn reserve_index_probe_with_limit(
         &self,
         read_bytes_max: usize,
+        workspace_factor: usize,
     ) -> RedDBResult<(super::memory_admission::QueryBufferReservation, usize)> {
-        // The decode allowance already covers encoded input plus the decoded
-        // entity. A HASH probe additionally materializes selected fields and
-        // their canonical key, but does not retain restoration descriptors.
-        let scratch = read_bytes_max.saturating_mul(3);
+        // The decode allowance covers encoded input plus the decoded entity.
+        // Direct table columns are borrowed while their canonical key is built,
+        // so they need one additional allowance. Document paths can also own an
+        // extracted value while encoding the key and therefore need two.
+        let scratch = read_bytes_max.saturating_mul(workspace_factor);
         let reservation = self.try_reserve_query_buffer(scratch).ok_or_else(|| {
             let accounting = self.memory_accounting();
             RedDBError::InvalidOperation(format!(

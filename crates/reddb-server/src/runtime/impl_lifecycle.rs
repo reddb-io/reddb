@@ -1006,6 +1006,38 @@ impl RedDBRuntime {
         // checkpoint publishes the projection.
         runtime.prepare_paged_counts()?;
 
+        // Anonymous access is the most consequential posture an operator can
+        // choose. Record it before reserving the user-ID floor so the boot-time
+        // audit entity remains in the internal range.
+        if no_auth_boot {
+            use crate::runtime::control_events::{
+                ActorRef, ControlEvent, ControlEventCtx, EventKind, Outcome,
+            };
+            let ledger = std::sync::Arc::clone(&runtime.inner.control_event_ledger.read());
+            let ctx = ControlEventCtx {
+                actor: ActorRef::System("boot"),
+                scope: None,
+                request_id: None,
+                trace_id: None,
+            };
+            let event = ControlEvent {
+                kind: EventKind::AuthDisabled,
+                outcome: Outcome::Allowed,
+                action: std::borrow::Cow::Borrowed("auth.disabled"),
+                resource: Some("server".to_string()),
+                reason: Some("--no-auth / --dev".to_string()),
+                matched_policy_id: None,
+                fields: std::collections::HashMap::new(),
+            };
+            if let Err(err) = ledger.emit(&ctx, event) {
+                tracing::warn!(
+                    target: "reddb::security",
+                    error = %err,
+                    "could not record the auth-disabled boot in the control-event ledger"
+                );
+            }
+        }
+
         // #1369 — reserve a fixed internal-id floor so the first user-inserted
         // entity always receives a stable, documented `rid` (FIRST_USER_ENTITY_ID),
         // independent of how many internal collection-descriptor / config-default
@@ -1267,38 +1299,6 @@ impl RedDBRuntime {
                         );
                     },
                 );
-        }
-
-        // Anonymous access is the most consequential posture an operator can
-        // choose. It was only ever announced on stderr; leave it in the
-        // chained ledger too, so an audit of the store itself shows it.
-        if no_auth_boot {
-            use crate::runtime::control_events::{
-                ActorRef, ControlEvent, ControlEventCtx, EventKind, Outcome,
-            };
-            let ledger = std::sync::Arc::clone(&runtime.inner.control_event_ledger.read());
-            let ctx = ControlEventCtx {
-                actor: ActorRef::System("boot"),
-                scope: None,
-                request_id: None,
-                trace_id: None,
-            };
-            let event = ControlEvent {
-                kind: EventKind::AuthDisabled,
-                outcome: Outcome::Allowed,
-                action: std::borrow::Cow::Borrowed("auth.disabled"),
-                resource: Some("server".to_string()),
-                reason: Some("--no-auth / --dev".to_string()),
-                matched_policy_id: None,
-                fields: std::collections::HashMap::new(),
-            };
-            if let Err(err) = ledger.emit(&ctx, event) {
-                tracing::warn!(
-                    target: "reddb::security",
-                    error = %err,
-                    "could not record the auth-disabled boot in the control-event ledger"
-                );
-            }
         }
 
         Ok(runtime)
