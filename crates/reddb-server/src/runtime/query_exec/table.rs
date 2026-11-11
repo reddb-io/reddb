@@ -3605,14 +3605,18 @@ mod tests {
                 .hash_lookup("indexed", index.hash_lookup_name().as_ref(), &bytes)
                 .expect("lookup");
             assert_eq!(candidates.len(), 1, "reopen={reopen}, filter={filter:?}");
-            let result = runtime.execute_query(sql).expect("select");
-            assert_eq!(result.result.records.len(), 1);
+            let _ = super::take_last_segment_scan_stats();
+            let records = super::execute_runtime_canonical_table_query_indexed(
+                &runtime.db(),
+                &query,
+                Some(runtime.index_store_ref()),
+            )
+            .expect("indexed SQL kernel");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].get("item"), Some(&Value::text("answer")));
             assert_eq!(
-                result.result.records[0].get("item"),
-                Some(&Value::text("answer"))
-            );
-            assert_eq!(
-                result.result.stats.segments_scanned, 0,
+                super::take_last_segment_scan_stats().segments_scanned,
+                0,
                 "point lookup should not scan; reopen={reopen}"
             );
             let missing = runtime

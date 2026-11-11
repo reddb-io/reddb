@@ -3376,6 +3376,11 @@ mod streaming_group_memory_tests {
         runtime
             .execute_query("SET CONFIG stream.executor.max_materialized_rows = 1")
             .expect("existing group remains admissible at the ceiling");
+        // Cache persistence may checkpoint the resident fixture and allocate a
+        // cold page read buffer. This test measures aggregation workspace.
+        runtime
+            .execute_query("SET CONFIG runtime.result_cache.enabled = false")
+            .expect("isolate aggregation allocations");
         let (result, allocation) = measure_allocations(|| {
             runtime.execute_query(
                 "SELECT cohort, COUNT(*), SUM(amount) FROM grouped_rows GROUP BY cohort",

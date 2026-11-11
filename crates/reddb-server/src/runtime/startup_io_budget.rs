@@ -347,6 +347,10 @@ fn embedded_startup_bounds_snapshot_reads() {
                 )
                 .unwrap();
         }
+        // Keep the measured cold boots focused on steady-state startup I/O.
+        // Activating the result-cache snapshot format is a one-time migration
+        // that checkpoints the embedded file and has its own regressions.
+        assert!(runtime.result_cache_snapshot().0.is_some());
         runtime.flush().unwrap();
     }
     let artifact = crate::storage::EmbeddedRdbArtifact::open(&path).unwrap();
