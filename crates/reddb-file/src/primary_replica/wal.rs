@@ -110,6 +110,14 @@ impl PrimaryReplicaFilePlan {
                 segment.segment_index, segment_index
             )));
         }
+        if let Some(existing) = segment.records.iter().find(|record| record.lsn == lsn) {
+            if existing.payload == payload {
+                return Ok(path);
+            }
+            return Err(RdbFileError::InvalidOperation(format!(
+                "wal record lsn {lsn} already exists with a different payload"
+            )));
+        }
         let sequence = segment
             .records
             .last()

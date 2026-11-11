@@ -756,28 +756,8 @@ impl PrimaryReplication {
                 .current_timeline(&plan.root)
                 .map_err(io::Error::other)?;
             let plan = reddb_file::PrimaryReplicaFilePlan::new(plan.root.clone(), timeline);
-            let existing = match reddb_file::PrimaryReplicaWalSegment::read_from_path(
-                plan.wal_segment_path(lsn),
-            ) {
-                Ok(segment) => segment.records.into_iter().find(|record| record.lsn == lsn),
-                Err(reddb_file::RdbFileError::Io(error))
-                    if error.kind() == io::ErrorKind::NotFound =>
-                {
-                    None
-                }
-                Err(error) => return Err(io::Error::other(error)),
-            };
-            if let Some(existing) = existing {
-                if existing.payload != encoded {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "logical outbox conflicts with published WAL",
-                    ));
-                }
-            } else {
-                plan.append_wal_record(lsn, &encoded)
-                    .map_err(io::Error::other)?;
-            }
+            plan.append_wal_record(lsn, &encoded)
+                .map_err(io::Error::other)?;
         }
         if let Some(spool) = &self.logical_wal_spool {
             if spool.current_lsn() < lsn {
