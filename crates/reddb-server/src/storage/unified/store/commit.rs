@@ -832,6 +832,31 @@ impl StoreCommitCoordinator {
         Ok(())
     }
 
+    fn truncate_incomplete_tail(&self, valid_lsn: u64) -> io::Result<()> {
+        let _epoch = self.queue.epoch.write();
+        if self.queue.has_pending() {
+            return Err(io::Error::other(
+                "WAL append raced incomplete-tail recovery",
+            ));
+        }
+        let mut wal = self.wal.lock();
+        wal.truncate_incomplete_tail(valid_lsn)?;
+        let durable = wal.durable_lsn();
+        drop(wal);
+        self.queue.reset(valid_lsn);
+
+        let (state_lock, cond) = &*self.state;
+        let mut state = state_lock.lock();
+        state.durable_lsn = durable;
+        state.pending_target_lsn = durable;
+        state.pending_statements = 0;
+        state.pending_wal_bytes = 0;
+        state.first_pending_at = None;
+        state.last_error = None;
+        cond.notify_all();
+        Ok(())
+    }
+
     /// Control records need a durable boundary even when user DML is async.
     /// Observe the queue's end under the epoch lease: syncing only WalWriter
     /// would miss records that have been accepted but not drained yet.
@@ -1302,14 +1327,15 @@ impl StoreCommitCoordinator {
         let mut has_page_writes = false;
         let mut ownership_journal = Vec::new();
         let mut latest_ownership_epoch = 0;
-        let mut incomplete_wal_tail = false;
+        let mut incomplete_wal_tail = None;
         let mut applied = false;
 
-        for record in reader.iter() {
+        let mut records = reader.iter();
+        while let Some(record) = records.next() {
             let (lsn, record) = match record {
                 Ok(record) => record,
                 Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
-                    incomplete_wal_tail = true;
+                    incomplete_wal_tail = Some(records.next_record_lsn());
                     break;
                 }
                 Err(err) => return Err(err),
@@ -1390,11 +1416,14 @@ impl StoreCommitCoordinator {
             }
         }
 
-        if incomplete_wal_tail && !ownership_journal.is_empty() {
+        if incomplete_wal_tail.is_some() && !ownership_journal.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "incomplete WAL prevents ownership recovery",
             ));
+        }
+        if let (Some(coordinator), Some(valid_lsn)) = (coordinator, incomplete_wal_tail) {
+            coordinator.truncate_incomplete_tail(valid_lsn)?;
         }
         Self::recover_page_ownership(coordinator, store, &ownership_journal)?;
 
