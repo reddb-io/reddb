@@ -164,7 +164,11 @@ impl UnifiedStore {
             // before the runtime raises the allocator to FIRST_USER_ENTITY_ID.
             // Creating the marker lazily from the first statement must not
             // consume the first documented user identity.
-            if !self.is_read_only() && self.result_cache_epoch.id.load(Ordering::SeqCst) == 0 {
+            if !self.is_read_only()
+                && self.result_cache_epoch.id.load(Ordering::SeqCst) == 0
+                && self.resident.next_entity_id.load(Ordering::SeqCst)
+                    < crate::storage::FIRST_USER_ENTITY_ID
+            {
                 let id = self.next_entity_id();
                 self.result_cache_epoch.id.store(id.raw(), Ordering::SeqCst);
             }
@@ -445,6 +449,18 @@ mod tests {
             store.next_entity_id().raw(),
             2,
             "publishing the reserved marker must not allocate a second identity"
+        );
+    }
+
+    #[test]
+    fn missing_epoch_does_not_advance_an_initialized_user_allocator_during_load() {
+        let store = UnifiedStore::new();
+        store.register_entity_id(EntityId::new(crate::storage::FIRST_USER_ENTITY_ID - 1));
+        store.load_result_cache_epoch().expect("load missing epoch");
+        assert_eq!(
+            store.next_entity_id().raw(),
+            crate::storage::FIRST_USER_ENTITY_ID,
+            "cold boot without a cache marker must not consume a user identity"
         );
     }
 
