@@ -20,3 +20,19 @@ Physical flash layout, sparse pieces, wear accounting and power-cut behavior
 belong in the concrete board `VfsFile`, never in the SQL engine or `.rdb` format.
 Flash adapters must implement `VfsFile::reserve` so capacity exhaustion is
 reported before a prepared double-write frame is sealed.
+
+## Host flash-model qualification
+
+`flash_emulator` models 4 KiB erase blocks, 256-byte program units, sparse zero
+blocks, capacity reservation, sync durability and power cycles entirely below
+`VfsFile`. The SQL capacity test fills each board profile, retries the final
+range one row at a time, power-cycles, and streams every acknowledged row.
+
+| Profile | Rows | Logical `.rdb` | Physical bytes | Usable capacity |
+| --- | ---: | ---: | ---: | ---: |
+| Raspberry Pi Pico 2 | 15,413 | 4,194,304 | 2,596,864 | 2,621,440 |
+| Arduino Nano ESP32 | 80,904 | 17,776,640 | 12,791,808 | 12,832,768 |
+
+These are deterministic host-model receipts, not instruction-set emulator or
+physical-board claims. Filesystem metadata, controller wear levelling and real
+power-cut behavior still require the concrete LittleFS/FatFS adapters.

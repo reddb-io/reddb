@@ -12,11 +12,15 @@ pub use reddb_file as file;
 pub use reddb_file::VfsFile;
 pub use reddb_types as types;
 
+pub mod flash_emulator;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BoardProfile {
     pub name: &'static str,
     pub sram_bytes: usize,
     pub flash_bytes: usize,
+    /// Usable database bytes after firmware and filesystem overhead.
+    pub database_bytes: usize,
     pub rust_heap_bytes: usize,
     pub stack_bytes: usize,
     pub read_buffer_bytes: usize,
@@ -27,6 +31,7 @@ pub const NANO_ESP32: BoardProfile = BoardProfile {
     name: "Arduino Nano ESP32",
     sram_bytes: 512 * 1024,
     flash_bytes: 16 * 1024 * 1024,
+    database_bytes: 12_832_768,
     rust_heap_bytes: 64 * 1024,
     stack_bytes: 256 * 1024,
     read_buffer_bytes: engine::storage::page::PAGE_SIZE,
@@ -37,6 +42,7 @@ pub const PICO_2: BoardProfile = BoardProfile {
     name: "Raspberry Pi Pico 2",
     sram_bytes: 520 * 1024,
     flash_bytes: 4 * 1024 * 1024,
+    database_bytes: 2_621_440,
     rust_heap_bytes: 64 * 1024,
     stack_bytes: 320 * 1024,
     read_buffer_bytes: engine::storage::page::PAGE_SIZE,

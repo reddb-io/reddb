@@ -1,0 +1,43 @@
+{
+  "date": "2026-11-11",
+  "package": "reddb-io-mcu",
+  "version": "1.33.3",
+  "model": {
+    "kind": "host flash model",
+    "erase_block_bytes": 4096,
+    "program_unit_bytes": 256,
+    "sparse_zero_blocks": true,
+    "gateway_used": false,
+    "physical_board_tested": false
+  },
+  "command": "cargo test -p reddb-io-mcu --test flash_emulator board_profiles_fill_recover_and_stream_every_acknowledged_row -- --nocapture",
+  "results": [
+    {
+      "board": "Raspberry Pi Pico 2",
+      "acknowledged_and_recovered_rows": 15413,
+      "logical_rdb_bytes": 4194304,
+      "physical_bytes": 2596864,
+      "usable_capacity_bytes": 2621440,
+      "program_bytes": 13106432,
+      "program_operations": 51197,
+      "erase_operations": 6502,
+      "sync_operations": 1458
+    },
+    {
+      "board": "Arduino Nano ESP32",
+      "acknowledged_and_recovered_rows": 80904,
+      "logical_rdb_bytes": 17776640,
+      "physical_bytes": 12791808,
+      "usable_capacity_bytes": 12832768,
+      "program_bytes": 58488832,
+      "program_operations": 228472,
+      "erase_operations": 25201,
+      "sync_operations": 3840
+    }
+  ],
+  "limitations": [
+    "This models storage behavior behind VfsFile; it is not a CPU or filesystem emulator.",
+    "Program and erase counters are deterministic model estimates, not physical-board measurements.",
+    "Concrete LittleFS and FatFS adapters still require emulator and hardware power-cut qualification."
+  ]
+}
