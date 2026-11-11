@@ -1251,6 +1251,20 @@ impl UnifiedStore {
         self.resident.entity_cache.remove(old_id.raw());
         self.resident.entity_cache.remove(new_id.raw());
         manager.update(old_version.clone())?;
+        #[cfg(test)]
+        if let Some(hook) = self.test_versioned_update_after_old.lock().clone() {
+            hook();
+        }
+        #[cfg(test)]
+        if self
+            .test_fail_versioned_update_phase
+            .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return Err(StoreError::Io(std::io::Error::other(
+                "injected update failure after old version",
+            )));
+        }
         self.resident.context_index.remove_entity(old_id);
 
         self.register_entity_id(new_version.id);
@@ -1263,6 +1277,16 @@ impl UnifiedStore {
         }
         new_version.ensure_table_logical_id();
         manager.insert(new_version.clone())?;
+        #[cfg(test)]
+        if self
+            .test_fail_versioned_update_phase
+            .compare_exchange(2, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return Err(StoreError::Io(std::io::Error::other(
+                "injected update failure after new version",
+            )));
+        }
         if let Some(metadata) = inherited_metadata {
             manager.set_metadata(new_id, metadata)?;
         }

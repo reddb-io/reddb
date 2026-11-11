@@ -7,6 +7,49 @@ use crate::storage::unified::{Metadata, MetadataValue, RefTarget, SparseVector, 
 use crate::storage::{EntityId, UnifiedEntity};
 use crate::{RedDBError, RedDBResult};
 use reddb_types::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+pub(crate) struct AutocommitUpdate {
+    manager: Arc<crate::storage::transaction::snapshot::SnapshotManager>,
+    pub(crate) xid: u64,
+    finished: AtomicBool,
+}
+
+impl AutocommitUpdate {
+    pub(crate) fn new(
+        manager: Arc<crate::storage::transaction::snapshot::SnapshotManager>,
+    ) -> Arc<Self> {
+        let xid = manager.begin_cache_coherent_update();
+        Arc::new(Self {
+            manager,
+            xid,
+            finished: AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn commit(&self) {
+        if !self.finished.swap(true, Ordering::AcqRel) {
+            self.manager.commit(self.xid);
+        }
+    }
+}
+
+impl std::fmt::Debug for AutocommitUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AutocommitUpdate")
+            .field("xid", &self.xid)
+            .finish()
+    }
+}
+
+impl Drop for AutocommitUpdate {
+    fn drop(&mut self) {
+        if !self.finished.load(Ordering::Acquire) {
+            self.manager.rollback(self.xid);
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CreateEntityOutput {
@@ -16,6 +59,7 @@ pub struct CreateEntityOutput {
 
 #[derive(Debug, Clone)]
 pub struct AppliedEntityMutation {
+    pub(crate) autocommit_update: Option<Arc<AutocommitUpdate>>,
     pub id: EntityId,
     pub collection: String,
     pub entity: UnifiedEntity,

@@ -1109,6 +1109,10 @@ impl UnifiedStore {
             #[cfg(test)]
             test_fail_deferred_wal_append: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
+            test_versioned_update_after_old: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            test_fail_versioned_update_phase: std::sync::atomic::AtomicU8::new(0),
+            #[cfg(test)]
             test_require_deferred_publication_fence: std::sync::atomic::AtomicBool::new(false),
             vault_publication_lock: parking_lot::ReentrantMutex::new(()),
             row_publications: Default::default(),
@@ -1280,6 +1284,10 @@ impl UnifiedStore {
             embedded_commit_session: std::sync::OnceLock::new(),
             #[cfg(test)]
             test_fail_deferred_wal_append: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            test_versioned_update_after_old: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            test_fail_versioned_update_phase: std::sync::atomic::AtomicU8::new(0),
             #[cfg(test)]
             test_require_deferred_publication_fence: std::sync::atomic::AtomicBool::new(false),
             vault_publication_lock: parking_lot::ReentrantMutex::new(()),

@@ -385,6 +385,11 @@ pub struct UnifiedStore {
     #[cfg(test)]
     pub(crate) test_fail_deferred_wal_append: std::sync::atomic::AtomicBool,
     #[cfg(test)]
+    pub(crate) test_versioned_update_after_old:
+        parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    pub(crate) test_fail_versioned_update_phase: std::sync::atomic::AtomicU8,
+    #[cfg(test)]
     pub(crate) test_require_deferred_publication_fence: std::sync::atomic::AtomicBool,
 }
 

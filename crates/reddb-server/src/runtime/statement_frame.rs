@@ -418,7 +418,8 @@ impl StatementExecutionFrame {
             .map(|ctx| ctx.xid);
         let (snapshot, as_of_floor, snapshot_retention) =
             runtime.statement_snapshot(query, identity_source)?;
-        let requires_index_fallback = as_of_floor.is_some() || tx_context.is_some();
+        let requires_index_fallback =
+            as_of_floor.is_some() || tx_context.is_some() || !snapshot.in_progress.is_empty();
         let (cache_key, is_volatile_query) = match identity_source {
             StatementIdentity::Text(_) => (
                 result_cache_key(query),
@@ -1202,14 +1203,13 @@ impl RedDBRuntime {
     }
 
     fn result_cache_safe(&self, conn_id: u64) -> bool {
-        let has_active_xids = self
+        let has_unsafe_xids = self
             .inner
             .transaction_state
             .snapshot_manager()
-            .oldest_active_xid()
-            .is_some();
+            .has_cache_unsafe_active_xids();
         let in_own_tx = self.inner.transaction_state.in_transaction(conn_id);
-        !has_active_xids && !in_own_tx
+        !has_unsafe_xids && !in_own_tx
     }
 }
 
