@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.32.1
+
+### Patch Changes
+
+- [#2779](https://github.com/reddb-io/reddb/pull/2779) [`db363d4`](https://github.com/reddb-io/reddb/commit/db363d448d82191509085c690fc8a7ce01ffc5f3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow offline compaction to discard page-aligned physical allocation beyond the
+  committed database high-water mark while still rejecting truncated or partial
+  pages.
+
+## 1.32.0
+
+### Minor Changes
+
+- [#2776](https://github.com/reddb-io/reddb/pull/2776) [`27db3a4`](https://github.com/reddb-io/reddb/commit/27db3a47d38737add018f33be10bf9d0373f5b95) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add transactional replication, byte-bounded binary WAL streaming, serverless
+  lease-expiry enforcement, and embedded writer identity fencing, with automated
+  crash/restart recovery coverage.
+
 ## 1.31.0
 
 ### Minor Changes
