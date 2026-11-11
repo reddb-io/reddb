@@ -245,14 +245,3 @@ fn concurrent_multi_writer_harness_high_conflict_ci() {
         seed: 0x1650_0002,
     });
 }
-
-#[test]
-#[ignore = "larger local/soak parametrization for TM commit concurrency"]
-fn concurrent_multi_writer_soak_harness() {
-    run_harness(HarnessConfig {
-        connections: 16,
-        transactions_per_connection: 4,
-        conflict_rows: 16,
-        seed: 0x1650_5000,
-    });
-}

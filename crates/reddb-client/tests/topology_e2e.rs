@@ -139,6 +139,9 @@ impl RedDb for MockServer {
     type AskStreamStream = ::core::pin::Pin<
         Box<dyn tokio_stream::Stream<Item = Result<AskStreamEvent, Status>> + Send + 'static>,
     >;
+    type StreamWalRecordsStream = ::core::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<WalStreamChunk, Status>> + Send + 'static>,
+    >;
 
     async fn kv_watch(
         &self,
@@ -156,6 +159,15 @@ impl RedDb for MockServer {
         Ok(Response::new(Box::pin(tokio_stream::iter(
             std::iter::empty::<Result<AskStreamEvent, Status>>(),
         ))))
+    }
+
+    async fn stream_wal_records(
+        &self,
+        _request: Request<WalStreamRequest>,
+    ) -> Result<Response<Self::StreamWalRecordsStream>, Status> {
+        Err(Status::unimplemented(
+            "topology mock does not serve WAL records",
+        ))
     }
 
     async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryReply>, Status> {
@@ -450,13 +462,18 @@ fn make_topology_bytes(primary: &SocketAddr, replicas: &[SocketAddr]) -> Vec<u8>
 const N_READS: usize = 300;
 
 #[tokio::test]
-async fn high_level_grpc_and_grpcs_discover_without_manual_refresh() {
+async fn high_level_grpc_and_enabled_grpcs_discover_without_manual_refresh() {
     let rcgen::CertifiedKey { cert, signing_key } =
         rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).expect("test certificate");
     let directory = tempfile::tempdir().expect("certificate directory");
     let certificate = directory.path().join("ca.pem");
     std::fs::write(&certificate, cert.pem()).expect("test CA");
-    for protocol in ["grpc", "grpcs"] {
+    let protocols = if cfg!(feature = "redwire-tls") {
+        &["grpc", "grpcs"][..]
+    } else {
+        &["grpc"][..]
+    };
+    for &protocol in protocols {
         let tls = || {
             if protocol == "grpcs" {
                 Some(tonic::transport::ServerTlsConfig::new().identity(
@@ -823,87 +840,6 @@ async fn topology_e2e_force_primary_preserves_pre_prd_baseline() {
     );
     assert_eq!(replica_a_counters.query.load(Ordering::Relaxed), 0);
     assert_eq!(replica_b_counters.query.load(Ordering::Relaxed), 0);
-
-    let _ = primary_shutdown.send(());
-    let _ = replica_a_shutdown.send(());
-    let _ = replica_b_shutdown.send(());
-}
-
-/// Latency capture used by the perf report
-/// (`docs/perf/topology-discovery-2026-05-06.md`). Marked `#[ignore]`
-/// so the headline `cargo test` stays cheap; CI / `make` can pick
-/// this up via `cargo test -- --ignored topology_perf_capture`.
-///
-/// Drives 1 000 reads under both routing modes (post-PRD discovery,
-/// and pre-PRD `force_primary=true` baseline) against the same mock
-/// stack and prints the resulting p50 / p99. Intentionally modest
-/// sample size — the goal is to characterise the routing dispatch
-/// overhead, not to land a production benchmark. The canonical
-/// full-cluster bench lives in `rdb-benchmark` (cf. issue #154 and
-/// the cluster-mode follow-up tracked in
-/// `docs/perf/topology-discovery-2026-05-06.md`).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore]
-async fn topology_perf_capture() {
-    use std::time::Instant;
-    let topology_bytes: TopologyBytes = Arc::new(Mutex::new(Vec::new()));
-    let (primary_addr, _, primary_shutdown) =
-        spawn_mock(Role::Primary, topology_bytes.clone()).await;
-    let (replica_a_addr, _, replica_a_shutdown) =
-        spawn_mock(Role::Replica, topology_bytes.clone()).await;
-    let (replica_b_addr, _, replica_b_shutdown) =
-        spawn_mock(Role::Replica, topology_bytes.clone()).await;
-    *topology_bytes.lock().unwrap() =
-        make_topology_bytes(&primary_addr, &[replica_a_addr, replica_b_addr]);
-    let primary_url = format!("http://{primary_addr}");
-
-    fn pct(samples: &[u128], pct: f64) -> u128 {
-        let mut s = samples.to_vec();
-        s.sort_unstable();
-        let idx = ((s.len() as f64) * pct).clamp(0.0, s.len() as f64 - 1.0) as usize;
-        s[idx]
-    }
-
-    // Post-PRD: discovery on, replicas absorb traffic.
-    let post_client = GrpcClient::connect_cluster(primary_url.clone(), Vec::new(), false)
-        .await
-        .unwrap();
-    post_client.refresh_topology().await.unwrap();
-    let mut post_us = Vec::with_capacity(1_000);
-    for _ in 0..1_000 {
-        let t = Instant::now();
-        post_client
-            .query_with_options("select 1", QueryOptions::local())
-            .await
-            .unwrap();
-        post_us.push(t.elapsed().as_micros());
-    }
-
-    // Pre-PRD: force_primary, all reads on primary.
-    let pre_client = GrpcClient::connect_cluster(primary_url, Vec::new(), true)
-        .await
-        .unwrap();
-    pre_client.refresh_topology().await.unwrap();
-    let mut pre_us = Vec::with_capacity(1_000);
-    for _ in 0..1_000 {
-        let t = Instant::now();
-        pre_client
-            .query_with_options("select 1", QueryOptions::local())
-            .await
-            .unwrap();
-        pre_us.push(t.elapsed().as_micros());
-    }
-
-    println!(
-        "[topology_perf_capture] pre-PRD  (force_primary): n=1000 p50={}us p99={}us",
-        pct(&pre_us, 0.50),
-        pct(&pre_us, 0.99),
-    );
-    println!(
-        "[topology_perf_capture] post-PRD (discovery on): n=1000 p50={}us p99={}us",
-        pct(&post_us, 0.50),
-        pct(&post_us, 0.99),
-    );
 
     let _ = primary_shutdown.send(());
     let _ = replica_a_shutdown.send(());

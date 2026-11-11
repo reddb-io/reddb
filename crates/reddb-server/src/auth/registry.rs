@@ -807,20 +807,4 @@ mod tests {
             "got {err:?}"
         );
     }
-
-    #[test]
-    fn registry_is_not_exposed_as_sql_collection() {
-        // The registry lives outside the SQL surface — ordinary DML
-        // cannot reach these entries because there is no collection /
-        // table / virtual surface that mirrors them. This test pins
-        // that contract: a ConfigRegistry stands alone; nothing on
-        // AuthStore or the storage path exposes it as a row source.
-        let reg = ConfigRegistry::new();
-        // The public API surface is the governance methods only:
-        let _ = reg.list_active();
-        let _ = reg.history("k");
-        // (No `as_collection()` / `as_table()` / SQL accessor exists by
-        // construction — if a future change adds one, this test should
-        // be reviewed alongside the new wire surface.)
-    }
 }

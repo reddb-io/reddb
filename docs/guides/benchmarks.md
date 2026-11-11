@@ -177,19 +177,10 @@ Examples of when this is the right mode:
 
 ## 6. Algorithm benchmark harnesses
 
-Some benchmark-like routines are implemented as ignored tests.
-
-Example pattern:
-
-```bash
-cargo test --release bench_graph_creation_1m_edges -- --ignored --nocapture
-```
-
-Use this model for the graph algorithm harnesses under:
-
-[`src/storage/engine/algorithms/mod.rs`](/home/cyber/Work/FF/reddb/src/storage/engine/algorithms/mod.rs)
-
-This path is useful when the benchmark is easier to express as a test harness than as a Criterion bench.
+The graph algorithm tests under `crates/reddb-server/src/storage/engine/algorithms/`
+verify behavior on small deterministic fixtures. Keep performance measurements
+out of the test suite and add a Criterion target when an algorithm needs a
+repeatable benchmark.
 
 ## 7. Practical decision table
 
