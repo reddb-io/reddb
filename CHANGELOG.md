@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.33.2
+
+### Patch Changes
+
+- [#2778](https://github.com/reddb-io/reddb/pull/2778) [`19a02b3`](https://github.com/reddb-io/reddb/commit/19a02b33a2dd57e0ab703e3f56237a6c5a7d4a75) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Stabilize RedWire query-summary bytes, include the auditable ASK planner trace
+  and final-query fields in typed gRPC replies, and make primary-replica WAL
+  publication idempotent when replaying a committed transaction outbox.
+
+  Bound HASH and index-intersection candidate memory, recover torn WAL tails before
+  new appends, preserve the first user entity ID when the durable result-cache epoch
+  is created, and keep non-read statements from initializing the result-cache format.
+  Promote resident cache files to the disk-resident cache format before checkpoint
+  publication so cold reopens retain queue and secondary-index roots instead of
+  rebuilding and growing them on every boot. Harden embedded WAL replay and
+  transactional reservation regression coverage.
+
 ## 1.33.1
 
 ### Patch Changes
