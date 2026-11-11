@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.33.1
+
+### Patch Changes
+
+- [#2782](https://github.com/reddb-io/reddb/pull/2782) [`0b0a6a0`](https://github.com/reddb-io/reddb/commit/0b0a6a0e56d73e806282f67ecdd6d4766202cd02) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Prevent durable Blob Cache publication, result-cache promotion, and database
+  write invalidation from deadlocking under concurrent traffic.
+
+## 1.33.0
+
+### Minor Changes
+
+- [#2768](https://github.com/reddb-io/reddb/pull/2768) [`14b9ccf`](https://github.com/reddb-io/reddb/commit/14b9ccf3c5a67eeca281679c9e24bc19e313cdde) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Unify the runtime SQL result cache on the native Blob Cache L1/L2 engine with
+  durable recovery, collection-scoped invalidation, protocol-independent query
+  routing, and downgrade fencing for persisted cache epochs.
+
 ## 1.32.1
 
 ### Patch Changes

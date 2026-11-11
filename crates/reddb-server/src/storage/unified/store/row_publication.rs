@@ -285,7 +285,7 @@ impl UnifiedStore {
             }
             Ok(())
         })();
-        let actions = capture.finish();
+        let mut actions = capture.finish();
         let committed = staged.and_then(|()| {
             #[cfg(test)]
             if self
@@ -301,11 +301,15 @@ impl UnifiedStore {
                     && !self.is_read_only()
             }) {
                 let track = self.config.resident_memory_bytes_max.is_some();
+                let epoch_guard = self.append_result_cache_epoch_action(&mut actions.actions)?;
                 let references = commit
                     .append_ready_actions(&actions.actions, track)
                     .map_err(StoreError::Io)?;
                 if track {
                     self.remember_checkpoint_rows(actions.actions, references);
+                }
+                if let Some(guard) = epoch_guard {
+                    guard.commit();
                 }
                 Ok(())
             } else {

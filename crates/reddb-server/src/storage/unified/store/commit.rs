@@ -1660,6 +1660,11 @@ impl Drop for StoreCommitCoordinator {
     }
 }
 
+pub(super) struct PendingResultCacheAppend {
+    pending: crate::storage::embedded::PendingEmbeddedAppend,
+    epoch_guard: Option<super::result_cache_epoch::ResultCacheEpochGuard>,
+}
+
 impl UnifiedStore {
     pub(crate) fn sync_control_metadata(&self) -> Result<(), StoreError> {
         if let Some(commit) = &self.commit {
@@ -1710,17 +1715,23 @@ impl UnifiedStore {
         if self.config.embedded_wal_path.is_some() {
             return self.append_embedded_store_wal_actions(&actions.actions);
         }
+        let _publication = self.vault_publication_lock.lock();
+        let mut actions = actions.actions;
+        let epoch_guard = self.append_result_cache_epoch_action(&mut actions)?;
         // Deferred transactions need a committed WAL batch even in Strict
         // mode. WAL-only versions have no pager pages to flush yet.
         if let Some(commit) = &self.commit {
             let references = commit
-                .append_checkpoint_actions(&actions.actions)
+                .append_checkpoint_actions(&actions)
                 .map_err(StoreError::Io)?;
-            self.remember_checkpoint_rows(actions.actions, references);
-            Ok(())
+            self.remember_checkpoint_rows(actions, references);
         } else {
-            self.flush_paged_state()
+            self.flush_paged_state()?;
         }
+        if let Some(guard) = epoch_guard {
+            guard.commit();
+        }
+        Ok(())
     }
 
     /// Emit a [`WalRecord::VectorInsert`] for a `vector.turbo`
@@ -1792,6 +1803,9 @@ impl UnifiedStore {
         if self.config.embedded_wal_path.is_some() {
             return self.append_embedded_store_wal_actions(&actions);
         }
+        let _publication = self.vault_publication_lock.lock();
+        let mut actions = actions;
+        let epoch_guard = self.append_result_cache_epoch_action(&mut actions)?;
         let mut references = super::checkpoint_wal::CheckpointWalBatch::default();
         let result = match self.config.durability_mode {
             DurabilityMode::Strict => {
@@ -1825,6 +1839,9 @@ impl UnifiedStore {
         if track {
             self.remember_checkpoint_rows(actions, references);
         }
+        if let Some(guard) = epoch_guard {
+            guard.commit();
+        }
         Ok(())
     }
 
@@ -1843,10 +1860,13 @@ impl UnifiedStore {
         if actions.is_empty() {
             return Ok(());
         }
+        let _publication = self.vault_publication_lock.lock();
+        let mut actions = actions.to_vec();
+        let epoch_guard = self.append_result_cache_epoch_action(&mut actions)?;
         let payloads: Vec<Vec<u8>> = actions.iter().map(StoreWalAction::encode).collect();
         let encoded_len = crate::storage::EmbeddedRdbArtifact::wal_payloads_encoded_len(&payloads)
             .map_err(|err| StoreError::Io(std::io::Error::other(err.to_string())))?;
-        match self.append_embedded_payloads(path, &payloads) {
+        let result = match self.append_embedded_payloads(path, &payloads) {
             Ok(_) => Ok(()),
             Err(crate::api::RedDBError::InvalidOperation(msg))
                 if msg.contains("embedded wal region full") =>
@@ -1854,7 +1874,13 @@ impl UnifiedStore {
                 self.recover_full_embedded_wal(path, &payloads, encoded_len)
             }
             Err(err) => Err(StoreError::Io(std::io::Error::other(err.to_string()))),
+        };
+        if result.is_ok() {
+            if let Some(guard) = epoch_guard {
+                guard.commit();
+            }
         }
+        result
     }
 
     fn recover_full_embedded_wal(
@@ -1937,7 +1963,7 @@ impl UnifiedStore {
     pub(super) fn enqueue_grouped_actions(
         &self,
         actions: &[StoreWalAction],
-    ) -> Result<Option<crate::storage::embedded::PendingEmbeddedAppend>, StoreError> {
+    ) -> Result<Option<PendingResultCacheAppend>, StoreError> {
         if self.config.durability_mode != DurabilityMode::WalDurableGrouped
             || deferred_store_wal_capture_active()
         {
@@ -1949,6 +1975,9 @@ impl UnifiedStore {
         let session = self
             .embedded_commit_session
             .get_or_init(|| crate::storage::EmbeddedRdbArtifact::group_commit_session(path));
+        let _publication = self.vault_publication_lock.lock();
+        let mut actions = actions.to_vec();
+        let epoch_guard = self.append_result_cache_epoch_action(&mut actions)?;
         let payloads: Vec<Vec<u8>> = actions.iter().map(StoreWalAction::encode).collect();
         let options = self.config.group_commit;
         session
@@ -1960,16 +1989,21 @@ impl UnifiedStore {
                     max_wal_bytes: options.max_wal_bytes,
                 },
             )
-            .map(Some)
+            .map(|pending| {
+                Some(PendingResultCacheAppend {
+                    pending,
+                    epoch_guard,
+                })
+            })
             .map_err(|error| StoreError::Io(io::Error::other(error.to_string())))
     }
 
     pub(super) fn complete_grouped_actions(
         &self,
-        pending: &crate::storage::embedded::PendingEmbeddedAppend,
+        pending: &mut PendingResultCacheAppend,
         actions: &[StoreWalAction],
     ) -> Result<(), StoreError> {
-        match pending.wait() {
+        let result = match pending.pending.wait() {
             Ok(_) => Ok(()),
             Err(crate::RedDBError::InvalidOperation(message))
                 if message.contains("embedded wal region full") =>
@@ -1977,7 +2011,13 @@ impl UnifiedStore {
                 self.append_embedded_store_wal_actions(actions)
             }
             Err(error) => Err(StoreError::Io(io::Error::other(error.to_string()))),
+        };
+        if result.is_ok() {
+            if let Some(guard) = pending.epoch_guard.take() {
+                guard.commit();
+            }
         }
+        result
     }
 
     pub(crate) fn apply_replayed_action(

@@ -37,6 +37,39 @@ fn hot_hit_does_not_require_exclusive_shard_access() {
 }
 
 #[test]
+fn internal_l2_put_enters_store_publication_before_cache_locks() {
+    let directory = tempfile::tempdir().expect("cache fixture");
+    let runtime = crate::RedDBRuntime::with_options(crate::RedDBOptions::persistent(
+        directory.path().join("internal-l2-lock-order.rdb"),
+    ))
+    .expect("runtime");
+    let store = runtime.db().store();
+    let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook_store = Arc::clone(&store);
+    let hook_observed = Arc::clone(&observed);
+    PUT_PREPARED_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            hook_observed.store(
+                hook_store
+                    .vault_publication_lock
+                    .is_owned_by_current_thread(),
+                Ordering::Relaxed,
+            );
+        }));
+    });
+
+    runtime
+        .result_blob_cache()
+        .put("lock-order", "key", BlobCachePut::new(vec![1; 32]))
+        .expect("publish internal L2 entry");
+
+    assert!(
+        observed.load(Ordering::Relaxed),
+        "internal L2 put reached cache locks before the store publication fence"
+    );
+}
+
+#[test]
 fn prepared_put_rechecks_version_before_publishing_either_tier() {
     let directory = tempfile::tempdir().expect("cache fixture");
     let path = directory.path().join("cache.rdb");
@@ -169,6 +202,15 @@ fn missing_key_updates_miss_counter() {
     let stats = cache.stats();
     assert_eq!(stats.hits, 0);
     assert_eq!(stats.misses, 2);
+}
+
+#[test]
+fn missing_namespaces_do_not_allocate_generations() {
+    let cache = small_cache(128);
+    for index in 0..1000 {
+        assert!(cache.get(&format!("missing-{index}"), "key").is_none());
+    }
+    assert!(cache.namespace_generations.read().is_empty());
 }
 
 #[test]
@@ -977,6 +1019,36 @@ fn namespace_flush_bumps_generation_and_old_entries_are_immediately_absent() {
         .put("n", "c", BlobCachePut::new(b"c".to_vec()))
         .unwrap();
     assert_eq!(&*cache.get("n", "c").unwrap().bytes, b"c");
+}
+
+#[test]
+fn in_memory_namespace_fence_hides_l2_until_durable_flush() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("fenced-cache.rdb");
+    {
+        let cache = l2_cache(&path);
+        cache
+            .put("n", "a", BlobCachePut::new(b"a".to_vec()))
+            .unwrap();
+    }
+    {
+        let cache = l2_cache(&path);
+        cache.invalidate_namespace_in_memory("n");
+        assert!(cache.get("n", "a").is_none());
+        assert!(cache.invalidate_namespace("n"));
+        cache
+            .put("n", "b", BlobCachePut::new(b"b".to_vec()))
+            .unwrap();
+    }
+    let cache = l2_cache(&path);
+    assert!(cache.get("n", "a").is_none());
+    assert_eq!(
+        &*cache
+            .get("n", "b")
+            .expect("new generation survives restart")
+            .bytes,
+        b"b"
+    );
 }
 
 #[test]

@@ -25,12 +25,13 @@ what the *value* looks like and how you want it invalidated.
 | Queryable JSON config / sessions / flags                                    | KV                                                                                                           |
 | Opaque byte blobs with TTL and invalidation                                 | Blob Cache                                                                                                   |
 | Embedding vectors with similarity lookup                                    | Semantic Cache                                                                                               |
-| SQL result rows materialized for re-read                                    | Built-in result cache (now Blob Cache backed when `runtime.result_cache.backend = blob_cache`)               |
+| SQL result rows materialized for re-read                                    | Built-in result cache backed by Blob Cache                                                                  |
 | Database pages                                                              | Page Cache (internal, not user-facing)                                                                       |
 
-The four user-visible caches in RedDB today are KV, Blob Cache, Semantic
-Cache, and the runtime SQL result cache. Page Cache exists but it
-protects database pages on the read path and is never addressed by
+Applications can directly address KV, Blob Cache, and Semantic Cache. The
+runtime SQL result cache is automatic rather than user-addressable, and it is
+backed by the same Blob Cache L1/L2 engine under a reserved namespace. Page
+Cache protects database pages on the read path and is never addressed by
 application code.
 
 ### Why these are separate modules
@@ -53,14 +54,17 @@ should hit the same entry even though their byte representation differs.
 ADR 0006 leaves the door open for Semantic Cache to use Blob Cache as
 its durable exact-key backend, but its lookup surface stays similarity.
 
-The runtime SQL result cache stores small `SELECT` results keyed by
-statement shape and scope, invalidated through table dependencies. With
-ADR 0006 in flight it becomes an adapter over Blob Cache when
-`runtime.result_cache.backend = blob_cache`. The Interface that
-application SQL callers see does not change; the storage underneath does.
-Tenant and auth identity stay part of the key, and table writes
-conservatively flush the result-cache namespace. The normal runtime cache is
-backed by the single-file L2 and can rehydrate eligible entries after restart.
+The runtime SQL result cache stores small `SELECT` results in Blob Cache,
+keyed by statement shape and scope and invalidated through table dependencies.
+Tenant and auth identity stay part of the key. Table writes flush the
+result-cache namespace when a dependency matches or L2 entries are untracked;
+otherwise unrelated results stay cached. After a matching invalidation, new
+results remain in memory during frequent writes; a background worker promotes them to the single-file L2 after one
+second of quiet, with their remaining TTL. Restart
+before promotion recomputes the result. Persisted results are accepted after
+recovery only when their data epoch matches the epoch committed with the data;
+older payload formats and results made obsolete by any intervening data write
+are recomputed.
 
 Page Cache and Entity Cache are internal acceleration structures.
 They are listed here only so readers stop trying to use them as
@@ -145,8 +149,9 @@ dedicated cache worker deletes due L2 rows in bounded batches, with the byte
 counter in the same WAL publication, and the normal MVCC reclamation path makes
 their pages reusable.
 
-Direct engine callers can still select the legacy standalone pager backend for
-compatibility, but the normal server does not create that sidecar.
+Embedded engine integrations can select a standalone L2 file backend. The
+normal server and its result cache use the internal collection backend and do
+not create that sidecar.
 
 When L2 is enabled, the tiers are connected by a *membership synopsis* — a per-namespace
 filter that lets the cache cheaply say "definitely absent" and skip the

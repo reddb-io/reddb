@@ -3625,20 +3625,30 @@ impl RedDBRuntime {
             return false;
         }
 
-        let mut entries = self.inner.ask_answer_cache_entries.write();
-        let (ref mut keys, ref mut order) = *entries;
-        if keys.insert(key.to_string()) {
-            order.push_back(key.to_string());
-        }
-        while keys.len() > max_entries {
-            let Some(old_key) = order.pop_front() else {
-                break;
-            };
-            if keys.remove(&old_key) {
-                self.inner
-                    .result_blob_cache
-                    .invalidate_key(ASK_ANSWER_CACHE_NAMESPACE, &old_key);
+        let evicted = {
+            let mut entries = self.inner.ask_answer_cache_entries.write();
+            let (ref mut keys, ref mut order) = *entries;
+            if keys.insert(key.to_string()) {
+                order.push_back(key.to_string());
             }
+            let mut evicted = Vec::new();
+            while keys.len() > max_entries {
+                let Some(old_key) = order.pop_front() else {
+                    break;
+                };
+                if keys.remove(&old_key) {
+                    evicted.push(old_key);
+                }
+            }
+            evicted
+        };
+        // Durable invalidation enters the store publication fence. Never
+        // retain the Ask entry index across that I/O: database writes hold the
+        // fence before clearing this same index.
+        for old_key in evicted {
+            self.inner
+                .result_blob_cache
+                .invalidate_key(ASK_ANSWER_CACHE_NAMESPACE, &old_key);
         }
         true
     }

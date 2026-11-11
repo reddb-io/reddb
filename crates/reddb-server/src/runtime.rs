@@ -938,9 +938,9 @@ struct RuntimeResultCacheEntry {
     result: RuntimeQueryResult,
     cached_at: std::time::Instant,
     scopes: HashSet<String>,
+    data_epoch: u64,
 }
 
-pub const METRIC_CACHE_SHADOW_DIVERGENCE_TOTAL: &str = "cache_shadow_divergence_total";
 /// Stable metric names for the query/graph-analytics result cache
 /// (issue #802). Exposed under the `red.metrics` surface as
 /// `reddb_result_cache_{hit,miss,evict}_total` and readable in-process
@@ -1158,18 +1158,26 @@ struct RuntimeInner {
     pub(crate) columnar_projection_size_floor_rows: usize,
     backup_scheduler: crate::replication::scheduler::BackupScheduler,
     query_cache: parking_lot::RwLock<crate::storage::query::planner::cache::PlanCache>,
-    result_cache: parking_lot::RwLock<(
-        HashMap<String, RuntimeResultCacheEntry>,
-        std::collections::VecDeque<String>,
-    )>,
     result_blob_cache: crate::storage::cache::BlobCache,
+    result_cache_format_lock: parking_lot::Mutex<()>,
+    // Serializes L2 promotion with result publication and invalidation,
+    // without blocking readers of the in-memory result.
+    result_blob_promotion: parking_lot::Mutex<()>,
     result_blob_entries: parking_lot::RwLock<(
         HashMap<String, RuntimeResultCacheEntry>,
         std::collections::VecDeque<String>,
+        // L2 may contain entries whose dependencies are not in the map.
+        bool,
+        // Detect writes or invalidations while decoding an L2 hit.
+        u64,
+        // Results kept in memory while their tables are changing.
+        HashSet<String>,
+        Option<std::time::Instant>,
+        // Last data epoch whose table invalidation has been processed.
+        u64,
     )>,
     ask_answer_cache_entries:
         parking_lot::RwLock<(HashSet<String>, std::collections::VecDeque<String>)>,
-    result_cache_shadow_divergences: std::sync::atomic::AtomicU64,
     /// Result-cache observability counters (issue #802). Process-cumulative
     /// hit/miss/eviction tallies surfaced under `red.metrics`.
     result_cache_hits: std::sync::atomic::AtomicU64,

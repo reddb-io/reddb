@@ -491,24 +491,7 @@ impl RedDBRuntime {
                 | crate::storage::EntityData::Node(_)
                 | crate::storage::EntityData::Edge(_)
         ) && self.vcs_is_versioned(&collection).unwrap_or(false);
-        let versioned_update_xid = if patch_versions {
-            match self.current_xid() {
-                Some(xid) => Some(xid),
-                None => {
-                    let snapshot_manager = self.snapshot_manager();
-                    let xid = snapshot_manager.begin();
-                    snapshot_manager.commit(xid);
-                    Some(xid)
-                }
-            }
-        } else {
-            None
-        };
-        let mut replaced_entity = versioned_update_xid.map(|xid| {
-            let mut old = entity.clone();
-            old.set_xmax(xid);
-            old
-        });
+        let mut replaced_entity = patch_versions.then(|| entity.clone());
 
         let db = self.db();
         let store = db.store();
@@ -1147,6 +1130,14 @@ impl RedDBRuntime {
         // prior version's xmax at the same xid. `install_versioned_*`
         // in persist installs the new row and tombstones the old one;
         // `record_pending_versioned_update` arms first-committer-wins.
+        let current_xid = self.current_xid();
+        let autocommit_update = (patch_versions && current_xid.is_none())
+            .then(|| crate::application::entity::AutocommitUpdate::new(self.snapshot_manager()));
+        let versioned_update_xid = if patch_versions {
+            current_xid.or_else(|| autocommit_update.as_ref().map(|update| update.xid))
+        } else {
+            None
+        };
         if let Some(xid) = versioned_update_xid {
             let logical_id = entity.logical_id();
             entity.id = store.next_entity_id();
@@ -1161,6 +1152,7 @@ impl RedDBRuntime {
         modified_columns = dedupe_modified_columns(modified_columns);
 
         Ok(AppliedEntityMutation {
+            autocommit_update,
             id: entity.id,
             collection,
             entity,
@@ -1196,20 +1188,7 @@ impl RedDBRuntime {
             )));
         };
 
-        let versioned_update_xid = match self.current_xid() {
-            Some(xid) => Some(xid),
-            None => {
-                let snapshot_manager = self.snapshot_manager();
-                let xid = snapshot_manager.begin();
-                snapshot_manager.commit(xid);
-                Some(xid)
-            }
-        };
-        let mut replaced_entity = versioned_update_xid.map(|xid| {
-            let mut old = entity.clone();
-            old.set_xmax(xid);
-            old
-        });
+        let mut replaced_entity = Some(entity.clone());
 
         let mut patch_metadata: Option<crate::storage::unified::Metadata> = None;
         let row_contract_timestamps = row_contract_plan
@@ -1369,6 +1348,12 @@ impl RedDBRuntime {
             .unwrap_or_default()
             .as_secs();
 
+        let current_xid = self.current_xid();
+        let autocommit_update = current_xid
+            .is_none()
+            .then(|| crate::application::entity::AutocommitUpdate::new(self.snapshot_manager()));
+        let versioned_update_xid =
+            current_xid.or_else(|| autocommit_update.as_ref().map(|update| update.xid));
         if let Some(xid) = versioned_update_xid {
             let logical_id = entity.logical_id();
             entity.id = store.next_entity_id();
@@ -1383,6 +1368,7 @@ impl RedDBRuntime {
         modified_columns = dedupe_modified_columns(modified_columns);
 
         Ok(AppliedEntityMutation {
+            autocommit_update,
             id: entity.id,
             collection,
             entity,
@@ -1419,18 +1405,48 @@ impl RedDBRuntime {
         let mut ordinary = Vec::with_capacity(applied.len());
         for item in applied {
             if let Some(old_version) = item.replaced_entity.as_ref() {
-                store
-                    .install_versioned_table_row_update(
-                        collection,
-                        old_version.clone(),
-                        item.entity.clone(),
-                        if item.persist_metadata {
-                            item.metadata.as_ref()
-                        } else {
-                            None
-                        },
-                    )
-                    .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
+                if item.autocommit_update.is_some()
+                    && crate::storage::UnifiedStore::deferred_store_wal_capture_active()
+                    && !crate::runtime::mvcc_lifecycle::autocommit_update_capture_available()
+                {
+                    return Err(crate::RedDBError::Internal(
+                        "missing autocommit update WAL scope".into(),
+                    ));
+                }
+                if let Err(error) = store.install_versioned_table_row_update(
+                    collection,
+                    old_version.clone(),
+                    item.entity.clone(),
+                    if item.persist_metadata {
+                        item.metadata.as_ref()
+                    } else {
+                        None
+                    },
+                ) {
+                    if let Some(update) = &item.autocommit_update {
+                        let changed = manager
+                            .get_with(old_version.id, |old| old.xmax == update.xid)
+                            == Some(true);
+                        if changed {
+                            let topology =
+                                self.index_store_ref().collection_topology_lock(collection);
+                            if let Err(undo) = self.revive_versioned_update(
+                                collection,
+                                old_version.id,
+                                item.entity.id,
+                                update.xid,
+                                item.replaced_entity_previous_xmax,
+                                topology.read_recursive(),
+                            ) {
+                                tracing::error!(%undo, "failed to undo incomplete autocommit update");
+                            }
+                        }
+                    }
+                    return Err(crate::RedDBError::Internal(error.to_string()));
+                }
+                if let Some(update) = &item.autocommit_update {
+                    crate::runtime::mvcc_lifecycle::publish_autocommit_update(self, item, update);
+                }
                 if self.current_xid().is_some() {
                     self.record_pending_versioned_update(
                         crate::runtime::impl_core::current_connection_id(),

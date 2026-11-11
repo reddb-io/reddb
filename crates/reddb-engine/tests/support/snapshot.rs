@@ -145,9 +145,10 @@ fn native_store_fixture() {
 /// Assert the same native-produced snapshot after an actual OPFS restart.
 pub fn verify_native_snapshot(bytes: &[u8]) -> u32 {
     let mut restored = Restored::default();
+    let expected_version = reddb_file::decode_native_store_header(bytes).expect("snapshot header");
     assert_eq!(
         visit_snapshot(bytes, &mut restored).expect("native snapshot"),
-        12
+        expected_version
     );
     assert_eq!(restored.collections.len(), 9);
     assert!(restored.collections["empty"].is_empty());
@@ -160,7 +161,7 @@ pub fn verify_native_snapshot(bytes: &[u8]) -> u32 {
     let (resident, version) =
         ResidentStore::from_snapshot(bytes, &ManagerConfig::default(), true, 1000)
             .expect("canonical resident recovery");
-    assert_eq!(version, 12);
+    assert_eq!(version, expected_version);
     assert!(resident
         .get_refs_from(EntityId::new(1024))
         .iter()
@@ -272,7 +273,8 @@ fn dump(version: u32, tails: bool) -> Vec<u8> {
         let _index = u32::from_le_bytes(reader.fixed().expect("index"));
         let size = u32::from_le_bytes(reader.fixed().expect("length")) as usize;
         let entity = reader.take(size).expect("frozen entity");
-        if version != entity_version {
+        // Version 13 changes the compatibility fence, not entity encoding.
+        if version.min(reddb_file::STORE_VERSION_V12) != entity_version {
             continue;
         }
         if version >= 7 {
@@ -500,7 +502,7 @@ fn native_committed_projection() {
     let mut restored = Restored::default();
     assert_eq!(
         visit_snapshot(&bytes, &mut restored).expect("canonical emitted snapshot"),
-        12
+        reddb_file::STORE_VERSION_CURRENT
     );
     let rows = &restored.collections["rows"];
     assert_eq!(rows.len(), 1);

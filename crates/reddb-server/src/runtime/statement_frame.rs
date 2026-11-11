@@ -303,6 +303,8 @@ pub(super) struct StatementExecutionFrame {
     own_xids: HashSet<Xid>,
     serializable_reader: Option<Xid>,
     cache_key: String,
+    cache_data_epoch: Option<u64>,
+    cache_revision: u64,
     is_volatile_query: bool,
     cache_safe: bool,
     /// Effective tenant captured at frame-build time after WITHIN /
@@ -400,6 +402,7 @@ impl StatementExecutionFrame {
         identity_source: StatementIdentity<'_>,
     ) -> RedDBResult<Self> {
         let query = identity_source.text();
+        let (cache_data_epoch, cache_revision) = runtime.result_cache_snapshot();
         if let StatementIdentity::Expr(expr) = identity_source {
             reject_unresolvable_as_of(expr)?;
         }
@@ -415,7 +418,8 @@ impl StatementExecutionFrame {
             .map(|ctx| ctx.xid);
         let (snapshot, as_of_floor, snapshot_retention) =
             runtime.statement_snapshot(query, identity_source)?;
-        let requires_index_fallback = as_of_floor.is_some() || tx_context.is_some();
+        let requires_index_fallback =
+            as_of_floor.is_some() || tx_context.is_some() || !snapshot.in_progress.is_empty();
         let (cache_key, is_volatile_query) = match identity_source {
             StatementIdentity::Text(_) => (
                 result_cache_key(query),
@@ -471,6 +475,8 @@ impl StatementExecutionFrame {
             own_xids,
             serializable_reader,
             cache_key,
+            cache_data_epoch,
+            cache_revision,
             is_volatile_query,
             cache_safe,
             effective_scope,
@@ -553,7 +559,7 @@ impl StatementExecutionFrame {
         }
         if self.can_read_result_cache() {
             runtime
-                .get_result_cache_entry(self.cache_key())
+                .get_result_cache_entry(self.cache_key(), self.cache_data_epoch)
                 .map(|mut result| {
                     if let Some(vector) = result.result.stats.vector.as_mut() {
                         vector.cache_hit = true;
@@ -578,7 +584,10 @@ impl StatementExecutionFrame {
                     result: result.clone(),
                     cached_at: std::time::Instant::now(),
                     scopes,
+                    data_epoch: self.cache_data_epoch.unwrap_or(0),
                 },
+                self.cache_data_epoch,
+                self.cache_revision,
             );
         }
     }
@@ -1194,14 +1203,13 @@ impl RedDBRuntime {
     }
 
     fn result_cache_safe(&self, conn_id: u64) -> bool {
-        let has_active_xids = self
+        let has_unsafe_xids = self
             .inner
             .transaction_state
             .snapshot_manager()
-            .oldest_active_xid()
-            .is_some();
+            .has_cache_unsafe_active_xids();
         let in_own_tx = self.inner.transaction_state.in_transaction(conn_id);
-        !has_active_xids && !in_own_tx
+        !has_unsafe_xids && !in_own_tx
     }
 }
 
@@ -1857,7 +1865,7 @@ mod tests {
         // tenant + identity in via `result_cache_key`, so finding "acme"
         // and "alice" inside any cached key proves the frame was the
         // seam used.
-        let cache = rt.inner.result_cache.read();
+        let cache = rt.inner.result_blob_entries.read();
         let any_keyed_with_scope = cache
             .0
             .keys()
@@ -1909,7 +1917,7 @@ mod tests {
         let _ = rt
             .execute_query("SELECT pg_advisory_unlock(1)")
             .expect("volatile SELECT executes");
-        let cache = rt.inner.result_cache.read();
+        let cache = rt.inner.result_blob_entries.read();
         let key = result_cache_key("SELECT pg_advisory_unlock(1)");
         assert!(
             !cache.0.contains_key(&key),
@@ -1921,14 +1929,9 @@ mod tests {
     }
 
     #[test]
-    fn blob_cache_backend_populates_blob_path_without_legacy_write() {
+    fn result_cache_populates_blob_path() {
         reset_thread_locals();
         let rt = fresh_runtime();
-        rt.inner
-            .db
-            .store()
-            .set_config_tree("runtime.result_cache.backend", &crate::json!("blob_cache"));
-
         let result = rt.execute_query("SELECT 1").expect("SELECT 1 executes");
         assert_eq!(result.statement_type, "select");
 
@@ -1941,21 +1944,12 @@ mod tests {
             "blob backend should stamp the Blob Cache path"
         );
         assert!(rt.inner.result_blob_entries.read().0.contains_key(&key));
-        assert!(
-            !rt.inner.result_cache.read().0.contains_key(&key),
-            "blob backend should not write the legacy map"
-        );
     }
 
     #[test]
     fn blob_cache_backend_keeps_volatile_select_out_of_blob_path() {
         reset_thread_locals();
         let rt = fresh_runtime();
-        rt.inner
-            .db
-            .store()
-            .set_config_tree("runtime.result_cache.backend", &crate::json!("blob_cache"));
-
         let _ = rt
             .execute_query("SELECT pg_advisory_unlock(1)")
             .expect("volatile SELECT executes");
@@ -1968,29 +1962,6 @@ mod tests {
             "volatile SELECT must not populate blob result cache"
         );
         assert!(!rt.inner.result_blob_entries.read().0.contains_key(&key));
-    }
-
-    #[test]
-    fn shadow_backend_dual_writes_and_reports_no_divergence_on_equal_results() {
-        reset_thread_locals();
-        let rt = fresh_runtime();
-        rt.inner
-            .db
-            .store()
-            .set_config_tree("runtime.result_cache.backend", &crate::json!("shadow"));
-
-        let first = rt.execute_query("SELECT 1").expect("first SELECT");
-        let second = rt.execute_query("SELECT 1").expect("cached SELECT");
-        assert_eq!(first.result.len(), second.result.len());
-
-        let key = result_cache_key("SELECT 1");
-        assert!(rt.inner.result_cache.read().0.contains_key(&key));
-        assert!(rt.inner.result_blob_entries.read().0.contains_key(&key));
-        assert_eq!(rt.result_cache_shadow_divergences(), 0);
-        assert_eq!(
-            crate::runtime::METRIC_CACHE_SHADOW_DIVERGENCE_TOTAL,
-            "cache_shadow_divergence_total"
-        );
     }
 
     #[test]

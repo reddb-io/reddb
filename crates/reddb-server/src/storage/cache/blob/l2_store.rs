@@ -124,6 +124,10 @@ impl StoreBlobCacheL2 {
         bytes_in_use: u64,
         expires_at_unix_ms: Option<u64>,
     ) -> Result<(), CacheError> {
+        debug_assert!(self
+            .store
+            .vault_publication_lock
+            .is_owned_by_current_thread());
         let control = find_value(&self.store, CONTROL_KEY).map(|(id, _)| id);
         let mut deletes = Vec::with_capacity(2);
         deletes.extend(previous.map(|id| (COLLECTION.to_string(), id)));
@@ -154,6 +158,10 @@ impl StoreBlobCacheL2 {
         previous: EntityId,
         expires_at_unix_ms: Option<u64>,
     ) -> Result<(), CacheError> {
+        debug_assert!(self
+            .store
+            .vault_publication_lock
+            .is_owned_by_current_thread());
         self.store
             .publish_rows(RowPublication {
                 inserts: vec![(
@@ -167,6 +175,10 @@ impl StoreBlobCacheL2 {
     }
 
     fn publish_deletions(&self, ids: Vec<EntityId>, bytes_in_use: u64) -> Result<(), CacheError> {
+        debug_assert!(self
+            .store
+            .vault_publication_lock
+            .is_owned_by_current_thread());
         let control = find_value(&self.store, CONTROL_KEY).map(|(id, _)| id);
         let mut deletes: Vec<_> = ids
             .into_iter()
@@ -234,6 +246,7 @@ impl StoreBlobCacheL2 {
     }
 
     fn delete_where(&self, predicate: impl Fn(&L2Record) -> bool) -> usize {
+        let _publication = self.store.vault_publication_lock.lock();
         let _operation = self.operation.lock();
         let mut removed = 0usize;
         loop {
@@ -316,19 +329,108 @@ impl StoreBlobCacheL2 {
 }
 
 impl BlobCacheL2Backend for StoreBlobCacheL2 {
+    fn namespace_generation(&self, namespace: &str) -> Option<u64> {
+        let _operation = self.operation.lock();
+        match find_value(&self.store, &generation_key(namespace)) {
+            Some((_, Value::UnsignedInteger(generation))) => Some(generation),
+            _ => None,
+        }
+    }
+
+    fn set_namespace_generation(&self, namespace: &str, generation: u64) -> Result<(), CacheError> {
+        let _publication = self.store.vault_publication_lock.lock();
+        let _operation = self.operation.lock();
+        let key = generation_key(namespace);
+        let previous = find_value(&self.store, &key).map(|(id, _)| (COLLECTION.to_string(), id));
+        self.store
+            .publish_rows(RowPublication {
+                inserts: vec![(
+                    COLLECTION.to_string(),
+                    cache_row(&key, Value::UnsignedInteger(generation)),
+                    None,
+                )],
+                deletes: previous.into_iter().collect(),
+            })
+            .map_err(store_error)
+    }
+
+    fn invalidate_namespace(&self, namespace: &str, generation: u64) -> Result<(), CacheError> {
+        let _publication = self.store.vault_publication_lock.lock();
+        let operation = self.operation.lock();
+        let mut ids = Vec::new();
+        let mut reclaimed = 0u64;
+        self.visit_records(|id, record| {
+            if record.namespace == namespace {
+                ids.push(id);
+                reclaimed = reclaimed.saturating_add(record.byte_len);
+            }
+            ids.len() < DELETE_BATCH
+        });
+        let more = ids.len() == DELETE_BATCH;
+        let generation_key = generation_key(namespace);
+        let previous_generation = find_value(&self.store, &generation_key).map(|(id, _)| id);
+        let new_bytes = self
+            .bytes_in_use
+            .load(Ordering::Relaxed)
+            .saturating_sub(reclaimed);
+        let mut deletes: Vec<_> = ids
+            .into_iter()
+            .map(|id| (COLLECTION.to_string(), id))
+            .collect();
+        deletes.extend(previous_generation.map(|id| (COLLECTION.to_string(), id)));
+        let mut inserts = vec![(
+            COLLECTION.to_string(),
+            cache_row(&generation_key, Value::UnsignedInteger(generation)),
+            None,
+        )];
+        if reclaimed > 0 {
+            deletes.extend(
+                find_value(&self.store, CONTROL_KEY).map(|(id, _)| (COLLECTION.to_string(), id)),
+            );
+            inserts.push((
+                COLLECTION.to_string(),
+                cache_row(CONTROL_KEY, Value::UnsignedInteger(new_bytes)),
+                None,
+            ));
+        }
+        self.store
+            .publish_rows(RowPublication { inserts, deletes })
+            .map_err(store_error)?;
+        if reclaimed > 0 {
+            self.bytes_in_use.store(new_bytes, Ordering::Relaxed);
+        }
+        drop(operation);
+        // The durable generation fences all remaining records. Reclaim any
+        // additional bounded batches using the ordinary deletion path.
+        if more {
+            self.delete_namespace(namespace);
+        }
+        Ok(())
+    }
+
     fn get(&self, key: &BlobCacheKey, now_ms: u64, generation: u64) -> Option<Entry> {
         if !self.synopsis_may_contain(&key.namespace, &key.key) {
             self.negative_skips.fetch_add(1, Ordering::Relaxed);
             return None;
         }
-        let _operation = self.operation.lock();
+        let operation = self.operation.lock();
         self.metadata_reads.fetch_add(1, Ordering::Relaxed);
         let Some(stored) = self.find_record(key) else {
             self.synopsis_metadata_reads.fetch_add(1, Ordering::Relaxed);
             return None;
         };
         if stored.record.namespace_generation != generation || stored.record.is_expired_at(now_ms) {
-            let _ = self.delete_key_locked(key);
+            let stale_id = stored.id;
+            drop(operation);
+            let _publication = self.store.vault_publication_lock.lock();
+            let _operation = self.operation.lock();
+            if self.find_record(key).is_some_and(|current| {
+                current.id == stale_id
+                    && (current.record.namespace_generation != generation
+                        || current.record.is_expired_at(now_ms))
+            }) {
+                let _ = self.delete_key_locked(key);
+            }
             return None;
         }
         if crate::storage::engine::crc32(&stored.framed) != stored.record.checksum {
@@ -369,6 +471,7 @@ impl BlobCacheL2Backend for StoreBlobCacheL2 {
         _old_entry_size: u64,
         compressed: Compressed,
     ) -> Result<(), CacheError> {
+        let _publication = self.store.vault_publication_lock.lock();
         let _operation = self.operation.lock();
         let old = self.find_record(key);
         let old_size = old.as_ref().map_or(0, |stored| stored.record.byte_len);
@@ -441,6 +544,7 @@ impl BlobCacheL2Backend for StoreBlobCacheL2 {
         now_ms: u64,
         expires_at_unix_ms: Option<u64>,
     ) -> Result<bool, CacheError> {
+        let _publication = self.store.vault_publication_lock.lock();
         let _operation = self.operation.lock();
         let Some(mut stored) = self.find_record(key) else {
             return Ok(false);
@@ -461,6 +565,7 @@ impl BlobCacheL2Backend for StoreBlobCacheL2 {
     }
 
     fn delete_key(&self, key: &BlobCacheKey) -> Option<u64> {
+        let _publication = self.store.vault_publication_lock.lock();
         let _operation = self.operation.lock();
         self.delete_key_locked(key).ok().flatten()
     }
@@ -495,6 +600,7 @@ impl BlobCacheL2Backend for StoreBlobCacheL2 {
         if hard_limit == 0 || millis_limit == Some(0) {
             return BlobCacheSweepOutcome::default();
         }
+        let _publication = self.store.vault_publication_lock.lock();
         let _operation = self.operation.lock();
         let Some(manager) = self.store.get_collection(COLLECTION) else {
             return BlobCacheSweepOutcome {
@@ -711,6 +817,10 @@ fn storage_key(key: &BlobCacheKey) -> String {
     hex::encode(encode_l2_key(&key.namespace, &key.key))
 }
 
+fn generation_key(namespace: &str) -> String {
+    format!("__generation:{}", hex::encode(namespace.as_bytes()))
+}
+
 fn encode_store_record(record: &L2Record, framed: &[u8]) -> Vec<u8> {
     let metadata = record.encode();
     let metadata_len = u32::try_from(metadata.len()).unwrap_or(u32::MAX);
@@ -842,6 +952,66 @@ mod tests {
         assert!(reopened.get("tenant", "deleted").is_none());
         assert!(reopened.get("tenant", "expired").is_none());
         assert_eq!(reopened.stats().l2_bytes_in_use(), 0);
+    }
+
+    #[test]
+    fn namespace_invalidation_publishes_generation_and_reclamation_atomically() {
+        let store = Arc::new(UnifiedStore::new());
+        let cache = internal_cache(Arc::clone(&store), 4096);
+        cache.put("tenant", "first", l2_only(b"first")).unwrap();
+        cache.put("other", "keep", l2_only(b"other")).unwrap();
+        let before = cache.stats().l2_bytes_in_use();
+        store
+            .test_fail_deferred_wal_append
+            .store(true, Ordering::Release);
+        assert!(cache.try_invalidate_namespace("tenant").is_err());
+        assert_eq!(cache.stats().l2_bytes_in_use(), before);
+        drop(cache);
+
+        let cache = internal_cache(Arc::clone(&store), 4096);
+        assert_eq!(
+            cache.get("tenant", "first").unwrap().bytes().as_ref(),
+            b"first"
+        );
+        assert_eq!(
+            cache.get("other", "keep").unwrap().bytes().as_ref(),
+            b"other"
+        );
+        assert!(cache.try_invalidate_namespace("tenant").unwrap());
+        assert_eq!(
+            cache.stats().l2_bytes_in_use(),
+            u64::try_from(b"other".len()).expect("payload length")
+        );
+        drop(cache);
+
+        let reopened = internal_cache(store, 4096);
+        assert!(reopened.get("tenant", "first").is_none());
+        assert_eq!(
+            reopened.get("other", "keep").unwrap().bytes().as_ref(),
+            b"other"
+        );
+    }
+
+    #[test]
+    fn namespace_invalidation_reclaims_more_than_one_batch() {
+        let store = Arc::new(UnifiedStore::new());
+        let cache = internal_cache(Arc::clone(&store), 4096);
+        for i in 0..(DELETE_BATCH + 2) {
+            cache.put("tenant", i.to_string(), l2_only(b"x")).unwrap();
+        }
+        cache.put("other", "keep", l2_only(b"y")).unwrap();
+        assert!(cache.try_invalidate_namespace("tenant").unwrap());
+        assert_eq!(cache.stats().l2_bytes_in_use(), 1);
+        drop(cache);
+        let reopened = internal_cache(store, 4096);
+        assert!(reopened.get("tenant", "0").is_none());
+        assert!(reopened
+            .get("tenant", &(DELETE_BATCH + 1).to_string())
+            .is_none());
+        assert_eq!(
+            reopened.get("other", "keep").unwrap().bytes().as_ref(),
+            b"y"
+        );
     }
 
     #[test]
