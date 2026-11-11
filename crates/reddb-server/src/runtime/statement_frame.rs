@@ -403,7 +403,9 @@ impl StatementExecutionFrame {
     ) -> RedDBResult<Self> {
         let query = identity_source.text();
         let (cache_data_epoch, cache_revision) = match identity_source {
-            StatementIdentity::Text(query) if statement_kind(query) == "read" => {
+            StatementIdentity::Text(query)
+                if !matches!(statement_kind(query), "write" | "ddl" | "admin" | "control") =>
+            {
                 runtime.result_cache_snapshot()
             }
             StatementIdentity::Text(_) | StatementIdentity::Expr(_) => (None, 0),

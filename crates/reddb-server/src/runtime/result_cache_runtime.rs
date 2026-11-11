@@ -841,7 +841,7 @@ mod crash_tests {
     }
 
     #[test]
-    fn non_read_statements_do_not_initialize_result_cache_format() {
+    fn write_and_control_statements_do_not_initialize_result_cache_format() {
         let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
         for sql in [
             "CREATE TABLE cache_format_gate (id INT)",
