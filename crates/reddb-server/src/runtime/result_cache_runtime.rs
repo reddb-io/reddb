@@ -652,9 +652,14 @@ impl RedDBRuntime {
         {
             return;
         }
-        let volatile = cache
-            .5
-            .is_some_and(|until| std::time::Instant::now() < until);
+        let defer_l2 = self.inner.db.path().is_some() && store.pager().is_none();
+        if defer_l2 && cache.5.is_none() {
+            cache.5 = Some(std::time::Instant::now() + RESULT_CACHE_WRITE_QUIET_PERIOD);
+        }
+        let volatile = defer_l2
+            || cache
+                .5
+                .is_some_and(|until| std::time::Instant::now() < until);
         if !volatile
             && self
                 .inner
@@ -1431,6 +1436,8 @@ mod crash_tests {
                 runtime.execute_query(sql).expect(sql);
             }
             assert!(runtime.db().store().result_cache_format_fenced());
+            runtime.inner.result_blob_entries.write().5 = Some(std::time::Instant::now());
+            runtime.promote_volatile_result_cache_entry();
         }
         let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
         assert!(

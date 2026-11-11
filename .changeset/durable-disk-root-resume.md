@@ -3,4 +3,5 @@
 ---
 
 Preserve disk-resident queue and secondary-index roots across result-cache format upgrades,
-and strengthen checkpoint, retention, indexed-query, aggregation, and memory-stat regressions.
+defer embedded L2 result-cache publication off the request path, and strengthen checkpoint,
+retention, indexed-query, aggregation, startup-I/O, and memory-stat regressions.
