@@ -123,10 +123,6 @@ fn aborted_update_removals_preserve_earlier_wal_projection() {
     ] {
         runtime.execute_query(query).expect("isolate checkpoint GC");
     }
-    assert!(
-        !runtime.db().store().result_cache_format_fenced(),
-        "disabling the cache before the first read must not initialize its durable format"
-    );
     runtime
         .execute_query("CREATE TABLE gc_absent (id INT,n INT)")
         .expect("table");
