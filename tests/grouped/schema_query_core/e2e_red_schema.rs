@@ -1977,11 +1977,32 @@ fn segment_and_index_usage_move_under_load() {
     );
     assert!(pool_metric(&rt, "segment_arena", "used_bytes") >= loaded_segment);
 
-    // Whatever moved, the shared total stays the sum of its parts.
-    let total_used = budget_unsigned(&rt, "total_used_bytes");
+    // Whatever moved, the shared total stays the sum of its parts. Read one
+    // snapshot because each red.stats query refreshes live accounting and may
+    // itself move governed result/query buffers.
+    let section = rt
+        .execute_query(&format!(
+            "SELECT * FROM red.stats WHERE collection = '{MEMORY_BUDGET_COLLECTION}'"
+        ))
+        .expect("red.stats budget section");
+    let used_of = |entity: &Value, metric: &str| -> u64 {
+        section
+            .result
+            .records
+            .iter()
+            .find(|row| {
+                row.get("entity") == Some(entity) && row.get("metric") == Some(&Value::text(metric))
+            })
+            .and_then(|row| match row.get("value") {
+                Some(Value::UnsignedInteger(bytes)) => Some(*bytes),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing unsigned {metric} for {entity:?}"))
+    };
+    let total_used = used_of(&Value::Null, "total_used_bytes");
     let summed: u64 = MEMORY_POOL_NAMES
         .iter()
-        .map(|pool| pool_metric(&rt, pool, "used_bytes"))
+        .map(|pool| used_of(&Value::text(*pool), "used_bytes"))
         .sum();
     assert_eq!(summed, total_used);
 
