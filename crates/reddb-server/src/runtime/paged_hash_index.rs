@@ -37,7 +37,7 @@ impl HashProjection {
         entity: &UnifiedEntity,
         bytes_max: usize,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        if !matches!(entity.kind, EntityKind::TableRow { .. }) {
+        if entity.xmax != 0 || !matches!(entity.kind, EntityKind::TableRow { .. }) {
             return Ok(None);
         }
         let EntityData::Row(row) = &entity.data else {
@@ -98,7 +98,7 @@ impl SecondaryIndexProjector for HashProjection {
 
 fn projection_identity(columns: &[String], schema: Option<&[String]>) -> SecondaryIndexIdentity {
     let mut digest = Sha256::new();
-    digest.update(b"runtime-hash-sha256-v1");
+    digest.update(b"runtime-current-hash-sha256-v2");
     digest.update([u8::from(schema.is_some())]);
     for names in [columns, schema.unwrap_or(&[])] {
         digest.update((names.len() as u64).to_le_bytes());
@@ -108,7 +108,7 @@ fn projection_identity(columns: &[String], schema: Option<&[String]>) -> Seconda
         }
     }
     SecondaryIndexIdentity {
-        codec_version: 1,
+        codec_version: 2,
         definition: digest.finalize().into(),
     }
 }
@@ -222,6 +222,7 @@ impl RuntimeHashIndex {
         let index = store.secondary_index(&self.collection, &self.name, &self.identity);
         let scan = |accept: &mut dyn FnMut(&UnifiedEntity) -> Result<(), HashIndexError>| {
             if let Some(index) = &index {
+                let mut dangling_posting = false;
                 let mut cursor = index
                     .candidates(&self.projection.digest(key))
                     .map_err(storage_error)?;
@@ -230,16 +231,30 @@ impl RuntimeHashIndex {
                         manager.try_get(id, read_bytes_max).map_err(storage_error)?
                     {
                         accept(&entity)?;
+                    } else {
+                        dangling_posting = true;
                     }
                 }
                 let mut failure = None;
-                manager.for_each_entity(|entity| {
-                    if let Err(error) = accept(entity) {
-                        failure = Some(error);
-                        return false;
-                    }
-                    true
-                });
+                if dangling_posting {
+                    manager
+                        .try_for_each_entity(read_bytes_max, |entity| {
+                            if let Err(error) = accept(entity) {
+                                failure = Some(error);
+                                return false;
+                            }
+                            true
+                        })
+                        .map_err(storage_error)?;
+                } else {
+                    manager.for_each_entity(|entity| {
+                        if let Err(error) = accept(entity) {
+                            failure = Some(error);
+                            return false;
+                        }
+                        true
+                    });
+                }
                 if let Some(error) = failure {
                     return Err(error);
                 }
@@ -441,6 +456,67 @@ mod tests {
             .expect("metadata-only restore");
         assert_eq!(lookup(&runtime, "alpha").len(), 1);
         assert!(lookup(&runtime, "missing").is_empty());
+    }
+
+    #[test]
+    fn paged_hash_dangling_posting_scans_authoritative_backing() {
+        use crate::storage::engine::BTree;
+        use reddb_engine::storage::collection_read::{
+            CollectionCursor, CollectionRead, EncodedRecord, PagedCollection,
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TrackScan {
+            source: Arc<dyn CollectionRead + Send + Sync>,
+            scanned: Arc<AtomicBool>,
+        }
+        impl CollectionRead for TrackScan {
+            fn get_record(
+                &self,
+                id: EntityId,
+                limit: usize,
+            ) -> Result<Option<EncodedRecord>, StoreError> {
+                self.source.get_record(id, limit)
+            }
+            fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, StoreError> {
+                self.scanned.store(true, Ordering::SeqCst);
+                self.source.cursor()
+            }
+            fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, StoreError> {
+                self.scanned.store(true, Ordering::SeqCst);
+                self.source.owned_cursor()
+            }
+        }
+
+        let (_directory, runtime) = fixture();
+        let physical_id = lookup(&runtime, "alpha")[0];
+        let store = runtime.db().store();
+        let root = store.collection_root_page("hash_rows").expect("root");
+        let manager = store.get_collection("hash_rows").expect("hash rows");
+        let scanned = Arc::new(AtomicBool::new(false));
+        manager.install_backing(
+            Arc::new(TrackScan {
+                source: Arc::new(PagedCollection::new(Arc::new(BTree::with_root(
+                    Arc::clone(store.pager().expect("pager")),
+                    root,
+                )))),
+                scanned: Arc::clone(&scanned),
+            }),
+            root,
+            store.format_version(),
+            1024 * 1024,
+            2,
+        );
+        manager
+            .delete(physical_id)
+            .expect("remove indexed physical row");
+        assert!(!scanned.load(Ordering::SeqCst));
+
+        assert!(lookup(&runtime, "alpha").is_empty());
+        assert!(
+            scanned.load(Ordering::SeqCst),
+            "a dangling posting must invalidate the fast path and scan the backing"
+        );
     }
 
     #[test]
