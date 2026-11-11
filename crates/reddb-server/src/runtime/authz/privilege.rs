@@ -193,6 +193,8 @@ impl RedDBRuntime {
         action: reddb_rql::ast::PolicyAction,
         collection: &str,
     ) -> RedDBResult<()> {
+        let collection =
+            reddb_engine::storage::system_collection_names::canonical_or_self(collection);
         let Some((username, role)) = current_auth_identity() else {
             return Ok(());
         };
@@ -2254,6 +2256,52 @@ mod collection_boundary_tests {
     use crate::runtime::execution_context::{with_snapshot_bundle, SnapshotBundle};
     use reddb_types::Value;
     use std::sync::Arc;
+
+    #[test]
+    fn system_collection_alias_cannot_bypass_prefix_deny() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let store = Arc::new(AuthStore::new(AuthConfig {
+            enabled: true,
+            require_auth: true,
+            ..AuthConfig::default()
+        }));
+        let principal = UserId::platform("reader");
+        store
+            .create_user("reader", "password", Role::Read)
+            .expect("reader");
+        store
+            .put_policy(
+                Policy::from_json_str(
+                    r#"{"id":"protect_system","version":1,"statements":[{"effect":"allow","actions":["select"],"resources":["collection:*","table:*"]},{"effect":"deny","actions":["select"],"resources":["collection:red.*","table:red.*"]}]}"#,
+                )
+                .expect("policy"),
+            )
+            .expect("put policy");
+        store
+            .attach_policy(PrincipalRef::User(principal.clone()), "protect_system")
+            .expect("attach policy");
+        runtime.set_auth_store(store);
+
+        let reader = SnapshotBundle {
+            snapshot: None,
+            auth: Some(("reader".to_string(), Role::Read)),
+            auth_principal: Some(principal),
+            tenant: None,
+        };
+        with_snapshot_bundle(&reader, || {
+            assert!(runtime.scan_collection("red.config", None, 10).is_err());
+            assert!(
+                runtime.scan_collection("red_config", None, 10).is_err(),
+                "the legacy alias must authorize as its canonical system collection"
+            );
+            let query =
+                reddb_rql::ast::QueryExpr::Table(reddb_rql::ast::TableQuery::new("red_config"));
+            assert!(
+                runtime.check_query_privilege(&query).is_err(),
+                "the statement privilege gate must canonicalize the legacy alias"
+            );
+        });
+    }
 
     #[test]
     fn shared_collection_boundary_enforces_role_and_tenant_aware_iam() {

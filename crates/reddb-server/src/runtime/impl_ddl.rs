@@ -1999,6 +1999,7 @@ impl RedDBRuntime {
 }
 
 pub(crate) fn is_system_schema_name(name: &str) -> bool {
+    let name = reddb_engine::storage::system_collection_names::canonical_or_self(name);
     name == "red" || name.starts_with("red.") || name.starts_with("__red_schema_")
 }
 
