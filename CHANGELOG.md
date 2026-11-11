@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.33.3
+
+### Patch Changes
+
+- [#2785](https://github.com/reddb-io/reddb/pull/2785) [`9fb0855`](https://github.com/reddb-io/reddb/commit/9fb0855b27ee3bee790ccc3f8b307744a620b12d) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve disk-resident queue and secondary-index roots across result-cache format upgrades,
+  defer embedded L2 result-cache publication off the request path, and strengthen checkpoint,
+  retention, indexed-query, aggregation, startup-I/O, and memory-stat regressions.
+
 ## 1.33.2
 
 ### Patch Changes
