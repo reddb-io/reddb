@@ -1691,6 +1691,8 @@ mod tests {
             .as_millis();
         db.save_collection_contract(crate::physical::CollectionContract {
             name: name.to_string(),
+            description: None,
+            description_generated: false,
             declared_model: crate::catalog::CollectionModel::Graph,
             schema_mode: crate::catalog::SchemaMode::Dynamic,
             origin: crate::physical::ContractOrigin::Explicit,

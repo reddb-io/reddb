@@ -316,16 +316,26 @@ silently re-routes to a different provider.
 | `red.config.ai.ask.planner_model` | ASK model | Planner model for the ASK planner |
 | `red.config.ai.ask.effort` | — | Planner effort hint (e.g. `low`/`medium`/`high`) |
 | `red.config.ai.ask.max_plan_steps` | `3` | Hard cap shared by ASK metadata-tool calls and the terminal read-only query |
+| `red.config.ai.collection_descriptions.auto_enrich` | `false` | Generate missing collection and attribute descriptions after collection DDL; Cloud may enable this for its AI plan |
 | `red.config.ai.inference.provider` | `openai` | Task pointer: which provider generates |
 | `red.config.ai.embeddings.provider` | `openai` | Task pointer: which provider embeds |
 | `red.config.ai.providers.{provider}.base_url` | — | Custom API base URL for a provider |
 | `red.config.ai.providers.{provider}.models.inference` | provider default | Inference model for that provider |
 | `red.config.ai.providers.{provider}.models.embeddings` | provider default | Embeddings model for that provider |
 | `red.config.ai.{provider}.{alias}.key` | — | API key (e.g., `red.config.ai.groq.default.key`) |
+
 | `red.config.ai.max_embedding_inputs` | `256` | Max inputs per embedding batch |
 | `red.config.ai.max_prompt_batch` | `256` | Max prompts per batch |
 | `red.config.ai.timeout.connect_secs` | `10` | API connection timeout |
 | `red.config.ai.timeout.read_secs` | `90` | API read timeout |
+
+`auto_enrich` uses the configured inference provider and runs after successful
+collection DDL. It needs an inference credential; it never requires an embeddings
+API. Cloud can enable the flag and supply a managed inference allowance, while a
+local installation can opt in with its own provider. Manual descriptions take
+priority over generated suggestions.
+For a container environment override, set
+`REDDB_RED_CONFIG_AI_COLLECTION_DESCRIPTIONS_AUTO_ENRICH=true`.
 
 > **Clean break (ADR 0068 §5):** the old keys `red.config.ai.default.provider`,
 > `red.config.ai.default.model`, and the per-credential base-URL shape

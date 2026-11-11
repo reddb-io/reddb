@@ -372,6 +372,7 @@ impl RedDBRuntime {
             super::query_budget::check_result(self.resource_limits(), &value)?;
             Ok(value)
         });
+        self.finish_collection_description_transaction(&result);
         let elapsed_ms = started.elapsed().as_millis() as u64;
 
         // Build EffectiveScope from the same thread-locals frame-build

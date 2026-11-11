@@ -26,6 +26,8 @@ pub const CASES: &[(&str, fn())] = &[
 fn column(name: &str) -> PhysicalDeclaredColumnContract {
     PhysicalDeclaredColumnContract {
         name: name.into(),
+        description: None,
+        description_generated: false,
         data_type: "integer".into(),
         sql_type: Some(reddb_file::PhysicalSqlTypeName {
             name: "integer".into(),
@@ -47,6 +49,8 @@ pub fn persisted() -> PhysicalCollectionContract {
     total.check = Some("total < 100".into());
     PhysicalCollectionContract {
         name: "orders".into(),
+        description: None,
+        description_generated: false,
         declared_model: "table".into(),
         schema_mode: "strict".into(),
         origin: "explicit".into(),

@@ -1392,6 +1392,7 @@ struct RuntimeInner {
     /// #121) Stage 2 to narrow vector-search candidates before any
     /// embedding compute. Mutated only from DDL execution paths.
     schema_vocabulary: parking_lot::RwLock<crate::runtime::schema_vocabulary::SchemaVocabulary>,
+    description_enrichment: parking_lot::Mutex<collection_description_enrichment::QueueState>,
     /// Issue #205 — dedicated slow-query sink (`red-slow.log`).
     /// Built once at runtime startup; below-threshold calls pay only a
     /// single relaxed atomic load. Threshold + sample-pct come from
@@ -1594,6 +1595,7 @@ mod background_tasks;
 pub mod batch_insert;
 pub mod blockchain_kind;
 mod collection_contract;
+mod collection_description_enrichment;
 pub mod config_matrix;
 pub mod config_overlay;
 pub mod config_watcher;

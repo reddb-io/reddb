@@ -238,21 +238,21 @@ pub fn definitions(surface: ToolSurface) -> Vec<RedToolDefinition> {
         query_description,
     ) = match surface {
         ToolSurface::Ask => (
-            "List a bounded summary of collections visible to the asking user",
-            "Describe columns of one collection visible to the asking user",
-            "Find visible collections containing an exact field name",
+            "List a bounded summary of collections and their descriptions visible to the asking user",
+            "Describe columns, native types, and descriptions of one collection visible to the asking user",
+            "Find visible collections containing an exact field name and return its description",
             "Run one bounded exploratory read under the asking user's access",
         ),
         ToolSurface::Mcp => (
-            "List visible collections with model, schema, size, index, and attention metadata. Remote calls execute under the connected user's tenant and policies.",
-            "Describe the fields visible on one collection using the canonical red.columns catalog. The database applies the connected user's tenant and policies before returning metadata.",
-            "Find every visible collection with an exact field name using the canonical red.columns catalog. Useful before a global SELECT when the user names an attribute such as passport_number. Tenant and policy filtering is enforced by the database.",
+            "List visible collections with model, schema, size, index, and description metadata. Remote calls execute under the connected user's tenant and policies.",
+            "Describe the fields, native types, and descriptions visible on one collection using the canonical red.columns catalog. The database applies the connected user's tenant and policies before returning metadata.",
+            "Find every visible collection with an exact field name and its description using the canonical red.columns catalog. Useful before a global SELECT when the user names an attribute such as passport_number. Tenant and policy filtering is enforced by the database.",
             "Execute a SQL or universal query against RedDB. Supports SELECT, INSERT, UPDATE, DELETE, and graph queries (Gremlin, Cypher, SPARQL).\n\nALWAYS pass user-provided values via the `params` array using `$1`, `$2`, ... placeholders rather than interpolating them into the SQL string. Example: `{\"sql\": \"SELECT * FROM users WHERE id = $1\", \"params\": [42]}`. Interpolating user input directly is unsafe and brittle; the parameterized form is type-checked and immune to injection.",
         ),
         ToolSurface::Acp => (
-            "List a bounded summary of collections visible to the connected user",
-            "Describe columns of one collection visible to the connected user",
-            "Find visible collections containing an exact field name",
+            "List a bounded summary of collections and their descriptions visible to the connected user",
+            "Describe columns, native types, and descriptions of one collection visible to the connected user",
+            "Find visible collections containing an exact field name and return its description",
             "Run one bounded read-only query under the connected user's access",
         ),
     };
@@ -484,7 +484,7 @@ impl<'a> RedToolExecutor<'a> {
             RedToolCall::Catalog => self.execute_query(
                 match self.profile {
                     ToolExecutionProfile::Ask => {
-                        "SELECT name, model, schema_mode, entities, indices FROM red.collections \
+                        "SELECT name, model, schema_mode, entities, indices, description, description_generated FROM red.collections \
                          WHERE internal = false ORDER BY name LIMIT 128"
                     }
                     ToolExecutionProfile::Direct => "SHOW COLLECTIONS",
@@ -495,11 +495,11 @@ impl<'a> RedToolExecutor<'a> {
                 match self.profile {
                     ToolExecutionProfile::Ask => {
                         "SELECT collection, name, type, nullable, default_value, is_primary_key, \
-                         is_unique FROM red.columns WHERE collection = $1 ORDER BY name LIMIT 128"
+                         is_unique, description, description_generated FROM red.columns WHERE collection = $1 ORDER BY name LIMIT 128"
                     }
                     ToolExecutionProfile::Direct => {
                         "SELECT collection, name, type, nullable, default_value, is_primary_key, \
-                         is_unique FROM red.columns WHERE collection = $1 ORDER BY name"
+                         is_unique, description, description_generated FROM red.columns WHERE collection = $1 ORDER BY name"
                     }
                 },
                 &[Value::text(collection.clone())],
@@ -507,11 +507,11 @@ impl<'a> RedToolExecutor<'a> {
             RedToolCall::FindField { field } => self.execute_query(
                 match self.profile {
                     ToolExecutionProfile::Ask => {
-                        "SELECT collection, name, type, nullable FROM red.columns WHERE name = $1 \
+                        "SELECT collection, name, type, nullable, description, description_generated FROM red.columns WHERE name = $1 \
                          ORDER BY collection, name LIMIT 128"
                     }
                     ToolExecutionProfile::Direct => {
-                        "SELECT collection, name, type, nullable FROM red.columns WHERE name = $1 \
+                        "SELECT collection, name, type, nullable, description, description_generated FROM red.columns WHERE name = $1 \
                          ORDER BY collection, name"
                     }
                 },

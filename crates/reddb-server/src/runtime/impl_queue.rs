@@ -3621,6 +3621,8 @@ fn queue_collection_contract(
 
     crate::physical::CollectionContract {
         name: name.to_string(),
+        description: None,
+        description_generated: false,
         declared_model: crate::catalog::CollectionModel::Queue,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
         origin: crate::physical::ContractOrigin::Explicit,
