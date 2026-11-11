@@ -197,14 +197,6 @@ harness = false
 name = "timeseries_ingest_bench"
 harness = false
 
-[[bench]]
-name = "wal_stream_bench"
-harness = false
-
-[[bench]]
-name = "wal_stream_rpc_bench"
-harness = false
-
 [dev-dependencies]
 http-body-util = "0.1"
 # Criterion benchmark harness for blob_cache_bench (#190).

@@ -2,6 +2,53 @@ use super::*;
 use crate::replication::cdc::ChangeRecord;
 use crate::replication::logical::{ApplyMode, LogicalChangeApplier};
 
+const REPLICA_LOOP_CRASH_ENV: &str = "REDDB_REPLICA_LOOP_CRASH_AT";
+const REPLICA_LOOP_CRASH_LSN_ENV: &str = "REDDB_REPLICA_LOOP_CRASH_LSN";
+const REPLICA_LOOP_AFTER_CURSOR_BEFORE_ACK: &str = "after_cursor_before_ack";
+
+fn maybe_crash_replica_loop(point: &str, applied_lsn: u64) {
+    let target_matches = std::env::var(REPLICA_LOOP_CRASH_LSN_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_none_or(|target| target == applied_lsn);
+    if target_matches && std::env::var(REPLICA_LOOP_CRASH_ENV).ok().as_deref() == Some(point) {
+        std::process::exit(177);
+    }
+}
+
+async fn acknowledge_replica_cursor(
+    client: &mut crate::grpc::proto::red_db_client::RedDbClient<tonic::transport::Channel>,
+    request_auth: &crate::replication::request_auth::ReplicaRequestAuth,
+    runtime: &RedDBRuntime,
+    replica_id: &str,
+    applied_lsn: u64,
+) -> Result<(), tonic::Status> {
+    let apply_errors = runtime.replica_apply_error_counts();
+    let apply_errors_total = apply_errors.iter().map(|(_, count)| *count).sum::<u64>();
+    let divergence_total = apply_errors
+        .iter()
+        .find(|(kind, _)| {
+            matches!(
+                kind,
+                crate::replication::logical::ApplyErrorKind::Divergence
+            )
+        })
+        .map(|(_, count)| *count)
+        .unwrap_or(0);
+    let ack_payload = reddb_wire::replication::WalStreamAck {
+        replica_id: replica_id.to_string(),
+        applied_lsn,
+        durable_lsn: applied_lsn,
+        apply_errors_total,
+        divergence_total,
+    };
+    let ack_request = request_auth.request(crate::grpc::proto::JsonPayloadRequest {
+        payload_json: String::from_utf8(ack_payload.encode_json())
+            .unwrap_or_else(|_| "{}".to_string()),
+    });
+    client.ack_replica_lsn(ack_request).await.map(|_| ())
+}
+
 fn catchup_mode_from_wire(
     catchup: Option<&reddb_wire::replication::CatchupModeReply>,
 ) -> reddb_file::ReplicaCatchupMode {
@@ -632,7 +679,6 @@ impl RedDBRuntime {
 
         runtime.block_on(async move {
             use crate::grpc::proto::red_db_client::RedDbClient;
-            use crate::grpc::proto::JsonPayloadRequest;
 
             let mut client = loop {
                 match RedDbClient::connect(endpoint.clone()).await {
@@ -707,6 +753,10 @@ impl RedDBRuntime {
             // Every subsequent pull keeps the efficient await-data behavior.
             let mut await_data = false;
             let mut binary_stream_supported = None;
+            // A crash or transport failure can leave the local durable cursor
+            // ahead of the primary slot. Reconcile it before awaiting or
+            // applying more WAL, and retain it until the primary accepts the ACK.
+            let mut pending_ack_lsn = (since_lsn > 0).then_some(since_lsn);
 
             loop {
                 let open = reddb_wire::replication::WalStreamOpen {
@@ -714,7 +764,7 @@ impl RedDBRuntime {
                     max_count,
                     replica_id: Some(replica_id.clone()),
                     term: self.current_replication_term(),
-                    await_data,
+                    await_data: await_data && pending_ack_lsn.is_none(),
                     await_timeout_ms: 30_000,
                 };
                 let routing_endpoints = self.routing_endpoints();
@@ -860,6 +910,43 @@ impl RedDBRuntime {
                             std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(250)));
                             continue;
                         }
+                        if let Some(applied_lsn) = pending_ack_lsn {
+                            if applied_lsn > chunk.current_lsn {
+                                self.persist_replication_health(
+                                    "rejoin_primary_behind",
+                                    &format!(
+                                        "local durable cursor {applied_lsn} is ahead of primary head {}",
+                                        chunk.current_lsn
+                                    ),
+                                    current_lsn,
+                                    oldest_available_lsn,
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(
+                                    poll_ms.max(250),
+                                ));
+                                continue;
+                            }
+                            if acknowledge_replica_cursor(
+                                &mut client,
+                                &request_auth,
+                                self,
+                                &replica_id,
+                                applied_lsn,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                self.persist_replication_health(
+                                    "ack_error",
+                                    "primary ack_replica_lsn request failed",
+                                    current_lsn,
+                                    oldest_available_lsn,
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(poll_ms));
+                                continue;
+                            }
+                            pending_ack_lsn = None;
+                        }
                         {
                             let mut batch_applied_lsn = None;
                             let mut applied_relay_records: Vec<(u64, &[u8])> = Vec::new();
@@ -891,8 +978,17 @@ impl RedDBRuntime {
                                         batch_applied_lsn = Some(since_lsn);
                                         applied_relay_records.push((change.lsn, &record.data));
                                     }
-                                    Ok(_) => {
-                                        // Idempotent / Skipped: no advance, no error.
+                                    Ok(
+                                        crate::replication::logical::ApplyOutcome::Idempotent
+                                        | crate::replication::logical::ApplyOutcome::Skipped,
+                                    ) => {
+                                        // The local cursor can be ahead of the primary slot when
+                                        // a process stops after cursor persistence but before ACK.
+                                        // Re-run the relay write idempotently so it validates the
+                                        // already-durable segment, then repeat cursor + ACK.
+                                        since_lsn = since_lsn.max(applier.last_applied_lsn());
+                                        batch_applied_lsn = Some(since_lsn);
+                                        applied_relay_records.push((change.lsn, &record.data));
                                     }
                                     Err(err) => {
                                         self.inner.replica_apply_metrics.record(err.kind());
@@ -995,31 +1091,21 @@ impl RedDBRuntime {
                                     }
                                 }
                                 if !ack_failed {
-                                    let apply_errors = self.replica_apply_error_counts();
-                                    let apply_errors_total =
-                                        apply_errors.iter().map(|(_, count)| *count).sum::<u64>();
-                                    let divergence_total = apply_errors
-                                        .iter()
-                                        .find(|(kind, _)| {
-                                            matches!(
-                                                kind,
-                                                crate::replication::logical::ApplyErrorKind::Divergence
-                                            )
-                                        })
-                                        .map(|(_, count)| *count)
-                                        .unwrap_or(0);
-                                    let ack_payload = reddb_wire::replication::WalStreamAck {
-                                        replica_id: replica_id.clone(),
+                                    pending_ack_lsn = Some(applied_lsn);
+                                    maybe_crash_replica_loop(
+                                        REPLICA_LOOP_AFTER_CURSOR_BEFORE_ACK,
                                         applied_lsn,
-                                        durable_lsn: applied_lsn,
-                                        apply_errors_total,
-                                        divergence_total,
-                                    };
-                                    let ack_request = request_auth.request(JsonPayloadRequest {
-                                        payload_json: String::from_utf8(ack_payload.encode_json())
-                                            .unwrap_or_else(|_| "{}".to_string()),
-                                    });
-                                    if client.ack_replica_lsn(ack_request).await.is_err() {
+                                    );
+                                    if acknowledge_replica_cursor(
+                                        &mut client,
+                                        &request_auth,
+                                        self,
+                                        &replica_id,
+                                        applied_lsn,
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
                                         ack_failed = true;
                                         self.persist_replication_health(
                                             "ack_error",
@@ -1027,6 +1113,8 @@ impl RedDBRuntime {
                                             current_lsn,
                                             oldest_available_lsn,
                                         );
+                                    } else {
+                                        pending_ack_lsn = None;
                                     }
                                 }
                             }
