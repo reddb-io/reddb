@@ -130,9 +130,12 @@ fn contract_round_trip() {
         let decoded =
             collection_contract_from_persisted(expected.clone()).expect("runtime mapping");
         assert_eq!(collection_contract_to_persisted(&decoded), expected);
+        let native_value = reddb_engine::json::from_str(&native_json)
+            .expect("canonical file codec must emit valid JSON");
         assert_eq!(
-            collection_contract_to_json(&decoded).to_string_compact(),
-            native_json
+            collection_contract_to_json(&decoded),
+            native_value,
+            "runtime and file codecs must preserve the same JSON value"
         );
         let bytes = serialize_collection_contracts(&[decoded]);
         let restored = deserialize_collection_contracts(&bytes).expect("contract blob");

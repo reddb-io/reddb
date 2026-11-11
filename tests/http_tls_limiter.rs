@@ -174,8 +174,8 @@ fn tls_rejection_when_clear_text_saturates_then_recovers() {
 
     // Saturate the shared cap via clear-text requests. The async edge
     // limits in-flight requests, not idle TCP connections, so the test
-    // slow-inject hook keeps each request occupying a permit.
-    server.set_test_slow_inject_ms(2_000);
+    // slow-inject gate keeps each request occupying a permit until released.
+    server.set_test_slow_inject_ms(u64::MAX);
     let mut held = Vec::new();
     for _ in 0..cap {
         held.push(spawn_http_get(clear_addr.clone(), "/__test/slow-query"));
@@ -321,8 +321,8 @@ fn mixed_http_https_saturation_rejects_both_transports_then_recovers() {
 
     // Saturate the shared cap with a MIX: one clear-text request + one
     // TLS request. Both occupy the shared in-flight request limiter
-    // while the test slow-inject hook sleeps.
-    server.set_test_slow_inject_ms(2_000);
+    // until the test slow-inject gate is released.
+    server.set_test_slow_inject_ms(u64::MAX);
     let hold_http = spawn_http_get(clear_addr.clone(), "/__test/slow-query");
     let hold_https = spawn_tls_get(
         tls_addr.clone(),
