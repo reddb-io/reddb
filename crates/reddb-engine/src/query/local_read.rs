@@ -1,17 +1,19 @@
 //! Single-owner SELECT over a committed native artifact. This is a local file-owner
 //! API, not a server principal/tenant session or an application transaction engine.
+#[cfg(feature = "full")]
+use crate::catalog::codec::deserialize_collection_contracts;
 use crate::catalog::enforcement::{
     INTERNAL_EXPIRES_AT_KEY, INTERNAL_TTL_MILLIS_KEY, INTERNAL_TTL_SECONDS_KEY,
 };
-use crate::catalog::{
-    codec::deserialize_collection_contracts, CollectionContract, CollectionModel,
-};
-use crate::storage::{
-    entity::EntityData, error::StoreError, manager::ManagerConfig,
-    resident_file::EmbeddedResidentStore,
-};
+use crate::catalog::{CollectionContract, CollectionModel};
+use crate::storage::{entity::EntityData, error::StoreError};
+#[cfg(feature = "full")]
+use crate::storage::{manager::ManagerConfig, resident_file::EmbeddedResidentStore};
+#[cfg(feature = "full")]
 use reddb_file::VfsFile;
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
+#[cfg(feature = "full")]
+use std::path::PathBuf;
 
 use super::{
     evaluator::EvalError,
@@ -105,11 +107,13 @@ impl From<EvalError> for LocalReadError {
 
 /// Holds the exclusively owned file and reconstructs snapshot + committed WAL once.
 /// Callers retain the file lock until this value is dropped. No mutator is exposed.
+#[cfg(feature = "full")]
 pub struct LocalReadDatabase<F: VfsFile> {
     store: EmbeddedResidentStore<F>,
     contracts: HashMap<String, CollectionContract>,
 }
 
+#[cfg(feature = "full")]
 impl<F: VfsFile> LocalReadDatabase<F> {
     pub fn open(file: F, name: impl Into<PathBuf>) -> Result<Self, LocalReadError> {
         let store = EmbeddedResidentStore::open(file, name, ManagerConfig::default(), false, 0)?;
@@ -135,6 +139,7 @@ impl<F: VfsFile> LocalReadDatabase<F> {
     }
 }
 
+#[cfg(feature = "full")]
 pub(crate) fn query_resident(
     resident: &dyn StoreView,
     contracts: &HashMap<String, CollectionContract>,
@@ -152,6 +157,7 @@ pub(crate) fn query_resident_bound(
     execute_resident_query(resident, contracts, admission::table(query)?, None)
 }
 
+#[cfg(feature = "full")]
 pub(crate) fn query_resident_scoped(
     resident: &dyn StoreView,
     contracts: &HashMap<String, CollectionContract>,

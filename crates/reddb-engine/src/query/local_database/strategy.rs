@@ -8,16 +8,19 @@ use crate::catalog::codec::{deserialize_collection_contracts, serialize_collecti
 use crate::storage::{
     collection_read::{CollectionCursor, CollectionRead},
     entity::{EntityId, UnifiedEntity},
-    manager::ManagerConfig,
     metadata::Metadata,
     paged_file::{PagedFileStore, RECORD_BYTES_MAX},
-    resident_file::EmbeddedResidentStore,
-    resident_store::ResidentStore,
     store_wal::StoreWalAction,
+};
+#[cfg(feature = "full")]
+use crate::storage::{
+    manager::ManagerConfig, resident_file::EmbeddedResidentStore, resident_store::ResidentStore,
 };
 use reddb_file::VfsFile;
 use reddb_rql::ast::QueryExpr;
-use std::{collections::HashSet, io, path::PathBuf};
+use std::io;
+#[cfg(feature = "full")]
+use std::{collections::HashSet, path::PathBuf};
 
 pub(super) trait StorageStrategy {
     type File: VfsFile;
@@ -46,6 +49,7 @@ pub(super) trait StorageStrategy {
     fn into_inner(self) -> Self::File;
 }
 
+#[cfg(feature = "full")]
 pub(super) struct ResidentStrategy<F: VfsFile> {
     store: EmbeddedResidentStore<F>,
 }
@@ -90,6 +94,7 @@ impl<F: VfsFile + 'static> PagedStrategy<F> {
     }
 }
 
+#[cfg(feature = "full")]
 impl<F: VfsFile> ResidentStrategy<F> {
     pub(super) fn create(file: F, name: impl Into<PathBuf>, now_ms: u64) -> Result<Self> {
         Ok(Self {
@@ -111,6 +116,7 @@ impl<F: VfsFile> ResidentStrategy<F> {
     }
 }
 
+#[cfg(feature = "full")]
 impl<F: VfsFile> StorageStrategy for ResidentStrategy<F> {
     type File = F;
     type Transaction = ResidentStore;
@@ -198,6 +204,7 @@ impl<F: VfsFile + 'static> StoreView for PagedStrategy<F> {
         Ok(())
     }
 
+    #[cfg(feature = "full")]
     fn get_entity(&self, collection: &str, id: EntityId) -> Result<Option<UnifiedEntity>> {
         Ok(self.record(collection, id)?.map(|(entity, _)| entity))
     }
@@ -230,6 +237,7 @@ impl StoreView for UnavailableTransaction {
         Err(transactions_unavailable())
     }
 
+    #[cfg(feature = "full")]
     fn get_entity(&self, _collection: &str, _id: EntityId) -> Result<Option<UnifiedEntity>> {
         Err(transactions_unavailable())
     }
@@ -355,16 +363,19 @@ impl<F: VfsFile + 'static> StorageStrategy for PagedStrategy<F> {
     }
 }
 
+#[cfg(feature = "full")]
 fn snapshot(resident: &ResidentStore) -> Vec<u8> {
     resident.snapshot_bytes(&HashSet::new(), &HashSet::new(), || {})
 }
 
+#[cfg(feature = "full")]
 fn copy_resident(resident: &ResidentStore) -> Result<ResidentStore> {
     ResidentStore::from_snapshot(&snapshot(resident), &ManagerConfig::default(), false, 0)
         .map(|(resident, _)| resident)
         .map_err(|error| LocalReadError::Query(error.to_string()))
 }
 
+#[cfg(feature = "full")]
 fn apply(resident: &ResidentStore, actions: &[StoreWalAction]) -> Result<()> {
     for action in actions {
         resident.apply_replayed_action(

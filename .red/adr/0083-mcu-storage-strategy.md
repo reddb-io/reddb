@@ -55,6 +55,12 @@ This ADR proposes the MCU exception to ADR 0038's embedded scale contract. It
 does not broaden the canonical embedded profile and does not claim support for
 every board. Each adapter and resource envelope requires its own qualification.
 
+The canonical crates expose a default `full` feature and an additive `mcu`
+selection. `mcu` excludes resident/server deployment machinery that cannot be
+used by the paged single-owner controller, while compiling the same SQL/RQL,
+catalog, record and page implementations. The host flash model is separately
+opt-in and is never required by a firmware build.
+
 ## Invariants
 
 - Opening an MCU-produced `.rdb` with a canonical reader uses the same format
@@ -94,7 +100,9 @@ catalog atomicity tests green. The implemented slice additionally verifies:
   batch, accepting only the complete old or complete new state;
 - the portable pager/query conformance suite; and
 - read-only SQL access to an MCU-produced `.rdb` through the canonical 1.33.3
-  server runtime.
+  server runtime; and
+- successful cross-compilation of the MCU library graph for
+  `xtensa-esp32s3-espidf` with Rust `std` built by the esp-rs toolchain.
 
 The package's host flash model additionally fills the usable board profiles to
 ENOSPC, power-cycles, and streams every acknowledged row. With sparse zero
@@ -102,7 +110,8 @@ blocks it retains 15,413 measurements in the Pico 2's 2,621,440-byte database
 budget and 80,904 in the Nano ESP32's 12,832,768-byte budget. Program/erase
 counters from this model are comparative estimates, not hardware wear claims.
 
-This is host/emulator qualification, not a hardware support claim. RedDB 1.33.3
-still depends on Rust `std`; concrete Nano ESP32 and Pico 2 firmware builds,
-flash wear receipts, physical capacity and power-cut campaigns remain required
-per board.
+This is host/emulator and target-compilation qualification, not a hardware
+support claim. The Nano ESP32 still needs a linked ESP-IDF firmware, concrete
+flash adapter, Wokwi execution and physical-board power-cut campaign. The Pico
+2 additionally needs the shared path ported to `no_std + alloc` before it can
+produce firmware for `thumbv8m.main-none-eabihf`.

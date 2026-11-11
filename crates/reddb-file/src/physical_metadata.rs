@@ -400,11 +400,13 @@ pub fn read_physical_metadata_document(path: &Path) -> RdbFileResult<String> {
     decode_physical_metadata_document(&bytes)
 }
 
+#[cfg(feature = "full")]
 pub fn write_physical_metadata_json_document(path: &Path, pretty_json: &str) -> RdbFileResult<()> {
     let bytes = encode_physical_metadata_json_document(pretty_json)?;
     write_physical_metadata_bytes_atomically(path, &bytes)
 }
 
+#[cfg(feature = "full")]
 pub fn write_physical_metadata_binary_document(
     path: &Path,
     compact_json: &str,
@@ -420,7 +422,9 @@ pub fn write_physical_metadata_binary_document(
 /// The temporary name is unique per call so two unserialised writers can
 /// never interleave inside one temporary file.
 #[path = "physical_metadata/atomic.rs"]
+#[cfg(feature = "full")]
 mod atomic;
+#[cfg(feature = "full")]
 use atomic::write_physical_metadata_bytes_atomically;
 
 pub fn copy_physical_metadata_binary_to_journal(

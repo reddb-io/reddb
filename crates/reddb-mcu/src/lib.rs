@@ -12,6 +12,7 @@ pub use reddb_file as file;
 pub use reddb_file::VfsFile;
 pub use reddb_types as types;
 
+#[cfg(feature = "host-flash-model")]
 pub mod flash_emulator;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

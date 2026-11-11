@@ -1,8 +1,11 @@
 use super::{LocalReadError, LocalReadError::Unsupported};
 use crate::catalog::schema::ResolvedColumnRule;
-use reddb_rql::ast::{Expr, FieldRef, QueryExpr, SelectItem, TableQuery, TableSource};
+#[cfg(feature = "full")]
+use reddb_rql::ast::QueryExpr;
+use reddb_rql::ast::{Expr, FieldRef, SelectItem, TableQuery, TableSource};
 use reddb_types::{function_catalog::FUNCTION_CATALOG, DataType};
 
+#[cfg(feature = "full")]
 pub(super) fn query(sql: &str) -> Result<TableQuery, LocalReadError> {
     let statement = reddb_rql::parse_frontend(sql).map_err(LocalReadError::Parse)?;
     let QueryExpr::Table(query) = statement.into_query_expr() else {

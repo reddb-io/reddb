@@ -1,8 +1,10 @@
 //! Single-owner local SQL. Native formats and publication barriers remain canonical.
+#[cfg(feature = "full")]
+use super::local_read::{query_resident_scoped, ReadScope};
 use super::{
     local_read::{
-        query_resident_bound, query_resident_scoped, query_store_stream, source::StoreView,
-        LocalReadError, ReadScope, StreamQueryResult,
+        query_resident_bound, query_store_stream, source::StoreView, LocalReadError,
+        StreamQueryResult,
     },
     scalar::ScalarResult,
 };
@@ -16,18 +18,20 @@ use crate::{
 use reddb_file::VfsFile;
 use reddb_rql::ast::{QueryExpr, TxnControl};
 use reddb_types::Value;
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-};
+use std::collections::HashMap;
+#[cfg(feature = "full")]
+use std::{collections::HashSet, path::PathBuf};
 
 mod mutation;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "full", not(target_arch = "wasm32")))]
 pub mod service;
 mod strategy;
+#[cfg(feature = "full")]
 pub mod vault;
 
-use strategy::{PagedStrategy, ResidentStrategy, StorageStrategy};
+#[cfg(feature = "full")]
+use strategy::ResidentStrategy;
+use strategy::{PagedStrategy, StorageStrategy};
 
 type Result<T> = std::result::Result<T, LocalReadError>;
 
@@ -44,6 +48,7 @@ struct Transaction<T> {
 
 /// One exclusively locked database handle is the transaction/session boundary.
 /// Closing drops uncommitted state. Failed I/O fences the controller until reopen.
+#[cfg(feature = "full")]
 pub struct LocalDatabase<F: VfsFile> {
     database: Database<ResidentStrategy<F>>,
 }
@@ -61,6 +66,7 @@ struct Database<S: StorageStrategy> {
     transaction: Option<Transaction<S::Transaction>>,
 }
 
+#[cfg(feature = "full")]
 impl<F: VfsFile> LocalDatabase<F> {
     pub fn create(file: F, name: impl Into<PathBuf>, now_ms: u64) -> Result<Self> {
         Ok(Self {
@@ -248,6 +254,7 @@ impl<S: StorageStrategy> Database<S> {
     }
 
     /// Only SELECT is admitted; a caller cannot widen the host's source-row scope.
+    #[cfg(feature = "full")]
     fn read_query(
         &self,
         sql: &str,

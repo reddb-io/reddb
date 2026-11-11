@@ -5,15 +5,15 @@ use crate::catalog::enforcement::{
     INTERNAL_EXPIRES_AT_KEY, INTERNAL_TTL_MILLIS_KEY, INTERNAL_TTL_SECONDS_KEY,
 };
 use crate::query::unified::UnifiedRecord;
+#[cfg(feature = "full")]
+use crate::storage::resident_store::ResidentStore;
 use crate::storage::{
     entity::{EntityData, EntityId, UnifiedEntity},
     metadata::Metadata,
-    resident_store::ResidentStore,
 };
-use std::{
-    cell::RefCell,
-    sync::{atomic::Ordering, Arc},
-};
+#[cfg(feature = "full")]
+use std::sync::atomic::Ordering;
+use std::{cell::RefCell, sync::Arc};
 
 type Result<T> = std::result::Result<T, LocalReadError>;
 
@@ -29,6 +29,7 @@ pub(crate) trait StoreView {
         name: &str,
         visit: &mut dyn FnMut(&UnifiedEntity, Option<&Metadata>) -> bool,
     ) -> Result<()>;
+    #[cfg(feature = "full")]
     fn get_entity(&self, collection: &str, id: EntityId) -> Result<Option<UnifiedEntity>>;
     fn get_metadata(&self, collection: &str, id: EntityId) -> Result<Option<Metadata>>;
     fn next_entity_id(&self) -> Result<u64>;
@@ -103,6 +104,7 @@ impl RowSource for StoreRows<'_> {
     }
 }
 
+#[cfg(feature = "full")]
 impl StoreView for ResidentStore {
     fn aux_metadata(&self) -> Result<Vec<u8>> {
         Ok(self.aux_metadata())
@@ -127,6 +129,7 @@ impl StoreView for ResidentStore {
         Ok(())
     }
 
+    #[cfg(feature = "full")]
     fn get_entity(&self, collection: &str, id: EntityId) -> Result<Option<UnifiedEntity>> {
         Ok(self
             .get_collection(collection)

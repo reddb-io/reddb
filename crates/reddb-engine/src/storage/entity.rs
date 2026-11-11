@@ -193,6 +193,7 @@ impl RowData {
 
     /// Replace a decoded named row with values in the authoritative schema's
     /// order. Different dynamic shapes retain their named representation.
+    #[cfg(feature = "full")]
     pub(crate) fn compact_with_schema(&mut self, schema: &std::sync::Arc<Vec<String>>) -> bool {
         let Some(named) = &self.named else {
             return false;

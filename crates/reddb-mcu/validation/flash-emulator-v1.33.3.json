@@ -10,7 +10,7 @@
     "gateway_used": false,
     "physical_board_tested": false
   },
-  "command": "cargo test -p reddb-io-mcu --test flash_emulator board_profiles_fill_recover_and_stream_every_acknowledged_row -- --nocapture",
+  "command": "cargo test -p reddb-io-mcu --features host-flash-model --test flash_emulator board_profiles_fill_recover_and_stream_every_acknowledged_row -- --nocapture",
   "results": [
     {
       "board": "Raspberry Pi Pico 2",

@@ -13,13 +13,21 @@ readme = "README.md"
 [lib]
 name = "reddb_mcu"
 
+[features]
+default = []
+host-flash-model = []
+
 [dependencies]
-reddb-engine = { workspace = true }
-reddb-file = { workspace = true }
+reddb-engine = { package = "reddb-io-engine", path = "../reddb-engine", version = "1.0", default-features = false, features = ["mcu"] }
+reddb-file = { package = "reddb-io-file", path = "../reddb-file", version = "1.0", default-features = false, features = ["mcu"] }
 reddb-types = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+[[test]]
+name = "flash_emulator"
+required-features = ["host-flash-model"]
 
 [lints]
 workspace = true

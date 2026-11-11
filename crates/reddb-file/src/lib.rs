@@ -16,17 +16,32 @@
 // checked conversions.
 #![allow(clippy::cast_possible_truncation)]
 
+// The MCU feature set does not carry the deterministic host-simulation
+// context. Keep crash hooks compilable and inert instead of pulling that
+// machinery into constrained builds.
+#[cfg(not(feature = "full"))]
+#[macro_export]
+macro_rules! buggify {
+    ($env:expr, $point:expr) => {{
+        let _ = ($env, $point);
+        false
+    }};
+}
+
 pub mod ai_model_cache;
 pub mod append_only_segment;
 pub mod audit_log;
 pub mod backup_manifest;
+#[cfg(feature = "full")]
 pub mod backup_temp;
 pub mod blob_cache;
 pub mod bloom_segment;
 pub mod btree_value_layout;
+#[cfg(feature = "full")]
 pub mod clock;
 pub mod column_block;
 pub mod control_store;
+#[cfg(feature = "full")]
 pub mod dst;
 pub mod embedded;
 pub mod file_format;
@@ -42,15 +57,22 @@ pub mod native_key_index;
 pub mod native_resume;
 pub mod native_store;
 pub mod native_value;
+#[cfg(feature = "full")]
 pub mod operational_manifest;
 pub mod page_ownership_journal;
 pub mod physical_metadata;
 pub mod physical_metadata_policy;
+#[cfg(feature = "full")]
 pub mod primary_replica;
 pub mod profile;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    feature = "full",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub mod salvage;
 pub mod scrub;
+#[cfg(feature = "full")]
 pub mod serverless;
 pub mod shm;
 pub mod spill;
@@ -101,6 +123,7 @@ pub use backup_manifest::{
     UnifiedSnapshotEntry, UnifiedWalEntry, WalSegmentManifest, WalSegmentMeta,
     BACKUP_MANIFEST_FORMAT_VERSION,
 };
+#[cfg(feature = "full")]
 pub use backup_temp::{
     BackupTempJsonFile, ARCHIVED_CHANGE_RECORDS_READ_TEMP_PREFIX,
     ARCHIVED_CHANGE_RECORDS_TEMP_PREFIX, BACKUP_JSON_OBJECT_READ_TEMP_PREFIX,
@@ -123,6 +146,7 @@ pub use btree_value_layout::{
     encode_btree_pointer, BTreeValueCell, BTreeValueCellError, BTREE_VALUE_COMPRESSION_THRESHOLD,
     BTREE_VALUE_MAX_SIZE, BTREE_VALUE_OVERFLOW_THRESHOLD, BTREE_VALUE_POINTER_CELL_LEN,
 };
+#[cfg(feature = "full")]
 pub use clock::{Clock, SimClock, SystemClock};
 pub use column_block::{
     column_block_crc32, decode_column_block_frame, decode_column_block_granule_bloom_blob,
@@ -137,8 +161,13 @@ pub use control_store::{
     DurableLastVote, FileLastVoteStore, FileTermStore, DEFAULT_FILE_TERM, LAST_VOTE_TEMP_EXTENSION,
     TERM_TEMP_EXTENSION,
 };
+#[cfg(feature = "full")]
 pub use dst::{FaultClass, FaultDecision, FaultRecord, SimulationContext};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    feature = "full",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub use embedded::EmbeddedRdbWriterLock;
 pub use embedded::{
     EmbeddedRdbArtifact, EmbeddedRdbFile, EmbeddedRdbManifest, EmbeddedRdbOpen,
@@ -278,6 +307,7 @@ pub use native_store::{
     STORE_VERSION_V2, STORE_VERSION_V3, STORE_VERSION_V4, STORE_VERSION_V5, STORE_VERSION_V6,
     STORE_VERSION_V7, STORE_VERSION_V8, STORE_VERSION_V9,
 };
+#[cfg(feature = "full")]
 pub use operational_manifest::{
     AppendOnlySegmentState, ForkHydrationState, ForkInfo, ForkOrigin, OperationalManifest,
     PreparedCollectionCreate, PreparedCollectionDrop,
@@ -308,8 +338,7 @@ pub use physical_metadata::{
     encode_physical_tree_definition_json, list_physical_metadata_journal_paths,
     physical_manifest_block_reference, physical_superblock_checkpoint_event,
     physical_superblock_object_key, prune_physical_metadata_journal_paths,
-    read_physical_metadata_document, write_physical_metadata_binary_document,
-    write_physical_metadata_json_document, BlockReference, ExportDescriptor, ManifestEvent,
+    read_physical_metadata_document, BlockReference, ExportDescriptor, ManifestEvent,
     ManifestEventKind, ManifestPointers, PersistedPhysicalHypertable,
     PersistedPhysicalHypertableChunk, PersistedPhysicalIndexState, PhysicalAiEmbedPolicy,
     PhysicalAiModeratePolicy, PhysicalAiPolicy, PhysicalAiVisionPolicy,
@@ -345,6 +374,11 @@ pub use vector_ivf_index::{
 };
 pub use vfs::{BorrowedStdFile, OpenMode, StdVfs, Vfs, VfsDirEntry, VfsFile};
 
+#[cfg(feature = "full")]
+pub use physical_metadata::{
+    write_physical_metadata_binary_document, write_physical_metadata_json_document,
+};
+#[cfg(feature = "full")]
 pub use primary_replica::{
     cleanup_rebootstrap_artifacts, decode_rebootstrap_ready_marker_json,
     discard_ready_rebootstrap_marker, encode_rebootstrap_ready_marker_json,
@@ -358,7 +392,11 @@ pub use primary_replica::{
     TimelineHistoryEntry, TimelineId, WalPruneResult, WalRetentionPlan, WalRetentionPolicy,
 };
 pub use profile::{FileArtifactKind, FileProfile};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    feature = "full",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub use salvage::{
     salvage_embedded_store, StorageSalvageCollection, StorageSalvageMode, StorageSalvageReport,
     StorageSalvageSkippedRegion,
@@ -366,6 +404,7 @@ pub use salvage::{
 pub use scrub::{
     scrub_embedded_store, StorageScrubFinding, StorageScrubReport, StorageScrubVerifiedCounters,
 };
+#[cfg(feature = "full")]
 pub use serverless::{
     decode_serverless_writer_lease_json, encode_serverless_writer_lease_json,
     serverless_writer_lease_key, serverless_writer_lease_temp_path, ServerlessBootIndex,
