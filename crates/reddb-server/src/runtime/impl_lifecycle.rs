@@ -377,20 +377,22 @@ impl RedDBRuntime {
                 query_cache: parking_lot::RwLock::new(
                     crate::storage::query::planner::cache::PlanCache::new(1000),
                 ),
-                result_cache: parking_lot::RwLock::new((
-                    HashMap::new(),
-                    std::collections::VecDeque::new(),
-                )),
                 result_blob_cache,
+                result_cache_format_lock: parking_lot::Mutex::new(()),
+                result_blob_promotion: parking_lot::Mutex::new(()),
                 result_blob_entries: parking_lot::RwLock::new((
                     HashMap::new(),
                     std::collections::VecDeque::new(),
+                    true,
+                    0,
+                    HashSet::new(),
+                    None,
+                    db.store().result_cache_epoch().unwrap_or(0),
                 )),
                 ask_answer_cache_entries: parking_lot::RwLock::new((
                     HashSet::new(),
                     std::collections::VecDeque::new(),
                 )),
-                result_cache_shadow_divergences: std::sync::atomic::AtomicU64::new(0),
                 result_cache_hits: std::sync::atomic::AtomicU64::new(0),
                 result_cache_misses: std::sync::atomic::AtomicU64::new(0),
                 result_cache_evictions: std::sync::atomic::AtomicU64::new(0),
@@ -750,22 +752,25 @@ impl RedDBRuntime {
         // Save system info to red_config on boot
         {
             let sys = SystemInfo::collect();
-            runtime.inner.db.store().set_config_tree(
-                "red.system",
-                &crate::serde_json::json!({
-                    "pid": sys.pid,
-                    "cpu_cores": sys.cpu_cores,
-                    "total_memory_bytes": sys.total_memory_bytes,
-                    "available_memory_bytes": sys.available_memory_bytes,
-                    "os": sys.os,
-                    "arch": sys.arch,
-                    "hostname": sys.hostname,
-                    "started_at": SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64
-                }),
-            );
+            let store = runtime.inner.db.store();
+            store.with_boot_system_info_update(|| {
+                store.set_config_tree(
+                    "red.system",
+                    &crate::serde_json::json!({
+                        "pid": sys.pid,
+                        "cpu_cores": sys.cpu_cores,
+                        "total_memory_bytes": sys.total_memory_bytes,
+                        "available_memory_bytes": sys.available_memory_bytes,
+                        "os": sys.os,
+                        "arch": sys.arch,
+                        "hostname": sys.hostname,
+                        "started_at": SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64
+                    }),
+                )
+            });
 
             // Seed defaults on first boot (only if red_config is empty or missing defaults)
             let store = runtime.inner.db.store();
@@ -1101,6 +1106,11 @@ impl RedDBRuntime {
                                 millis: 5,
                             },
                         );
+                        let rt = RedDBRuntime {
+                            background_tasks: None,
+                            inner,
+                        };
+                        rt.promote_volatile_result_cache_entry();
                     },
                 );
         }

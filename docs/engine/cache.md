@@ -1,4 +1,11 @@
-# SIEVE Cache
+# Engine Cache Layers
+
+RedDB has separate caches for physical pages, query plans, entities, and full
+query results. The full result cache is an internal adapter over the same
+native Blob Cache L1/L2 engine exposed to applications; the page cache remains
+a separate storage acceleration structure.
+
+## Page Cache (SIEVE)
 
 RedDB uses the SIEVE eviction algorithm for its page cache, providing better hit rates than traditional LRU for database workloads.
 
@@ -59,9 +66,17 @@ Query Engine --> SIEVE Cache --> Pager --> Disk
 
 ## Result Cache
 
-On top of the page cache, RedDB maintains a **query result cache** for
-small `SELECT` results. Keys include the SQL text plus the current
-tenant and auth identity, so scoped callers do not share cached rows.
+Before entering the query executor, RedDB checks an internal **query result
+cache** for eligible `SELECT` results. This is not a second cache engine: the
+adapter stores entries in Blob Cache under the reserved
+`runtime.result_cache` namespace and adds query identity, authorization scope,
+dependency tracking, and durable data-epoch validation. Application cache APIs
+cannot read, write, or flush this namespace.
+
+HTTP, gRPC, RedWire, and PostgreSQL-wire queries converge on this same runtime
+statement path, so the result-cache policy does not depend on the protocol.
+Keys include the SQL text plus the current tenant and auth identity, so scoped
+callers do not share cached rows.
 
 | Property | Value |
 |:---------|:------|
@@ -69,44 +84,70 @@ tenant and auth identity, so scoped callers do not share cached rows.
 | Max entries | 1 000 |
 | Eviction | Oldest entry removed when full |
 | Scope | SELECT queries only |
-| Blob backend L2 | hidden `red.cache.blob_l2` collection in the same `.rdb` |
+| L1 | process-local Blob Cache plus decoded runtime entries |
+| Persistent L2 | hidden `red.cache.blob_l2` collection in the same `.rdb` |
 
 ### How It Works
 
-1. Before parsing a query, the runtime checks the result cache
-2. On cache hit with a valid TTL, the cached result is returned immediately (no parse, no plan, no scan)
-3. On cache miss, the query executes normally and the result is stored
-4. Writes invalidate affected result-cache entries. The Blob Cache
-   backend uses a conservative namespace flush for table writes so
-   unrehydrated L2 entries from a previous process cannot become stale.
+1. The common runtime statement path derives the cache key and data epoch.
+2. Before parsing, it checks `runtime.result_cache` through Blob Cache.
+3. On a valid hit, it returns the decoded result immediately (no parse, plan, or scan).
+4. On a miss, the query executes normally and the result is stored with its collection dependencies.
+5. Writes invalidate affected result-cache entries. The result cache
+   preserves unrelated results when every L2 entry is tracked; otherwise it
+   flushes the namespace to protect untracked durable entries.
 
-When `runtime.result_cache.backend = 'blob_cache'`, cacheable results
-are written as Blob Cache payloads, not only in-memory sidecars. A clean
-runtime restart can rehydrate eligible entries from L2 until their
-30-second TTL expires. Statements rejected by the normal safety gate
+Eligible results can be rehydrated from L2 after restart until their TTL expires. Following
+invalidation by a table write, new results are kept only in memory while
+matching writes continue. A background worker promotes the result to L2 with its remaining TTL
+after at least one second without a matching invalidation.
+A restart before promotion recomputes the result. Persisted results carry a
+data epoch recorded with the data's WAL commit; a result from an older epoch
+is recomputed after recovery. This can also discard an unrelated result after
+a write. Within one process, tracked table and join results can remain usable
+across unrelated writes when the bounded publication history proves that none
+of their dependencies changed. A missing history or an uncertain publication
+causes a cache miss. Statements rejected by the normal safety gate
 still do not persist: volatile builtins, active-transaction reads,
-oversized result sets, vault results, and pre-serialized fast paths are
+oversized result sets, system-collection and vault results, and pre-serialized fast paths are
 recomputed instead.
+
+Before persisting results, RedDB fences the database format so binaries that do
+not maintain the data epoch cannot open it for writing. The first activation may
+therefore require a durable checkpoint.
 
 ```
 SELECT * FROM users WHERE active = true
-  1st call: ~5ms   (cold: parse + plan + scan)
-  2nd call: <0.1ms (cache hit, clone only)
-  After INSERT: ~5ms (cache invalidated, re-executes)
+  1st call: miss → parse + plan + execute + cache
+  2nd call: hit  → return the cached result
+  After INSERT: miss → dependency changed, so re-execute
+```
+
+### Regression Coverage
+
+Unit tests assert that a hot hit returns before the parser, planner, and
+executor; that disabling the cache executes every read; and that a write to a
+dependency forces one recomputation before the next hit. The checked-in
+Criterion benchmark compares cache-off and verified hot-hit paths without
+using wall-clock thresholds as correctness assertions:
+
+```bash
+cargo test -p reddb-io-server --lib result_cache_execution_tests
+cargo bench -p reddb-io-server --bench result_cache_bench
 ```
 
 ### Invalidation
 
-The legacy backend is cleared or narrowed by dependency on write paths:
+The result cache is cleared or narrowed by dependency on write paths:
 - SQL DML: `INSERT`, `UPDATE`, `DELETE`
 - REST API: entity create, patch, delete
 - Retention policy sweep
 - Any operation that calls the runtime cache invalidation hooks
 
-The Blob Cache backend deliberately chooses a broader namespace
-invalidation on table writes. That costs occasional misses after
-unrelated writes, but preserves correctness for durable entries that
-exist only in L2 after restart.
+The result cache flushes the namespace when a tracked result depends on
+the written table, or when L2 may contain untracked results (such as after a
+restart or tracking eviction). It skips the flush for unrelated writes when
+all entries are tracked.
 
 ---
 
@@ -132,8 +173,9 @@ The plan cache saves ~100us per query for repeated SQL patterns. It is especiall
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│ Result Cache   (30s TTL, 1K entries)                  │
-│   Hit → return full result, zero compute              │
+│ Result Cache adapter (runtime.result_cache)           │
+│   Hit → return full result before parse/plan/execute  │
+│   Storage → native Blob Cache L1/L2                   │
 ├──────────────────────────────────────────────────────┤
 │ Plan Cache     (1h TTL, 1K entries, LRU)              │
 │   Hit → skip parse/plan, go straight to execution     │
@@ -148,11 +190,11 @@ The plan cache saves ~100us per query for repeated SQL patterns. It is especiall
 
 ## Blob Cache
 
-RedDB also has a native **Blob Cache** module for exact-key cache
-workloads. Unlike the page cache, result cache, and entity cache, Blob Cache is
-designed around arbitrary byte values, rich TTL policy, durable L2 storage, fast
-existence checks, and explicit invalidation by key, prefix, tag, dependency, or
-namespace generation.
+The native **Blob Cache** is the shared exact-key cache engine. It provides a
+byte-bounded, sharded process-local L1 and a durable L2 inside the database
+file, plus TTL, fast existence checks, and invalidation by key, prefix, tag,
+dependency, or namespace generation. The result cache is its first internal
+caller; remote applications use tenant-partitioned application namespaces.
 
 Applications can access the native module through the HTTP data plane and
 `db.cache.*` in the remote JavaScript client using HTTP. See

@@ -172,6 +172,15 @@ fn missing_key_updates_miss_counter() {
 }
 
 #[test]
+fn missing_namespaces_do_not_allocate_generations() {
+    let cache = small_cache(128);
+    for index in 0..1000 {
+        assert!(cache.get(&format!("missing-{index}"), "key").is_none());
+    }
+    assert!(cache.namespace_generations.read().is_empty());
+}
+
+#[test]
 fn namespace_isolation_keeps_same_key_separate() {
     let cache = small_cache(128);
     cache
@@ -977,6 +986,36 @@ fn namespace_flush_bumps_generation_and_old_entries_are_immediately_absent() {
         .put("n", "c", BlobCachePut::new(b"c".to_vec()))
         .unwrap();
     assert_eq!(&*cache.get("n", "c").unwrap().bytes, b"c");
+}
+
+#[test]
+fn in_memory_namespace_fence_hides_l2_until_durable_flush() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("fenced-cache.rdb");
+    {
+        let cache = l2_cache(&path);
+        cache
+            .put("n", "a", BlobCachePut::new(b"a".to_vec()))
+            .unwrap();
+    }
+    {
+        let cache = l2_cache(&path);
+        cache.invalidate_namespace_in_memory("n");
+        assert!(cache.get("n", "a").is_none());
+        assert!(cache.invalidate_namespace("n"));
+        cache
+            .put("n", "b", BlobCachePut::new(b"b".to_vec()))
+            .unwrap();
+    }
+    let cache = l2_cache(&path);
+    assert!(cache.get("n", "a").is_none());
+    assert_eq!(
+        &*cache
+            .get("n", "b")
+            .expect("new generation survives restart")
+            .bytes,
+        b"b"
+    );
 }
 
 #[test]

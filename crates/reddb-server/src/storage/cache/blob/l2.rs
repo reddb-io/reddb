@@ -71,6 +71,37 @@ pub(super) struct BlobCacheL2 {
 }
 
 impl BlobCacheL2 {
+    pub(super) fn namespace_generation(&self, namespace: &str) -> Option<u64> {
+        self.metadata
+            .read()
+            .get(&generation_key(namespace))
+            .ok()
+            .flatten()
+            .and_then(|bytes| bytes.as_slice().try_into().ok().map(u64::from_le_bytes))
+    }
+
+    pub(super) fn set_namespace_generation(
+        &self,
+        namespace: &str,
+        generation: u64,
+    ) -> Result<(), CacheError> {
+        let key = generation_key(namespace);
+        let metadata = self.metadata.write();
+        metadata
+            .delete(&key)
+            .map_err(|error| CacheError::L2Io(error.to_string()))?;
+        metadata
+            .insert(&key, &generation.to_le_bytes())
+            .map_err(|error| CacheError::L2Io(error.to_string()))?;
+        let root = metadata.root_page_id();
+        drop(metadata);
+        let mut control = self.control.write();
+        control.metadata_root = root;
+        control
+            .write(&self.control_path)
+            .map_err(|error| CacheError::L2Io(error.to_string()))
+    }
+
     pub(super) fn open(path: PathBuf, bytes_max: u64) -> Result<Self, CacheError> {
         let control_path = blob_cache_control_path(&path);
         let control =
@@ -618,6 +649,17 @@ impl BlobCacheL2 {
         }
         Ok(payload)
     }
+}
+
+fn generation_key(namespace: &str) -> Vec<u8> {
+    // An encoded cache key declares a key length after the namespace.  The
+    // marker declares a nonempty key but carries no bytes, so it cannot collide.
+    let mut key = vec![0; 16];
+    let namespace_len = u16::try_from(namespace.len()).unwrap_or(u16::MAX);
+    key.extend_from_slice(&namespace_len.to_le_bytes());
+    key.extend_from_slice(namespace.as_bytes());
+    key.extend_from_slice(&u16::MAX.to_le_bytes());
+    key
 }
 
 fn synopsis_heap_bytes(filter: &L2Synopsis) -> u64 {

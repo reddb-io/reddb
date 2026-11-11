@@ -687,6 +687,8 @@ impl UnifiedStore {
                 self.mark_paged_registry_dirty();
             }
             self.finish_paged_write(actions)?;
+        } else {
+            self.note_in_memory_result_mutation(collection)?;
         }
 
         Ok(id)
@@ -1051,12 +1053,14 @@ impl UnifiedStore {
             if registry_dirty {
                 self.mark_paged_registry_dirty();
             }
-            if let Some(pending) = self.enqueue_grouped_actions(&actions)? {
+            if let Some(mut pending) = self.enqueue_grouped_actions(&actions)? {
                 drop(_publication);
-                self.complete_grouped_actions(&pending, &actions)?;
+                self.complete_grouped_actions(&mut pending, &actions)?;
             } else {
                 self.finish_paged_write(actions)?;
             }
+        } else {
+            self.note_in_memory_result_mutation(collection)?;
         }
         if unversioned && !Self::deferred_store_wal_capture_active() {
             if let Some(before) = before {
@@ -1247,6 +1251,20 @@ impl UnifiedStore {
         self.resident.entity_cache.remove(old_id.raw());
         self.resident.entity_cache.remove(new_id.raw());
         manager.update(old_version.clone())?;
+        #[cfg(test)]
+        if let Some(hook) = self.test_versioned_update_after_old.lock().clone() {
+            hook();
+        }
+        #[cfg(test)]
+        if self
+            .test_fail_versioned_update_phase
+            .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return Err(StoreError::Io(std::io::Error::other(
+                "injected update failure after old version",
+            )));
+        }
         self.resident.context_index.remove_entity(old_id);
 
         self.register_entity_id(new_version.id);
@@ -1259,6 +1277,16 @@ impl UnifiedStore {
         }
         new_version.ensure_table_logical_id();
         manager.insert(new_version.clone())?;
+        #[cfg(test)]
+        if self
+            .test_fail_versioned_update_phase
+            .compare_exchange(2, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return Err(StoreError::Io(std::io::Error::other(
+                "injected update failure after new version",
+            )));
+        }
         if let Some(metadata) = inherited_metadata {
             manager.set_metadata(new_id, metadata)?;
         }
@@ -1384,9 +1412,9 @@ impl UnifiedStore {
             collection: collection.to_string(),
             entity_id: id.raw(),
         }];
-        if let Some(pending) = self.enqueue_grouped_actions(&actions)? {
+        if let Some(mut pending) = self.enqueue_grouped_actions(&actions)? {
             drop(publication);
-            self.complete_grouped_actions(&pending, &actions)?;
+            self.complete_grouped_actions(&mut pending, &actions)?;
         } else {
             self.finish_paged_write(actions)?;
         }
