@@ -124,6 +124,10 @@ impl StoreBlobCacheL2 {
         bytes_in_use: u64,
         expires_at_unix_ms: Option<u64>,
     ) -> Result<(), CacheError> {
+        debug_assert!(self
+            .store
+            .vault_publication_lock
+            .is_owned_by_current_thread());
         let control = find_value(&self.store, CONTROL_KEY).map(|(id, _)| id);
         let mut deletes = Vec::with_capacity(2);
         deletes.extend(previous.map(|id| (COLLECTION.to_string(), id)));
@@ -154,6 +158,10 @@ impl StoreBlobCacheL2 {
         previous: EntityId,
         expires_at_unix_ms: Option<u64>,
     ) -> Result<(), CacheError> {
+        debug_assert!(self
+            .store
+            .vault_publication_lock
+            .is_owned_by_current_thread());
         self.store
             .publish_rows(RowPublication {
                 inserts: vec![(
@@ -167,6 +175,10 @@ impl StoreBlobCacheL2 {
     }
 
     fn publish_deletions(&self, ids: Vec<EntityId>, bytes_in_use: u64) -> Result<(), CacheError> {
+        debug_assert!(self
+            .store
+            .vault_publication_lock
+            .is_owned_by_current_thread());
         let control = find_value(&self.store, CONTROL_KEY).map(|(id, _)| id);
         let mut deletes: Vec<_> = ids
             .into_iter()
@@ -234,6 +246,7 @@ impl StoreBlobCacheL2 {
     }
 
     fn delete_where(&self, predicate: impl Fn(&L2Record) -> bool) -> usize {
+        let _publication = self.store.vault_publication_lock.lock();
         let _operation = self.operation.lock();
         let mut removed = 0usize;
         loop {
@@ -325,6 +338,7 @@ impl BlobCacheL2Backend for StoreBlobCacheL2 {
     }
 
     fn set_namespace_generation(&self, namespace: &str, generation: u64) -> Result<(), CacheError> {
+        let _publication = self.store.vault_publication_lock.lock();
         let _operation = self.operation.lock();
         let key = generation_key(namespace);
         let previous = find_value(&self.store, &key).map(|(id, _)| (COLLECTION.to_string(), id));
@@ -341,6 +355,7 @@ impl BlobCacheL2Backend for StoreBlobCacheL2 {
     }
 
     fn invalidate_namespace(&self, namespace: &str, generation: u64) -> Result<(), CacheError> {
+        let _publication = self.store.vault_publication_lock.lock();
         let operation = self.operation.lock();
         let mut ids = Vec::new();
         let mut reclaimed = 0u64;
@@ -398,14 +413,24 @@ impl BlobCacheL2Backend for StoreBlobCacheL2 {
             self.negative_skips.fetch_add(1, Ordering::Relaxed);
             return None;
         }
-        let _operation = self.operation.lock();
+        let operation = self.operation.lock();
         self.metadata_reads.fetch_add(1, Ordering::Relaxed);
         let Some(stored) = self.find_record(key) else {
             self.synopsis_metadata_reads.fetch_add(1, Ordering::Relaxed);
             return None;
         };
         if stored.record.namespace_generation != generation || stored.record.is_expired_at(now_ms) {
-            let _ = self.delete_key_locked(key);
+            let stale_id = stored.id;
+            drop(operation);
+            let _publication = self.store.vault_publication_lock.lock();
+            let _operation = self.operation.lock();
+            if self.find_record(key).is_some_and(|current| {
+                current.id == stale_id
+                    && (current.record.namespace_generation != generation
+                        || current.record.is_expired_at(now_ms))
+            }) {
+                let _ = self.delete_key_locked(key);
+            }
             return None;
         }
         if crate::storage::engine::crc32(&stored.framed) != stored.record.checksum {
@@ -446,6 +471,7 @@ impl BlobCacheL2Backend for StoreBlobCacheL2 {
         _old_entry_size: u64,
         compressed: Compressed,
     ) -> Result<(), CacheError> {
+        let _publication = self.store.vault_publication_lock.lock();
         let _operation = self.operation.lock();
         let old = self.find_record(key);
         let old_size = old.as_ref().map_or(0, |stored| stored.record.byte_len);
@@ -518,6 +544,7 @@ impl BlobCacheL2Backend for StoreBlobCacheL2 {
         now_ms: u64,
         expires_at_unix_ms: Option<u64>,
     ) -> Result<bool, CacheError> {
+        let _publication = self.store.vault_publication_lock.lock();
         let _operation = self.operation.lock();
         let Some(mut stored) = self.find_record(key) else {
             return Ok(false);
@@ -538,6 +565,7 @@ impl BlobCacheL2Backend for StoreBlobCacheL2 {
     }
 
     fn delete_key(&self, key: &BlobCacheKey) -> Option<u64> {
+        let _publication = self.store.vault_publication_lock.lock();
         let _operation = self.operation.lock();
         self.delete_key_locked(key).ok().flatten()
     }
@@ -572,6 +600,7 @@ impl BlobCacheL2Backend for StoreBlobCacheL2 {
         if hard_limit == 0 || millis_limit == Some(0) {
             return BlobCacheSweepOutcome::default();
         }
+        let _publication = self.store.vault_publication_lock.lock();
         let _operation = self.operation.lock();
         let Some(manager) = self.store.get_collection(COLLECTION) else {
             return BlobCacheSweepOutcome {

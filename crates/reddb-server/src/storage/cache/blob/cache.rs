@@ -674,6 +674,7 @@ impl AtomicStats {
 /// family touch L2 only on rehydrate / delete paths.
 pub struct BlobCache {
     config: BlobCacheConfig,
+    internal_store: Option<Arc<crate::storage::UnifiedStore>>,
     shards: Vec<RwLock<Shard>>,
     namespaces: RwLock<HashSet<String>>,
     namespace_generations: RwLock<HashMap<String, u64>>,
@@ -725,10 +726,11 @@ impl BlobCache {
         store: Arc<crate::storage::UnifiedStore>,
     ) -> Result<Self, CacheError> {
         let l2 = (config.l2_bytes_max > 0)
-            .then(|| StoreBlobCacheL2::open(store, config.l2_bytes_max))
+            .then(|| StoreBlobCacheL2::open(Arc::clone(&store), config.l2_bytes_max))
             .transpose()?
             .map(|backend| Arc::new(backend) as Arc<dyn BlobCacheL2Backend>);
-        Self::with_backend(config, l2)
+        let internal_store = l2.as_ref().map(|_| store);
+        Self::with_backend(config, l2, internal_store)
     }
 
     fn try_new(config: BlobCacheConfig) -> Result<Self, CacheError> {
@@ -738,12 +740,13 @@ impl BlobCache {
             .map(|path| BlobCacheL2::open(path, config.l2_bytes_max))
             .transpose()?
             .map(|backend| Arc::new(backend) as Arc<dyn BlobCacheL2Backend>);
-        Self::with_backend(config, l2)
+        Self::with_backend(config, l2, None)
     }
 
     fn with_backend(
         config: BlobCacheConfig,
         l2: Option<Arc<dyn BlobCacheL2Backend>>,
+        internal_store: Option<Arc<crate::storage::UnifiedStore>>,
     ) -> Result<Self, CacheError> {
         let config = BlobCacheConfig {
             shard_count: config.shard_count.max(1),
@@ -754,6 +757,7 @@ impl BlobCache {
             .collect();
         Ok(Self {
             config,
+            internal_store,
             shards,
             namespaces: RwLock::new(HashSet::new()),
             namespace_generations: RwLock::new(HashMap::new()),
@@ -804,6 +808,32 @@ impl BlobCache {
         let key = BlobCacheKey::new(namespace.clone(), key);
         self.validate_blob_size(input.bytes.len(), input.policy)?;
         self.validate_metadata(&input.content_metadata)?;
+        let compressed = if self.l2.is_some() {
+            // Compress before the store publication fence. The result is not
+            // visible until the fenced publication below, so CPU-heavy zstd
+            // work must not serialize unrelated database writes.
+            Some(match self.config.l2_compression {
+                L2Compression::Off => Compressed::Raw(input.bytes.clone()),
+                L2Compression::On => {
+                    let content_type = input
+                        .content_metadata
+                        .get("content-type")
+                        .map(String::as_str);
+                    L2BlobCompressor::compress(&input.bytes, content_type, &CompressOpts::default())
+                        .map_err(|err| CacheError::L2Io(err.to_string()))?
+                }
+            })
+        } else {
+            None
+        };
+        // The internal L2 publishes through the owning store. Enter that
+        // store's publication fence before any Blob Cache lock so database
+        // writes that invalidate the cache cannot form an AB/BA cycle with a
+        // concurrent cache publication. The standalone L2 has no such fence.
+        let _publication = self
+            .internal_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
         self.ensure_namespace(&namespace)?;
         let namespace_generation = self.current_generation(&namespace);
         let tags = input.tags.clone();
@@ -830,32 +860,6 @@ impl BlobCache {
             &key.key,
         );
         let entry_charge = entry.l1_charge_bytes;
-        let compressed = if self.l2.is_some() {
-            // Compression decision happens in the foreground put — the
-            // outcome (`Compressed::Raw` or `Compressed::Zstd`) is what
-            // gets framed and written to the chain (#192). When the knob
-            // is `Off`, skip the compressor entirely (CPU savings) and
-            // emit a `Raw` variant directly so the on-disk format stays
-            // uniform.
-            Some(match self.config.l2_compression {
-                L2Compression::Off => Compressed::Raw(entry.bytes.as_ref().to_vec()),
-                L2Compression::On => {
-                    let content_type = entry
-                        .content_metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.get("content-type"))
-                        .map(String::as_str);
-                    L2BlobCompressor::compress(
-                        entry.bytes.as_ref(),
-                        content_type,
-                        &CompressOpts::default(),
-                    )
-                    .map_err(|err| CacheError::L2Io(err.to_string()))?
-                }
-            })
-        } else {
-            None
-        };
         #[cfg(test)]
         if let Some(hook) = PUT_PREPARED_HOOK.with(|slot| slot.borrow_mut().take()) {
             hook();
@@ -949,10 +953,10 @@ impl BlobCache {
             Lookup::Expired(entry) => {
                 let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
+                drop(shard);
                 if let Some(l2) = &self.l2 {
                     l2.delete_key(&cache_key);
                 }
-                drop(shard);
                 self.stats.expirations.fetch_add(1, Ordering::Relaxed);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 None
@@ -960,10 +964,10 @@ impl BlobCache {
             Lookup::IdleEvicted(entry) => {
                 let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
+                drop(shard);
                 if let Some(l2) = &self.l2 {
                     l2.delete_key(&cache_key);
                 }
-                drop(shard);
                 self.stats.expirations.fetch_add(1, Ordering::Relaxed);
                 self.stats.l1_idle_evicts.fetch_add(1, Ordering::Relaxed);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
@@ -1069,6 +1073,10 @@ impl BlobCache {
         expires_at_unix_ms: Option<u64>,
         now_ms: u64,
     ) -> Result<bool, CacheError> {
+        let _publication = self
+            .internal_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
         if !self.namespace_exists(namespace) {
             return Ok(false);
         }
@@ -1101,10 +1109,10 @@ impl BlobCache {
             Lookup::Expired(entry) => {
                 let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
+                drop(shard);
                 if let Some(l2) = &self.l2 {
                     l2.delete_key(&cache_key);
                 }
-                drop(shard);
                 self.stats.expirations.fetch_add(1, Ordering::Relaxed);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 CachePresence::Absent
@@ -1112,10 +1120,10 @@ impl BlobCache {
             Lookup::IdleEvicted(entry) => {
                 let cache_key = BlobCacheKey::new(namespace, key);
                 self.record_removed_entry(&cache_key, &entry);
+                drop(shard);
                 if let Some(l2) = &self.l2 {
                     l2.delete_key(&cache_key);
                 }
-                drop(shard);
                 self.stats.expirations.fetch_add(1, Ordering::Relaxed);
                 self.stats.l1_idle_evicts.fetch_add(1, Ordering::Relaxed);
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
@@ -1156,6 +1164,10 @@ impl BlobCache {
     /// future contract; callers that need cross-node coherence must rely on the
     /// underlying write reaching each node and triggering local eviction there.
     pub fn invalidate_key(&self, namespace: &str, key: &str) -> usize {
+        let _publication = self
+            .internal_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
         if !self.namespace_exists(namespace) {
             return 0;
         }
@@ -1183,6 +1195,10 @@ impl BlobCache {
 
     /// Node-local invalidation for keys with a namespace-local prefix.
     pub fn invalidate_prefix(&self, namespace: &str, prefix: &str) -> usize {
+        let _publication = self
+            .internal_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
         if !self.namespace_exists(namespace) {
             return 0;
         }
@@ -1277,6 +1293,10 @@ impl BlobCache {
     }
 
     pub(crate) fn try_invalidate_namespace(&self, namespace: &str) -> Result<bool, CacheError> {
+        let _publication = self
+            .internal_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
         if !self.namespace_exists(namespace)
             && !self.pending_namespace_fences.read().contains(namespace)
         {
@@ -1386,6 +1406,10 @@ impl BlobCache {
         entries_limit: Option<usize>,
         millis_limit: Option<u32>,
     ) -> BlobCacheSweepOutcome {
+        let _publication = self
+            .internal_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
         let started = Instant::now();
         let time_limit = millis_limit.map(|millis| Duration::from_millis(u64::from(millis)));
         let now_ms = unix_now_ms();
@@ -1469,6 +1493,10 @@ impl BlobCache {
         entries_limit: usize,
         millis_limit: Option<u32>,
     ) -> BlobCacheSweepOutcome {
+        let _publication = self
+            .internal_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
         let Some(l2) = &self.l2 else {
             return BlobCacheSweepOutcome {
                 completed: true,
@@ -1866,6 +1894,10 @@ impl BlobCache {
         labels: &[&str],
         kind: IndexedKind,
     ) -> usize {
+        let _publication = self
+            .internal_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
         if labels.is_empty() || !self.namespace_exists(namespace) {
             return 0;
         }
