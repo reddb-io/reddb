@@ -12,6 +12,7 @@ pub use reddb_file as file;
 pub use reddb_file::VfsFile;
 pub use reddb_types as types;
 
+pub mod fixed_file;
 #[cfg(feature = "host-flash-model")]
 pub mod flash_emulator;
 
@@ -32,7 +33,7 @@ pub const NANO_ESP32: BoardProfile = BoardProfile {
     name: "Arduino Nano ESP32",
     sram_bytes: 512 * 1024,
     flash_bytes: 16 * 1024 * 1024,
-    database_bytes: 12_832_768,
+    database_bytes: 12_378_112,
     rust_heap_bytes: 64 * 1024,
     stack_bytes: 256 * 1024,
     read_buffer_bytes: engine::storage::page::PAGE_SIZE,

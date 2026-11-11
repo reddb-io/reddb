@@ -1,0 +1,51 @@
+{
+  "date": "2026-11-11",
+  "package": "reddb-io-mcu",
+  "reddb_version": "1.33.3",
+  "emulator": {
+    "name": "Espressif esp-emu",
+    "version": "0.51.0",
+    "chip": "esp32s3",
+    "cpu_mode": "dual-core",
+    "psram_bytes": 8388608,
+    "flash_bytes": 16777216
+  },
+  "firmware": {
+    "app_partition_bytes": 4194304,
+    "app_image_bytes": 3806592,
+    "main_task_stack_bytes": 262144,
+    "database_capacity_bytes": 12378112,
+    "gateway_used": false
+  },
+  "workload": {
+    "table": "measurements",
+    "rows": 43200,
+    "period": "one row per minute for 30 days",
+    "ingestion": "SQL INSERT batches of 64",
+    "verification": "streaming SQL SELECT with a fixed 43200-bit bitmap"
+  },
+  "receipts": [
+    {
+      "boot": "fresh flash",
+      "storage_state": "Empty",
+      "result": "REDB_MCU_OK rows=43200 capacity_bytes=12378112"
+    },
+    {
+      "boot": "saved flash restart",
+      "storage_state": "Existing",
+      "rows_reinserted": 0,
+      "result": "REDB_MCU_OK rows=43200 capacity_bytes=12378112"
+    }
+  ],
+  "compatibility": {
+    "storage_format": "canonical .rdb",
+    "sql_executor": "canonical reddb-engine mcu feature",
+    "storage_adapter": "FixedCapacityFile over ESP-IDF FAT and wear levelling",
+    "engine_or_format_forked": false
+  },
+  "limitations": [
+    "This is instruction-set emulator evidence, not a physical-board receipt.",
+    "Power loss was represented by a clean persisted emulator restart, not an electrically interrupted flash operation.",
+    "The Pico 2 still requires the no_std + alloc engine slice."
+  ]
+}

@@ -25,19 +25,19 @@
     },
     {
       "board": "Arduino Nano ESP32",
-      "acknowledged_and_recovered_rows": 80904,
-      "logical_rdb_bytes": 17776640,
-      "physical_bytes": 12791808,
-      "usable_capacity_bytes": 12832768,
-      "program_bytes": 58488832,
-      "program_operations": 228472,
-      "erase_operations": 25201,
-      "sync_operations": 3840
+      "acknowledged_and_recovered_rows": 77981,
+      "logical_rdb_bytes": 17170432,
+      "physical_bytes": 12337152,
+      "usable_capacity_bytes": 12378112,
+      "program_bytes": 56592384,
+      "program_operations": 221064,
+      "erase_operations": 24507,
+      "sync_operations": 3786
     }
   ],
   "limitations": [
     "This models storage behavior behind VfsFile; it is not a CPU or filesystem emulator.",
     "Program and erase counters are deterministic model estimates, not physical-board measurements.",
-    "Concrete LittleFS and FatFS adapters still require emulator and hardware power-cut qualification."
+    "The Nano FAT/wear-levelling adapter has instruction-set emulator coverage; hardware power-cut qualification remains."
   ]
 }
