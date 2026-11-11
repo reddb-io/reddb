@@ -1214,20 +1214,7 @@ impl StoreCommitCoordinator {
             .pager
             .as_ref()
             .ok_or_else(|| io::Error::other("ownership epoch requires a pager"))?;
-        let current_format_version = pager
-            .header()
-            .map_err(|error| io::Error::other(error.to_string()))?
-            .version;
-        let format_version = if store.config.resident_memory_bytes_max.is_some()
-            && current_format_version >= reddb_file::file_format::PAGE_RESULT_CACHE_FILE_VERSION
-        {
-            // PAGE_RESULT_CACHE_FILE_VERSION is the resident-only cache
-            // contract. A disk-resident reopen must promote it before the
-            // next catalog publication, otherwise startup deliberately skips
-            // the disk-residency resume trailer and rebuilds every derived
-            // index on every boot.
-            reddb_file::file_format::PAGE_RESULT_CACHE_DISK_FILE_VERSION
-        } else if !store.secondary_index_specs.read().is_empty() {
+        let format_version = if !store.secondary_index_specs.read().is_empty() {
             reddb_file::file_format::PAGE_SECONDARY_INDEX_FILE_VERSION
         } else if store.config.resident_memory_bytes_max.is_some() {
             reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
@@ -1236,7 +1223,12 @@ impl StoreCommitCoordinator {
         };
         // Dropping the final secondary tree never permits an old writer to
         // reopen the file; its retired pages may still be reader-pinned.
-        let format_version = format_version.max(current_format_version);
+        let format_version = format_version.max(
+            pager
+                .header()
+                .map_err(|error| io::Error::other(error.to_string()))?
+                .version,
+        );
         pager
             .fence_file_format_version(format_version)
             .map_err(|error| io::Error::other(error.to_string()))?;

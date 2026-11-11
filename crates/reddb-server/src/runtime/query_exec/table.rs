@@ -3613,10 +3613,7 @@ mod tests {
             )
             .expect("indexed SQL kernel");
             assert_eq!(records.len(), 1);
-            assert_eq!(
-                records[0].get("item"),
-                Some(&Value::text("answer"))
-            );
+            assert_eq!(records[0].get("item"), Some(&Value::text("answer")));
             assert_eq!(
                 super::take_last_segment_scan_stats().segments_scanned,
                 0,
