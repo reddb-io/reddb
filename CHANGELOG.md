@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.33.0
+
+### Minor Changes
+
+- [#2768](https://github.com/reddb-io/reddb/pull/2768) [`14b9ccf`](https://github.com/reddb-io/reddb/commit/14b9ccf3c5a67eeca281679c9e24bc19e313cdde) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Unify the runtime SQL result cache on the native Blob Cache L1/L2 engine with
+  durable recovery, collection-scoped invalidation, protocol-independent query
+  routing, and downgrade fencing for persisted cache epochs.
+
 ## 1.32.1
 
 ### Patch Changes
