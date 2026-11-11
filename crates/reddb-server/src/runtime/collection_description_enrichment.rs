@@ -210,7 +210,11 @@ fn valid_description(text: &str, max_bytes: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::store::AuthStore;
+    use crate::auth::AuthConfig;
     use crate::RedDBOptions;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     #[test]
     fn rollback_discards_schema_enrichment_event() {
@@ -257,5 +261,95 @@ mod tests {
         let state = runtime.inner.description_enrichment.lock();
         assert!(state.pending.get(&connection).is_none());
         assert!(state.sender.is_some());
+    }
+
+    #[test]
+    fn configured_inference_provider_enriches_missing_descriptions() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock provider");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let api_base = format!("http://{}", listener.local_addr().unwrap());
+        let provider = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let mut request = [0_u8; 8192];
+                        let read = stream.read(&mut request).expect("provider request");
+                        let request = String::from_utf8_lossy(&request[..read]);
+                        assert!(request.contains("/chat/completions"), "{request}");
+                        let body = r#"{"choices":[{"message":{"content":"{\"collection\":\"Reading contacts\",\"columns\":{\"email\":\"Contact email\",\"amount\":\"Suggested amount\"}}"}}],"model":"gpt-test"}"#;
+                        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                        stream
+                            .write_all(response.as_bytes())
+                            .expect("provider response");
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("provider accept: {error}"),
+                }
+            }
+            panic!("no enrichment request reached the provider");
+        });
+
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        runtime.execute_query("CREATE TABLE contacts_for_ai (email EMAIL, amount MONEY DESCRIPTION 'Manual amount')").expect("table");
+        let auth = Arc::new(AuthStore::new(AuthConfig::default()));
+        auth.vault_kv_set(
+            "red.secret.ai.providers.openai.tokens.default".to_string(),
+            "test-key".to_string(),
+        );
+        runtime.set_auth_store(auth);
+        runtime.inner.db.store().set_config_tree(
+            "red.config.ai.providers.openai.base_url",
+            &crate::serde_json::Value::String(api_base),
+        );
+        runtime
+            .inner
+            .db
+            .store()
+            .set_config_tree(CONFIG_KEY, &crate::serde_json::Value::Bool(true));
+        runtime.schema_vocabulary_apply(
+            super::super::schema_vocabulary::DdlEvent::AlterCollection {
+                collection: "contacts_for_ai".to_string(),
+                columns: vec!["email".to_string(), "amount".to_string()],
+                type_tags: Vec::new(),
+                description: None,
+            },
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let contract = runtime
+                .inner
+                .db
+                .collection_contract("contacts_for_ai")
+                .unwrap();
+            if contract.description.as_deref() == Some("Reading contacts") {
+                assert!(contract.description_generated);
+                assert_eq!(
+                    contract.declared_columns[0].description.as_deref(),
+                    Some("Contact email")
+                );
+                assert!(contract.declared_columns[0].description_generated);
+                assert_eq!(
+                    contract.declared_columns[1].description.as_deref(),
+                    Some("Manual amount")
+                );
+                assert!(!contract.declared_columns[1].description_generated);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "description was not generated"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        provider.join().expect("provider thread");
     }
 }
