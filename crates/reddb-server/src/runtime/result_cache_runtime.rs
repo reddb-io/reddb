@@ -852,6 +852,14 @@ mod crash_tests {
             runtime.execute_query(sql).expect("non-read statement");
             assert!(!runtime.db().store().result_cache_format_fenced(), "{sql}");
         }
+        runtime.execute_query("SCRUB").expect("uncached scrub");
+        assert!(!runtime.db().store().result_cache_format_fenced());
+        runtime
+            .execute_query("SELECT * FROM red.stats WHERE collection = 'cache_format_gate'")
+            .expect("computed stats read");
+        assert!(!runtime.db().store().result_cache_format_fenced());
+        runtime.execute_query("SHOW STATS").expect("show stats");
+        assert!(!runtime.db().store().result_cache_format_fenced());
         runtime
             .execute_query("SELECT id FROM cache_format_gate")
             .expect("read statement");

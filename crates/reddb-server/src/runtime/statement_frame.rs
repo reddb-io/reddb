@@ -243,8 +243,16 @@ fn statement_kind(query: &str) -> &'static str {
         b"BEGIN" | b"START" | b"COMMIT" | b"ROLLBACK" | b"SAVEPOINT" | b"RELEASE" | b"END"
         | b"SET" | b"RESET" | b"PREPARE" | b"EXECUTE" | b"DEALLOCATE" | b"USE" => "control",
         b"PUT" | b"INCR" | b"DECR" | b"ADD" | b"ROTATE" | b"PURGE" | b"INVALIDATE" => "write",
+        b"SCRUB" => "uncached",
         _ => "unknown",
     }
+}
+
+fn statement_uses_result_cache(query: &str) -> bool {
+    !matches!(
+        statement_kind(query),
+        "write" | "ddl" | "admin" | "control" | "uncached"
+    ) && !super::red_schema::is_computed_stats_query(query)
 }
 
 /// Refuse a pre-parsed expression that carries a top-level `AS OF`.
@@ -405,12 +413,9 @@ impl StatementExecutionFrame {
         identity_source: StatementIdentity<'_>,
     ) -> RedDBResult<Self> {
         let query = identity_source.text();
+        let uses_result_cache = matches!(identity_source, StatementIdentity::Text(query) if statement_uses_result_cache(query));
         let (cache_data_epoch, cache_revision) = match identity_source {
-            StatementIdentity::Text(query)
-                if !matches!(statement_kind(query), "write" | "ddl" | "admin" | "control") =>
-            {
-                runtime.result_cache_snapshot()
-            }
+            StatementIdentity::Text(_) if uses_result_cache => runtime.result_cache_snapshot(),
             StatementIdentity::Text(_)
             | StatementIdentity::UncachedText(_)
             | StatementIdentity::Expr(_) => (None, 0),
@@ -433,7 +438,7 @@ impl StatementExecutionFrame {
         let requires_index_fallback =
             as_of_floor.is_some() || tx_context.is_some() || !snapshot.in_progress.is_empty();
         let (cache_key, is_volatile_query) = match identity_source {
-            StatementIdentity::Text(_) => (
+            StatementIdentity::Text(_) if uses_result_cache => (
                 result_cache_key(query),
                 query_has_volatile_builtin(query) || query_is_ask_statement(query),
             ),
@@ -441,9 +446,9 @@ impl StatementExecutionFrame {
             // result cache on both sides: an empty key is never read from
             // or written to, and `is_volatile_query` is set so
             // `should_cache_result` refuses regardless of the key.
-            StatementIdentity::UncachedText(_) | StatementIdentity::Expr(_) => {
-                (String::new(), true)
-            }
+            StatementIdentity::Text(_)
+            | StatementIdentity::UncachedText(_)
+            | StatementIdentity::Expr(_) => (String::new(), true),
         };
         let cache_safe = runtime.result_cache_safe(conn_id);
         // Capture identity + effective scope under the same
