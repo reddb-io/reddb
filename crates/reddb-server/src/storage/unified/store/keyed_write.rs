@@ -27,13 +27,13 @@ impl UnifiedStore {
         for (_, previous) in &rows {
             for id in previous {
                 let entity = self
-                    .get("red_config", *id)
+                    .get("red.config", *id)
                     .ok_or(StoreError::EntityNotFound(*id))?;
-                let metadata = self.get_metadata("red_config", *id);
+                let metadata = self.get_metadata("red.config", *id);
                 before.push((
                     *id,
                     StoreWalAction::upsert_entity(
-                        "red_config",
+                        "red.config",
                         &entity,
                         metadata.as_ref(),
                         self.format_version(),
@@ -47,8 +47,8 @@ impl UnifiedStore {
             for (mut entity, previous) in rows {
                 entity.id = self.next_entity_id();
                 inserted.push(entity.id);
-                self.insert_auto("red_config", entity)?;
-                self.delete_batch("red_config", &previous)?;
+                self.insert_auto("red.config", entity)?;
+                self.delete_batch("red.config", &previous)?;
             }
             Ok(())
         })();
@@ -58,14 +58,14 @@ impl UnifiedStore {
             for id in inserted.into_iter().chain(before.iter().map(|(id, _)| *id)) {
                 self.apply_replayed_action(
                     &StoreWalAction::DeleteEntityRecord {
-                        collection: "red_config".to_string(),
+                        collection: "red.config".to_string(),
                         entity_id: id.raw(),
                     },
                     true,
                 )?;
             }
             if !before.is_empty() {
-                self.get_collection("red_config")
+                self.get_collection("red.config")
                     .expect("system config collection")
                     .force_seal()?;
                 for (_, action) in before {

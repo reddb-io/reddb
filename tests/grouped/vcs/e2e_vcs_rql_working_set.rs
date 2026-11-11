@@ -6,7 +6,7 @@
 //! (`current_connection_id()`), and are verifiable through the slice-1
 //! read surface (`red.commits` / `red.status`).
 //!
-//! Genuine data-body merge-conflict materialisation (the `red_conflicts`
+//! Genuine data-body merge-conflict materialisation (the `red.vcs.conflicts`
 //! rows a non-trivial merge would produce) is Phase 6 of the VCS engine
 //! and is exercised at the port layer in `e2e_vcs_phase5`; here the
 //! RESOLVE CONFLICT verb is verified by confirming it reaches the port

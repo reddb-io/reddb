@@ -3394,7 +3394,7 @@ pub fn resolve_defaults_from_runtime(
 ) -> crate::RedDBResult<(AiProvider, String)> {
     use crate::application::ports::RuntimeEntityPort;
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
-        match runtime.get_kv("red_config", key)? {
+        match runtime.get_kv("red.config", key)? {
             Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
@@ -3413,7 +3413,7 @@ pub fn resolve_prompt_model_from_runtime(
     if let Some(model) = explicit {
         return model.to_string();
     }
-    resolve_default_model(provider, &|key| match runtime.get_kv("red_config", key)? {
+    resolve_default_model(provider, &|key| match runtime.get_kv("red.config", key)? {
         Some((reddb_types::Value::Text(value), _)) => Ok(Some(value.to_string())),
         _ => Ok(None),
     })
@@ -3429,7 +3429,7 @@ pub fn resolve_ask_planner_model_from_runtime(
 ) -> String {
     use crate::application::ports::RuntimeEntityPort;
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
-        match runtime.get_kv("red_config", key)? {
+        match runtime.get_kv("red.config", key)? {
             Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
@@ -3444,7 +3444,7 @@ pub fn resolve_defaults_from_runtime_port<
     runtime: &P,
 ) -> crate::RedDBResult<(AiProvider, String)> {
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
-        match runtime.get_kv("red_config", key)? {
+        match runtime.get_kv("red.config", key)? {
             Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
@@ -3471,7 +3471,7 @@ pub fn resolve_embeddings_provider_from_runtime<
         return Ok(provider);
     }
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
-        match runtime.get_kv("red_config", key)? {
+        match runtime.get_kv("red.config", key)? {
             Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
@@ -3493,7 +3493,7 @@ pub fn resolve_embeddings_model_from_runtime<
         return model.to_string();
     }
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
-        match runtime.get_kv("red_config", key)? {
+        match runtime.get_kv("red.config", key)? {
             Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
@@ -3761,7 +3761,7 @@ pub fn resolve_connection_from_runtime(
 ) -> crate::RedDBResult<AiConnection> {
     use crate::application::ports::RuntimeEntityPort;
     let api_base =
-        provider.resolve_api_base_checked(&|key| match runtime.get_kv("red_config", key)? {
+        provider.resolve_api_base_checked(&|key| match runtime.get_kv("red.config", key)? {
             Some((reddb_types::Value::Text(value), _)) => Ok(Some(value.to_string())),
             _ => Ok(None),
         })?;
@@ -3786,7 +3786,7 @@ pub fn resolve_api_key_from_runtime(
     use crate::application::ports::RuntimeEntityPort;
     let configured_alias = if credential_alias.is_none() {
         match runtime.get_kv(
-            "red_config",
+            "red.config",
             &format!("red.config.ai.providers.{}.credential", provider.token()),
         )? {
             Some((reddb_types::Value::Text(value), _)) => Some(value.to_string()),
@@ -3808,7 +3808,7 @@ pub fn resolve_api_key_from_runtime(
                 .push((kv_key.to_string(), value.is_some()));
             return Ok(value);
         }
-        match runtime.get_kv("red_config", kv_key)? {
+        match runtime.get_kv("red.config", kv_key)? {
             Some((reddb_types::Value::Text(secret), _)) => {
                 audited_paths.borrow_mut().push((kv_key.to_string(), true));
                 Ok(Some(secret.to_string()))
@@ -4572,7 +4572,7 @@ pub fn parse_provider_mode(name: &str) -> Option<AiProviderMode> {
 
 /// Resolve the provider mode. Lookup chain:
 /// 1. `REDDB_AI_PROVIDER_MODE` env var.
-/// 2. `red_config` KV key `red.config.ai.provider`.
+/// 2. `red.config` KV key `red.config.ai.provider`.
 /// 3. Returns `None` so callers can fall back to their existing
 ///    vendor-based routing.
 pub fn resolve_provider_mode<F>(kv_getter: &F) -> Option<AiProviderMode>

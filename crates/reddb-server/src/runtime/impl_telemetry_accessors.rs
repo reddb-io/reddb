@@ -213,7 +213,7 @@ impl RedDBRuntime {
 
     /// Slice 10 of issue #527 — render-time scan of pending entries
     /// per (queue, group) for the `queue_pending_gauge` exposition.
-    /// Walks `red_queue_meta` live so the gauge cannot drift from
+    /// Walks `red.queue.meta` live so the gauge cannot drift from
     /// the source of truth.
     pub fn queue_pending_counts(&self) -> Vec<((String, String), u64)> {
         let store = self.inner.db.store();

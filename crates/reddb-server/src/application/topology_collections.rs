@@ -48,7 +48,7 @@ pub const CLUSTER: &str = "red.topology.cluster";
 /// Sidecar collection holding the single materialisation-metadata row
 /// (`graph_version`, `computed_at`, `fingerprint`). Kept out of the graph so it
 /// never pollutes the analytics computation.
-pub const META: &str = "red_topology_meta";
+pub const META: &str = "red.topology.meta";
 
 /// Analytics outputs declared on the topology graph.
 pub const OUTPUTS: &[AnalyticsOutput] = &[

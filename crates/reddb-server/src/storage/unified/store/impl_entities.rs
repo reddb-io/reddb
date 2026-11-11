@@ -327,7 +327,7 @@ impl UnifiedStore {
     /// Set multiple config KV pairs at once from a JSON tree.
     /// Keys are flattened with dot-notation: `{"a":{"b":1}}` → `a.b = 1`.
     ///
-    /// `red_config` is last-writer-wins (ADR 0014): each write replaces the
+    /// `red.config` is last-writer-wins (ADR 0014): each write replaces the
     /// key's earlier rows. Appending instead grew the store on every boot,
     /// since boot re-seeds keys such as `red.system.*`.
     pub fn set_config_tree(&self, prefix: &str, json: &crate::serde_json::Value) -> usize {
@@ -341,7 +341,7 @@ impl UnifiedStore {
         prefix: &str,
         json: &crate::serde_json::Value,
     ) -> Result<usize, StoreError> {
-        self.try_set_key_value_tree("red_config", prefix, json)
+        self.try_set_key_value_tree("red.config", prefix, json)
     }
 
     /// Storage control documents are isolated from application CONFIG reads.
@@ -400,7 +400,7 @@ impl UnifiedStore {
         } else {
             manager.try_for_each_entity(usize::MAX, &mut capture)?;
         }
-        let batch_system = collection == "red_config"
+        let batch_system = collection == "red.config"
             && prefix == "red.system"
             && self.config.embedded_wal_path.is_some()
             && !Self::deferred_store_wal_capture_active();
@@ -456,9 +456,9 @@ impl UnifiedStore {
         Ok(saved)
     }
 
-    /// Read a single config value from `red_config` by dot-notation key.
+    /// Read a single config value from `red.config` by dot-notation key.
     /// When a key has several rows the newest one wins, like every other
-    /// `red_config` reader.
+    /// `red.config` reader.
     pub fn get_config(&self, key: &str) -> Option<reddb_types::Value> {
         // Historical best-effort adapter; bootstrap and authoritative runtime
         // callers use try_get_config so a fault cannot become a default value.
@@ -466,7 +466,7 @@ impl UnifiedStore {
     }
 
     pub fn try_get_config(&self, key: &str) -> Result<Option<reddb_types::Value>, StoreError> {
-        self.try_get_key_value("red_config", key)
+        self.try_get_key_value("red.config", key)
     }
 
     pub fn try_get_storage_metadata(
@@ -1763,7 +1763,7 @@ impl UnifiedStore {
     }
 }
 
-/// Flatten a JSON value into dot-notation key-value pairs for red_config.
+/// Flatten a JSON value into dot-notation key-value pairs for red.config.
 fn flatten_config_json(
     prefix: &str,
     value: &crate::serde_json::Value,

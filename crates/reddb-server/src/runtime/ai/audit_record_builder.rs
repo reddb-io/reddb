@@ -1,7 +1,7 @@
-//! `AuditRecordBuilder` — pure builder for `red_ask_audit` rows.
+//! `AuditRecordBuilder` — pure builder for `red.ask.audit` rows.
 //!
 //! Issue #402 (PRD #391): every ASK call writes one row to the
-//! `red_ask_audit` system collection. This module owns the *shape* of
+//! `red.ask.audit` system collection. This module owns the *shape* of
 //! that row: which fields exist, how `answer_hash` is computed, what
 //! `include_answer` toggles, what the keys look like on the wire.
 //!
@@ -129,7 +129,7 @@ pub struct CallState<'a> {
     pub executed_query: Option<&'a str>,
 }
 
-/// Produce one audit row, ready to insert into `red_ask_audit`.
+/// Produce one audit row, ready to insert into `red.ask.audit`.
 ///
 /// The keys are stable (pinned by tests) and the value types match
 /// what the storage layer expects for the collection's columns. The

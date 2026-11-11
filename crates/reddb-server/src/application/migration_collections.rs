@@ -1,7 +1,7 @@
 //! Internal collection names for the migrations layer.
 //!
-//! All migration-owned collections share the `red_*` prefix — matching
-//! `red_config`, `red_stats`, `red_commits`, etc. Keeping every name in
+//! All migration-owned collections share the `red.*` prefix — matching
+//! `red.config`, `red.query.stats_catalog`, and `red.vcs.commits`. Keeping every name in
 //! one file prevents accidental divergence between bootstrap code, runtime
 //! access, and schema documentation.
 

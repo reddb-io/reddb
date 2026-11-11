@@ -6,7 +6,7 @@
 //! that:
 //!
 //! 1. Persists the per-collection signer registry on the existing
-//!    `red_config` config tree under
+//!    `red.config` config tree under
 //!    `red.collection.{name}.signed_writes.*` so it survives restarts.
 //! 2. Loads the registry on demand for the INSERT-time verification
 //!    path and the `ALTER COLLECTION ... ADD|REVOKE SIGNER` executor.
@@ -124,7 +124,7 @@ fn entry_from_json(v: &crate::serde_json::Value) -> Option<SignerHistoryEntry> {
 
 /// Returns true if `CREATE COLLECTION ... SIGNED_BY (...)` was issued
 /// (or `ALTER COLLECTION ... ADD SIGNER` has been used to enable the
-/// registry) and there is at least a marker in `red_config`.
+/// registry) and there is at least a marker in `red.config`.
 pub fn is_signed(store: &UnifiedStore, collection: &str) -> bool {
     // Compatibility probe: failed policy reads require verification. Runtime
     // decisions use the fallible API and report the actual storage failure.
@@ -172,7 +172,7 @@ pub fn try_install(
 }
 
 /// Serialise registry state into the config tree. Overwrites any prior
-/// value at the same key — the store treats `red_config` as
+/// value at the same key — the store treats `red.config` as
 /// insert-only, but the read path returns the most recent matching row.
 fn write_registry(store: &UnifiedStore, collection: &str, reg: &SignerRegistry) -> RedDBResult<()> {
     let allowed: Vec<crate::serde_json::Value> = reg
@@ -229,7 +229,7 @@ fn read_registry(store: &UnifiedStore, collection: &str) -> RedDBResult<SignerRe
 }
 
 /// Load the current registry. Cheap enough for the INSERT hot path:
-/// two `red_config` reads + two JSON parses, no scan of the parent
+/// two `red.config` reads + two JSON parses, no scan of the parent
 /// collection.
 pub fn registry(store: &UnifiedStore, collection: &str) -> SignerRegistry {
     // An empty compatibility result denies every signer; it never authorizes

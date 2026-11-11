@@ -60,7 +60,7 @@ fn opt_in_is_idempotent() {
 fn internal_red_collections_cannot_be_versioned() {
     let rt = rt();
     let err = vcs(&rt)
-        .set_versioned("red_commits", true)
+        .set_versioned("red.vcs.commits", true)
         .expect_err("internal collection refused");
     assert!(format!("{err}").contains("internal collection"));
 }

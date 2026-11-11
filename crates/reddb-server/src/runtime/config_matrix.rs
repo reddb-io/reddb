@@ -3,7 +3,7 @@
 //! Two tiers:
 //!
 //! - **Tier A (`Critical`)** — self-healing on boot. If the key is
-//!   missing from `red_config`, the loader writes the default in.
+//!   missing from `red.config`, the loader writes the default in.
 //!   Operators always see these via `SHOW CONFIG` so they know what
 //!   guarantees and tuning they have.
 //! - **Tier B (`Optional`)** — in-memory default. Never self-populated.
@@ -390,7 +390,7 @@ pub fn tier_for(key: &str) -> Option<Tier> {
 }
 
 /// Boot-time self-healing pass: for every `Tier::Critical` key, if
-/// `red_config` does not already contain the key, write the default
+/// `red.config` does not already contain the key, write the default
 /// in. Idempotent — re-running produces no writes.
 ///
 /// `Tier::Optional` keys are never touched here; they stay
@@ -409,7 +409,7 @@ pub fn heal_critical_keys(store: &UnifiedStore) {
     }
 }
 
-/// Lightweight presence probe. Avoids loading the whole red_config
+/// Lightweight presence probe. Avoids loading the whole red.config
 /// collection; scans until the first hit.
 fn is_key_present(store: &UnifiedStore, key: &str) -> bool {
     match store.try_get_config(key) {

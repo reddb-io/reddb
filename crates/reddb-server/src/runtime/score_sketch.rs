@@ -191,7 +191,7 @@ impl ScoreSketch {
 
     // ───────────────────────── persistence ─────────────────────────
 
-    /// Serialize to the compact JSON shape persisted in `red_config`.
+    /// Serialize to the compact JSON shape persisted in `red.config`.
     pub fn to_json(&self) -> crate::serde_json::Value {
         let mut obj = crate::serde_json::Map::new();
         obj.insert(

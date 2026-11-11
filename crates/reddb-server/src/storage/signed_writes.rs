@@ -163,7 +163,7 @@ impl SignerRegistry {
     }
 
     /// Rebuild a registry from previously-persisted state. Used by the
-    /// runtime adapter when loading the registry off `red_config` — the
+    /// runtime adapter when loading the registry off `red.config` — the
     /// caller is responsible for the storage format; this constructor
     /// only stitches the in-memory invariants back together.
     pub fn from_persisted_parts(

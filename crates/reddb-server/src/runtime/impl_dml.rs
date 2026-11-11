@@ -3185,10 +3185,10 @@ mod tests {
         let store = runtime.db().store();
         store.persist().expect("publish recheck configuration");
         let root = store
-            .collection_root_page("red_config")
+            .collection_root_page("red.config")
             .expect("configuration root");
         let manager = store
-            .get_collection("red_config")
+            .get_collection("red.config")
             .expect("configuration collection");
         let install = |limit| {
             let tree = BTree::with_root(Arc::clone(store.pager().expect("pager")), root);

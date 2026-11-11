@@ -73,21 +73,24 @@ fn as_of_commit_resolves_to_commit_root_xid() {
 fn as_of_branch_sql_parses_and_executes() {
     let rt = rt();
     let _c1 = commit(&rt, 1, "c1");
-    // Query the bootstrap `red_commits` collection — always exists
+    // Query the bootstrap `red.vcs.commits` collection — always exists
     // and should return our one commit record. The AS OF BRANCH
     // clause must parse, resolve, and install the snapshot; scan
     // must succeed.
     let result = rt
-        .execute_query("SELECT * FROM red_commits AS OF BRANCH 'main'")
+        .execute_query("SELECT * FROM red.vcs.commits AS OF BRANCH 'main'")
         .expect("query executes");
-    assert!(!result.result.records.is_empty(), "red_commits has rows");
+    assert!(
+        !result.result.records.is_empty(),
+        "red.vcs.commits has rows"
+    );
 }
 
 #[test]
 fn as_of_commit_sql_parses_and_executes() {
     let rt = rt();
     let c1 = commit(&rt, 1, "c1");
-    let sql = format!("SELECT * FROM red_commits AS OF COMMIT '{}'", c1);
+    let sql = format!("SELECT * FROM red.vcs.commits AS OF COMMIT '{}'", c1);
     let result = rt.execute_query(&sql).expect("query executes");
     assert!(!result.result.records.is_empty());
 }
@@ -98,7 +101,7 @@ fn as_of_unknown_commit_errors() {
     let _ = commit(&rt, 1, "c1");
     let err = rt
         .execute_query(
-            "SELECT * FROM red_commits AS OF COMMIT \
+            "SELECT * FROM red.vcs.commits AS OF COMMIT \
              '0000000000000000000000000000000000000000000000000000000000000000'",
         )
         .expect_err("unknown commit hash");
@@ -118,7 +121,7 @@ fn as_of_snapshot_does_not_error_on_valid_xid() {
     let rt = rt();
     let _c = commit(&rt, 1, "c1");
     let _ = rt
-        .execute_query("SELECT * FROM red_commits AS OF SNAPSHOT 1")
+        .execute_query("SELECT * FROM red.vcs.commits AS OF SNAPSHOT 1")
         .expect("snapshot xid executes");
 }
 

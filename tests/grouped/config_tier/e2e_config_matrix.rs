@@ -1,7 +1,7 @@
 //! Perf-parity config matrix — Tier A self-healing + Tier B defaults.
 //!
 //! On boot every `Tier::Critical` key must be visible through
-//! `SHOW CONFIG <key>` (populated into red_config if absent). Tier B
+//! `SHOW CONFIG <key>` (populated into red.config if absent). Tier B
 //! keys stay silent until a user `SET CONFIG` writes them.
 
 #[allow(dead_code)]
@@ -150,7 +150,7 @@ fn tier_b_optional_keys_stay_silent_until_user_sets_them() {
     let pre = show_value(&rt, "concurrency.locking.deadlock_timeout_ms");
     assert!(
         pre.as_deref() == Some("Null") || pre.is_none(),
-        "Tier B key leaked a default into red_config: {pre:?}"
+        "Tier B key leaked a default into red.config: {pre:?}"
     );
 
     // After SET CONFIG, the same lookup must reveal the user's value.
@@ -181,7 +181,7 @@ fn env_override_wins_over_persisted_value_via_readers() {
     }
     let rt = open_runtime();
     // `config_u64` is crate-private; probe via a public surface that
-    // uses it. SHOW CONFIG reads red_config directly — it will NOT
+    // uses it. SHOW CONFIG reads red.config directly — it will NOT
     // reflect env overrides by design (documented contract). So we
     // use a second boot + a fresh SET CONFIG to confirm env takes
     // precedence at the reader layer only, not at SHOW CONFIG.
@@ -230,7 +230,7 @@ fn config_file_overlay_seeds_missing_keys() {
     );
 
     // Tier B key — matrix did NOT self-heal it, so the file overlay's
-    // value landed in red_config and is visible via SHOW CONFIG.
+    // value landed in red.config and is visible via SHOW CONFIG.
     let show_rows = show_value(&rt, "storage.bulk_insert.max_buffered_rows");
     assert!(
         show_rows

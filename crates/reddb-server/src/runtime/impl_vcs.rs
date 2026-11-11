@@ -6,7 +6,7 @@
 //! remain stubbed and land in Phase 3.
 //!
 //! Every VCS entity is stored as a plain TableRow in a `red_*`
-//! collection (same pattern as `red_queue_meta` / `red_stats`).
+//! collection (same pattern as `red.queue.meta` / `red.query.stats_catalog`).
 //! Commits reuse the MVCC snapshot xid as their immutable root, and
 //! pin that xid so VACUUM cannot reclaim historical row versions.
 
@@ -394,7 +394,7 @@ fn versioned_collections(store: &UnifiedStore) -> RedDBResult<Vec<String>> {
     Ok(collections)
 }
 
-/// Upsert / delete the `red_vcs_settings` row for `name`. `true`
+/// Upsert / delete the `red.vcs.settings` row for `name`. `true`
 /// opts the collection into VCS; `false` opts it out (subsequent
 /// merges / diffs / AS OF queries stop seeing it). Does NOT touch
 /// existing row versions — you control whether history is retained
@@ -978,7 +978,7 @@ impl RedDBRuntime {
 
         // Non-fast-forward: compute LCA, create a merge commit.
         // Data-level 3-way merge (with conflict materialisation into
-        // red_conflicts) is deferred to Phase 4 — for now we produce
+        // red.vcs.conflicts) is deferred to Phase 4 — for now we produce
         // the merge commit only when both sides have no content
         // overlap to resolve, i.e. when LCA == head_hash (reverse FF)
         // we already handled above. Otherwise surface a merge_state
@@ -1705,7 +1705,7 @@ impl RedDBRuntime {
 }
 
 /// Detect entities changed on both sides of a 3-way merge and write
-/// a `red_conflicts` row for each. Returns the in-memory `Conflict`
+/// a `red.vcs.conflicts` row for each. Returns the in-memory `Conflict`
 /// list in the same shape `vcs_conflicts_list` would later read back.
 ///
 /// Phase 5: metadata-level only — identifiers + which sides moved.

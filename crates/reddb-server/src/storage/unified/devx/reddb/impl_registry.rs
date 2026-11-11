@@ -394,7 +394,7 @@ impl RedDB {
             // metadata catalogue from its last durable roots, removing the
             // dropped root and descriptors explicitly.  Calling the generic
             // metadata updater here used to fingerprint every row in changed
-            // internal collections (notably append-heavy red_config) while
+            // internal collections (notably append-heavy red.config) while
             // holding the publication lock, turning a tiny DROP after cold
             // boot into work proportional to the database's history.
             //

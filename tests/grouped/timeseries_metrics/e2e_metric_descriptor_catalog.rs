@@ -83,7 +83,7 @@ fn alter_metric_descriptor_updates_role_and_persists() {
     assert_eq!(text(row, "role"), "sli");
 
     // The update is durable through a checkpoint/reopen cycle —
-    // it landed in red_config like every other WAL-backed catalog write.
+    // it landed in red.config like every other WAL-backed catalog write.
     let reopened = checkpoint_and_reopen(&path, rt);
     let persisted = exec(
         &reopened,

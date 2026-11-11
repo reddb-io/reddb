@@ -10,7 +10,7 @@
 //! RIDs out of result sets.
 //!
 //! This module owns the durable representation (a JSON list persisted under
-//! a single `red_config` key) and the pure helpers the runtime + stream
+//! a single `red.config` key) and the pure helpers the runtime + stream
 //! handler use. The runtime caches the parsed ranges in-memory so the common
 //! no-tombstone read path pays only a single relaxed atomic load.
 
@@ -79,7 +79,7 @@ impl TombstoneRange {
 }
 
 /// Serialize the range list to the compact JSON array persisted in
-/// `red_config`. Table names are SQL identifiers (validated at OpenStream),
+/// `red.config`. Table names are SQL identifiers (validated at OpenStream),
 /// so the only escaping needed is the JSON string quote — kept explicit here
 /// rather than pulling a serializer for a three-field record.
 pub fn serialize_ranges(ranges: &[TombstoneRange]) -> String {

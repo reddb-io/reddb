@@ -119,9 +119,9 @@ fn update_migration_field(
     key: &str,
     value: Value,
 ) -> RedDBResult<()> {
-    let manager = store
-        .get_collection(mc::MIGRATIONS)
-        .ok_or_else(|| RedDBError::Internal("red_migrations collection not found".to_string()))?;
+    let manager = store.get_collection(mc::MIGRATIONS).ok_or_else(|| {
+        RedDBError::Internal("red.migration.definitions collection not found".to_string())
+    })?;
     let results = manager.query_all(|entity| {
         if let EntityData::Row(ref row) = entity.data {
             if let Some(ref named) = row.named {
@@ -146,7 +146,7 @@ fn update_migration_field(
     )))
 }
 
-/// Load all dependency edges from red_migration_deps.
+/// Load all dependency edges from red.migration.dependencies.
 fn load_all_edges(store: &UnifiedStore) -> Vec<(String, String)> {
     let Some(manager) = store.get_collection(mc::MIGRATION_DEPS) else {
         return Vec::new();
@@ -173,7 +173,7 @@ fn load_all_edges(store: &UnifiedStore) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Load all migration names from red_migrations.
+/// Load all migration names from red.migration.definitions.
 fn load_all_migration_names(store: &UnifiedStore) -> Vec<String> {
     let Some(manager) = store.get_collection(mc::MIGRATIONS) else {
         return Vec::new();

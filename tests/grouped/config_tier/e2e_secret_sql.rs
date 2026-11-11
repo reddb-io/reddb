@@ -291,7 +291,7 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
     );
 
     let dump_text = std::fs::read_to_string(&dump_path).expect("dump should be readable");
-    assert!(dump_text.contains("red_config"));
+    assert!(dump_text.contains("\"collection\":\"red.config\""));
     assert!(dump_text.contains("red.config.demo.enabled"));
     assert!(dump_text.contains("reddb.vault_kv.v1"));
     assert!(

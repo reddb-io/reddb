@@ -119,7 +119,7 @@ pub(super) fn row_text(
 }
 
 fn discover_queue_dlqs(store: &UnifiedStore) -> HashSet<String> {
-    const QUEUE_META_COLLECTION: &str = "red_queue_meta";
+    const QUEUE_META_COLLECTION: &str = "red.queue.meta";
 
     let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
         return HashSet::new();

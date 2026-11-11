@@ -31,7 +31,7 @@ use crate::storage::unified::RedDB;
 use crate::{RedDBError, RedDBResult};
 use reddb_types::Value;
 
-const RED_CONFIG_COLLECTION: &str = "red_config";
+const RED_CONFIG_COLLECTION: &str = "red.config";
 const AI_MODEL_KEY_PREFIX: &str = "red.config.ai.models.";
 const STATUS_INSTALLED: &str = "installed";
 const TASK_EMBEDDING: &str = "embedding";
@@ -200,7 +200,7 @@ pub fn ensure_local_embedding_available() -> RedDBResult<()> {
 ///
 /// Performs, in order:
 /// 1. Backend availability gate (or feature-off error).
-/// 2. Registry lookup for `name` in `red_config`.
+/// 2. Registry lookup for `name` in `red.config`.
 /// 3. Task / status / engine validation.
 /// 4. Backend dispatch.
 /// 5. Shape validation against the registered dimensions.

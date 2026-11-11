@@ -3,7 +3,7 @@ use crate::application::SearchContextInput;
 use crate::storage::unified::context_index::{entity_tokens_for_search, tokenize_query};
 use reddb_rql::ast::Expr;
 
-const ASK_AUDIT_COLLECTION: &str = "red_ask_audit";
+const ASK_AUDIT_COLLECTION: &str = "red.ask.audit";
 const ASK_SYNTHESIS_SYSTEM_PROMPT: &str = include_str!("ai/prompts/ask_synthesis.txt");
 
 fn mark_table_scan_as_index_seek(
@@ -4418,7 +4418,7 @@ fn latest_config_value(runtime: &RedDBRuntime, key: &str) -> Option<reddb_types:
     use crate::application::ports::RuntimeEntityPort;
 
     runtime
-        .get_kv("red_config", key)
+        .get_kv("red.config", key)
         .ok()
         .flatten()
         .map(|(value, _)| value)
