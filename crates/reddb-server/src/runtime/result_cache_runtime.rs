@@ -859,6 +859,19 @@ mod crash_tests {
     }
 
     #[test]
+    fn uncached_native_read_frame_does_not_initialize_result_cache_format() {
+        use crate::runtime::statement_frame::{StatementExecutionFrame, StatementIdentity};
+
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let _frame = StatementExecutionFrame::build(
+            &runtime,
+            StatementIdentity::UncachedText("SEARCH CONTEXT"),
+        )
+        .expect("native read frame");
+        assert!(!runtime.db().store().result_cache_format_fenced());
+    }
+
+    #[test]
     fn promotion_gate_does_not_block_hits_and_orders_invalidation() {
         use std::sync::mpsc;
         use std::time::Duration;

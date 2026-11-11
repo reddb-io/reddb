@@ -370,6 +370,9 @@ pub(super) struct PreparedStatement {
 pub(super) enum StatementIdentity<'a> {
     /// The statement's SQL text. All five derivations are exact.
     Text(&'a str),
+    /// A direct runtime read that needs the text-derived snapshot, scope and
+    /// privilege context but does not traverse result-cache read/write paths.
+    UncachedText(&'a str),
     /// A pre-parsed expression with no accompanying text — the nested
     /// in-statement callers (CTE prelude, materialized-view refresh,
     /// inline graph TVF) hold an expression the outer statement already
@@ -390,7 +393,7 @@ impl<'a> StatementIdentity<'a> {
     /// deliberately inert `unknown` / `None` classes on the expr path.
     fn text(&self) -> &'a str {
         match self {
-            Self::Text(query) => query,
+            Self::Text(query) | Self::UncachedText(query) => query,
             Self::Expr(_) => "",
         }
     }
@@ -408,7 +411,9 @@ impl StatementExecutionFrame {
             {
                 runtime.result_cache_snapshot()
             }
-            StatementIdentity::Text(_) | StatementIdentity::Expr(_) => (None, 0),
+            StatementIdentity::Text(_)
+            | StatementIdentity::UncachedText(_)
+            | StatementIdentity::Expr(_) => (None, 0),
         };
         if let StatementIdentity::Expr(expr) = identity_source {
             reject_unresolvable_as_of(expr)?;
@@ -436,7 +441,9 @@ impl StatementExecutionFrame {
             // result cache on both sides: an empty key is never read from
             // or written to, and `is_volatile_query` is set so
             // `should_cache_result` refuses regardless of the key.
-            StatementIdentity::Expr(_) => (String::new(), true),
+            StatementIdentity::UncachedText(_) | StatementIdentity::Expr(_) => {
+                (String::new(), true)
+            }
         };
         let cache_safe = runtime.result_cache_safe(conn_id);
         // Capture identity + effective scope under the same
