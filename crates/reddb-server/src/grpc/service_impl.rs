@@ -191,6 +191,10 @@ fn ask_reply_from_runtime_result(result: &RuntimeQueryResult) -> Result<AskReply
         cache_hit: reply.cache_hit,
         mode: reply.mode,
         retry_count: reply.retry_count,
+        reasoning_json: reply.reasoning_json,
+        exploratory_queries_json: reply.exploratory_queries_json,
+        final_query: reply.final_query,
+        final_query_params_json: reply.final_query_params_json,
     })
 }
 
