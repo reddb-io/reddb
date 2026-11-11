@@ -3529,6 +3529,10 @@ fn cold_dml_delete_events_abort_with_the_source() {
                 }
             };
             let runtime = RedDBRuntime::with_options(options()).expect("event runtime");
+            // This fixture owns the store-global WAL fault injector. Periodic
+            // workers must not consume the one-shot failure between arming it
+            // and publishing the DELETE under test.
+            runtime.background_tasks.as_ref().unwrap().shutdown();
             if bounded {
                 runtime
                     .execute_query("CREATE QUEUE delete_events_outbox MAX_SIZE 1")
@@ -3549,9 +3553,12 @@ fn cold_dml_delete_events_abort_with_the_source() {
                     .store()
                     .test_fail_deferred_wal_append
                     .store(true, std::sync::atomic::Ordering::SeqCst);
-                let error = runtime
-                    .execute_query("DELETE FROM delete_events_probe")
-                    .expect_err("real event WAL append must fail");
+                let error = match runtime.execute_query("DELETE FROM delete_events_probe") {
+                    Err(error) => error,
+                    Ok(result) => panic!(
+                        "real event WAL append must fail: paged={paged} bounded={bounded} cycle={cycle}: {result:?}"
+                    ),
+                };
                 assert!(error
                     .to_string()
                     .contains("injected deferred WAL append failure"));

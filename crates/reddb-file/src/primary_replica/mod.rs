@@ -741,6 +741,15 @@ mod tests {
         );
         plan.append_wal_record(2, b"next")
             .expect("append second record");
+        plan.append_wal_record(1, b"payload-larger-than-one")
+            .expect("replaying the same record is idempotent");
+
+        let conflict = plan
+            .append_wal_record(1, b"conflicting-payload")
+            .expect_err("the same lsn cannot name different payloads");
+        assert!(conflict
+            .to_string()
+            .contains("already exists with a different payload"));
 
         let segment = PrimaryReplicaWalSegment::read_from_path(plan.wal_segment_path(1))
             .expect("read appended wal segment");

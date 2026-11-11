@@ -660,6 +660,13 @@ mod tests {
         runtime
             .execute_query("CREATE INDEX body_idx ON samples (body) USING HASH")
             .expect("index");
+        // This test isolates nested mutation reservations. Initialize the
+        // durable result-cache format before measuring the exact headroom so
+        // the read used to prove the rejected write stayed atomic does not
+        // consume unrelated metadata bytes inside that accounting window.
+        runtime
+            .execute_query("SELECT * FROM samples")
+            .expect("initialize read metadata");
         runtime.refresh_memory_accounting();
         let headroom = runtime.memory_accounting().budget().resolved_bytes
             - runtime.memory_accounting().total_used_bytes();

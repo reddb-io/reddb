@@ -83,6 +83,10 @@ message AskReply {
   bool cache_hit = 10;
   string mode = 11;
   uint32 retry_count = 12;
+  string reasoning_json = 13;
+  string exploratory_queries_json = 14;
+  optional string final_query = 15;
+  string final_query_params_json = 16;
 }
 
 message AskStreamEvent {

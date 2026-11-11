@@ -72,6 +72,12 @@ pub struct WalIterator {
     format_version: u8,
 }
 
+impl WalIterator {
+    pub(crate) fn next_record_lsn(&self) -> u64 {
+        self.position
+    }
+}
+
 impl Iterator for WalIterator {
     type Item = io::Result<(u64, WalRecord)>;
 

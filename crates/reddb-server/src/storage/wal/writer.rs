@@ -305,6 +305,29 @@ impl<V: Vfs> WalWriter<V> {
         self.current_lsn = lsn;
     }
 
+    /// Drop an ordinary record that recovery proved was interrupted at EOF.
+    /// The caller must validate ownership state before invoking this method.
+    pub(crate) fn truncate_incomplete_tail(&mut self, valid_lsn: u64) -> io::Result<()> {
+        if valid_lsn < reddb_file::WAL_FILE_HEADER_BYTES as u64 || valid_lsn > self.current_lsn {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid incomplete WAL tail boundary",
+            ));
+        }
+        self.file.flush()?;
+        {
+            let raw = self.file.get_mut();
+            raw.set_len(valid_lsn)?;
+            raw.seek(SeekFrom::Start(valid_lsn))?;
+        }
+        self.file.get_ref().sync_all()?;
+        self.current_lsn = valid_lsn;
+        self.durable_lsn = valid_lsn;
+        self.last_synced_size = self.preallocated_to.max(valid_lsn);
+        self.prealloc_metadata_dirty = false;
+        Ok(())
+    }
+
     /// Force sync to disk.
     ///
     /// Drains the user-space [`BufWriter`] first, then calls

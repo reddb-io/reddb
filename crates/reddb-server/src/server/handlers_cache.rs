@@ -712,6 +712,8 @@ mod tests {
             None
         ))["value"]
             .is_null());
+        // The authoritative GET removed the expired L2 metadata, but the
+        // no-false-negative Bloom synopsis cannot clear its insertion bits.
         assert_eq!(
             value(request(
                 &server,
@@ -720,7 +722,7 @@ mod tests {
                 "",
                 None
             ))["status"],
-            "absent"
+            "maybe"
         );
     }
 

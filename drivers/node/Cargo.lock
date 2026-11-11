@@ -2253,6 +2253,7 @@ dependencies = [
 name = "reddb-io-grpc-proto"
 version = "1.33.1"
 dependencies = [
+ "bytes",
  "prost",
  "reddb-io-tonic",
  "reddb-io-tonic-prost",

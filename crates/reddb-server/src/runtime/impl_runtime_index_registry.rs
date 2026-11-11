@@ -305,7 +305,7 @@ impl RedDBRuntime {
     pub(super) fn reserve_index_scan_with_limit(
         &self,
         manager: &crate::storage::unified::SegmentManager,
-        mut read_bytes_max: usize,
+        read_bytes_max: usize,
     ) -> RedDBResult<(super::memory_admission::QueryBufferReservation, usize)> {
         // Decode, indexed projection and descriptor reduction share this owned
         // scratch. Resident-only visitors borrow rows already charged to the
@@ -324,6 +324,68 @@ impl RedDBRuntime {
         } else {
             0
         };
+        self.reserve_index_workspace_with_limit(read_bytes_max, overlay_bytes)
+    }
+
+    /// A point/range probe returns only admitted entity IDs and does not retain
+    /// the source overlay. Its resident rows are already charged to the segment
+    /// arena, so charging them again can prevent decoding one otherwise bounded
+    /// cold row after sustained writes.
+    pub(super) fn reserve_index_probe_with_limit(
+        &self,
+        read_bytes_max: usize,
+        workspace_factor: usize,
+    ) -> RedDBResult<(super::memory_admission::QueryBufferReservation, usize)> {
+        // The decode allowance covers encoded input plus the decoded entity.
+        // Direct table columns are borrowed while their canonical key is built,
+        // so they need one additional allowance. Document paths can also own an
+        // extracted value while encoding the key and therefore need two.
+        let scratch = read_bytes_max.saturating_mul(workspace_factor);
+        let mut reservation = self.try_reserve_query_buffer(scratch);
+        if reservation.is_none() {
+            self.reclaim_index_probe_workspace(scratch)?;
+            reservation = self.try_reserve_query_buffer(scratch);
+        }
+        let reservation = reservation.ok_or_else(|| {
+            let accounting = self.memory_accounting();
+            RedDBError::InvalidOperation(format!(
+                "index probe workspace exceeds the shared memory budget: requested {scratch} bytes, used {}, budget {}",
+                accounting.total_used_bytes(),
+                accounting.budget().resolved_bytes
+            ))
+        })?;
+        Ok((reservation, read_bytes_max))
+    }
+
+    fn reclaim_index_probe_workspace(&self, scratch: usize) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        if self.inner.db.options().read_only
+            || self.inner.lifecycle.phase() != super::lifecycle::Phase::Ready
+            || !store.is_paged()
+            || self
+                .memory_accounting()
+                .used_bytes(crate::storage::memory_pools::MemoryPool::QueryBuffers)
+                >= u64::try_from(scratch).unwrap_or(u64::MAX)
+            || store.vault_publication_lock.is_owned_by_current_thread()
+            || crate::storage::UnifiedStore::deferred_store_wal_capture_active()
+            || self.current_xid().is_some()
+        {
+            return Ok(());
+        }
+        // Probe admission runs before publication and source locks. Avoid
+        // waiting on a concurrent publisher; if we can acquire the fence,
+        // checkpointing releases committed overlay memory before one retry.
+        let Some(_publication) = store.vault_publication_lock.try_lock() else {
+            return Ok(());
+        };
+        self.checkpoint_local()
+    }
+
+    fn reserve_index_workspace_with_limit(
+        &self,
+        mut read_bytes_max: usize,
+        overlay_bytes: usize,
+    ) -> RedDBResult<(super::memory_admission::QueryBufferReservation, usize)> {
         // The configured allowance is a ceiling, not a minimum allocation.
         // Reduce owned scratch under pressure, but reserve it before scanning
         // and pass the effective limit to every reader and projection. Keep a
@@ -339,7 +401,7 @@ impl RedDBRuntime {
             if read_bytes_max == read_bytes_min {
                 let accounting = self.memory_accounting();
                 return Err(RedDBError::InvalidOperation(format!(
-                    "index restoration workspace exceeds the shared memory budget: requested {scratch} bytes (overlay {overlay_bytes}), used {}, budget {}",
+                    "index workspace exceeds the shared memory budget: requested {scratch} bytes (overlay {overlay_bytes}), used {}, budget {}",
                     accounting.total_used_bytes(), accounting.budget().resolved_bytes
                 )));
             }

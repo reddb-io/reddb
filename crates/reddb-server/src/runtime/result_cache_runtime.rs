@@ -841,6 +841,45 @@ mod crash_tests {
     }
 
     #[test]
+    fn write_and_control_statements_do_not_initialize_result_cache_format() {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        for sql in [
+            "CREATE TABLE cache_format_gate (id INT)",
+            "INSERT INTO cache_format_gate (id) VALUES (1)",
+            "BEGIN",
+            "ROLLBACK",
+        ] {
+            runtime.execute_query(sql).expect("non-read statement");
+            assert!(!runtime.db().store().result_cache_format_fenced(), "{sql}");
+        }
+        runtime.execute_query("SCRUB").expect("uncached scrub");
+        assert!(!runtime.db().store().result_cache_format_fenced());
+        runtime
+            .execute_query("SELECT * FROM red.stats WHERE collection = 'cache_format_gate'")
+            .expect("computed stats read");
+        assert!(!runtime.db().store().result_cache_format_fenced());
+        runtime.execute_query("SHOW STATS").expect("show stats");
+        assert!(!runtime.db().store().result_cache_format_fenced());
+        runtime
+            .execute_query("SELECT id FROM cache_format_gate")
+            .expect("read statement");
+        assert!(runtime.db().store().result_cache_format_fenced());
+    }
+
+    #[test]
+    fn uncached_native_read_frame_does_not_initialize_result_cache_format() {
+        use crate::runtime::statement_frame::{StatementExecutionFrame, StatementIdentity};
+
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        let _frame = StatementExecutionFrame::build(
+            &runtime,
+            StatementIdentity::UncachedText("SEARCH CONTEXT"),
+        )
+        .expect("native read frame");
+        assert!(!runtime.db().store().result_cache_format_fenced());
+    }
+
+    #[test]
     fn promotion_gate_does_not_block_hits_and_orders_invalidation() {
         use std::sync::mpsc;
         use std::time::Duration;

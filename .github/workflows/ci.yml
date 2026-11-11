@@ -1,6 +1,22 @@
 name: CI
 
 on:
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [ main, develop ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'CHANGELOG**'
+      - 'LICENSE**'
+  pull_request:
+    branches: [ main, develop ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'CHANGELOG**'
+      - 'LICENSE**'
   workflow_dispatch:
     inputs:
       full_ci:
@@ -270,6 +286,13 @@ jobs:
           fi
       - name: Build RedWire server
         run: cargo build --locked --bin red
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22'
+      - name: Install Bun workspace dependencies
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io/client-bun...
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: '1.4.1'
@@ -284,9 +307,6 @@ jobs:
           REDDB_BENCH_ROUNDS: '3'
           REDDB_BENCH_SAMPLE_MS: '5'
         run: bun run bench-receive.ts > "$RUNNER_TEMP/bun-receive.json"
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        with:
-          node-version: '22'
       - name: Remote HTTP native Blob Cache regression
         env:
           RED_BIN: ${{ github.workspace }}/target/debug/red
@@ -517,7 +537,9 @@ jobs:
       - platforms
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # A cold build plus all 8k+ unit tests exceeded 20 minutes while still
+    # making steady progress. Per-test hangs remain bounded by nextest.
+    timeout-minutes: 30
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
@@ -955,6 +977,10 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.x'
+      - name: Install Bun workspace dependencies
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io/client-bun...
       - name: Build red (embedded engine for the JS SDK)
         run: cargo build --locked --bin red
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2

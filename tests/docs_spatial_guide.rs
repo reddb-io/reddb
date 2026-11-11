@@ -415,23 +415,33 @@ fn guide_is_cross_linked_both_ways() {
 
 // ── The worked example prints what the engine prints ─────────────────────────
 
-/// Seed the guide's `stores` table, exactly as its first fence does.
-fn seeded_stores() -> RedDBRuntime {
+/// Seed the guide's `stores` table, exactly as its first fence does, and retain
+/// the engine-assigned identities instead of assuming a bootstrap offset.
+fn seeded_stores() -> (RedDBRuntime, [u64; 4]) {
     let rt = fresh();
     rt.execute_query("CREATE TABLE stores (id INT, name TEXT, location GEOPOINT)")
         .unwrap();
-    for (id, name, loc) in [
+    let mut rids = [0; 4];
+    for (offset, (id, name, loc)) in [
         (1, "Louvre", "48.8606,2.3376"),
         (2, "Eiffel Tower", "48.8584,2.2945"),
         (3, "Sacre-Coeur", "48.8867,2.3431"),
         (4, "Gare de Lyon", "48.8443,2.3743"),
-    ] {
-        rt.execute_query(&format!(
-            "INSERT INTO stores (id, name, location) VALUES ({id}, '{name}', '{loc}')"
-        ))
-        .unwrap();
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let inserted = rt
+            .execute_query(&format!(
+                "INSERT INTO stores (id, name, location) VALUES ({id}, '{name}', '{loc}') RETURNING rid"
+            ))
+            .unwrap();
+        rids[offset] = match inserted.result.records[0].get("rid") {
+            Some(Value::UnsignedInteger(rid)) => *rid,
+            other => panic!("RETURNING rid: {other:?}"),
+        };
     }
-    rt
+    (rt, rids)
 }
 
 fn rows(rt: &RedDBRuntime, query: &str) -> Vec<(u64, Option<f64>)> {
@@ -458,7 +468,7 @@ fn rows(rt: &RedDBRuntime, query: &str) -> Vec<(u64, Option<f64>)> {
 
 #[test]
 fn guide_worked_example_prints_the_real_output() {
-    let rt = seeded_stores();
+    let (rt, rids) = seeded_stores();
     rt.execute_query("CREATE INDEX idx_stores_loc ON stores (location) USING H3")
         .unwrap();
 
@@ -466,14 +476,20 @@ fn guide_worked_example_prints_the_real_output() {
         &rt,
         "SEARCH SPATIAL RADIUS 48.8566 2.3522 3.0 COLLECTION stores COLUMN location",
     );
-    // The guide prints these ids and these distances, verbatim.
-    for (id, dist) in &radius {
-        assert_guide_quotes(&id.to_string());
+    // The guide prints stable semantic placeholders and the real distances.
+    assert_eq!(
+        radius.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![rids[0], rids[3]],
+        "the radius hits must be Louvre then Gare de Lyon"
+    );
+    for (_, dist) in &radius {
         assert_guide_quotes(&dist.expect("RADIUS returns a distance").to_string());
     }
     assert_eq!(radius.len(), 2, "the guide shows two hits within 3 km");
     // ...and the two the guide names as absent really are.
-    assert!(!radius.iter().any(|(id, _)| *id == 1028 || *id == 1029));
+    assert!(!radius
+        .iter()
+        .any(|(id, _)| *id == rids[1] || *id == rids[2]));
 
     // NEAREST K 2 is the same two rows, as the guide claims.
     let nearest = rows(
@@ -488,9 +504,14 @@ fn guide_worked_example_prints_the_real_output() {
         "SEARCH SPATIAL BBOX 48.85 2.30 48.89 2.40 COLLECTION stores COLUMN location LIMIT 10",
     );
     assert!(bbox.iter().all(|(_, dist)| dist.is_none()));
-    for (id, _) in &bbox {
-        assert_guide_quotes(&id.to_string());
-    }
+    let mut bbox_ids = bbox.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    bbox_ids.sort_unstable();
+    let mut expected_bbox_ids = vec![rids[2], rids[0]];
+    expected_bbox_ids.sort_unstable();
+    assert_eq!(
+        bbox_ids, expected_bbox_ids,
+        "the bounding box must contain Sacre-Coeur and Louvre"
+    );
 }
 
 #[test]
@@ -501,8 +522,8 @@ fn guide_promise_that_the_index_is_a_pure_optimization_holds() {
         "SEARCH SPATIAL BBOX 48.85 2.30 48.89 2.40 COLLECTION stores COLUMN location",
     ];
 
-    let scan = seeded_stores();
-    let indexed = seeded_stores();
+    let (scan, _) = seeded_stores();
+    let (indexed, _) = seeded_stores();
     indexed
         .execute_query("CREATE INDEX idx_stores_loc ON stores (location) USING H3")
         .unwrap();

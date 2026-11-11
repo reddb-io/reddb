@@ -160,7 +160,14 @@ impl UnifiedStore {
                 .store(marker_fenced && format_fenced, Ordering::Release);
         } else {
             self.result_cache_epoch.epoch.store(0, Ordering::SeqCst);
-            self.result_cache_epoch.id.store(0, Ordering::SeqCst);
+            // Reserve the marker identity while the store is still loading,
+            // before the runtime raises the allocator to FIRST_USER_ENTITY_ID.
+            // Creating the marker lazily from the first statement must not
+            // consume the first documented user identity.
+            if !self.is_read_only() && self.result_cache_epoch.id.load(Ordering::SeqCst) == 0 {
+                let id = self.next_entity_id();
+                self.result_cache_epoch.id.store(id.raw(), Ordering::SeqCst);
+            }
             self.result_cache_epoch
                 .format_fenced
                 .store(false, Ordering::Release);
@@ -276,7 +283,12 @@ impl UnifiedStore {
             self.result_cache_epoch.epoch.store(epoch, Ordering::SeqCst);
             return Ok(epoch);
         }
-        let id = self.next_entity_id();
+        let reserved_id = self.result_cache_epoch.id.load(Ordering::SeqCst);
+        let id = if reserved_id == 0 {
+            self.next_entity_id()
+        } else {
+            EntityId::new(reserved_id)
+        };
         let entity = Self::result_cache_epoch_entity(id, 1);
         self.publish_rows(super::row_publication::RowPublication {
             inserts: vec![(CACHE_COLLECTION.to_string(), entity, None)],
@@ -420,6 +432,21 @@ impl UnifiedStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_epoch_reserves_one_marker_identity_during_load() {
+        let store = UnifiedStore::new();
+        store.load_result_cache_epoch().expect("load missing epoch");
+        store
+            .load_result_cache_epoch()
+            .expect("reloading missing epoch is idempotent");
+        assert_eq!(store.ensure_result_cache_epoch().expect("initial epoch"), 1);
+        assert_eq!(
+            store.next_entity_id().raw(),
+            2,
+            "publishing the reserved marker must not allocate a second identity"
+        );
+    }
 
     #[test]
     fn pending_publication_only_fences_results_with_matching_dependencies() {

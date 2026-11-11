@@ -731,6 +731,21 @@ pub(super) fn references_system_schema(query: &str) -> bool {
     contains_case_insensitive_outside_quotes(query, "red.")
 }
 
+pub(super) fn is_computed_stats_query(query: &str) -> bool {
+    let mut tokens = query
+        .trim_start()
+        .split(|c: char| c.is_whitespace() || c == '(' || c == ';');
+    let show_stats = tokens
+        .next()
+        .is_some_and(|token| token.eq_ignore_ascii_case("SHOW"))
+        && tokens
+            .next()
+            .is_some_and(|token| token.eq_ignore_ascii_case("STATS"));
+    show_stats
+        || contains_case_insensitive_outside_quotes(query, STATS)
+        || contains_case_insensitive_outside_quotes(query, STATS_INTERNAL)
+}
+
 pub(super) fn is_system_schema_write(query: &str) -> bool {
     let trimmed = query.trim_start();
     let mut tokens = trimmed.split(|c: char| c.is_whitespace() || c == '(' || c == ';');

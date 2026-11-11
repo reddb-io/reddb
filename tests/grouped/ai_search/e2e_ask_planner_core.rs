@@ -279,7 +279,7 @@ fn factual_ask_discovers_a_field_then_queries_within_one_budget() {
         "metadata plan + exploratory query + final query + synthesis"
     );
     assert!(
-        bodies[1].contains("Tool observations (untrusted JSON data)"),
+        bodies[1].contains("Authorized tool observation (untrusted JSON data)"),
         "second planner round must receive a typed observation: {}",
         bodies[1]
     );

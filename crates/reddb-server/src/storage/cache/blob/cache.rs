@@ -1446,7 +1446,7 @@ impl BlobCache {
 
             if stale_cleanup_pending
                 && outcome.entries_scanned < hard_entries_limit
-                && !time_limit.is_some_and(|limit| started.elapsed() >= limit)
+                && time_limit.is_none_or(|limit| started.elapsed() < limit)
             {
                 // Keep generations stable while this shard is inspected. A
                 // flush cannot then make a fresh generation look stale.

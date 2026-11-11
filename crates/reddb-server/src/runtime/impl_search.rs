@@ -1143,8 +1143,11 @@ impl RedDBRuntime {
         let _scope = if crate::runtime::impl_core::capture_current_snapshot().is_none() {
             use super::statement_frame::{StatementExecutionFrame, StatementIdentity};
             Some(
-                StatementExecutionFrame::build(self, StatementIdentity::Text("SEARCH CONTEXT"))?
-                    .install(self),
+                StatementExecutionFrame::build(
+                    self,
+                    StatementIdentity::UncachedText("SEARCH CONTEXT"),
+                )?
+                .install(self),
             )
         } else {
             None
