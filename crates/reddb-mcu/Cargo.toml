@@ -1,0 +1,25 @@
+[package]
+name = "reddb-io-mcu"
+version = "1.33.3"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+description = "RedDB integration package for bounded embedded storage hosts."
+readme = "README.md"
+
+[lib]
+name = "reddb_mcu"
+
+[dependencies]
+reddb-engine = { workspace = true }
+reddb-file = { workspace = true }
+reddb-types = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

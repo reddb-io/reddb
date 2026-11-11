@@ -1,6 +1,6 @@
 # ADR 0083 — MCU storage strategy over the canonical `.rdb`
 
-Status: proposed; resident strategy extraction implemented
+Status: accepted; host/emulator MCU slice implemented
 Date: 2026-11-11
 
 ## Context
@@ -37,12 +37,19 @@ The first strategy is a behavior-preserving adapter over
 `BEGIN`, the current catalog snapshot barrier, the native WAL action path and
 the existing failure fence. The public API and stored bytes do not change.
 
-A later MCU strategy may implement `StoreView` with canonical pager/B-tree
-cursors and a bounded transaction overlay. It must not implement a second SQL
-or RQL dispatcher. Operators that require materialization, sorting, joins or
-other memory above the local budget either fail with the existing didactic
-resource error or execute through the explicit gateway contract; no operation
-silently changes semantics.
+`PagedStrategy<F>` implements `StoreView` with the canonical pager, B-tree,
+RER1 entity codec, native manifest and physical metadata document. It selects
+one cache page and exposes a callback query path that applies the canonical
+filter, projection, offset and limit operators one row at a time. The ordinary
+local query path remains available for admitted whole-result operations. No
+second SQL or RQL dispatcher exists.
+
+The bounded writer currently admits `CREATE TABLE` and append-only `INSERT`.
+Transactions, `UPDATE`, `DELETE`, catalog extensions it cannot preserve, and
+streaming plans that require whole-set materialization fail before publication.
+Those are explicit implementation limits, not alternate semantics. A future
+bounded transaction overlay and external operator spill can narrow the gap
+without changing the strategy boundary or file format.
 
 This ADR proposes the MCU exception to ADR 0038's embedded scale contract. It
 does not broaden the canonical embedded profile and does not claim support for
@@ -62,17 +69,32 @@ every board. Each adapter and resource envelope requires its own qualification.
 ## Cost sketch
 
 The resident strategy retains its existing O(database) recovered memory and
-O(database) transaction snapshot copy. The interface adds one indirect scan
-callback per visited entity on the local database path; it adds no file I/O,
-network operation or stored bytes. The future MCU strategy targets O(cache +
-transaction overlay + result budget) RAM while scan work remains O(visited
-rows). Operators that require materialization remain explicitly bounded.
+O(database) transaction snapshot copy. The paged strategy keeps one 16 KiB
+cache page, one decoded row, query-operator state and one statement's admitted
+mutation records in memory. Streaming scans are O(visited rows) and bounded in
+resident row count. INSERT uniqueness checks remain bounded by scanning
+existing rows one at a time, at the cost of O(existing rows × inserted rows)
+work when a uniqueness rule exists.
+
+One prepared native double-write frame holds at most the existing DWB entry
+capacity. Page images are staged in the canonical on-file DWB zone; RAM retains
+only page identities. An oversized statement fails and fences the writer until
+reopen rather than publishing a prefix.
 
 ## Verification
 
-The extraction must keep the existing local SQL, Vault, WAL interruption,
-catalog atomicity and canonical-reader tests green. Engine and file suites must
-remain green, and `layout_authority` must confirm that no format authority moved
-out of `reddb-file`. The later MCU strategy additionally requires deterministic
-RAM admission, restart/fault campaigns, canonical-reader interoperability and
-per-board emulator or hardware receipts before support is claimed.
+The extraction keeps the existing local SQL, Vault, WAL interruption and
+catalog atomicity tests green. The implemented slice additionally verifies:
+
+- one-page cache operation and one-page owned read buffers;
+- 43,200 minute measurements (30 days) inserted and streamed after reboot;
+- all injected write/sync interruption boundaries of a multi-page prepared
+  batch, accepting only the complete old or complete new state;
+- the portable pager/query conformance suite; and
+- read-only SQL access to an MCU-produced `.rdb` through the canonical 1.33.3
+  server runtime.
+
+This is host/emulator qualification, not a hardware support claim. RedDB 1.33.3
+still depends on Rust `std`; concrete Nano ESP32 and Pico 2 firmware builds,
+flash wear receipts, physical capacity and power-cut campaigns remain required
+per board.

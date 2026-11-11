@@ -88,6 +88,11 @@ pub struct VfsDirEntry {
 
 /// A handle to one open file.
 pub trait VfsFile: Sized {
+    /// Maximum size of one owned read buffer. Native backends retain an
+    /// unlimited default; constrained hosts should return their RAM budget.
+    fn max_read_buffer_bytes(&self) -> usize {
+        usize::MAX
+    }
     /// Duplicate this handle while retaining access to the same file.
     fn try_clone(&self) -> io::Result<Self>;
     /// Compare two still-open handles to the same immutable file generation.

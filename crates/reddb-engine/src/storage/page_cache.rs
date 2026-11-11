@@ -42,7 +42,7 @@ fn cache_lock<'a, T>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
 pub const DEFAULT_CACHE_CAPACITY: usize = 100_000;
 
 /// Minimum cache capacity
-pub const MIN_CACHE_CAPACITY: usize = 2;
+pub const MIN_CACHE_CAPACITY: usize = 1;
 
 /// Lock-protected cache entry.
 ///
@@ -908,13 +908,14 @@ const NUM_SHARDS: usize = 8;
 
 /// Sharded page cache.
 ///
-/// Routes each `page_id` to one of `NUM_SHARDS` independent
+/// Routes each `page_id` to one of at most `NUM_SHARDS` independent
 /// [`PageCacheShard`]s by the low bits of the id. Readers and writers
 /// for disjoint pages hit different shards and do not contend on the
 /// shard-internal RwLocks/Mutexes. Each shard runs its own SIEVE
-/// eviction loop over `capacity / NUM_SHARDS` slots; hot/cold
+/// eviction loop over its share of the requested slots; hot/cold
 /// asymmetry across shards is accepted in exchange for the
-/// contention win.
+/// contention win. Tiny budgets use fewer shards so one requested page
+/// remains one physical page slot.
 pub struct PageCache {
     shards: Box<[PageCacheShard]>,
     capacity: usize,
@@ -922,12 +923,13 @@ pub struct PageCache {
 
 impl PageCache {
     pub fn new(capacity: usize) -> Self {
-        // Keep every shard above MIN_CACHE_CAPACITY so the inner
-        // SIEVE invariants stay valid even when callers pass tiny
-        // totals (tests frequently do).
-        let per_shard = capacity.div_ceil(NUM_SHARDS).max(MIN_CACHE_CAPACITY);
-        let total = per_shard * NUM_SHARDS;
-        let shards: Vec<PageCacheShard> = (0..NUM_SHARDS)
+        let shard_count = (capacity / MIN_CACHE_CAPACITY)
+            .max(1)
+            .next_power_of_two()
+            .min(NUM_SHARDS);
+        let per_shard = capacity.div_ceil(shard_count).max(MIN_CACHE_CAPACITY);
+        let total = per_shard * shard_count;
+        let shards: Vec<PageCacheShard> = (0..shard_count)
             .map(|_| PageCacheShard::new(per_shard))
             .collect();
         Self {
@@ -942,7 +944,7 @@ impl PageCache {
 
     #[inline]
     fn shard_for(&self, page_id: u32) -> &PageCacheShard {
-        &self.shards[(page_id as usize) & (NUM_SHARDS - 1)]
+        &self.shards[(page_id as usize) & (self.shards.len() - 1)]
     }
 
     pub fn len(&self) -> usize {
@@ -1033,6 +1035,10 @@ impl PageCache {
             }
         }
         pages
+    }
+
+    pub(crate) fn flush_dirty_page(&self, page_id: u32) -> Option<Page> {
+        self.shard_for(page_id).take_dirty_page(page_id)
     }
 
     pub fn flush_some_dirty(&self, max: usize) -> Vec<(u32, Page)> {
@@ -1177,6 +1183,13 @@ mod tests {
 
     fn make_page(id: u32) -> Page {
         Page::new(PageType::BTreeLeaf, id)
+    }
+
+    #[test]
+    fn requested_small_cache_does_not_allocate_all_shards() {
+        for capacity in [1, 2, 4, 8, 10_000] {
+            assert_eq!(PageCache::new(capacity).capacity(), capacity);
+        }
     }
 
     #[test]

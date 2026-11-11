@@ -395,6 +395,27 @@ impl fmt::Display for PagedDwbFrameError {
 
 impl std::error::Error for PagedDwbFrameError {}
 
+pub fn encode_paged_dwb_header(count: u32, checksum: u32) -> [u8; PAGED_DWB_HEADER_SIZE] {
+    let mut header = [0; PAGED_DWB_HEADER_SIZE];
+    header[..4].copy_from_slice(&DWB_MAGIC);
+    header[4..8].copy_from_slice(&count.to_le_bytes());
+    header[8..12].copy_from_slice(&checksum.to_le_bytes());
+    header
+}
+
+pub fn decode_paged_dwb_header(bytes: &[u8]) -> Result<(u32, u32), PagedDwbFrameError> {
+    if bytes.len() < PAGED_DWB_HEADER_SIZE {
+        return Err(PagedDwbFrameError::ShortHeader { got: bytes.len() });
+    }
+    if bytes[..4] != DWB_MAGIC {
+        return Err(PagedDwbFrameError::InvalidMagic);
+    }
+    Ok((
+        u32::from_le_bytes(bytes[4..8].try_into().expect("header length checked")),
+        u32::from_le_bytes(bytes[8..12].try_into().expect("header length checked")),
+    ))
+}
+
 pub fn encode_paged_dwb_frame<'a>(
     pages: impl IntoIterator<Item = (u32, &'a [u8; PAGED_PAGE_SIZE])>,
 ) -> Vec<u8> {
@@ -402,9 +423,10 @@ pub fn encode_paged_dwb_frame<'a>(
     let total = PAGED_DWB_HEADER_SIZE + pages.len() * PAGED_DWB_ENTRY_SIZE;
     let mut out = Vec::with_capacity(total);
 
-    out.extend_from_slice(&DWB_MAGIC);
-    out.extend_from_slice(&(pages.len() as u32).to_le_bytes());
-    out.extend_from_slice(&[0u8; 4]);
+    out.extend_from_slice(&encode_paged_dwb_header(
+        u32::try_from(pages.len()).expect("DWB count fits u32"),
+        0,
+    ));
 
     for (page_id, page) in pages {
         out.extend_from_slice(&page_id.to_le_bytes());
@@ -417,15 +439,8 @@ pub fn encode_paged_dwb_frame<'a>(
 }
 
 pub fn decode_paged_dwb_frame(bytes: &[u8]) -> Result<Vec<PagedDwbEntry>, PagedDwbFrameError> {
-    if bytes.len() < PAGED_DWB_HEADER_SIZE {
-        return Err(PagedDwbFrameError::ShortHeader { got: bytes.len() });
-    }
-    if bytes[0..4] != DWB_MAGIC {
-        return Err(PagedDwbFrameError::InvalidMagic);
-    }
-
-    let count = u32::from_le_bytes(bytes[4..8].try_into().expect("len checked")) as usize;
-    let stored_checksum = u32::from_le_bytes(bytes[8..12].try_into().expect("len checked"));
+    let (count, stored_checksum) = decode_paged_dwb_header(bytes)?;
+    let count = count as usize;
     let expected_len = PAGED_DWB_HEADER_SIZE + count * PAGED_DWB_ENTRY_SIZE;
     if bytes.len() < expected_len {
         return Err(PagedDwbFrameError::IncompleteFrame {

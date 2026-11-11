@@ -16,7 +16,10 @@ use std::{collections::HashMap, path::PathBuf};
 use super::{
     evaluator::EvalError,
     planning::build_table_plan_with_host,
-    runtime::{projection::projected_columns, table_plan::execute_table_plan_with_host},
+    runtime::{
+        projection::projected_columns,
+        table_plan::{execute_table_plan_with_host, visit_table_plan_with_host},
+    },
     scalar::ScalarResult,
 };
 
@@ -35,6 +38,13 @@ pub struct ReadScope {
     pub table: String,
     pub field: String,
     pub value: reddb_types::Value,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct StreamQueryResult {
+    pub columns: Vec<String>,
+    pub rows: u64,
+    pub complete: bool,
 }
 
 #[derive(Debug)]
@@ -149,6 +159,75 @@ pub(crate) fn query_resident_scoped(
     scope: &ReadScope,
 ) -> Result<ScalarResult, LocalReadError> {
     execute_resident_query(resident, contracts, admission::table(query)?, Some(scope))
+}
+
+pub(crate) fn query_store_stream(
+    store: &dyn StoreView,
+    contracts: &HashMap<String, CollectionContract>,
+    query: reddb_rql::ast::TableQuery,
+    visit: &mut dyn FnMut(&[reddb_types::Value]) -> Result<bool, LocalReadError>,
+) -> Result<StreamQueryResult, LocalReadError> {
+    let query = admission::table(query)?;
+    let contract = contracts.get(&query.table).ok_or_else(|| {
+        LocalReadError::Catalog(format!(
+            "no persisted collection contract for {}",
+            query.table
+        ))
+    })?;
+    if contract.declared_model != CollectionModel::Table
+        || contract.default_ttl_ms.is_some()
+        || contract.retention_duration_ms.is_some()
+    {
+        return Err(LocalReadError::Unsupported(
+            "local SELECT currently requires a table without TTL or retention",
+        ));
+    }
+    let columns = crate::catalog::schema::resolved_contract_columns(contract)
+        .map_err(|error| LocalReadError::Catalog(error.to_string()))?;
+    admission::expressions(&query, &columns)?;
+    let schema = std::sync::Arc::new(columns.iter().map(|column| column.name.clone()).collect());
+    let source = source::StoreRows {
+        store,
+        table: &query.table,
+        schema,
+        allow_materialization: false,
+    };
+    let projections = reddb_rql::sql_lowering::effective_table_projections(&query);
+    if projections
+        .iter()
+        .any(|projection| matches!(projection, reddb_rql::ast::Projection::All))
+    {
+        return Err(LocalReadError::Unsupported(
+            "streaming SELECT requires explicit output columns",
+        ));
+    }
+    let names = projected_columns(&[], &projections);
+    let host = host::ReadHost::with_source(&query, &columns, &projections, &source);
+    let plan = build_table_plan_with_host(&host, &query);
+    let mut rows = 0u64;
+    let mut complete = true;
+    visit_table_plan_with_host(&host, &plan, &query, &mut |record| {
+        let row = names
+            .iter()
+            .map(|name| {
+                record
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(reddb_types::Value::Null)
+            })
+            .collect::<Vec<_>>();
+        rows = rows.checked_add(1).ok_or(LocalReadError::ResourceLimit)?;
+        if !visit(&row)? {
+            complete = false;
+            return Ok(false);
+        }
+        Ok(true)
+    })?;
+    Ok(StreamQueryResult {
+        columns: names,
+        rows,
+        complete,
+    })
 }
 
 fn execute_resident_query(

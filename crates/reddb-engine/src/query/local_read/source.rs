@@ -1,12 +1,19 @@
 //! Logical row source shared by local storage strategies.
 
 use super::LocalReadError;
+use crate::catalog::enforcement::{
+    INTERNAL_EXPIRES_AT_KEY, INTERNAL_TTL_MILLIS_KEY, INTERNAL_TTL_SECONDS_KEY,
+};
+use crate::query::unified::UnifiedRecord;
 use crate::storage::{
-    entity::{EntityId, UnifiedEntity},
+    entity::{EntityData, EntityId, UnifiedEntity},
     metadata::Metadata,
     resident_store::ResidentStore,
 };
-use std::sync::atomic::Ordering;
+use std::{
+    cell::RefCell,
+    sync::{atomic::Ordering, Arc},
+};
 
 type Result<T> = std::result::Result<T, LocalReadError>;
 
@@ -25,6 +32,75 @@ pub(crate) trait StoreView {
     fn get_entity(&self, collection: &str, id: EntityId) -> Result<Option<UnifiedEntity>>;
     fn get_metadata(&self, collection: &str, id: EntityId) -> Result<Option<Metadata>>;
     fn next_entity_id(&self) -> Result<u64>;
+}
+
+pub(crate) type RowVisitor<'a> = dyn FnMut(UnifiedRecord) -> Result<bool> + 'a;
+
+pub(crate) trait RowSource {
+    fn scan(&self, visit: &mut RowVisitor<'_>) -> Result<()>;
+    fn estimated_rows(&self) -> usize;
+    fn materialize(&self) -> bool {
+        true
+    }
+}
+
+pub(crate) struct StoreRows<'a> {
+    pub store: &'a dyn StoreView,
+    pub table: &'a str,
+    pub schema: Arc<Vec<String>>,
+    pub allow_materialization: bool,
+}
+
+impl RowSource for StoreRows<'_> {
+    fn scan(&self, visit: &mut RowVisitor<'_>) -> Result<()> {
+        let error = RefCell::new(None);
+        self.store
+            .scan_collection(self.table, &mut |entity, metadata| {
+                if !matches!(entity.data, EntityData::Row(_)) {
+                    *error.borrow_mut() = Some(LocalReadError::Unsupported(
+                        "local table contains non-row entities",
+                    ));
+                    return false;
+                }
+                if metadata.is_some_and(|metadata| {
+                    metadata.has(INTERNAL_TTL_SECONDS_KEY)
+                        || metadata.has(INTERNAL_TTL_MILLIS_KEY)
+                        || metadata.has(INTERNAL_EXPIRES_AT_KEY)
+                }) {
+                    *error.borrow_mut() = Some(LocalReadError::Unsupported(
+                        "local SELECT does not yet admit row TTL metadata",
+                    ));
+                    return false;
+                }
+                let Some(record) =
+                    crate::query::records::runtime_table_record_from_entity_ref_with_schema(
+                        entity,
+                        Some(&self.schema),
+                    )
+                else {
+                    return true;
+                };
+                match visit(record) {
+                    Ok(keep_going) => keep_going,
+                    Err(cause) => {
+                        *error.borrow_mut() = Some(cause);
+                        false
+                    }
+                }
+            })?;
+        match error.into_inner() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn estimated_rows(&self) -> usize {
+        usize::MAX
+    }
+
+    fn materialize(&self) -> bool {
+        self.allow_materialization
+    }
 }
 
 impl StoreView for ResidentStore {

@@ -16,6 +16,8 @@ pub mod page_cache;
 pub mod page_store;
 pub mod pager;
 pub mod pager_io;
+#[doc(hidden)]
+pub mod paged_file;
 
 // Canonical resident collection storage used by native and browser hosts.
 #[doc(hidden)]

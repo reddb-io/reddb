@@ -221,8 +221,8 @@ pub fn pager_dirty_eviction_obeys_wal_barrier() {
                 let homes = operations.iter().filter(|operation| matches!(operation,
                     Operation::Write(offset, PAGE_SIZE) if *offset >= u64::from(ids[0]) * PAGE_SIZE as u64)).count();
                 assert!(
-                    homes > 1 && homes <= pager_io::DWB_MAX_PAGES_PER_FRAME,
-                    "amortize barriers over a bounded batch, got {homes} images"
+                    (1..=pager_io::DWB_MAX_PAGES_PER_FRAME).contains(&homes),
+                    "publish a bounded eviction batch, got {homes} images"
                 );
                 assert_eq!(operations.last(), Some(&Operation::Sync));
             }

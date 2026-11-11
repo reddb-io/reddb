@@ -1,7 +1,8 @@
 //! Single-owner local SQL. Native formats and publication barriers remain canonical.
 use super::{
     local_read::{
-        query_resident_bound, query_resident_scoped, source::StoreView, LocalReadError, ReadScope,
+        query_resident_bound, query_resident_scoped, query_store_stream, source::StoreView,
+        LocalReadError, ReadScope, StreamQueryResult,
     },
     scalar::ScalarResult,
 };
@@ -26,7 +27,7 @@ pub mod service;
 mod strategy;
 pub mod vault;
 
-use strategy::{ResidentStrategy, StorageStrategy};
+use strategy::{PagedStrategy, ResidentStrategy, StorageStrategy};
 
 type Result<T> = std::result::Result<T, LocalReadError>;
 
@@ -45,6 +46,13 @@ struct Transaction<T> {
 /// Closing drops uncommitted state. Failed I/O fences the controller until reopen.
 pub struct LocalDatabase<F: VfsFile> {
     database: Database<ResidentStrategy<F>>,
+}
+
+/// Bounded-page local SQL over the canonical `.rdb` pager and B-tree.
+/// Transactions and non-append mutations remain explicitly unsupported.
+#[doc(hidden)]
+pub struct PagedLocalDatabase<F: VfsFile + 'static> {
+    database: Database<PagedStrategy<F>>,
 }
 
 struct Database<S: StorageStrategy> {
@@ -80,6 +88,15 @@ impl<F: VfsFile> LocalDatabase<F> {
         self.database.catalog()
     }
 
+    pub fn query_stream(
+        &self,
+        sql: &str,
+        parameters: &[Value],
+        visit: &mut dyn FnMut(&[Value]) -> Result<bool>,
+    ) -> Result<StreamQueryResult> {
+        self.database.query_stream(sql, parameters, visit)
+    }
+
     /// Only SELECT is admitted; callers cannot widen the host's row scope.
     pub fn read_query(
         &self,
@@ -97,6 +114,54 @@ impl<F: VfsFile> LocalDatabase<F> {
         now_ms: u64,
     ) -> Result<ScalarResult> {
         self.database.query_with_params(sql, parameters, now_ms)
+    }
+
+    pub fn into_inner(self) -> F {
+        self.database.storage.into_inner()
+    }
+}
+
+impl<F: VfsFile + 'static> PagedLocalDatabase<F> {
+    pub fn create(file: F) -> Result<Self> {
+        Ok(Self {
+            database: Database::create(PagedStrategy::create(file)?),
+        })
+    }
+
+    pub fn open(file: F) -> Result<Self> {
+        Ok(Self {
+            database: Database::open(PagedStrategy::open(file)?)?,
+        })
+    }
+
+    pub fn query(&mut self, sql: &str, now_ms: u64) -> Result<ScalarResult> {
+        self.database.query(sql, now_ms)
+    }
+
+    pub fn query_with_params(
+        &mut self,
+        sql: &str,
+        parameters: &[Value],
+        now_ms: u64,
+    ) -> Result<ScalarResult> {
+        self.database.query_with_params(sql, parameters, now_ms)
+    }
+
+    pub fn catalog(&self) -> Result<ScalarResult> {
+        self.database.catalog()
+    }
+
+    pub fn query_stream(
+        &self,
+        sql: &str,
+        parameters: &[Value],
+        visit: &mut dyn FnMut(&[Value]) -> Result<bool>,
+    ) -> Result<StreamQueryResult> {
+        self.database.query_stream(sql, parameters, visit)
+    }
+
+    pub fn cache_pages(&self) -> usize {
+        self.database.storage.cache_pages()
     }
 
     pub fn into_inner(self) -> F {
@@ -224,6 +289,37 @@ impl<S: StorageStrategy> Database<S> {
         query_resident_scoped(resident, contracts, query, scope)
     }
 
+    fn query_stream(
+        &self,
+        sql: &str,
+        parameters: &[Value],
+        visit: &mut dyn FnMut(&[Value]) -> Result<bool>,
+    ) -> Result<StreamQueryResult> {
+        self.check_healthy()?;
+        if parameters.len() > MAX_QUERY_PARAMETERS {
+            return Err(query_error("local SQL accepts at most 65536 parameters"));
+        }
+        if self
+            .transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.aborted)
+        {
+            return Err(query_error("transaction is aborted; ROLLBACK is required"));
+        }
+        let statement = reddb_rql::parse_frontend(sql)
+            .map_err(LocalReadError::Parse)?
+            .into_query_expr();
+        let statement =
+            super::parameters::bind(&statement, parameters).map_err(LocalReadError::Parameters)?;
+        let QueryExpr::Table(query) = statement else {
+            return Err(LocalReadError::Unsupported(
+                "streaming execution requires SELECT",
+            ));
+        };
+        let (store, contracts) = self.visible()?;
+        query_store_stream(store, contracts, query, visit)
+    }
+
     fn query_with_params(
         &mut self,
         sql: &str,
@@ -255,6 +351,7 @@ impl<S: StorageStrategy> Database<S> {
             .into_query_expr();
         let statement =
             super::parameters::bind(&statement, parameters).map_err(LocalReadError::Parameters)?;
+        self.storage.admit(&statement)?;
         if matches!(
             statement,
             QueryExpr::TransactionControl(TxnControl::Rollback)
