@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.33.4
+
+### Patch Changes
+
+- [#2791](https://github.com/reddb-io/reddb/pull/2791) [`09aa50f`](https://github.com/reddb-io/reddb/commit/09aa50f299f6fff5d02d892262497de2909b3cad) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Rebuild paged HASH and BTREE artifacts as current-state indexes so MVCC updates and deletes remain discoverable after checkpoint and cold reopen, and store runtime index metadata under the canonical `red.index.registry` control collection.
+
 ## 1.33.3
 
 ### Patch Changes
