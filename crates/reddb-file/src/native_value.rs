@@ -642,10 +642,20 @@ pub fn write_native_value(buf: &mut Vec<u8>, value: &Value) {
     }
 }
 
+/// Mandatory paged-file capabilities needed to decode this declared type.
+pub fn required_file_capabilities_for_data_type(data_type: reddb_types::DataType) -> u64 {
+    match data_type {
+        reddb_types::DataType::Temperature => crate::FILE_CAPABILITY_TEMPERATURE,
+        _ => 0,
+    }
+}
+
 /// Mandatory paged-file capabilities needed to decode this value.
 pub fn required_file_capabilities(value: &Value) -> u64 {
     match value {
-        Value::Temperature(_) => crate::FILE_CAPABILITY_TEMPERATURE,
+        Value::Temperature(_) => {
+            required_file_capabilities_for_data_type(reddb_types::DataType::Temperature)
+        }
         Value::Array(values) => values.iter().fold(0, |required, value| {
             required | required_file_capabilities(value)
         }),
