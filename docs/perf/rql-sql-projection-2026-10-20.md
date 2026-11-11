@@ -283,9 +283,10 @@ ID for conservative rechecking. It preserves all unaffected indexed candidates;
 there is no whole-segment scan fallback. The extra candidate set is included in
 resident-memory accounting. Segment fragmentation and MVCC history remain real
 costs: lookup is O(segments + key versions + raw-mutated candidates), not O(1)
-independent of history. The ignored
-`key_lookup_fragmentation_history_diagnostic` exercises 1/16/64 segments and
-1/100/1000 versions while checking the returned version and resident bytes.
+independent of history. The original investigation used an ignored timing
+diagnostic across 1/16/64 segments and 1/100/1000 versions. That diagnostic was
+retired from the test suite in November 2026; functional key/version regressions
+remain automated.
 
 SQL CPU profiling of the previous binary found 22.07% of samples in entity
 cloning and 16.29% in value cloning. The caller was time-series hydration on

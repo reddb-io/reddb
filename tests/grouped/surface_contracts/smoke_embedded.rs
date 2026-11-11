@@ -43,13 +43,6 @@ fn smoke_health_report() {
 }
 
 #[test]
-fn smoke_catalog_snapshot() {
-    let rt = rt();
-    let native = NativeUseCases::new(rt.runtime());
-    let _report = native.health();
-}
-
-#[test]
 fn embedded_phase3_census_has_no_dwb_sidecars_and_no_shm() {
     let db = super::support::temp_db_file("embedded-phase3-census");
     let path = db.path();

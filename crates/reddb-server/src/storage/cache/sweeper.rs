@@ -504,34 +504,6 @@ mod tests {
         assert!(!report.truncated_due_to_limit);
     }
 
-    /// Verifies that an orphan chain produced by the `fault_after_blob_write`
-    /// hook is reclaimed by the sweeper. Marked `#[ignore]` because both the
-    /// fault-injection hook and the L2-walk accessor are private to
-    /// `blob.rs`; this test is the contract this sweeper module commits to
-    /// satisfying once flag #2 lands and `inject_l2_fault_after_blob_write_once`
-    /// is exposed for cross-module use.
-    #[test]
-    #[ignore = "requires BlobCache::for_each_l2_record + cross-module fault hook (flag #2)"]
-    fn reclaim_orphans_reclaims_chain_left_by_interrupted_write() {
-        // Sketch (executable once accessor lands):
-        //
-        // let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
-        // let cache = BlobCache::new(
-        //     BlobCacheConfig::default()
-        //         .with_l1_bytes_max(128)
-        //         .with_l2_path(&path),
-        // );
-        // cache.inject_l2_fault_after_blob_write_once();
-        // let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        //     cache
-        //         .put("n", "partial", BlobCachePut::new(b"partial".to_vec()))
-        //         .unwrap();
-        // }));
-        // let report = BlobCacheSweeper::reclaim_orphans(&cache, SweepLimit::Entries(100));
-        // assert_eq!(report.blob_chains_reclaimed, 1);
-        // assert!(report.bytes_reclaimed >= b"partial".len() as u64);
-    }
-
     // -- flush_namespace ----------------------------------------------------
 
     #[test]
