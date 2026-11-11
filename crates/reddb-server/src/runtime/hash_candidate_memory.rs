@@ -62,7 +62,7 @@ mod tests {
     use crate::{RedDBOptions, RedDBRuntime};
 
     fn fixture() -> RedDBRuntime {
-        let runtime = RedDBRuntime::with_options(
+        let mut runtime = RedDBRuntime::with_options(
             RedDBOptions::in_memory().with_memory_budget(16 * 1024 * 1024),
         )
         .unwrap();
@@ -83,6 +83,11 @@ mod tests {
                 ))
                 .unwrap();
         }
+        // These tests control the exact headroom between a storage sample and
+        // candidate admission. Keep background maintenance from changing the
+        // sampled resident footprint inside that deliberately narrow window.
+        drop(runtime.background_tasks.take());
+        runtime.refresh_memory_accounting();
         runtime
     }
 

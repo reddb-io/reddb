@@ -2048,8 +2048,8 @@ fn test_create_table_with_ttl_applies_default_to_api_insert() {
         .expect("SELECT before retention should succeed");
     assert_eq!(
         before.result.records.len(),
-        1,
-        "row should exist before retention sweep"
+        0,
+        "a row with the table's 0s default TTL must be hidden before physical cleanup"
     );
 
     native

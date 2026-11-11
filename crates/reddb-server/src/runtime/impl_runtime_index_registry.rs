@@ -305,7 +305,7 @@ impl RedDBRuntime {
     pub(super) fn reserve_index_scan_with_limit(
         &self,
         manager: &crate::storage::unified::SegmentManager,
-        mut read_bytes_max: usize,
+        read_bytes_max: usize,
     ) -> RedDBResult<(super::memory_admission::QueryBufferReservation, usize)> {
         // Decode, indexed projection and descriptor reduction share this owned
         // scratch. Resident-only visitors borrow rows already charged to the
@@ -324,6 +324,25 @@ impl RedDBRuntime {
         } else {
             0
         };
+        self.reserve_index_workspace_with_limit(read_bytes_max, overlay_bytes)
+    }
+
+    /// A point/range probe returns only admitted entity IDs and does not retain
+    /// the source overlay. Its resident rows are already charged to the segment
+    /// arena, so charging them again can prevent decoding one otherwise bounded
+    /// cold row after sustained writes.
+    pub(super) fn reserve_index_probe_with_limit(
+        &self,
+        read_bytes_max: usize,
+    ) -> RedDBResult<(super::memory_admission::QueryBufferReservation, usize)> {
+        self.reserve_index_workspace_with_limit(read_bytes_max, 0)
+    }
+
+    fn reserve_index_workspace_with_limit(
+        &self,
+        mut read_bytes_max: usize,
+        overlay_bytes: usize,
+    ) -> RedDBResult<(super::memory_admission::QueryBufferReservation, usize)> {
         // The configured allowance is a ceiling, not a minimum allocation.
         // Reduce owned scratch under pressure, but reserve it before scanning
         // and pass the effective limit to every reader and projection. Keep a
@@ -339,7 +358,7 @@ impl RedDBRuntime {
             if read_bytes_max == read_bytes_min {
                 let accounting = self.memory_accounting();
                 return Err(RedDBError::InvalidOperation(format!(
-                    "index restoration workspace exceeds the shared memory budget: requested {scratch} bytes (overlay {overlay_bytes}), used {}, budget {}",
+                    "index workspace exceeds the shared memory budget: requested {scratch} bytes (overlay {overlay_bytes}), used {}, budget {}",
                     accounting.total_used_bytes(), accounting.budget().resolved_bytes
                 )));
             }

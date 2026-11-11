@@ -183,7 +183,7 @@ impl RuntimeHashIndex {
         // Admission samples managers; finish it before taking publication or
         // source locks. The output owner outlives both scanning and this runtime.
         let (_scratch, read_bytes_max) = runtime
-            .reserve_index_scan_with_limit(&manager, limit)
+            .reserve_index_probe_with_limit(limit)
             .map_err(read_error)?;
         let ids_max = read_bytes_max / std::mem::size_of::<EntityId>();
         let matches = |entity: &UnifiedEntity| -> Result<bool, HashIndexError> {
