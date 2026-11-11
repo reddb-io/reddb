@@ -1,6 +1,15 @@
 # ADR 0006: Tiered blob cache as a native cache module
 
-Status: Proposed (2026-05-06)
+Status: Accepted and implemented (2026-11-11)
+
+## Implementation status
+
+The server uses one native Blob Cache implementation with a process-local L1
+and a durable L2 in the primary `.rdb`. The runtime result cache is an adapter
+over the reserved `runtime.result_cache` namespace; application namespaces are
+isolated from it. The page cache remains an independent cache of physical
+database pages. The decision and rollout sections below preserve the original
+design rationale.
 
 ## Context
 
@@ -185,9 +194,8 @@ should be O(1) on the foreground path, with physical cleanup left to a sweeper.
 
 - **KV** remains the queryable key-value model. Blob Cache is for byte-oriented
   cache semantics, not general records.
-- **Runtime result cache** can become an adapter over Blob Cache after the native
-  module exists. Its current dependency tracking maps cleanly onto cache
-  dependencies.
+- **Runtime result cache** is an adapter over Blob Cache. Its dependency
+  tracking maps table and collection writes onto cache invalidation.
 - **Entity cache** should stay specialized. It caches cloned `UnifiedEntity`
   values for cross-collection lookup and has a narrower, deeper Interface.
 - **Semantic cache** can later use Blob Cache as its durable exact-key backend

@@ -87,6 +87,31 @@ The execution layer processes queries across all data models:
 - **Vector Engine**: HNSW, IVF, PQ, hybrid search
 - **Join Executor**: Nested-loop joins between tables
 
+## Read Acceleration Path
+
+All query protocols enter the same runtime statement path. An eligible result
+hit returns before parsing, planning, or execution. A miss continues through
+the executor, where the independent page cache can still avoid physical I/O.
+
+```mermaid
+flowchart LR
+    P[HTTP / gRPC / RedWire / PostgreSQL] --> R[Runtime statement frame]
+    R --> RC[Result cache adapter]
+    RC -->|hit| O[Response envelope]
+    RC -->|miss| Q[Parser / planner / executor]
+    Q --> PC[SIEVE page cache]
+    PC --> PG[Pager]
+    Q --> B[Blob Cache put]
+    B --> L1[L1 memory]
+    B --> L2[L2 in the .rdb]
+    L1 --> RC
+    L2 --> RC
+```
+
+The result cache uses the reserved `runtime.result_cache` Blob Cache namespace.
+The SIEVE page cache is not an L1 tier of Blob Cache: it caches database pages,
+while Blob Cache stores exact-key byte values and encoded query results.
+
 ## Entity Model
 
 All data in RedDB is stored as entities. Every entity has:

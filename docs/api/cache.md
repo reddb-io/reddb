@@ -1,8 +1,11 @@
 # Remote Blob Cache
 
 The native Blob Cache is available to remote applications over HTTP. It stores
-opaque bytes by namespace and key, independently of SQL collections and the
-runtime's internal result-cache namespace. Reads return bytes or a cache miss.
+opaque bytes by namespace and key. These application namespaces use the same
+L1/L2 cache engine as the runtime result cache, but remain isolated from the
+reserved `runtime.result_cache` namespace and from SQL collections. Remote
+callers cannot address or flush the internal namespace. Reads return bytes or a
+cache miss.
 
 ```js
 import { connect } from '@reddb-io/client'

@@ -38,20 +38,30 @@ test("Blob Cache runtime evidence covers L1, TTL, invalidation, L2, and synopsis
   }
 });
 
-test("Blob Cache result-cache adapter evidence is separated from missing warm-restart contract", () => {
-  const frameTests = read("crates/reddb-server/src/runtime/statement_frame.rs");
+test("Blob Cache result-cache adapter covers warm restart without a second implementation", () => {
   const runtime = read("crates/reddb-server/src/runtime/result_cache_runtime.rs");
-  const followUp = read("issues/done/348-result-cache-l2-warm-restart-contract.md");
+  const integration = read(
+    "tests/grouped/schema_query_core/e2e_statement_execution_contract.rs",
+  );
 
-  assert.match(frameTests, /fn blob_cache_backend_populates_blob_path_without_legacy_write\(\)/);
-  assert.match(frameTests, /fn blob_cache_backend_keeps_volatile_select_out_of_blob_path\(\)/);
-  assert.match(frameTests, /fn shadow_backend_dual_writes_and_reports_no_divergence_on_equal_results\(\)/);
-  assert.match(runtime, /fn put_blob_result_cache_entry\(&self, key: &str, entry: RuntimeResultCacheEntry\)/);
-  assert.match(runtime, /result_cache_fingerprint\(&entry\.result\)\.into_bytes\(\)/);
-  assert.match(runtime, /result_blob_entries\.read\(\)/);
+  assert.match(runtime, /const RESULT_CACHE_BLOB_NAMESPACE: &str = "runtime\.result_cache"/);
+  assert.match(runtime, /fn get_blob_result_cache_entry\(&self, key: &str, epoch: u64\)/);
+  assert.match(
+    runtime,
+    /fn put_blob_result_cache_entry\(\s*&self,\s*key: &str,\s*entry: RuntimeResultCacheEntry,/,
+  );
+  assert.match(runtime, /fn result_cache_format_fence_and_warm_result_survive_restart\(\)/);
+  assert.doesNotMatch(runtime, /LegacyResultCache|ShadowResultCache|shadow_backend/);
 
-  assert.match(followUp, /`RuntimeQueryResult` sidecar/);
-  assert.match(followUp, /Eligible result-cache entries can be served after runtime restart from Blob Cache L2/);
+  for (const symbol of [
+    "fn blob_result_cache_rehydrates_after_restart_with_tenant_and_auth_isolation()",
+    "fn blob_result_cache_write_after_restart_invalidates_unrehydrated_l2_entries()",
+    "fn blob_result_cache_recovers_table_result_after_restart()",
+    "fn blob_result_cache_recovers_join_result_after_restart()",
+    "fn blob_result_cache_promotes_volatile_result_after_writes_stop()",
+  ]) {
+    assert.match(integration, new RegExp(symbol.replace(/[()]/g, "\\$&")));
+  }
 });
 
 test("Blob Cache benchmark and API review status is repeatable or explicitly split", () => {

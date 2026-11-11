@@ -28,9 +28,10 @@ what the *value* looks like and how you want it invalidated.
 | SQL result rows materialized for re-read                                    | Built-in result cache backed by Blob Cache                                                                  |
 | Database pages                                                              | Page Cache (internal, not user-facing)                                                                       |
 
-The four user-visible caches in RedDB today are KV, Blob Cache, Semantic
-Cache, and the runtime SQL result cache. Page Cache exists but it
-protects database pages on the read path and is never addressed by
+Applications can directly address KV, Blob Cache, and Semantic Cache. The
+runtime SQL result cache is automatic rather than user-addressable, and it is
+backed by the same Blob Cache L1/L2 engine under a reserved namespace. Page
+Cache protects database pages on the read path and is never addressed by
 application code.
 
 ### Why these are separate modules
@@ -148,8 +149,9 @@ dedicated cache worker deletes due L2 rows in bounded batches, with the byte
 counter in the same WAL publication, and the normal MVCC reclamation path makes
 their pages reusable.
 
-Direct engine callers can still select the legacy standalone pager backend for
-compatibility, but the normal server does not create that sidecar.
+Embedded engine integrations can select a standalone L2 file backend. The
+normal server and its result cache use the internal collection backend and do
+not create that sidecar.
 
 When L2 is enabled, the tiers are connected by a *membership synopsis* — a per-namespace
 filter that lets the cache cheaply say "definitely absent" and skip the
