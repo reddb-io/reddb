@@ -72,12 +72,16 @@ impl Source {
             header.page_count >= FIRST_ALLOCATABLE_PAGE && header.page_count <= 64 * 1024 * 1024,
             "source page inventory exceeds compaction budget",
         )?;
+        let page_size = PAGE_SIZE as u64;
+        let allocation_bytes = u64::from(header.page_count) * page_size;
         ensure(
             if allow_unified_wal {
-                bytes.div_ceil(PAGE_SIZE as u64) >= u64::from(header.page_count)
-                    && bytes.div_ceil(PAGE_SIZE as u64) <= 64 * 1024 * 1024
+                bytes.div_ceil(page_size) >= u64::from(header.page_count)
+                    && bytes.div_ceil(page_size) <= 64 * 1024 * 1024
             } else {
-                bytes == u64::from(header.page_count) * PAGE_SIZE as u64
+                bytes >= allocation_bytes
+                    && bytes.is_multiple_of(page_size)
+                    && bytes / page_size <= 64 * 1024 * 1024
             },
             "source allocation boundary differs from file length",
         )?;
