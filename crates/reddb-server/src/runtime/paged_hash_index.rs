@@ -185,13 +185,8 @@ impl RuntimeHashIndex {
         let (_scratch, read_bytes_max) = runtime
             .reserve_index_scan_with_limit(&manager, limit)
             .map_err(read_error)?;
-        let output = runtime
-            .try_reserve_query_buffer(read_bytes_max)
-            .ok_or_else(|| read_error("HASH candidates exceed shared memory budget"))?;
         let ids_max = read_bytes_max / std::mem::size_of::<EntityId>();
-        let mut ids = Vec::new();
-        ids.try_reserve_exact(ids_max).map_err(read_error)?;
-        let mut accept = |entity: &UnifiedEntity| -> Result<(), HashIndexError> {
+        let matches = |entity: &UnifiedEntity| -> Result<bool, HashIndexError> {
             let required_bytes = crate::storage::unified::memory_size::entity_bytes(entity);
             if required_bytes > read_bytes_max {
                 return Err(HashIndexError::ReadLimit {
@@ -199,61 +194,96 @@ impl RuntimeHashIndex {
                     limit_bytes: read_bytes_max,
                 });
             }
-            if self
+            Ok(self
                 .projection
                 .raw_key(entity, read_bytes_max)
                 .map_err(storage_error)?
                 .as_deref()
-                == Some(key)
-            {
-                if ids.len() == ids_max {
+                == Some(key))
+        };
+        // Freeze publication across base capture, source recheck and overlay.
+        // Native handles additionally pin both trees against page reclamation.
+        let _publication = store.vault_publication_lock.lock();
+        let index = store.secondary_index(&self.collection, &self.name, &self.identity);
+        let scan = |accept: &mut dyn FnMut(&UnifiedEntity) -> Result<(), HashIndexError>| {
+            if let Some(index) = &index {
+                let mut cursor = index
+                    .candidates(&self.projection.digest(key))
+                    .map_err(storage_error)?;
+                while let Some(id) = cursor.next_id().map_err(storage_error)? {
+                    if let Some(entity) =
+                        manager.try_get(id, read_bytes_max).map_err(storage_error)?
+                    {
+                        accept(&entity)?;
+                    }
+                }
+                let mut failure = None;
+                manager.for_each_entity(|entity| {
+                    if let Err(error) = accept(entity) {
+                        failure = Some(error);
+                        return false;
+                    }
+                    true
+                });
+                if let Some(error) = failure {
+                    return Err(error);
+                }
+            } else {
+                let mut failure = None;
+                manager
+                    .try_for_each_entity(read_bytes_max, |entity| {
+                        if let Err(error) = accept(entity) {
+                            failure = Some(error);
+                            return false;
+                        }
+                        true
+                    })
+                    .map_err(storage_error)?;
+                if let Some(error) = failure {
+                    return Err(error);
+                }
+            }
+            Ok(())
+        };
+
+        // Count first, then admit exactly the candidate allocation. Reserving
+        // the whole decode ceiling made a one-row primary-key lookup fail when
+        // the bounded store still had enough headroom for its actual result.
+        let mut candidate_count = 0usize;
+        scan(&mut |entity| {
+            if matches(entity)? {
+                if candidate_count == ids_max {
                     return Err(HashIndexError::ReadLimit {
                         required_bytes: read_bytes_max
                             .saturating_add(std::mem::size_of::<EntityId>()),
                         limit_bytes: read_bytes_max,
                     });
                 }
+                candidate_count += 1;
+            }
+            Ok(())
+        })?;
+        let candidate_bytes = candidate_count.saturating_mul(std::mem::size_of::<EntityId>());
+        let output = runtime
+            .try_reserve_query_buffer(candidate_bytes)
+            .ok_or_else(|| read_error("HASH candidates exceed shared memory budget"))?;
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(candidate_count).map_err(read_error)?;
+        scan(&mut |entity| {
+            if matches(entity)? {
+                if ids.len() == candidate_count {
+                    return Err(read_error(
+                        "HASH candidate set changed while publication was fenced",
+                    ));
+                }
                 ids.push(entity.id);
             }
             Ok(())
-        };
-        // Freeze publication across base capture, source recheck and overlay.
-        // Native handles additionally pin both trees against page reclamation.
-        let _publication = store.vault_publication_lock.lock();
-        if let Some(index) = store.secondary_index(&self.collection, &self.name, &self.identity) {
-            let mut cursor = index
-                .candidates(&self.projection.digest(key))
-                .map_err(storage_error)?;
-            while let Some(id) = cursor.next_id().map_err(storage_error)? {
-                if let Some(entity) = manager.try_get(id, read_bytes_max).map_err(storage_error)? {
-                    accept(&entity)?;
-                }
-            }
-            let mut failure = None;
-            manager.for_each_entity(|entity| {
-                if let Err(error) = accept(entity) {
-                    failure = Some(error);
-                    return false;
-                }
-                true
-            });
-            if let Some(error) = failure {
-                return Err(error);
-            }
-        } else {
-            let mut failure = None;
-            manager
-                .try_for_each_entity(read_bytes_max, |entity| {
-                    if let Err(error) = accept(entity) {
-                        failure = Some(error);
-                        return false;
-                    }
-                    true
-                })
-                .map_err(storage_error)?;
-            if let Some(error) = failure {
-                return Err(error);
-            }
+        })?;
+        if ids.len() != candidate_count {
+            return Err(read_error(
+                "HASH candidate set changed while publication was fenced",
+            ));
         }
         // A replacement may be reached through both base and overlay. Sorting
         // in place avoids another set allocation and retains all physical MVCC IDs.
