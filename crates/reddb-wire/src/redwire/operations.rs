@@ -143,11 +143,8 @@ pub fn decode_delete_payload(bytes: &[u8]) -> Result<KeyPayload, OperationPayloa
 }
 
 pub fn encode_query_result_summary_payload(statement: &str, affected: u64) -> Vec<u8> {
-    let mut obj = JsonMap::new();
-    obj.insert("ok".into(), JsonValue::Bool(true));
-    obj.insert("statement".into(), JsonValue::String(statement.to_string()));
-    obj.insert("affected".into(), JsonValue::Number(affected.into()));
-    serde_json::to_vec(&JsonValue::Object(obj)).expect("query result payload JSON is serializable")
+    let statement = serde_json::to_string(statement).expect("statement string is serializable");
+    format!(r#"{{"affected":{affected},"ok":true,"statement":{statement}}}"#).into_bytes()
 }
 
 pub fn decode_query_result_payload(bytes: &[u8]) -> Result<JsonValue, OperationPayloadError> {
@@ -421,8 +418,12 @@ mod tests {
 
     #[test]
     fn operation_reply_payloads_encode_wire_visible_json_contracts() {
-        let query =
-            decode_query_result_payload(&encode_query_result_summary_payload("INSERT", 3)).unwrap();
+        let query_bytes = encode_query_result_summary_payload("INSERT", 3);
+        assert_eq!(
+            query_bytes,
+            br#"{"affected":3,"ok":true,"statement":"INSERT"}"#
+        );
+        let query = decode_query_result_payload(&query_bytes).unwrap();
         assert_eq!(query["ok"], JsonValue::Bool(true));
         assert_eq!(query["statement"], JsonValue::String("INSERT".into()));
         assert_eq!(query["affected"], JsonValue::Number(3.into()));
