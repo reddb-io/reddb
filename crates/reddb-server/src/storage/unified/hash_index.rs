@@ -287,8 +287,6 @@ pub struct HashIndexManager {
     /// Collection → index name → backing; borrowed probes allocate no names.
     indices: RwLock<HashMap<String, HashMap<String, HashIndex>>>,
     candidate_admission: OnceLock<Arc<dyn HashCandidateAdmission>>,
-    #[cfg(test)]
-    candidate_admission_override: RwLock<Option<Arc<dyn HashCandidateAdmission>>>,
 }
 
 impl HashIndexManager {
@@ -305,8 +303,6 @@ impl HashIndexManager {
         Self {
             indices: RwLock::new(HashMap::new()),
             candidate_admission: OnceLock::new(),
-            #[cfg(test)]
-            candidate_admission_override: RwLock::new(None),
         }
     }
 
@@ -410,10 +406,6 @@ impl HashIndexManager {
     }
 
     pub(crate) fn sample_candidate_memory(&self) -> Result<(), HashIndexError> {
-        #[cfg(test)]
-        if let Some(admission) = self.candidate_admission_override.read().as_ref() {
-            return admission.sample();
-        }
         if let Some(admission) = self.candidate_admission.get() {
             admission.sample()?;
         }
@@ -428,10 +420,6 @@ impl HashIndexManager {
         if bytes == 0 {
             return Ok(None);
         }
-        #[cfg(test)]
-        if let Some(admission) = self.candidate_admission_override.read().as_ref() {
-            return admission.reserve(bytes).map(Some);
-        }
         self.candidate_admission
             .get()
             .map(|admission| admission.reserve(bytes))
@@ -443,14 +431,6 @@ impl HashIndexManager {
             self.candidate_admission.set(admission).is_ok(),
             "invariant: runtime candidate admission is installed once"
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn override_candidate_admission_for_tests(
-        &self,
-        admission: Option<Arc<dyn HashCandidateAdmission>>,
-    ) {
-        *self.candidate_admission_override.write() = admission;
     }
 
     pub(crate) fn lookup_owned(
@@ -490,13 +470,6 @@ impl HashIndexManager {
         I: Iterator<Item = K> + Clone,
         K: AsRef<[u8]>,
     {
-        #[cfg(test)]
-        let admission_override = self.candidate_admission_override.read().clone();
-        #[cfg(test)]
-        let admission = admission_override
-            .as_ref()
-            .or_else(|| self.candidate_admission.get());
-        #[cfg(not(test))]
         let admission = self.candidate_admission.get();
         let mut sampled = false;
         loop {

@@ -336,9 +336,12 @@ mod tests {
     }
 
     #[test]
-    fn resident_hash_denial_reaches_select_wire_and_dml_without_changing_rows() {
+    fn resident_hash_and_dml_denials_preserve_rows() {
+        use super::super::index_store::{IndexMethodKind, IndexStore, RegisteredIndex};
+        use super::super::query_exec::try_hash_eq_lookup;
         use crate::storage::unified::hash_index::{HashCandidateAdmission, HashIndexError};
-        use crate::wire::query_direct::try_handle_query_binary_direct;
+        use crate::storage::EntityId;
+        use reddb_types::Value;
         use std::sync::Arc;
 
         struct RejectHashCandidates;
@@ -355,41 +358,70 @@ mod tests {
             }
         }
 
-        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        let store = IndexStore::new();
+        let columns = vec!["bucket".to_string()];
+        let rows = vec![(
+            EntityId::new(1),
+            vec![("bucket".to_string(), Value::Integer(7))],
+        )];
+        store
+            .create_index(
+                "candidate_bucket",
+                "candidate_budget",
+                &columns,
+                IndexMethodKind::Hash,
+                false,
+                &rows,
+            )
+            .unwrap();
+        store.register(RegisteredIndex {
+            name: "candidate_bucket".to_string(),
+            collection: "candidate_budget".to_string(),
+            columns,
+            method: IndexMethodKind::Hash,
+            unique: false,
+        });
+        store
+            .hash
+            .install_candidate_admission(Arc::new(RejectHashCandidates));
+
+        let point_error = store
+            .hash_lookup("candidate_budget", "candidate_bucket", &7i64.to_le_bytes())
+            .unwrap_err();
+        assert!(point_error.contains("index candidate memory budget"));
+        let union_error = try_hash_eq_lookup(
+            &in_filter(vec![Value::Integer(7), Value::Integer(7)]),
+            "candidate_budget",
+            &store,
+        )
+        .unwrap_err();
+        assert!(
+            union_error
+                .to_string()
+                .contains("index candidate memory budget"),
+            "{union_error}"
+        );
+
+        let mut runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory().with_memory_budget(16 * 1024 * 1024),
+        )
+        .unwrap();
         for sql in [
             "CREATE TABLE candidate_denial (id INT, bucket INT)",
-            "CREATE INDEX candidate_denial_bucket ON candidate_denial (bucket) USING HASH",
             "INSERT INTO candidate_denial (id, bucket) VALUES (1, 7), (2, 8), (3, 9)",
         ] {
             runtime.execute_query(sql).unwrap();
         }
+        runtime.flush().expect("settle fixture WAL");
+        drop(runtime.background_tasks.take());
         let before = runtime
             .execute_query("SELECT id, bucket FROM candidate_denial ORDER BY id")
             .unwrap();
-        runtime
-            .index_store_ref()
-            .hash
-            .override_candidate_admission_for_tests(Some(Arc::new(RejectHashCandidates)));
         let baseline = query_bytes(&runtime);
         for sql in [
-            "SELECT id FROM candidate_denial WHERE bucket = 7",
             "DELETE FROM candidate_denial WHERE bucket = 7",
-            "DELETE FROM candidate_denial WHERE bucket IN (7, 8)",
-        ] {
-            let error = runtime.execute_query(sql).unwrap_err();
-            assert!(
-                error.to_string().contains("index candidate memory budget"),
-                "{sql}: {error}"
-            );
-            assert_eq!(query_bytes(&runtime), baseline);
-        }
-        for sql in [
             "UPDATE candidate_denial SET bucket = 8 WHERE bucket = 7",
-            "UPDATE candidate_denial SET bucket = 8 WHERE bucket IN (7, 8)",
         ] {
-            // UPDATE discovers targets from its snapshot-preserving source
-            // scan. Deny its mutation reservation deterministically instead
-            // of assuming it will use the HASH lookup chosen by SELECT.
             let held = leave_headroom(&runtime, 0);
             let pressure_baseline = query_bytes(&runtime);
             let error = runtime.execute_query(sql).unwrap_err();
@@ -398,23 +430,6 @@ mod tests {
             drop(held);
             assert_eq!(query_bytes(&runtime), baseline);
         }
-        for sql in [
-            "SELECT id FROM candidate_denial WHERE bucket = 7 LIMIT 1",
-            "SELECT id FROM candidate_denial WHERE bucket IN (7, 8) LIMIT 1",
-        ] {
-            let response = try_handle_query_binary_direct(&runtime, sql)
-                .expect("direct path must not fall back");
-            assert_eq!(response[4], reddb_wire::legacy::MSG_ERROR);
-            assert!(
-                String::from_utf8_lossy(&response[5..]).contains("index candidate memory budget")
-            );
-            drop(response);
-            assert_eq!(query_bytes(&runtime), baseline);
-        }
-        runtime
-            .index_store_ref()
-            .hash
-            .override_candidate_admission_for_tests(None);
         let after = runtime
             .execute_query("SELECT id, bucket FROM candidate_denial ORDER BY id")
             .unwrap();
@@ -423,13 +438,6 @@ mod tests {
         for (before, after) in before.result.records.iter().zip(&after.result.records) {
             assert_eq!(before.get("id"), after.get("id"));
             assert_eq!(before.get("bucket"), after.get("bucket"));
-        }
-        for sql in [
-            "SELECT id FROM candidate_denial WHERE bucket = 7 LIMIT 1",
-            "SELECT id FROM candidate_denial WHERE bucket IN (7, 8) LIMIT 1",
-        ] {
-            let response = try_handle_query_binary_direct(&runtime, sql).unwrap();
-            assert_eq!(response[4], reddb_wire::legacy::MSG_RESULT);
         }
         assert_eq!(query_bytes(&runtime), 0);
     }

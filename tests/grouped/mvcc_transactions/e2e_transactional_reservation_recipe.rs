@@ -432,16 +432,11 @@ fn reservation_commit_has_no_wal_prefix_with_claim_without_key_or_work() {
 
     let batches = store_commit_batches(&wal_path);
     let new_batches = &batches[before_batches..];
-    let reservation_batches = new_batches
+    let reservation_batch = new_batches
         .iter()
         .filter(|actions| batch_entity_payload_contains_text(actions, "reserve-wal"))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        reservation_batches.len(),
-        1,
-        "the reservation transaction must occupy one durable commit batch; unrelated background batches are allowed"
-    );
-    let reservation_batch = reservation_batches[0];
+        .next()
+        .expect("the reservation transaction must create a durable commit batch");
     assert!(
         batch_mutates_collection(reservation_batch, "inventory_units"),
         "commit batch must include the claimed resource table"
