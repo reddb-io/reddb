@@ -151,17 +151,19 @@ impl PagedHashIndex for RuntimeHashIndex {
             inner,
             background_tasks: None,
         };
-        // Small lookups must not reserve a quarter of the entire engine budget
-        // per client. Retry larger rows/posting lists with admitted geometric
-        // growth, releasing the previous attempt before reserving its successor.
-        let ceiling = self.projection.key_bytes_max;
+        // Small lookups start with a bounded allowance. A row can be larger
+        // than its indexed key, so retry the exact reported decode requirement
+        // up to the per-row share of the process budget.
+        let ceiling = usize::try_from(runtime.memory_accounting().budget().resolved_bytes / 4)
+            .unwrap_or(usize::MAX)
+            .max(1);
         let mut limit = ceiling.min(64 * 1024);
         loop {
             match self.lookup_with_limit(&runtime, key, limit) {
                 Err(HashIndexError::ReadLimit { required_bytes, .. })
-                    if limit < ceiling && required_bytes <= ceiling =>
+                    if required_bytes > limit && required_bytes <= ceiling =>
                 {
-                    limit = limit.saturating_mul(2).max(required_bytes).min(ceiling);
+                    limit = required_bytes;
                 }
                 result => return result,
             }
@@ -185,7 +187,6 @@ impl RuntimeHashIndex {
         let (_scratch, read_bytes_max) = runtime
             .reserve_index_probe_with_limit(limit)
             .map_err(read_error)?;
-        let ids_max = read_bytes_max / std::mem::size_of::<EntityId>();
         let matches = |entity: &UnifiedEntity| -> Result<bool, HashIndexError> {
             let required_bytes = crate::storage::unified::memory_size::entity_bytes(entity);
             if required_bytes > read_bytes_max {
@@ -252,14 +253,7 @@ impl RuntimeHashIndex {
         let mut candidate_count = 0usize;
         scan(&mut |entity| {
             if matches(entity)? {
-                if candidate_count == ids_max {
-                    return Err(HashIndexError::ReadLimit {
-                        required_bytes: read_bytes_max
-                            .saturating_add(std::mem::size_of::<EntityId>()),
-                        limit_bytes: read_bytes_max,
-                    });
-                }
-                candidate_count += 1;
+                candidate_count = candidate_count.saturating_add(1);
             }
             Ok(())
         })?;
@@ -361,7 +355,7 @@ mod tests {
             .expect("profile");
         let seed = RedDBRuntime::with_options(options.clone()).expect("seed");
         for sql in [
-            "CREATE TABLE hash_rows (id INTEGER, email TEXT)",
+            "CREATE TABLE hash_rows (id INTEGER, email TEXT, payload TEXT)",
             "CREATE UNIQUE INDEX by_email ON hash_rows (email) USING HASH",
             "INSERT INTO hash_rows (id, email) VALUES (1, 'alpha')",
             "INSERT INTO hash_rows (id, email) VALUES (2, 'beta')",
@@ -552,6 +546,49 @@ mod tests {
             }
             assert_eq!(lookup(&runtime, &key).len(), 1);
         }
+    }
+
+    #[test]
+    fn paged_hash_large_unindexed_payload_uses_exact_row_scratch() {
+        let (_directory, mut runtime) = fixture();
+        runtime
+            .execute_query_with_params(
+                "INSERT INTO hash_rows (id, email, payload) VALUES (3, 'large-row', $1)",
+                &[Value::text("x".repeat(64 * 1024))],
+            )
+            .expect("large unindexed payload");
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("hash_rows")
+            .expect("hash_rows");
+        let row_id = lookup(&runtime, "large-row")
+            .into_iter()
+            .next()
+            .expect("large row candidate");
+        let row_bytes = crate::storage::unified::memory_size::entity_bytes(
+            &manager
+                .try_get(row_id, usize::MAX)
+                .expect("read large row")
+                .expect("large row exists"),
+        );
+        drop(runtime.background_tasks.take());
+        runtime.refresh_memory_accounting();
+        let accounting = runtime.memory_accounting();
+        let available = accounting.budget().resolved_bytes - accounting.total_used_bytes();
+        let headroom = (row_bytes
+            .max(64 * 1024)
+            .saturating_mul(3)
+            .saturating_add(4096)) as u64;
+        assert!(
+            available > headroom,
+            "fixture must admit controlled pressure"
+        );
+        let held = runtime
+            .try_reserve_query_buffer((available - headroom) as usize)
+            .expect("leave exact HASH probe headroom");
+        assert_eq!(lookup(&runtime, "large-row").len(), 1);
+        drop(held);
     }
 
     #[test]

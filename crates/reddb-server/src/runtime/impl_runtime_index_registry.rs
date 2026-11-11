@@ -335,7 +335,19 @@ impl RedDBRuntime {
         &self,
         read_bytes_max: usize,
     ) -> RedDBResult<(super::memory_admission::QueryBufferReservation, usize)> {
-        self.reserve_index_workspace_with_limit(read_bytes_max, 0)
+        // The decode allowance already covers encoded input plus the decoded
+        // entity. A HASH probe additionally materializes selected fields and
+        // their canonical key, but does not retain restoration descriptors.
+        let scratch = read_bytes_max.saturating_mul(3);
+        let reservation = self.try_reserve_query_buffer(scratch).ok_or_else(|| {
+            let accounting = self.memory_accounting();
+            RedDBError::InvalidOperation(format!(
+                "index probe workspace exceeds the shared memory budget: requested {scratch} bytes, used {}, budget {}",
+                accounting.total_used_bytes(),
+                accounting.budget().resolved_bytes
+            ))
+        })?;
+        Ok((reservation, read_bytes_max))
     }
 
     fn reserve_index_workspace_with_limit(

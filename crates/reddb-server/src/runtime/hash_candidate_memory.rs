@@ -83,6 +83,7 @@ mod tests {
                 ))
                 .unwrap();
         }
+        runtime.flush().expect("settle fixture WAL");
         // These tests control the exact headroom between a storage sample and
         // candidate admission. Keep background maintenance from changing the
         // sampled resident footprint inside that deliberately narrow window.

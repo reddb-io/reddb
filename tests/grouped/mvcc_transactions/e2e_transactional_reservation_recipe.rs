@@ -405,15 +405,7 @@ fn reservation_commit_has_no_wal_prefix_with_claim_without_key_or_work() {
     let new_batches = &batches[before_batches..];
     let reservation_batches = new_batches
         .iter()
-        .filter(|actions| {
-            [
-                "inventory_units",
-                "reservation_idempotency",
-                "reservation_work",
-            ]
-            .iter()
-            .any(|needle| batch_contains_text(actions, needle))
-        })
+        .filter(|actions| batch_contains_text(actions, "reserve-wal"))
         .collect::<Vec<_>>();
     assert_eq!(
         reservation_batches.len(),
