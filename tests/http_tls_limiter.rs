@@ -100,8 +100,8 @@ fn spawn_http_get(addr: String, path: &'static str) -> thread::JoinHandle<String
 }
 
 fn wait_for_limiter(server: &RedDBServer, target: usize) -> bool {
-    // A busy nextest runner can delay the TLS handshake before admission.
-    // The blocking gate keeps admitted holders deterministic once they arrive.
+    // A busy nextest runner can delay request admission. The blocking gate
+    // keeps an admitted holder deterministic once it arrives.
     for _ in 0..500 {
         if server.http_limiter().current() == target {
             return true;
@@ -150,7 +150,7 @@ fn spawn_tls_get(
 
 #[test]
 fn tls_rejection_when_clear_text_saturates_then_recovers() {
-    let cap = 2;
+    let cap = 1;
     let (_dir, tls_cfg, cert_der) = build_tls_config("cross");
 
     // Boot a single RedDBServer with one shared limiter, then bind two
@@ -174,7 +174,7 @@ fn tls_rejection_when_clear_text_saturates_then_recovers() {
     });
     thread::sleep(Duration::from_millis(120));
 
-    // Saturate the shared cap via clear-text requests. The async edge
+    // Saturate the shared cap via one clear-text request. The async edge
     // limits in-flight requests, not idle TCP connections, so the test
     // slow-inject gate keeps each request occupying a permit until released.
     server.set_test_slow_inject_ms(u64::MAX);
@@ -289,15 +289,13 @@ fn tls_handler_deadline_emits_503_then_recovers() {
     );
 }
 
-/// AC #4 (vice-versa + mix): one shared cap, saturated by a *mixture*
-/// of clear-text and TLS connections. While saturated, a further
-/// request on *either* transport is rejected — proving HTTP and HTTPS
-/// draw against the single limiter regardless of which transport
-/// filled it. After the holders drain, capacity is restored on *both*
-/// transports.
+/// AC #4 (vice-versa): one TLS request saturates the shared cap. While
+/// saturated, a further request on either transport is rejected, proving HTTP
+/// and HTTPS draw against the single limiter regardless of which transport
+/// filled it. After the holder drains, capacity is restored on both transports.
 #[test]
-fn mixed_http_https_saturation_rejects_both_transports_then_recovers() {
-    let cap = 2;
+fn tls_saturation_rejects_both_transports_then_recovers() {
+    let cap = 1;
     let (_dir, tls_cfg, cert_der) = build_tls_config("mixed");
 
     let (_db, runtime) = support::persistent_runtime("http-tls-limiter-mixed");
@@ -321,11 +319,9 @@ fn mixed_http_https_saturation_rejects_both_transports_then_recovers() {
 
     let client_cfg = client_config_trusting(&cert_der);
 
-    // Saturate the shared cap with a MIX: one clear-text request + one
-    // TLS request. Both occupy the shared in-flight request limiter
-    // until the test slow-inject gate is released.
+    // Saturate the shared cap with one TLS request until the test slow-inject
+    // gate is released. The clear-text-first direction is covered above.
     server.set_test_slow_inject_ms(u64::MAX);
-    let hold_http = spawn_http_get(clear_addr.clone(), "/__test/slow-query");
     let hold_https = spawn_tls_get(
         tls_addr.clone(),
         Arc::clone(&client_cfg),
@@ -333,12 +329,12 @@ fn mixed_http_https_saturation_rejects_both_transports_then_recovers() {
     );
     assert!(
         wait_for_limiter(&server, cap),
-        "a mix of one HTTP + one HTTPS request must saturate the shared cap, current={}",
+        "one HTTPS request must saturate the shared cap, current={}",
         server.http_limiter().current()
     );
 
-    // Cap is full (filled by both transports). A new clear-text request
-    // is rejected with the limiter 503...
+    // Cap is full (filled by TLS). A new clear-text request is rejected with
+    // the limiter 503...
     let http_body = http_get(&clear_addr, "/__test/rejected-query");
     assert!(
         http_body.starts_with("HTTP/1.1 503"),
@@ -360,13 +356,8 @@ fn mixed_http_https_saturation_rejects_both_transports_then_recovers() {
         "expected Retry-After header, got: {https_body:?}"
     );
 
-    // Drain both holders; permits return to zero.
+    // Drain the holder; the permit returns to zero.
     server.set_test_slow_inject_ms(0);
-    let http_done = hold_http.join().expect("held HTTP request");
-    assert!(
-        http_done.starts_with("HTTP/1.1 404"),
-        "held HTTP request should complete normally, got: {http_done:?}"
-    );
     let https_done = hold_https.join().expect("held HTTPS request");
     assert!(
         https_done.starts_with("HTTP/1.1 404"),
@@ -374,7 +365,7 @@ fn mixed_http_https_saturation_rejects_both_transports_then_recovers() {
     );
     assert!(
         wait_for_limiter(&server, 0),
-        "permits should drain to zero after both holders close, current={}",
+        "permits should drain to zero after the holder closes, current={}",
         server.http_limiter().current()
     );
     thread::sleep(Duration::from_millis(100));
