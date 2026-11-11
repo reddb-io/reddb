@@ -82,6 +82,90 @@ fn exercise(update: &str) {
     verify(&open(&path, false), 2);
 }
 
+fn assert_platform_row_is_indexed(runtime: &RedDBRuntime, expected_status: &str) {
+    let full_scan = runtime
+        .execute_query("SELECT id,status FROM databases")
+        .expect("database table scan");
+    assert_eq!(full_scan.result.records.len(), 1, "table scan lost row");
+    assert_eq!(
+        full_scan.result.records[0]
+            .get("status")
+            .expect("status")
+            .as_text(),
+        Some(expected_status)
+    );
+
+    for query in [
+        "SELECT id,status FROM databases WHERE id = '566bf064-849b-4233-8ea5-78f13734e28b'",
+        "SELECT id,status FROM databases WHERE org_id = '699e23ba-bf9a-4974-9979-10147e782c48'",
+    ] {
+        let indexed = runtime
+            .execute_query(query)
+            .expect("indexed database lookup");
+        assert_eq!(
+            indexed.result.records.len(),
+            1,
+            "indexed lookup lost table-scan-visible row: {query}"
+        );
+        assert_eq!(
+            indexed.result.records[0]
+                .get("status")
+                .expect("status")
+                .as_text(),
+            Some(expected_status),
+            "indexed lookup returned the wrong row version: {query}"
+        );
+    }
+}
+
+#[test]
+fn cold_non_indexed_update_preserves_platform_btree_lookups() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let path = directory.path().join("platform.rdb");
+
+    {
+        let runtime = open(&path, true);
+        runtime.checkpoint().expect("initialize paged file");
+    }
+    {
+        let runtime = open(&path, false);
+        runtime
+            .execute_query(
+                "CREATE TABLE databases (id TEXT, org_id TEXT, status TEXT, deleted_at TEXT, purged_at TEXT)",
+            )
+            .expect("create databases table");
+        runtime
+            .execute_query(
+                "INSERT INTO databases (id,org_id,status) VALUES ('566bf064-849b-4233-8ea5-78f13734e28b','699e23ba-bf9a-4974-9979-10147e782c48','ready')",
+            )
+            .expect("seed database row");
+        runtime.checkpoint().expect("checkpoint pre-index row");
+    }
+    {
+        let runtime = open(&path, false);
+        runtime
+            .execute_query("CREATE UNIQUE INDEX idx_databases_id ON databases (id)")
+            .expect("create id index");
+        runtime
+            .execute_query("CREATE INDEX idx_databases_org_id ON databases (org_id)")
+            .expect("create organization index");
+        assert_platform_row_is_indexed(&runtime, "ready");
+        runtime.checkpoint().expect("checkpoint indexes");
+    }
+    {
+        let runtime = open(&path, false);
+        assert_platform_row_is_indexed(&runtime, "ready");
+        runtime
+            .execute_query(
+                "UPDATE databases SET status = 'thawing' WHERE id = '566bf064-849b-4233-8ea5-78f13734e28b'",
+            )
+            .expect("update non-indexed status");
+        assert_platform_row_is_indexed(&runtime, "thawing");
+        runtime.checkpoint().expect("checkpoint updated row");
+    }
+    assert_platform_row_is_indexed(&open(&path, false), "thawing");
+}
+
 #[test]
 fn constant_update_preserves_reopened_positional_fields_and_indexes() {
     exercise("UPDATE updated_rows SET n = 2");
