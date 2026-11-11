@@ -7,7 +7,9 @@ use crate::{
     },
     query::{
         evaluator,
-        local_read::{self, host::ReadHost, LocalReadError, LOCAL_READ_ROWS_MAX},
+        local_read::{
+            self, host::ReadHost, source::StoreView, LocalReadError, LOCAL_READ_ROWS_MAX,
+        },
         planning::aggregation::validate_expression_depth,
         records::runtime_table_record_from_entity_ref_with_schema,
     },
@@ -16,7 +18,6 @@ use crate::{
             compute_entity_field_bloom, EntityData, EntityId, RowData, UnifiedEntity,
             FIRST_USER_ENTITY_ID,
         },
-        resident_store::ResidentStore,
         store_wal::StoreWalAction,
     },
 };
@@ -27,7 +28,7 @@ use reddb_rql::ast::{
 use reddb_types::{DataType, Value};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    sync::{atomic::Ordering, Arc},
+    sync::Arc,
 };
 
 fn unsupported() -> LocalReadError {
@@ -109,7 +110,7 @@ fn admit_contract(contract: &CollectionContract) -> Result<()> {
 
 pub(super) fn plan(
     statement: &QueryExpr,
-    resident: &ResidentStore,
+    resident: &dyn StoreView,
     contracts: &HashMap<String, CollectionContract>,
     now_ms: u64,
 ) -> Result<Vec<StoreWalAction>> {
@@ -181,30 +182,26 @@ pub(super) fn plan(
         });
     }
     local_read::admission::expressions(&query, &columns)?;
-    let manager = resident
-        .get_collection(table)
-        .ok_or_else(|| LocalReadError::Catalog(format!("collection {table} is missing")))?;
     let mut entities = Vec::new();
     let mut exceeded = false;
-    manager.scan_for_each(None, |entity| {
+    resident.scan_collection(table, &mut |entity, metadata| {
         if entities.len() == LOCAL_READ_ROWS_MAX {
             exceeded = true;
             return false;
         }
-        entities.push(entity.clone());
+        let has_ttl = metadata.is_some_and(|metadata| {
+            INTERNAL_TTL_METADATA_KEYS
+                .iter()
+                .any(|key| metadata.has(key))
+        });
+        entities.push((entity.clone(), has_ttl));
         true
-    });
+    })?;
     if exceeded {
         return Err(LocalReadError::ResourceLimit);
     }
-    for entity in &entities {
-        if !matches!(entity.data, EntityData::Row(_))
-            || manager.get_metadata(entity.id).is_some_and(|metadata| {
-                INTERNAL_TTL_METADATA_KEYS
-                    .iter()
-                    .any(|key| metadata.has(key))
-            })
-        {
+    for (entity, has_ttl) in &entities {
+        if !matches!(entity.data, EntityData::Row(_)) || *has_ttl {
             return Err(unsupported());
         }
     }
@@ -220,7 +217,7 @@ pub(super) fn plan(
     let mut actions = Vec::new();
     let mut final_fields: Vec<_> = entities
         .iter()
-        .map(|entity| fields(entity, &context.schema))
+        .map(|(entity, _)| fields(entity, &context.schema))
         .collect();
     match statement {
         QueryExpr::Insert(insert) => {
@@ -247,10 +244,7 @@ pub(super) fn plan(
             {
                 return Err(LocalReadError::ResourceLimit);
             }
-            let first_id = resident
-                .next_entity_id
-                .load(Ordering::SeqCst)
-                .max(FIRST_USER_ENTITY_ID);
+            let first_id = resident.next_entity_id()?.max(FIRST_USER_ENTITY_ID);
             for (index, row) in insert.value_exprs.iter().enumerate() {
                 if row.len() != names.len() {
                     return Err(query_error("INSERT column/value counts differ"));
@@ -299,7 +293,7 @@ pub(super) fn plan(
             if update.assignment_exprs.is_empty() {
                 return Err(query_error("UPDATE requires assignments"));
             }
-            for (index, original) in entities.iter().enumerate() {
+            for (index, (original, _)) in entities.iter().enumerate() {
                 if !context.matches(update.where_expr.as_ref(), original)? {
                     continue;
                 }
@@ -317,7 +311,7 @@ pub(super) fn plan(
                 actions.push(StoreWalAction::upsert_entity(
                     table,
                     &entity,
-                    manager.get_metadata(original.id).as_ref(),
+                    resident.get_metadata(table, original.id)?.as_ref(),
                     reddb_file::STORE_VERSION_CURRENT,
                 ));
                 final_fields[index] = fields;
@@ -327,7 +321,7 @@ pub(super) fn plan(
             if contract.append_only {
                 return Err(query_error("append-only tables cannot be deleted"));
             }
-            for entity in &entities {
+            for (entity, _) in &entities {
                 if context.matches(delete.where_expr.as_ref(), entity)? {
                     actions.push(StoreWalAction::DeleteEntityRecord {
                         collection: table.into(),

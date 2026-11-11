@@ -1,6 +1,8 @@
 //! Single-owner local SQL. Native formats and publication barriers remain canonical.
 use super::{
-    local_read::{query_resident_bound, query_resident_scoped, LocalReadError, ReadScope},
+    local_read::{
+        query_resident_bound, query_resident_scoped, source::StoreView, LocalReadError, ReadScope,
+    },
     scalar::ScalarResult,
 };
 use crate::{
@@ -8,10 +10,7 @@ use crate::{
         codec::{deserialize_collection_contracts, serialize_collection_contracts},
         CollectionContract,
     },
-    storage::{
-        manager::ManagerConfig, resident_file::EmbeddedResidentStore,
-        resident_store::ResidentStore, store_wal::StoreWalAction,
-    },
+    storage::store_wal::StoreWalAction,
 };
 use reddb_file::VfsFile;
 use reddb_rql::ast::{QueryExpr, TxnControl};
@@ -24,15 +23,18 @@ use std::{
 mod mutation;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod service;
+mod strategy;
 pub mod vault;
+
+use strategy::{ResidentStrategy, StorageStrategy};
 
 type Result<T> = std::result::Result<T, LocalReadError>;
 
 /// Same positional-parameter count bound as the native wire protocol.
 pub const MAX_QUERY_PARAMETERS: usize = 65_536;
 
-struct Transaction {
-    resident: ResidentStore,
+struct Transaction<T> {
+    store: T,
     contracts: HashMap<String, CollectionContract>,
     actions: Vec<StoreWalAction>,
     catalog_changed: bool,
@@ -42,30 +44,77 @@ struct Transaction {
 /// One exclusively locked database handle is the transaction/session boundary.
 /// Closing drops uncommitted state. Failed I/O fences the controller until reopen.
 pub struct LocalDatabase<F: VfsFile> {
-    store: EmbeddedResidentStore<F>,
+    database: Database<ResidentStrategy<F>>,
+}
+
+struct Database<S: StorageStrategy> {
+    storage: S,
     contracts: HashMap<String, CollectionContract>,
-    transaction: Option<Transaction>,
+    transaction: Option<Transaction<S::Transaction>>,
 }
 
 impl<F: VfsFile> LocalDatabase<F> {
     pub fn create(file: F, name: impl Into<PathBuf>, now_ms: u64) -> Result<Self> {
         Ok(Self {
-            store: EmbeddedResidentStore::create(
-                file,
-                name,
-                u128::from(now_ms),
-                ManagerConfig::default(),
-                false,
-                0,
-            )?,
-            contracts: HashMap::new(),
-            transaction: None,
+            database: Database::create(ResidentStrategy::create(file, name, now_ms)?),
         })
     }
 
     pub fn open(file: F, name: impl Into<PathBuf>) -> Result<Self> {
-        let store = EmbeddedResidentStore::open(file, name, ManagerConfig::default(), false, 0)?;
-        let bytes = store.committed_resident()?.aux_metadata();
+        Ok(Self {
+            database: Database::open(ResidentStrategy::open(file, name)?)?,
+        })
+    }
+
+    pub fn query(&mut self, sql: &str, now_ms: u64) -> Result<ScalarResult> {
+        self.database.query(sql, now_ms)
+    }
+
+    /// Host-side read operations honor the interrupted-publication fence.
+    pub fn check_healthy(&self) -> Result<()> {
+        self.database.check_healthy()
+    }
+
+    /// Read persisted contracts without inferring schemas from row payloads.
+    pub fn catalog(&self) -> Result<ScalarResult> {
+        self.database.catalog()
+    }
+
+    /// Only SELECT is admitted; callers cannot widen the host's row scope.
+    pub fn read_query(
+        &self,
+        sql: &str,
+        parameters: &[Value],
+        scopes: &[ReadScope],
+    ) -> Result<ScalarResult> {
+        self.database.read_query(sql, parameters, scopes)
+    }
+
+    pub fn query_with_params(
+        &mut self,
+        sql: &str,
+        parameters: &[Value],
+        now_ms: u64,
+    ) -> Result<ScalarResult> {
+        self.database.query_with_params(sql, parameters, now_ms)
+    }
+
+    pub fn into_inner(self) -> F {
+        self.database.storage.into_inner()
+    }
+}
+
+impl<S: StorageStrategy> Database<S> {
+    fn create(storage: S) -> Self {
+        Self {
+            storage,
+            contracts: HashMap::new(),
+            transaction: None,
+        }
+    }
+
+    fn open(storage: S) -> Result<Self> {
+        let bytes = storage.committed_view()?.aux_metadata()?;
         let mut contracts = HashMap::new();
         if !bytes.is_empty() {
             for contract in deserialize_collection_contracts(&bytes)
@@ -80,24 +129,24 @@ impl<F: VfsFile> LocalDatabase<F> {
             }
         }
         Ok(Self {
-            store,
+            storage,
             contracts,
             transaction: None,
         })
     }
 
-    pub fn query(&mut self, sql: &str, now_ms: u64) -> Result<ScalarResult> {
+    fn query(&mut self, sql: &str, now_ms: u64) -> Result<ScalarResult> {
         self.query_with_params(sql, &[], now_ms)
     }
 
     /// Host-side read operations must honor the same interrupted-publication fence.
-    pub fn check_healthy(&self) -> Result<()> {
-        self.store.committed_resident()?;
+    fn check_healthy(&self) -> Result<()> {
+        self.storage.committed_view()?;
         Ok(())
     }
 
     /// Read actual persisted contracts without inferring schemas from row payloads.
-    pub fn catalog(&self) -> Result<ScalarResult> {
+    fn catalog(&self) -> Result<ScalarResult> {
         self.check_healthy()?;
         if self
             .transaction
@@ -134,7 +183,7 @@ impl<F: VfsFile> LocalDatabase<F> {
     }
 
     /// Only SELECT is admitted; a caller cannot widen the host's source-row scope.
-    pub fn read_query(
+    fn read_query(
         &self,
         sql: &str,
         parameters: &[Value],
@@ -175,7 +224,7 @@ impl<F: VfsFile> LocalDatabase<F> {
         query_resident_scoped(resident, contracts, query, scope)
     }
 
-    pub fn query_with_params(
+    fn query_with_params(
         &mut self,
         sql: &str,
         parameters: &[Value],
@@ -239,10 +288,10 @@ impl<F: VfsFile> LocalDatabase<F> {
                     }
                     // An apply error aborts the transaction; provisional state is
                     // inaccessible until rollback, including through COMMIT.
-                    apply(&transaction.resident, &actions)?;
+                    self.storage.apply_transaction(&transaction.store, &actions)?;
                     transaction.actions.extend(actions);
                 } else {
-                    self.store.publish_actions(&actions)?;
+                    self.storage.publish_actions(&actions)?;
                 }
                 Ok(affected(count))
             }
@@ -250,10 +299,10 @@ impl<F: VfsFile> LocalDatabase<F> {
         }
     }
 
-    fn visible(&self) -> Result<(&ResidentStore, &HashMap<String, CollectionContract>)> {
+    fn visible(&self) -> Result<(&dyn StoreView, &HashMap<String, CollectionContract>)> {
         match &self.transaction {
-            Some(transaction) => Ok((&transaction.resident, &transaction.contracts)),
-            None => Ok((self.store.committed_resident()?, &self.contracts)),
+            Some(transaction) => Ok((&transaction.store, &transaction.contracts)),
+            None => Ok((self.storage.committed_view()?, &self.contracts)),
         }
     }
 
@@ -264,7 +313,7 @@ impl<F: VfsFile> LocalDatabase<F> {
                     return Err(query_error("a transaction is already active"));
                 }
                 self.transaction = Some(Transaction {
-                    resident: copy_resident(self.store.committed_resident()?)?,
+                    store: self.storage.begin_transaction()?,
                     contracts: self.contracts.clone(),
                     actions: Vec::new(),
                     catalog_changed: false,
@@ -273,11 +322,14 @@ impl<F: VfsFile> LocalDatabase<F> {
             }
             TxnControl::Commit => {
                 let transaction = self.transaction.as_ref().ok_or_else(|| query_error("no active transaction"))?;
-                if transaction.catalog_changed {
-                    self.store.publish_snapshot(&snapshot(&transaction.resident))?;
-                } else {
-                    self.store.publish_actions(&transaction.actions)?;
-                }
+                let catalog = transaction
+                    .catalog_changed
+                    .then(|| catalog_bytes(&transaction.contracts));
+                self.storage.commit_transaction(
+                    &transaction.store,
+                    &transaction.actions,
+                    catalog,
+                )?;
                 self.contracts = self.transaction.take().expect("active transaction committed").contracts;
             }
             _ => return Err(LocalReadError::Unsupported("local transactions support BEGIN, COMMIT and ROLLBACK without isolation options or savepoints")),
@@ -294,7 +346,7 @@ impl<F: VfsFile> LocalDatabase<F> {
         let (exists, catalog_exists) = {
             let (resident, contracts) = self.visible()?;
             (
-                resident.get_collection(&query.name).is_some(),
+                resident.contains_collection(&query.name)?,
                 contracts.contains_key(&query.name),
             )
         };
@@ -316,25 +368,18 @@ impl<F: VfsFile> LocalDatabase<F> {
             name: query.name.clone(),
         };
         if let Some(transaction) = &mut self.transaction {
-            apply(&transaction.resident, &[action])?;
+            self.storage
+                .apply_transaction(&transaction.store, &[action])?;
             transaction.contracts.insert(query.name.clone(), contract);
-            set_contracts(&transaction.resident, &transaction.contracts);
             transaction.catalog_changed = true;
         } else {
-            let (resident, contracts) = self.visible()?;
-            let staged = copy_resident(resident)?;
-            let mut contracts = contracts.clone();
-            apply(&staged, &[action])?;
+            let mut contracts = self.contracts.clone();
             contracts.insert(query.name.clone(), contract);
-            set_contracts(&staged, &contracts);
-            self.store.publish_snapshot(&snapshot(&staged))?;
+            self.storage
+                .publish_catalog_actions(&[action], catalog_bytes(&contracts))?;
             self.contracts = contracts;
         }
         Ok(affected(0))
-    }
-
-    pub fn into_inner(self) -> F {
-        self.store.into_inner()
     }
 }
 
@@ -349,26 +394,8 @@ fn affected(count: usize) -> ScalarResult {
 fn query_error(message: impl Into<String>) -> LocalReadError {
     LocalReadError::Query(message.into())
 }
-fn snapshot(resident: &ResidentStore) -> Vec<u8> {
-    resident.snapshot_bytes(&HashSet::new(), &HashSet::new(), || {})
-}
-fn copy_resident(resident: &ResidentStore) -> Result<ResidentStore> {
-    ResidentStore::from_snapshot(&snapshot(resident), &ManagerConfig::default(), false, 0)
-        .map(|(resident, _)| resident)
-        .map_err(|error| query_error(error.to_string()))
-}
-fn apply(resident: &ResidentStore, actions: &[StoreWalAction]) -> Result<()> {
-    for action in actions {
-        resident.apply_replayed_action(
-            action,
-            reddb_file::STORE_VERSION_CURRENT,
-            &ManagerConfig::default(),
-        )?;
-    }
-    Ok(())
-}
-fn set_contracts(resident: &ResidentStore, contracts: &HashMap<String, CollectionContract>) {
+fn catalog_bytes(contracts: &HashMap<String, CollectionContract>) -> Vec<u8> {
     let mut contracts: Vec<_> = contracts.values().cloned().collect();
     contracts.sort_by(|left, right| left.name.cmp(&right.name));
-    resident.set_aux_metadata(serialize_collection_contracts(&contracts));
+    serialize_collection_contracts(&contracts)
 }

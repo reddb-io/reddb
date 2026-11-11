@@ -22,6 +22,9 @@ use super::{
 
 pub(crate) mod admission;
 pub(crate) mod host;
+pub(crate) mod source;
+
+use source::StoreView;
 
 /// Bound materialization before cloning records, independently of SQL LIMIT.
 pub const LOCAL_READ_ROWS_MAX: usize = 100_000;
@@ -123,7 +126,7 @@ impl<F: VfsFile> LocalReadDatabase<F> {
 }
 
 pub(crate) fn query_resident(
-    resident: &crate::storage::resident_store::ResidentStore,
+    resident: &dyn StoreView,
     contracts: &HashMap<String, CollectionContract>,
     sql: &str,
 ) -> Result<ScalarResult, LocalReadError> {
@@ -132,7 +135,7 @@ pub(crate) fn query_resident(
 }
 
 pub(crate) fn query_resident_bound(
-    resident: &crate::storage::resident_store::ResidentStore,
+    resident: &dyn StoreView,
     contracts: &HashMap<String, CollectionContract>,
     query: reddb_rql::ast::TableQuery,
 ) -> Result<ScalarResult, LocalReadError> {
@@ -140,7 +143,7 @@ pub(crate) fn query_resident_bound(
 }
 
 pub(crate) fn query_resident_scoped(
-    resident: &crate::storage::resident_store::ResidentStore,
+    resident: &dyn StoreView,
     contracts: &HashMap<String, CollectionContract>,
     query: reddb_rql::ast::TableQuery,
     scope: &ReadScope,
@@ -149,7 +152,7 @@ pub(crate) fn query_resident_scoped(
 }
 
 fn execute_resident_query(
-    resident: &crate::storage::resident_store::ResidentStore,
+    resident: &dyn StoreView,
     contracts: &HashMap<String, CollectionContract>,
     query: reddb_rql::ast::TableQuery,
     scope: Option<&ReadScope>,
@@ -176,13 +179,10 @@ fn execute_resident_query(
             "inspection scope column is missing".into(),
         ));
     }
-    let manager = resident
-        .get_collection(&query.table)
-        .ok_or_else(|| LocalReadError::Catalog(format!("collection {} is missing", query.table)))?;
     let schema = std::sync::Arc::new(columns.iter().map(|column| column.name.clone()).collect());
     let mut entities = Vec::new();
     let mut exceeded = false;
-    manager.scan_for_each(None, |entity| {
+    resident.scan_collection(&query.table, &mut |entity, metadata| {
         if let Some(scope) = scope {
             let Some(record) = super::records::runtime_table_record_from_entity_ref_with_schema(
                 entity,
@@ -198,24 +198,25 @@ fn execute_resident_query(
             exceeded = true;
             return false;
         }
-        entities.push(entity.clone());
+        let has_ttl = metadata.is_some_and(|metadata| {
+            metadata.has(INTERNAL_TTL_SECONDS_KEY)
+                || metadata.has(INTERNAL_TTL_MILLIS_KEY)
+                || metadata.has(INTERNAL_EXPIRES_AT_KEY)
+        });
+        entities.push((entity.clone(), has_ttl));
         true
-    });
+    })?;
     if exceeded {
         return Err(LocalReadError::ResourceLimit);
     }
     let mut records = Vec::with_capacity(entities.len());
-    for entity in entities {
+    for (entity, has_ttl) in entities {
         if !matches!(entity.data, EntityData::Row(_)) {
             return Err(LocalReadError::Unsupported(
                 "local table contains non-row entities",
             ));
         }
-        if manager.get_metadata(entity.id).is_some_and(|metadata| {
-            metadata.has(INTERNAL_TTL_SECONDS_KEY)
-                || metadata.has(INTERNAL_TTL_MILLIS_KEY)
-                || metadata.has(INTERNAL_EXPIRES_AT_KEY)
-        }) {
+        if has_ttl {
             return Err(LocalReadError::Unsupported(
                 "local SELECT does not yet admit row TTL metadata",
             ));
