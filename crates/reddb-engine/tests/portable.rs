@@ -399,6 +399,67 @@ fn format_upgrade_fences_both_superblocks_and_stops_after_io_failure() {
 }
 
 #[test]
+fn capability_fence_precedes_dependent_pages_and_survives_either_superblock() {
+    use reddb_engine::storage::{
+        page::PageType,
+        pager::{NoWal, Pager, PagerConfig},
+    };
+    use reddb_file::{
+        FILE_CAPABILITY_TEMPERATURE, PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE,
+        PAGE_REQUIRED_CAPABILITIES_FILE_VERSION,
+    };
+
+    let pager = Pager::open_owned(
+        pager::MemoryFile::default(),
+        "capability-fence.rdb".into(),
+        PagerConfig::default(),
+        NoWal,
+        true,
+    )
+    .expect("create pager");
+    let persisted_page_count = pager.header().expect("header").page_count;
+    pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("dirty allocation");
+    pager
+        .fence_required_capabilities(FILE_CAPABILITY_TEMPERATURE)
+        .expect("fence temperature");
+
+    let bytes = pager
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("durable bytes");
+    for copy in 0..PAGED_SUPERBLOCK_SLOT_COUNT {
+        let start = copy * PAGED_SUPERBLOCK_SLOT_SIZE;
+        let slot = &bytes[start..start + PAGED_SUPERBLOCK_SLOT_SIZE];
+        let header = reddb_file::decode_database_header(slot).expect("header");
+        assert_eq!(header.version, PAGE_REQUIRED_CAPABILITIES_FILE_VERSION);
+        assert_eq!(header.required_capabilities, FILE_CAPABILITY_TEMPERATURE);
+        assert_eq!(
+            header.page_count, persisted_page_count,
+            "capability fence must not publish dirty allocator state"
+        );
+
+        let mut damaged = bytes.clone();
+        damaged[start + 64] ^= 1;
+        let reopened = Pager::open_owned(
+            pager::MemoryFile::from_bytes(damaged),
+            "capability-fallback.rdb".into(),
+            PagerConfig::default(),
+            NoWal,
+            false,
+        )
+        .expect("either fenced copy can recover");
+        assert_eq!(
+            reopened
+                .header()
+                .expect("fallback header")
+                .required_capabilities,
+            FILE_CAPABILITY_TEMPERATURE
+        );
+    }
+}
+
+#[test]
 fn pager_records_ownership_before_allocator_changes_and_fences_errors() {
     use reddb_engine::storage::{
         page::PageType,

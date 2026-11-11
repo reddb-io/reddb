@@ -214,8 +214,9 @@ fn recover_paged_wal_inner(
     copy_physical_metadata_files(&source, &staged_source)?;
     let preserved_audit = detach_recovery_audit_logs(&staged_source, &stage)?;
     let config = crate::storage::unified::UnifiedStoreConfig {
-        resident_memory_bytes_max: (guard.header.version
-            >= f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION)
+        resident_memory_bytes_max: guard
+            .header
+            .requires_disk_residency()
             .then_some(64 * 1024 * 1024),
         ..Default::default()
     };
@@ -361,9 +362,7 @@ fn recover_paged_wal_inner(
     if !probabilistic_deltas.is_empty() {
         let options = crate::RedDBOptions::persistent(&staged_source)
             .with_memory_budget(64 * 1024 * 1024)
-            .with_bounded_disk_residency(
-                guard.header.version >= f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION,
-            );
+            .with_bounded_disk_residency(guard.header.requires_disk_residency());
         let runtime = crate::RedDBRuntime::with_options(options)?;
         runtime.persist_offline_probabilistic_recovery(probabilistic_deltas)?;
         runtime.checkpoint()?;
@@ -752,8 +751,7 @@ fn compact_paged_inner(
         catalog.retain_canonical_system_config()?;
     }
     ensure(
-        source.header.version < f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
-            || catalog.resume.is_some(),
+        !source.header.requires_disk_residency() || catalog.resume.is_some(),
         "prepared disk-resident file has no resume catalog",
     )?;
     if let Some(salvage) = salvage {
@@ -825,8 +823,7 @@ fn compact_paged_inner(
         &temporary,
         PagerConfig {
             cache_size: 1024,
-            disk_residency: source.header.version
-                >= f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION,
+            disk_residency: source.header.requires_disk_residency(),
             ..PagerConfig::default()
         },
     )?);

@@ -71,6 +71,7 @@ impl From<&Value> for WireValue {
             Value::UnsignedInteger(n) => WireValue::U64(*n),
             Value::Float(f) => WireValue::F64(*f),
             Value::Text(s) => WireValue::Text(s.to_string()),
+            Value::Temperature(temperature) => WireValue::Text(temperature.to_string()),
             Value::Blob(bytes) => WireValue::Bytes(bytes.clone()),
             Value::Boolean(b) => WireValue::Bool(*b),
             Value::Timestamp(t) => WireValue::Timestamp(*t as u64),
@@ -87,6 +88,7 @@ impl From<Value> for WireValue {
             Value::UnsignedInteger(n) => WireValue::U64(n),
             Value::Float(f) => WireValue::F64(f),
             Value::Text(s) => WireValue::Text(s.to_string()),
+            Value::Temperature(temperature) => WireValue::Text(temperature.to_string()),
             Value::Blob(bytes) => WireValue::Bytes(bytes),
             Value::Boolean(b) => WireValue::Bool(b),
             Value::Timestamp(t) => WireValue::Timestamp(t as u64),
@@ -228,6 +230,9 @@ pub fn encode_native_value(buf: &mut Vec<u8>, value: &Value) {
             buf.extend_from_slice(&(text.len() as u32).to_le_bytes());
             buf.extend_from_slice(text.as_bytes());
         }
+        Value::Temperature(temperature) => {
+            encode_value(buf, &WireValue::Text(temperature.to_string()))
+        }
         Value::Integer(value) => encode_value(buf, &WireValue::I64(*value)),
         Value::UnsignedInteger(value) => encode_value(buf, &WireValue::U64(*value)),
         Value::Float(value) => encode_value(buf, &WireValue::F64(*value)),
@@ -242,6 +247,7 @@ pub fn encode_native_value(buf: &mut Vec<u8>, value: &Value) {
 pub fn native_value_encoded_len(value: &Value) -> usize {
     match value {
         Value::Text(text) => 5 + text.len(),
+        Value::Temperature(temperature) => 5 + temperature.to_string().len(),
         Value::Integer(_) | Value::UnsignedInteger(_) | Value::Float(_) | Value::Timestamp(_) => 9,
         Value::Boolean(_) => 2,
         _ => 1,
@@ -541,5 +547,26 @@ mod tests {
             &bytes[row_count_offset..row_count_offset + 4],
             &[5, 0, 0, 0]
         );
+    }
+}
+
+#[cfg(test)]
+mod temperature_wire_tests {
+    use super::*;
+
+    #[test]
+    fn temperature_uses_existing_text_tag_in_legacy_wire() {
+        let value = Value::Temperature(
+            reddb_types::Temperature::new(29_315, 2, reddb_types::TemperatureUnit::Kelvin)
+                .expect("temperature"),
+        );
+        let expected = WireValue::Text("293.15 K".into());
+        assert_eq!(WireValue::from(&value), expected);
+        assert_eq!(WireValue::from(value.clone()), expected);
+
+        let mut bytes = Vec::new();
+        encode_native_value(&mut bytes, &value);
+        assert_eq!(bytes.len(), native_value_encoded_len(&value));
+        assert_eq!(try_decode_value(&bytes, &mut 0).expect("decode"), expected);
     }
 }

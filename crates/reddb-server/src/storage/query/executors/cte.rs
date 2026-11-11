@@ -315,6 +315,10 @@ where
 
         match value {
             Value::Null => 0u8.hash(hasher),
+            Value::Temperature(temperature) => {
+                56u8.hash(hasher);
+                temperature.hash(hasher);
+            }
             Value::Boolean(b) => {
                 1u8.hash(hasher);
                 b.hash(hasher);

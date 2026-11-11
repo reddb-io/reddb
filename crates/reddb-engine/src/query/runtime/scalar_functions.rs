@@ -196,8 +196,9 @@ pub fn evaluate_scalar_function_with_host<H: ScalarFunctionHost>(
             }
             Some(Value::Null)
         }
-        "JSON_PARSE" | "JSON_EXTRACT" | "JSON_EXTRACT_TEXT" | "CONTAINS" | "JSON_SET"
-        | "JSON_ARRAY_LENGTH" | "JSON_TYPEOF" | "JSON_VALID" | "JSON_ARRAY" | "JSON_OBJECT" => {
+        "TEMPERATURE" | "TEMPERATURE_UNIT" | "TEMPERATURE_VALUE" | "JSON_PARSE"
+        | "JSON_EXTRACT" | "JSON_EXTRACT_TEXT" | "CONTAINS" | "JSON_SET" | "JSON_ARRAY_LENGTH"
+        | "JSON_TYPEOF" | "JSON_VALID" | "JSON_ARRAY" | "JSON_OBJECT" => {
             let values = (0..args.len())
                 .map(|index| resolve_scalar_arg(args, index, source))
                 .collect::<Option<Vec<_>>>()?;

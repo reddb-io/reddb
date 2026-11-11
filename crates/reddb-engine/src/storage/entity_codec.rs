@@ -15,6 +15,29 @@ fn persistent_name(name: &str) -> &str {
     super::system_collection_names::canonical_or_self(name)
 }
 
+/// Mandatory paged-file capabilities needed by an encoded entity.
+pub fn required_file_capabilities(entity: &UnifiedEntity) -> u64 {
+    fn values<'a>(values: impl Iterator<Item = &'a reddb_types::Value>) -> u64 {
+        values.fold(0, |required, value| {
+            required | reddb_file::native_value::required_file_capabilities(value)
+        })
+    }
+
+    match &entity.data {
+        EntityData::Row(row) => row.named.as_ref().map_or_else(
+            || values(row.columns.iter()),
+            |named| values(named.values()),
+        ),
+        EntityData::Node(node) => values(node.properties.values()),
+        EntityData::Edge(edge) => values(edge.properties.values()),
+        EntityData::TimeSeries(series) => values(series.fields.values()),
+        EntityData::QueueMessage(message) => {
+            reddb_file::native_value::required_file_capabilities(&message.payload)
+        }
+        EntityData::Vector(_) => 0,
+    }
+}
+
 /// Write entity to binary buffer
 pub fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_version: u32) {
     // Entity ID

@@ -329,6 +329,15 @@ fn read_atom(reader: &mut NativeReader<'_, '_>, tag: u8) -> RdbFileResult<Value>
             minor_units: i64::from_le_bytes(reader.fixed()?),
         },
         52 => Value::DecimalText(reader.string()?),
+        53 => {
+            let unit = reddb_types::TemperatureUnit::from_byte(reader.byte()?)
+                .ok_or_else(|| invalid("invalid temperature unit"))?;
+            let scale = reader.byte()?;
+            let minor_units = i64::from_le_bytes(reader.fixed()?);
+            Value::Temperature(
+                reddb_types::Temperature::new(minor_units, scale, unit).map_err(invalid)?,
+            )
+        }
         0x85 => reader.text(true)?,
         0x86 => Value::Blob(reader.compressed()?),
         _ => return Err(invalid(format!("Unknown Value type: {tag}"))),
@@ -624,6 +633,23 @@ pub fn write_native_value(buf: &mut Vec<u8>, value: &Value) {
             write_varu32(buf, value.len() as u32);
             buf.extend_from_slice(value.as_bytes());
         }
+        Value::Temperature(value) => {
+            buf.push(53);
+            buf.push(value.unit() as u8);
+            buf.push(value.scale());
+            buf.extend_from_slice(&value.minor_units().to_le_bytes());
+        }
+    }
+}
+
+/// Mandatory paged-file capabilities needed to decode this value.
+pub fn required_file_capabilities(value: &Value) -> u64 {
+    match value {
+        Value::Temperature(_) => crate::FILE_CAPABILITY_TEMPERATURE,
+        Value::Array(values) => values.iter().fold(0, |required, value| {
+            required | required_file_capabilities(value)
+        }),
+        _ => 0,
     }
 }
 

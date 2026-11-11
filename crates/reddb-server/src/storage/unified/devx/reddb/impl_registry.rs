@@ -294,6 +294,13 @@ impl RedDB {
         &self,
         contract: crate::physical::CollectionContract,
     ) -> Result<crate::physical::CollectionContract, Box<dyn std::error::Error>> {
+        if contract.declared_columns.iter().any(|column| {
+            reddb_types::DataType::from_sql_name(&column.data_type)
+                == Some(reddb_types::DataType::Temperature)
+        }) {
+            self.store()
+                .fence_required_capabilities(reddb_file::FILE_CAPABILITY_TEMPERATURE)?;
+        }
         let _publication = self.store.vault_publication_lock.lock();
         if let Ok(mut defaults) = self.collection_ttl_defaults_ms.write() {
             if let Some(ttl_ms) = contract.default_ttl_ms {

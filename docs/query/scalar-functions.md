@@ -208,3 +208,18 @@ ORDER BY dist
 ```
 
 You cannot currently mix aggregate and scalar functions in the same query (use a subquery or two separate queries).
+
+---
+
+## Temperature Functions
+
+The native [TEMPERATURE](../types/temperature.md) value carries its unit and an
+exact decimal representation.
+
+| Function | Returns | Description |
+|:---------|:--------|:------------|
+| `TEMPERATURE(text)` | `TEMPERATURE` | Construct from text such as `'20 C'`; invalid input returns `NULL` |
+| `TEMPERATURE_UNIT(value)` | `TEXT` | Return the stored unit: `C`, `F`, or `K` |
+| `TEMPERATURE_VALUE(value, unit)` | `DOUBLE` | Explicitly convert to an approximate numeric value |
+
+Use `CAST('20 C' AS TEMPERATURE)` for validation that raises an error.

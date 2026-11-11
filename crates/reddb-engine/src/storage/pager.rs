@@ -459,9 +459,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 "recovered database is read-only; export verified data into a new store".into(),
             ));
         }
-        if header.version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
-            && !self.config.disk_residency
-            && !self.config.read_only
+        if header.requires_disk_residency() && !self.config.disk_residency && !self.config.read_only
         {
             return Err(PagerError::InvalidDatabase(
                 "prepared disk-resident database requires a disk-resident writer".into(),
@@ -541,35 +539,136 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 "recovery read-only format is reserved".into(),
             ));
         }
-        if version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
-            && !self.config.disk_residency
-        {
-            return Err(PagerError::InvalidDatabase(
-                "disk-residency format requires a disk-resident writer".into(),
-            ));
-        }
         if !(PHASE3_DWB_ZONE_FILE_VERSION..=reddb_file::PAGE_FILE_VERSION).contains(&version) {
             return Err(PagerError::InvalidDatabase(
                 "unsupported file format fence".into(),
+            ));
+        }
+        let current = self.header_read()?.clone();
+        if version < current.version {
+            return Err(PagerError::InvalidDatabase(
+                "file format downgrade is not supported".into(),
+            ));
+        }
+        let legacy_disk_residency = current.version
+            >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+            && current.version < reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION;
+        let required_capabilities = current.required_capabilities
+            | if version >= reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION
+                && legacy_disk_residency
+            {
+                reddb_file::FILE_CAPABILITY_DISK_RESIDENCY
+            } else {
+                0
+            };
+        let requires_disk_residency =
+            if version < reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION {
+                version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+            } else {
+                required_capabilities & reddb_file::FILE_CAPABILITY_DISK_RESIDENCY != 0
+            };
+        if requires_disk_residency && !self.config.disk_residency {
+            return Err(PagerError::InvalidDatabase(
+                "disk-residency format requires a disk-resident writer".into(),
             ));
         }
         let _publication = self
             .superblock_publication
             .lock()
             .map_err(|_| PagerError::LockPoisoned)?;
-        if version < self.header_read()?.version {
-            return Err(PagerError::InvalidDatabase(
-                "file format downgrade is not supported".into(),
-            ));
-        }
         let result = (|| {
             for _ in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
                 self.commit_superblock_locked(|image| {
                     reddb_file::set_database_header_version(image, version)
+                        .map_err(|error| PagerError::InvalidDatabase(error.to_string()))?;
+                    if version >= reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION {
+                        reddb_file::set_database_header_required_capabilities(
+                            image,
+                            required_capabilities,
+                        )
+                        .map_err(|error| PagerError::InvalidDatabase(error.to_string()))?;
+                    }
+                    Ok(())
+                })?;
+            }
+            let mut header = self.header_write()?;
+            header.version = version;
+            if version >= reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION {
+                header.required_capabilities = required_capabilities;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.writeback_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+
+    /// Durably enable mandatory reader capabilities before dependent pages exist.
+    ///
+    /// The set only grows. Both superblock copies cross the fence before this
+    /// returns, so a crash can leave a conservatively declared unused feature,
+    /// never reachable bytes whose decoder requirement was not published.
+    pub fn fence_required_capabilities(&self, capabilities: u64) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        let unsupported = capabilities & !reddb_file::FILE_CAPABILITIES_SUPPORTED;
+        if unsupported != 0 {
+            return Err(PagerError::InvalidDatabase(format!(
+                "unsupported required database capabilities: {unsupported:#018x}"
+            )));
+        }
+
+        let current = self.header_read()?.clone();
+        if current.version == reddb_file::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION {
+            return Err(PagerError::InvalidDatabase(
+                "recovery read-only format cannot enable capabilities".into(),
+            ));
+        }
+        let legacy_disk_residency = current.version
+            >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+            && current.version < reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION;
+        let required = current.required_capabilities
+            | capabilities
+            | if legacy_disk_residency {
+                reddb_file::FILE_CAPABILITY_DISK_RESIDENCY
+            } else {
+                0
+            };
+        let version = current
+            .version
+            .max(reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION);
+        if required == current.required_capabilities && version == current.version {
+            return Ok(());
+        }
+        if required & reddb_file::FILE_CAPABILITY_DISK_RESIDENCY != 0 && !self.config.disk_residency
+        {
+            return Err(PagerError::InvalidDatabase(
+                "disk-residency capability requires a disk-resident writer".into(),
+            ));
+        }
+
+        let _publication = self
+            .superblock_publication
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?;
+        let result = (|| {
+            for _ in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+                self.commit_superblock_locked(|image| {
+                    reddb_file::set_database_header_version(image, version)
+                        .and_then(|()| {
+                            reddb_file::set_database_header_required_capabilities(image, required)
+                        })
                         .map_err(|error| PagerError::InvalidDatabase(error.to_string()))
                 })?;
             }
-            self.header_write()?.version = version;
+            let mut header = self.header_write()?;
+            header.version = version;
+            header.required_capabilities = required;
             Ok(())
         })();
         if result.is_err() {
