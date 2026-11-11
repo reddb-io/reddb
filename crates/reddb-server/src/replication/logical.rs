@@ -1106,6 +1106,17 @@ mod tests {
         replica
             .execute_query("CREATE TABLE users (id INT, payload BLOB)")
             .expect("schema");
+        // Initialize the durable result-cache format before the test pauses a
+        // transaction while holding the publication lock. A real transaction
+        // completes without this test-only barrier; letting the first read
+        // create cache metadata inside the pause would deadlock the harness
+        // rather than exercise transaction visibility.
+        assert!(replica
+            .execute_query("SELECT id FROM users")
+            .expect("initialize read metadata")
+            .result
+            .records
+            .is_empty());
         let applier = Arc::new(LogicalChangeApplier::new(0));
         let barrier = Arc::new(std::sync::Barrier::new(2));
         *applier
