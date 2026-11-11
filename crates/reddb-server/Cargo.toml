@@ -194,6 +194,10 @@ name = "concurrent_commit_bench"
 harness = false
 
 [[bench]]
+name = "result_cache_bench"
+harness = false
+
+[[bench]]
 name = "timeseries_ingest_bench"
 harness = false
 

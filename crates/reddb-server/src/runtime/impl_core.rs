@@ -62,6 +62,21 @@ pub(super) use super::impl_core_result_cache_scopes::query_expr_result_cache_sco
 // (`table_row_index_fields`) are re-exported so those call sites need no edit.
 pub(crate) use super::impl_lifecycle::{table_row_index_fields, view_records_to_entities};
 
+#[cfg(test)]
+thread_local! {
+    static RESULT_CACHE_MISS_EXECUTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_result_cache_miss_executions() {
+    RESULT_CACHE_MISS_EXECUTIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn result_cache_miss_executions() -> u64 {
+    RESULT_CACHE_MISS_EXECUTIONS.with(std::cell::Cell::get)
+}
+
 pub use super::execution_context::{
     capture_current_snapshot, clear_current_auth_identity, clear_current_connection_id,
     clear_current_snapshot, clear_current_tenant, current_auth_identity_for_audit,
@@ -723,6 +738,9 @@ impl RedDBRuntime {
                 return Ok(result);
             }
         }
+
+        #[cfg(test)]
+        RESULT_CACHE_MISS_EXECUTIONS.with(|count| count.set(count.get() + 1));
 
         let prepared = frame.prepare_statement(self, execution_query)?;
         let mode = prepared.mode;
@@ -3961,6 +3979,101 @@ fn confine_copy_from_path(path: &str) -> RedDBResult<()> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod result_cache_execution_tests {
+    use super::*;
+
+    const QUERY: &str = "SELECT SUM(n) AS n FROM result_cache_probe";
+
+    fn runtime_with_rows(cache_enabled: bool) -> RedDBRuntime {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE result_cache_probe (id INT, n INT)")
+            .expect("create table");
+        runtime
+            .execute_query(
+                "INSERT INTO result_cache_probe (id, n) VALUES (1, 10), (2, 20), (3, 30)",
+            )
+            .expect("seed rows");
+        runtime
+            .execute_query(&format!(
+                "SET CONFIG runtime.result_cache.enabled = {cache_enabled}"
+            ))
+            .expect("configure result cache");
+        runtime
+    }
+
+    fn aggregate_value(runtime: &RedDBRuntime) -> i64 {
+        let result = runtime.execute_query(QUERY).expect("aggregate query");
+        match result.result.records[0].get("n") {
+            Some(reddb_types::Value::Integer(value)) => *value,
+            other => panic!("expected integer aggregate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hot_hit_bypasses_query_execution_pipeline() {
+        let runtime = runtime_with_rows(true);
+        reset_result_cache_miss_executions();
+        let before = runtime.result_cache_metrics();
+
+        assert_eq!(aggregate_value(&runtime), 60);
+        assert_eq!(result_cache_miss_executions(), 1);
+        assert_eq!(aggregate_value(&runtime), 60);
+
+        let after = runtime.result_cache_metrics();
+        assert_eq!(
+            result_cache_miss_executions(),
+            1,
+            "hit re-entered the executor"
+        );
+        assert_eq!(after.0 - before.0, 1, "second read must be a cache hit");
+        assert_eq!(after.1 - before.1, 1, "first read must populate the cache");
+    }
+
+    #[test]
+    fn disabled_cache_executes_every_read() {
+        let runtime = runtime_with_rows(false);
+        reset_result_cache_miss_executions();
+        let before = runtime.result_cache_metrics();
+
+        assert_eq!(aggregate_value(&runtime), 60);
+        assert_eq!(aggregate_value(&runtime), 60);
+
+        assert_eq!(result_cache_miss_executions(), 2);
+        assert_eq!(
+            runtime.result_cache_metrics(),
+            before,
+            "disabled cache must not report lookups"
+        );
+    }
+
+    #[test]
+    fn table_write_forces_one_reexecution_then_hits_again() {
+        let runtime = runtime_with_rows(true);
+        assert_eq!(aggregate_value(&runtime), 60);
+        assert_eq!(aggregate_value(&runtime), 60);
+        runtime
+            .execute_query("INSERT INTO result_cache_probe (id, n) VALUES (4, 40)")
+            .expect("mutate cached table");
+        reset_result_cache_miss_executions();
+        let before = runtime.result_cache_metrics();
+
+        assert_eq!(aggregate_value(&runtime), 100);
+        assert_eq!(result_cache_miss_executions(), 1);
+        assert_eq!(aggregate_value(&runtime), 100);
+
+        let after = runtime.result_cache_metrics();
+        assert_eq!(result_cache_miss_executions(), 1);
+        assert_eq!(after.0 - before.0, 1, "post-write result must become hot");
+        assert_eq!(
+            after.1 - before.1,
+            1,
+            "write must invalidate the old result"
+        );
+    }
 }
 
 #[cfg(test)]
