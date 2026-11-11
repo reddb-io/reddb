@@ -65,6 +65,7 @@ impl UnifiedStore {
             )?;
         let mut store = Self::with_config(config);
         store.resident = resident;
+        store.note_result_cache_snapshot_version(version);
         store.set_format_version(version.max(STORE_VERSION_CURRENT));
         store.load_result_cache_epoch()?;
 

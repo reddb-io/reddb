@@ -1233,11 +1233,12 @@ impl UnifiedStore {
         trace_startup_phase(path, "paged_pager_open", pager_open_started);
 
         if config.resident_memory_bytes_max.is_none()
-            && pager
-                .header()
-                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
-                .version
-                >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+            && reddb_file::file_format::page_format_is_disk_resident(
+                pager
+                    .header()
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                    .version,
+            )
         {
             return Err(StoreError::Io(std::io::Error::new(std::io::ErrorKind::Unsupported,
                 "this database was prepared for disk residency; reopen with the disk-resident storage profile")));
@@ -1552,8 +1553,7 @@ impl UnifiedStore {
                 .header()
                 .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
                 .version;
-            let prepared =
-                file_version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION;
+            let prepared = reddb_file::file_format::page_format_is_disk_resident(file_version);
             let resume = if prepared {
                 reddb_file::native_resume::decode_catalog_resume(content)
                     .map_err(|error| StoreError::Serialization(error.to_string()))?

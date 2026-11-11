@@ -459,7 +459,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 "recovered database is read-only; export verified data into a new store".into(),
             ));
         }
-        if header.version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+        if reddb_file::file_format::page_format_is_disk_resident(header.version)
             && !self.config.disk_residency
             && !self.config.read_only
         {
@@ -541,7 +541,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 "recovery read-only format is reserved".into(),
             ));
         }
-        if version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+        if reddb_file::file_format::page_format_is_disk_resident(version)
             && !self.config.disk_residency
         {
             return Err(PagerError::InvalidDatabase(

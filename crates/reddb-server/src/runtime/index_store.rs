@@ -1098,6 +1098,7 @@ pub(crate) enum MutationTestPhase {
     StoragePublished,
     BeforeResultCacheInvalidation,
     TransactionWalCommitted,
+    ResultCacheFormatCheckpointed,
     BeforeEvents,
     BeforeUndoTopology,
     UndoIndexRemoved,

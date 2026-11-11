@@ -18,6 +18,8 @@ pub(super) struct ResultCacheEpochState {
     id: AtomicU64,
     pending: AtomicUsize,
     poisoned: AtomicBool,
+    format_fenced: AtomicBool,
+    snapshot_format_current: AtomicBool,
     // None means a publication whose effects cannot be limited to collections.
     history: parking_lot::Mutex<VecDeque<(u64, Option<HashSet<String>>)>>,
     #[cfg(test)]
@@ -45,6 +47,47 @@ impl Drop for ResultCacheEpochGuard {
 }
 
 impl UnifiedStore {
+    pub(crate) fn result_cache_format_fenced(&self) -> bool {
+        self.result_cache_epoch
+            .format_fenced
+            .load(Ordering::Acquire)
+    }
+
+    pub(super) fn note_result_cache_snapshot_version(&self, version: u32) {
+        self.result_cache_epoch
+            .snapshot_format_current
+            .store(version >= reddb_file::STORE_VERSION_V13, Ordering::Release);
+    }
+
+    pub(crate) fn result_cache_snapshot_format_current(&self) -> bool {
+        self.result_cache_epoch
+            .snapshot_format_current
+            .load(Ordering::Acquire)
+    }
+
+    /// Publish the epoch marker once after a checkpoint so both embedded
+    /// superblocks name the fenced snapshot before cached results are written.
+    pub(crate) fn seal_result_cache_snapshot(&self) -> Result<(), StoreError> {
+        let _publication = self.vault_publication_lock.lock();
+        let id = EntityId::new(self.result_cache_epoch.id.load(Ordering::SeqCst));
+        let mut entity = self
+            .try_get(CACHE_COLLECTION, id, usize::MAX)?
+            .ok_or_else(|| {
+                StoreError::Io(std::io::Error::other("result-cache epoch marker missing"))
+            })?;
+        entity.data = Self::result_cache_epoch_data(
+            self.result_cache_epoch.epoch.load(Ordering::SeqCst),
+            true,
+        );
+        let action =
+            StoreWalAction::upsert_entity(CACHE_COLLECTION, &entity, None, self.format_version());
+        self.apply_replayed_action(&action, true)?;
+        self.finish_paged_write([action])?;
+        self.result_cache_epoch
+            .format_fenced
+            .store(true, Ordering::Release);
+        Ok(())
+    }
     #[cfg(test)]
     pub(crate) fn set_result_cache_pending_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
         *self.result_cache_epoch.on_pending.lock() = hook;
@@ -64,7 +107,7 @@ impl UnifiedStore {
         f()
     }
 
-    fn read_result_cache_epoch_marker(&self) -> Result<Option<(EntityId, u64)>, StoreError> {
+    fn read_result_cache_epoch_marker(&self) -> Result<Option<(EntityId, u64, bool)>, StoreError> {
         let Some(manager) = self.get_collection(CACHE_COLLECTION) else {
             return Ok(None);
         };
@@ -76,11 +119,20 @@ impl UnifiedStore {
                     .as_row()
                     .and_then(|row| row.get_field("value"))
                     .cloned(),
+                matches!(
+                    entity
+                        .data
+                        .as_row()
+                        .and_then(|row| row.get_field("format_fenced")),
+                    Some(Value::Boolean(true))
+                ),
             )
         })?;
         match row {
             None => Ok(None),
-            Some((id, Some(Value::UnsignedInteger(epoch)))) if epoch > 0 => Ok(Some((id, epoch))),
+            Some((id, Some(Value::UnsignedInteger(epoch)), fenced)) if epoch > 0 => {
+                Ok(Some((id, epoch, fenced)))
+            }
             Some(_) => Err(StoreError::Io(std::io::Error::other(
                 "invalid result-cache epoch marker",
             ))),
@@ -91,12 +143,27 @@ impl UnifiedStore {
     pub(crate) fn load_result_cache_epoch(&self) -> Result<(), StoreError> {
         let _publication = self.vault_publication_lock.lock();
         self.result_cache_epoch.history.lock().clear();
-        if let Some((id, epoch)) = self.read_result_cache_epoch_marker()? {
+        if let Some((id, epoch, marker_fenced)) = self.read_result_cache_epoch_marker()? {
             self.result_cache_epoch.id.store(id.raw(), Ordering::SeqCst);
             self.result_cache_epoch.epoch.store(epoch, Ordering::SeqCst);
+            let format_fenced = if let Some(pager) = self.pager() {
+                pager
+                    .header()
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                    .version
+                    >= reddb_file::file_format::PAGE_RESULT_CACHE_FILE_VERSION
+            } else {
+                self.result_cache_snapshot_format_current()
+            };
+            self.result_cache_epoch
+                .format_fenced
+                .store(marker_fenced && format_fenced, Ordering::Release);
         } else {
             self.result_cache_epoch.epoch.store(0, Ordering::SeqCst);
             self.result_cache_epoch.id.store(0, Ordering::SeqCst);
+            self.result_cache_epoch
+                .format_fenced
+                .store(false, Ordering::Release);
         }
         Ok(())
     }
@@ -173,12 +240,6 @@ impl UnifiedStore {
         next == current.saturating_add(1)
     }
 
-    pub(crate) fn result_cache_epoch_uninitialized(&self) -> bool {
-        self.result_cache_epoch.epoch.load(Ordering::SeqCst) == 0
-            && !self.result_cache_epoch.poisoned.load(Ordering::SeqCst)
-            && self.result_cache_epoch.pending.load(Ordering::SeqCst) == 0
-    }
-
     /// Activate epoch tracking before a result can be persisted. Cache rows
     /// written by older versions have another payload format and are ignored.
     pub(crate) fn ensure_result_cache_epoch(&self) -> Result<u64, StoreError> {
@@ -210,7 +271,7 @@ impl UnifiedStore {
                 "read-only result-cache epoch",
             )));
         }
-        if let Some((id, epoch)) = self.read_result_cache_epoch_marker()? {
+        if let Some((id, epoch, _)) = self.read_result_cache_epoch_marker()? {
             self.result_cache_epoch.id.store(id.raw(), Ordering::SeqCst);
             self.result_cache_epoch.epoch.store(epoch, Ordering::SeqCst);
             return Ok(epoch);
@@ -234,11 +295,19 @@ impl UnifiedStore {
                 table: Arc::from(CACHE_COLLECTION),
                 row_id: 0,
             },
-            EntityData::Row(RowData::with_names(
-                vec![Value::text(EPOCH_KEY), Value::UnsignedInteger(epoch)],
-                vec!["key".into(), "value".into()],
-            )),
+            Self::result_cache_epoch_data(epoch, false),
         )
+    }
+
+    fn result_cache_epoch_data(epoch: u64, fenced: bool) -> EntityData {
+        EntityData::Row(RowData::with_names(
+            vec![
+                Value::text(EPOCH_KEY),
+                Value::UnsignedInteger(epoch),
+                Value::Boolean(fenced),
+            ],
+            vec!["key".into(), "value".into(), "format_fenced".into()],
+        ))
     }
 
     pub(super) fn note_in_memory_result_mutation(
@@ -298,10 +367,14 @@ impl UnifiedStore {
                 "result-cache epoch marker disappeared",
             )));
         };
-        entity.data = EntityData::Row(RowData::with_names(
-            vec![Value::text(EPOCH_KEY), Value::UnsignedInteger(next)],
-            vec!["key".into(), "value".into()],
-        ));
+        let fenced = matches!(
+            entity
+                .data
+                .as_row()
+                .and_then(|row| row.get_field("format_fenced")),
+            Some(Value::Boolean(true))
+        );
+        entity.data = Self::result_cache_epoch_data(next, fenced);
         let action =
             StoreWalAction::upsert_entity(CACHE_COLLECTION, &entity, None, self.format_version());
         self.apply_replayed_action(&action, true)?;

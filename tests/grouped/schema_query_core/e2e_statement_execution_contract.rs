@@ -40,19 +40,6 @@ fn row_count(rt: &RedDBRuntime, sql: &str) -> usize {
         .len()
 }
 
-fn show_config_value(rt: &RedDBRuntime, key: &str) -> String {
-    let result = rt
-        .execute_query(&format!("SHOW CONFIG {key}"))
-        .unwrap_or_else(|err| panic!("SHOW CONFIG {key}: {err:?}"));
-    result
-        .result
-        .records
-        .first()
-        .and_then(|record| record.get("value"))
-        .map(|value| format!("{value:?}"))
-        .unwrap_or_else(|| "Null".to_string())
-}
-
 fn selected_ids(rt: &RedDBRuntime, sql: &str) -> Vec<i64> {
     let result = rt
         .execute_query(sql)
@@ -414,15 +401,6 @@ fn read_statement_context_observes_tenant_config_auth_and_policy_state() {
         1
     );
 
-    exec(
-        &rt,
-        "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
-    );
-    assert!(
-        show_config_value(&rt, "runtime.result_cache.backend").contains("blob_cache"),
-        "SHOW CONFIG should expose the current runtime config"
-    );
-
     set_current_auth_identity("reader".to_string(), Role::Read);
     let read = rt.execute_query("SELECT 1");
     assert!(read.is_ok(), "Role::Read should execute SELECT: {read:?}");
@@ -440,14 +418,9 @@ fn show_config_as_json_reconstructs_config_subtree() {
     let rt = runtime();
     exec(
         &rt,
-        "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
-    );
-    exec(
-        &rt,
         "SET CONFIG runtime.result_cache.capacity_entries = 128",
     );
     exec(&rt, "SET CONFIG runtime.result_cache.enabled = true");
-    exec(&rt, "SET CONFIG runtime.result_cache.backend = 'shadow'");
 
     let result = rt
         .execute_query("SHOW CONFIG runtime.result_cache AS JSON")
@@ -462,7 +435,6 @@ fn show_config_as_json_reconstructs_config_subtree() {
         panic!("expected JSON value, got {record:?}");
     };
     let json: reddb::json::Value = reddb::json::from_slice(bytes).expect("valid config json");
-    assert_eq!(json["backend"].as_str(), Some("shadow"));
     assert_eq!(json["capacity_entries"].as_u64(), Some(128));
     assert_eq!(json["enabled"].as_bool(), Some(true));
 }
@@ -475,10 +447,6 @@ fn blob_result_cache_rehydrates_after_restart_with_tenant_and_auth_isolation() {
 
     {
         let rt = persistent_runtime(&path);
-        exec(
-            &rt,
-            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
-        );
         set_current_auth_identity("alice".to_string(), Role::Read);
         set_current_tenant("acme".to_string());
         assert_eq!(selected_text(&rt, "SELECT CURRENT_TENANT()"), "acme");
@@ -530,10 +498,6 @@ fn blob_result_cache_write_after_restart_invalidates_unrehydrated_l2_entries() {
 
     {
         let rt = persistent_runtime(&path);
-        exec(
-            &rt,
-            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
-        );
         exec(&rt, "CREATE TABLE items (id INT)");
         exec(&rt, "INSERT INTO items (id) VALUES (1)");
         assert_eq!(
@@ -565,10 +529,6 @@ fn blob_result_cache_recovers_table_result_after_restart() {
     let query = "SELECT id FROM items ORDER BY id";
     let expected = {
         let rt = persistent_runtime(&path);
-        exec(
-            &rt,
-            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
-        );
         exec(&rt, "CREATE TABLE items (id INT)");
         exec(&rt, "INSERT INTO items (id) VALUES (1)");
         assert_eq!(selected_ids(&rt, query), vec![1]);
@@ -601,10 +561,6 @@ fn blob_result_cache_recovers_join_result_after_restart() {
     let query = "SELECT a.id AS id FROM items a JOIN items b ON a.id = b.id";
     {
         let rt = persistent_runtime(&path);
-        exec(
-            &rt,
-            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
-        );
         exec(&rt, "CREATE TABLE items (id INT)");
         exec(&rt, "INSERT INTO items (id) VALUES (1)");
         assert_eq!(selected_ids(&rt, query), vec![1]);
@@ -691,33 +647,27 @@ fn blob_cache_standalone_l2_recovers_after_namespace_flush() {
 
 #[test]
 fn blob_result_cache_keeps_unrelated_entries_after_table_write() {
-    for backend in ["blob_cache", "shadow"] {
-        let rt = runtime();
-        exec(
-            &rt,
-            &format!("SET CONFIG runtime.result_cache.backend = '{backend}'"),
-        );
-        exec(&rt, "CREATE TABLE items (id INT)");
-        exec(&rt, "CREATE TABLE noise (id INT)");
-        exec(&rt, "INSERT INTO items (id) VALUES (1)");
-        exec(&rt, "INSERT INTO noise (id) VALUES (1)");
-        let query = "SELECT id FROM items ORDER BY id";
-        assert_eq!(selected_ids(&rt, query), vec![1]);
-        exec(&rt, "UPDATE noise SET id = 2 WHERE id = 1");
-        let before = rt.result_cache_metrics();
-        let blob_hits = rt.result_blob_cache().stats().hits();
-        assert_eq!(selected_ids(&rt, query), vec![1]);
-        let after = rt.result_cache_metrics();
-        assert_eq!(
-            after.0 - before.0,
-            1,
-            "unrelated writes should preserve the result"
-        );
-        assert_eq!(after.1 - before.1, 0);
-        assert_eq!(rt.result_blob_cache().stats().hits() - blob_hits, 1);
-        exec(&rt, "INSERT INTO items (id) VALUES (2)");
-        assert_eq!(selected_ids(&rt, query), vec![1, 2]);
-    }
+    let rt = runtime();
+    exec(&rt, "CREATE TABLE items (id INT)");
+    exec(&rt, "CREATE TABLE noise (id INT)");
+    exec(&rt, "INSERT INTO items (id) VALUES (1)");
+    exec(&rt, "INSERT INTO noise (id) VALUES (1)");
+    let query = "SELECT id FROM items ORDER BY id";
+    assert_eq!(selected_ids(&rt, query), vec![1]);
+    exec(&rt, "UPDATE noise SET id = 2 WHERE id = 1");
+    let before = rt.result_cache_metrics();
+    let blob_hits = rt.result_blob_cache().stats().hits();
+    assert_eq!(selected_ids(&rt, query), vec![1]);
+    let after = rt.result_cache_metrics();
+    assert_eq!(
+        after.0 - before.0,
+        1,
+        "unrelated writes should preserve the result"
+    );
+    assert_eq!(after.1 - before.1, 0);
+    assert_eq!(rt.result_blob_cache().stats().hits() - blob_hits, 1);
+    exec(&rt, "INSERT INTO items (id) VALUES (2)");
+    assert_eq!(selected_ids(&rt, query), vec![1, 2]);
 }
 
 #[test]
@@ -726,10 +676,6 @@ fn blob_result_cache_defers_l2_for_frequently_written_tables() {
     let query = "SELECT id FROM items ORDER BY id";
     {
         let rt = persistent_runtime(&path);
-        exec(
-            &rt,
-            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
-        );
         exec(&rt, "CREATE TABLE items (id INT)");
         exec(&rt, "INSERT INTO items (id) VALUES (1)");
         assert_eq!(selected_ids(&rt, query), vec![1]);
@@ -774,10 +720,6 @@ fn blob_result_cache_promotes_volatile_result_after_writes_stop() {
     let query = "SELECT id FROM items ORDER BY id";
     {
         let rt = persistent_runtime(&path);
-        exec(
-            &rt,
-            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
-        );
         exec(&rt, "CREATE TABLE items (id INT)");
         exec(&rt, "INSERT INTO items (id) VALUES (1)");
         assert_eq!(selected_ids(&rt, query), vec![1]);
@@ -813,10 +755,6 @@ fn blob_result_cache_promotes_volatile_result_after_writes_stop() {
 #[test]
 fn blob_result_cache_promotion_preserves_remaining_ttl() {
     let rt = runtime();
-    exec(
-        &rt,
-        "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
-    );
     exec(&rt, "SET CONFIG runtime.result_cache.ttl_seconds = 5");
     exec(&rt, "CREATE TABLE items (id INT)");
     exec(&rt, "INSERT INTO items (id) VALUES (1)");
@@ -847,10 +785,6 @@ fn blob_result_cache_promotion_preserves_remaining_ttl() {
 #[test]
 fn blob_result_cache_invalidates_entries_evicted_from_tracking() {
     let rt = runtime();
-    exec(
-        &rt,
-        "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
-    );
     exec(&rt, "SET CONFIG runtime.result_cache.capacity_entries = 1");
     exec(&rt, "CREATE TABLE items (id INT)");
     exec(&rt, "CREATE TABLE other (id INT)");

@@ -25,7 +25,7 @@ what the *value* looks like and how you want it invalidated.
 | Queryable JSON config / sessions / flags                                    | KV                                                                                                           |
 | Opaque byte blobs with TTL and invalidation                                 | Blob Cache                                                                                                   |
 | Embedding vectors with similarity lookup                                    | Semantic Cache                                                                                               |
-| SQL result rows materialized for re-read                                    | Built-in result cache (now Blob Cache backed when `runtime.result_cache.backend = blob_cache`)               |
+| SQL result rows materialized for re-read                                    | Built-in result cache backed by Blob Cache                                                                  |
 | Database pages                                                              | Page Cache (internal, not user-facing)                                                                       |
 
 The four user-visible caches in RedDB today are KV, Blob Cache, Semantic
@@ -53,11 +53,8 @@ should hit the same entry even though their byte representation differs.
 ADR 0006 leaves the door open for Semantic Cache to use Blob Cache as
 its durable exact-key backend, but its lookup surface stays similarity.
 
-The runtime SQL result cache stores small `SELECT` results keyed by
-statement shape and scope, invalidated through table dependencies. With
-ADR 0006 in flight it becomes an adapter over Blob Cache when
-`runtime.result_cache.backend = blob_cache`. The Interface that
-application SQL callers see does not change; the storage underneath does.
+The runtime SQL result cache stores small `SELECT` results in Blob Cache,
+keyed by statement shape and scope and invalidated through table dependencies.
 Tenant and auth identity stay part of the key. Table writes flush the
 result-cache namespace when a dependency matches or L2 entries are untracked;
 otherwise unrelated results stay cached. After a matching invalidation, new

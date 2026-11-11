@@ -23,7 +23,15 @@ pub const PAGE_SECONDARY_INDEX_FILE_VERSION: u32 = 0x0001_0005;
 /// Legacy recovery output: identity high-water marks are unknown and every
 /// writer must refuse this file. Older readers reject the version outright.
 pub const PAGE_RECOVERY_READ_ONLY_FILE_VERSION: u32 = 0x0001_0006;
-pub const PAGE_FILE_VERSION: u32 = PAGE_RECOVERY_READ_ONLY_FILE_VERSION;
+/// Result-cache epoch fencing for resident paged stores.
+pub const PAGE_RESULT_CACHE_FILE_VERSION: u32 = 0x0001_0007;
+/// Result-cache epoch fencing for disk-resident paged stores.
+pub const PAGE_RESULT_CACHE_DISK_FILE_VERSION: u32 = 0x0001_0008;
+pub const PAGE_FILE_VERSION: u32 = PAGE_RESULT_CACHE_DISK_FILE_VERSION;
+
+pub fn page_format_is_disk_resident(version: u32) -> bool {
+    version >= PAGE_DISK_RESIDENCY_FILE_VERSION && version != PAGE_RESULT_CACHE_FILE_VERSION
+}
 
 /// Paged database page size.
 pub const PAGED_PAGE_SIZE: usize = 16_384;

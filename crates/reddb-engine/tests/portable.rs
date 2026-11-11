@@ -399,6 +399,49 @@ fn format_upgrade_fences_both_superblocks_and_stops_after_io_failure() {
 }
 
 #[test]
+fn result_cache_format_fences_both_paged_storage_profiles() {
+    use reddb_engine::storage::pager::{NoWal, Pager, PagerConfig};
+    use reddb_file::{file_format, PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE};
+
+    for (version, disk_residency) in [
+        (file_format::PAGE_RESULT_CACHE_FILE_VERSION, false),
+        (file_format::PAGE_RESULT_CACHE_DISK_FILE_VERSION, true),
+    ] {
+        let pager = Pager::open_owned(
+            pager::MemoryFile::default(),
+            "result-cache-format.rdb".into(),
+            PagerConfig {
+                disk_residency,
+                ..PagerConfig::default()
+            },
+            NoWal,
+            true,
+        )
+        .expect("create pager");
+        pager
+            .fence_file_format_version(version)
+            .expect("fence both copies");
+        let bytes = pager
+            .with_file(|file| file.durable.borrow().clone())
+            .unwrap();
+        for copy in 0..PAGED_SUPERBLOCK_SLOT_COUNT {
+            let start = copy * PAGED_SUPERBLOCK_SLOT_SIZE;
+            let slot = &bytes[start..start + PAGED_SUPERBLOCK_SLOT_SIZE];
+            assert!(reddb_file::paged_superblock_slot_generation(slot, copy).is_some());
+            assert_eq!(
+                reddb_file::decode_database_header(slot).unwrap().version,
+                version
+            );
+        }
+        assert_eq!(
+            file_format::page_format_is_disk_resident(version),
+            disk_residency
+        );
+        assert!(version > file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION);
+    }
+}
+
+#[test]
 fn pager_records_ownership_before_allocator_changes_and_fences_errors() {
     use reddb_engine::storage::{
         page::PageType,

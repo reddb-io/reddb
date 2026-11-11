@@ -182,11 +182,6 @@ pub const MATRIX: &[ConfigDefault] = &[
         default: || text("sync"),
     },
     // runtime.result_cache.*
-    ConfigDefault {
-        key: "runtime.result_cache.backend",
-        tier: Tier::Critical,
-        default: || text("legacy"),
-    },
     // Kill-switch (issue #802). Critical so it self-heals to `true` on
     // boot and is always visible in SHOW CONFIG — operators flip it to
     // `false` to disable result caching wholesale for debugging.
@@ -454,7 +449,6 @@ mod tests {
             "cache.blob.namespace_bytes_max",
             "cache.blob.max_namespaces",
             "durability.mode",
-            "runtime.result_cache.backend",
             "concurrency.locking.enabled",
             "storage.wal.max_interval_ms",
             "storage.deploy.profile",

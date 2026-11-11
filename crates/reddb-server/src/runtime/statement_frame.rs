@@ -1865,7 +1865,7 @@ mod tests {
         // tenant + identity in via `result_cache_key`, so finding "acme"
         // and "alice" inside any cached key proves the frame was the
         // seam used.
-        let cache = rt.inner.result_cache.read();
+        let cache = rt.inner.result_blob_entries.read();
         let any_keyed_with_scope = cache
             .0
             .keys()
@@ -1917,7 +1917,7 @@ mod tests {
         let _ = rt
             .execute_query("SELECT pg_advisory_unlock(1)")
             .expect("volatile SELECT executes");
-        let cache = rt.inner.result_cache.read();
+        let cache = rt.inner.result_blob_entries.read();
         let key = result_cache_key("SELECT pg_advisory_unlock(1)");
         assert!(
             !cache.0.contains_key(&key),
@@ -1929,14 +1929,9 @@ mod tests {
     }
 
     #[test]
-    fn blob_cache_backend_populates_blob_path_without_legacy_write() {
+    fn result_cache_populates_blob_path() {
         reset_thread_locals();
         let rt = fresh_runtime();
-        rt.inner
-            .db
-            .store()
-            .set_config_tree("runtime.result_cache.backend", &crate::json!("blob_cache"));
-
         let result = rt.execute_query("SELECT 1").expect("SELECT 1 executes");
         assert_eq!(result.statement_type, "select");
 
@@ -1949,21 +1944,12 @@ mod tests {
             "blob backend should stamp the Blob Cache path"
         );
         assert!(rt.inner.result_blob_entries.read().0.contains_key(&key));
-        assert!(
-            !rt.inner.result_cache.read().0.contains_key(&key),
-            "blob backend should not write the legacy map"
-        );
     }
 
     #[test]
     fn blob_cache_backend_keeps_volatile_select_out_of_blob_path() {
         reset_thread_locals();
         let rt = fresh_runtime();
-        rt.inner
-            .db
-            .store()
-            .set_config_tree("runtime.result_cache.backend", &crate::json!("blob_cache"));
-
         let _ = rt
             .execute_query("SELECT pg_advisory_unlock(1)")
             .expect("volatile SELECT executes");
@@ -1976,29 +1962,6 @@ mod tests {
             "volatile SELECT must not populate blob result cache"
         );
         assert!(!rt.inner.result_blob_entries.read().0.contains_key(&key));
-    }
-
-    #[test]
-    fn shadow_backend_dual_writes_and_reports_no_divergence_on_equal_results() {
-        reset_thread_locals();
-        let rt = fresh_runtime();
-        rt.inner
-            .db
-            .store()
-            .set_config_tree("runtime.result_cache.backend", &crate::json!("shadow"));
-
-        let first = rt.execute_query("SELECT 1").expect("first SELECT");
-        let second = rt.execute_query("SELECT 1").expect("cached SELECT");
-        assert_eq!(first.result.len(), second.result.len());
-
-        let key = result_cache_key("SELECT 1");
-        assert!(rt.inner.result_cache.read().0.contains_key(&key));
-        assert!(rt.inner.result_blob_entries.read().0.contains_key(&key));
-        assert_eq!(rt.result_cache_shadow_divergences(), 0);
-        assert_eq!(
-            crate::runtime::METRIC_CACHE_SHADOW_DIVERGENCE_TOTAL,
-            "cache_shadow_divergence_total"
-        );
     }
 
     #[test]

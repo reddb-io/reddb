@@ -377,11 +377,8 @@ impl RedDBRuntime {
                 query_cache: parking_lot::RwLock::new(
                     crate::storage::query::planner::cache::PlanCache::new(1000),
                 ),
-                result_cache: parking_lot::RwLock::new((
-                    HashMap::new(),
-                    std::collections::VecDeque::new(),
-                )),
                 result_blob_cache,
+                result_cache_format_lock: parking_lot::Mutex::new(()),
                 result_blob_promotion: parking_lot::Mutex::new(()),
                 result_blob_entries: parking_lot::RwLock::new((
                     HashMap::new(),
@@ -396,7 +393,6 @@ impl RedDBRuntime {
                     HashSet::new(),
                     std::collections::VecDeque::new(),
                 )),
-                result_cache_shadow_divergences: std::sync::atomic::AtomicU64::new(0),
                 result_cache_hits: std::sync::atomic::AtomicU64::new(0),
                 result_cache_misses: std::sync::atomic::AtomicU64::new(0),
                 result_cache_evictions: std::sync::atomic::AtomicU64::new(0),

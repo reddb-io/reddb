@@ -69,19 +69,18 @@ tenant and auth identity, so scoped callers do not share cached rows.
 | Max entries | 1 000 |
 | Eviction | Oldest entry removed when full |
 | Scope | SELECT queries only |
-| Blob backend L2 | hidden `red.cache.blob_l2` collection in the same `.rdb` |
+| Persistent L2 | hidden `red.cache.blob_l2` collection in the same `.rdb` |
 
 ### How It Works
 
 1. Before parsing a query, the runtime checks the result cache
 2. On cache hit with a valid TTL, the cached result is returned immediately (no parse, no plan, no scan)
 3. On cache miss, the query executes normally and the result is stored
-4. Writes invalidate affected result-cache entries. The Blob Cache backend
+4. Writes invalidate affected result-cache entries. The result cache
    preserves unrelated results when every L2 entry is tracked; otherwise it
    flushes the namespace to protect untracked durable entries.
 
-When `runtime.result_cache.backend = 'blob_cache'`, eligible results can
-be rehydrated from L2 after restart until their TTL expires. Following
+Eligible results can be rehydrated from L2 after restart until their TTL expires. Following
 invalidation by a table write, new results are kept only in memory while
 matching writes continue. A background worker promotes the result to L2 with its remaining TTL
 after at least one second without a matching invalidation.
@@ -91,14 +90,14 @@ is recomputed after recovery. This can also discard an unrelated result after
 a write. Within one process, tracked table and join results can remain usable
 across unrelated writes when the bounded publication history proves that none
 of their dependencies changed. A missing history or an uncertain publication
-causes a cache miss. Results saved in the previous payload format are recomputed once on
-upgrade. Statements rejected by the normal safety gate
+causes a cache miss. Statements rejected by the normal safety gate
 still do not persist: volatile builtins, active-transaction reads,
 oversized result sets, system-collection and vault results, and pre-serialized fast paths are
 recomputed instead.
 
-An older binary does not maintain this epoch. Do not reuse a persisted result
-cache after writing the database with a version that predates epoch tracking.
+Before persisting results, RedDB fences the database format so binaries that do
+not maintain the data epoch cannot open it for writing. The first activation may
+therefore require a durable checkpoint.
 
 ```
 SELECT * FROM users WHERE active = true
@@ -109,13 +108,13 @@ SELECT * FROM users WHERE active = true
 
 ### Invalidation
 
-The legacy backend is cleared or narrowed by dependency on write paths:
+The result cache is cleared or narrowed by dependency on write paths:
 - SQL DML: `INSERT`, `UPDATE`, `DELETE`
 - REST API: entity create, patch, delete
 - Retention policy sweep
 - Any operation that calls the runtime cache invalidation hooks
 
-The Blob Cache backend flushes the namespace when a tracked result depends on
+The result cache flushes the namespace when a tracked result depends on
 the written table, or when L2 may contain untracked results (such as after a
 restart or tracking eviction). It skips the flush for unrelated writes when
 all entries are tracked.
