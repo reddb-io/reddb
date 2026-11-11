@@ -1,4 +1,4 @@
-//! Metric descriptor catalog persisted in `red_config`.
+//! Metric descriptor catalog persisted in `red.config`.
 //!
 //! Analytics v0 starts with descriptor state only: CREATE METRIC stores a
 //! catalog record and `red.analytics.metrics` projects it back for reads.
@@ -261,7 +261,7 @@ fn validate_identifier(value: &str, label: &str) -> RedDBResult<()> {
 }
 
 fn read_latest_registry_json(store: &UnifiedStore) -> Option<String> {
-    let manager = store.get_collection("red_config")?;
+    let manager = store.get_collection("red.config")?;
     let mut all = manager.query_all(|_| true);
     all.sort_by_key(|entity| std::cmp::Reverse(entity.id.raw()));
     for entity in all {

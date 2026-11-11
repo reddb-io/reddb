@@ -425,7 +425,7 @@ mod tests {
             }),
         );
         let initial = store
-            .get_collection("red_config")
+            .get_collection("red.config")
             .map(|m| m.query_all(|_| true).len())
             .unwrap_or(0);
         assert!(initial >= 3);
@@ -433,7 +433,7 @@ mod tests {
 
         let reopened = UnifiedStore::open(&path).unwrap();
         let first_reopen = reopened
-            .get_collection("red_config")
+            .get_collection("red.config")
             .map(|m| m.query_all(|_| true).len())
             .unwrap_or(0);
         assert_eq!(first_reopen, initial);
@@ -441,7 +441,7 @@ mod tests {
 
         let reopened_again = UnifiedStore::open(&path).unwrap();
         let second_reopen = reopened_again
-            .get_collection("red_config")
+            .get_collection("red.config")
             .map(|m| m.query_all(|_| true).len())
             .unwrap_or(0);
         assert_eq!(second_reopen, initial);
@@ -452,7 +452,7 @@ mod tests {
         let store = UnifiedStore::new();
         let config_rows = |store: &UnifiedStore| {
             store
-                .get_collection("red_config")
+                .get_collection("red.config")
                 .map(|m| m.query_all(|_| true).len())
                 .unwrap_or(0)
         };
@@ -476,7 +476,7 @@ mod tests {
         store.set_config_tree("red.system", &crate::json!({ "os": "linux", "pid": 1_u64 }));
         let ids_of = |store: &UnifiedStore| {
             let mut ids: Vec<u64> = store
-                .get_collection("red_config")
+                .get_collection("red.config")
                 .map(|m| m.query_all(|_| true).iter().map(|e| e.id.raw()).collect())
                 .unwrap_or_default();
             ids.sort_unstable();
@@ -506,12 +506,12 @@ mod tests {
     }
 
     fn add_duplicate_system_value(store: &UnifiedStore) {
-        let mut row = UnifiedEntity::table_row(EntityId::new(0), "red_config", 0, vec![]);
+        let mut row = UnifiedEntity::table_row(EntityId::new(0), "red.config", 0, vec![]);
         row.data = EntityData::Row(RowData::with_names(
             vec![Value::text("red.system.value"), Value::text("duplicate")],
             vec!["key".into(), "value".into()],
         ));
-        store.insert_auto("red_config", row).unwrap();
+        store.insert_auto("red.config", row).unwrap();
     }
 
     #[test]
@@ -548,7 +548,7 @@ mod tests {
             );
             assert_eq!(
                 replay
-                    .get_collection("red_config")
+                    .get_collection("red.config")
                     .unwrap()
                     .query_all(|_| true)
                     .len(),
@@ -582,7 +582,7 @@ mod tests {
             );
             assert_eq!(
                 store
-                    .get_collection("red_config")
+                    .get_collection("red.config")
                     .unwrap()
                     .query_all(|_| true)
                     .len(),
@@ -671,7 +671,7 @@ mod tests {
                 );
                 assert_eq!(
                     recovered
-                        .get_collection("red_config")
+                        .get_collection("red.config")
                         .unwrap()
                         .query_all(|_| true)
                         .len(),

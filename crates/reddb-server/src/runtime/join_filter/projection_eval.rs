@@ -300,7 +300,7 @@ pub(in crate::runtime::join_filter) fn evaluate_projection_config_function(
         return Some(value);
     }
     if let Some(db) = db {
-        // #1743 — gate the raw `red_config` fallback on `config:read`, matching
+        // #1743 — gate the raw `red.config` fallback on `config:read`, matching
         // the expression-path resolver.
         if crate::runtime::impl_core::config_read_permitted(&key) {
             // `$config.<path>` desugars to CONFIG("red.config/<path>") but SET CONFIG
@@ -308,8 +308,8 @@ pub(in crate::runtime::join_filter) fn evaluate_projection_config_function(
             // the WHERE-clause / projection legacy path (evaluate_scalar_function_with_db).
             let key_str: &str = key.as_ref();
             let bare = key_str.strip_prefix("red.config/").unwrap_or(key_str);
-            if let Some(value) = super::expr_eval::lookup_latest_kv_value(db, "red_config", &key)
-                .or_else(|| super::expr_eval::lookup_latest_kv_value(db, "red_config", bare))
+            if let Some(value) = super::expr_eval::lookup_latest_kv_value(db, "red.config", &key)
+                .or_else(|| super::expr_eval::lookup_latest_kv_value(db, "red.config", bare))
             {
                 return Some(value);
             }

@@ -290,7 +290,7 @@ mod tests {
                 "runtime/impl_queue.rs",
                 include_str!("../../runtime/impl_queue.rs"),
                 9,
-                "maintenance: red_queue_meta bookkeeping (config, groups, acks, \
+                "maintenance: red.queue.meta bookkeeping (config, groups, acks, \
                  pending, gauge counts) — queue message bodies are \
                  read through scan. \
                  TODO(#2138 follow-up): QUEUE PENDING projects meta rows to clients",
@@ -307,7 +307,7 @@ mod tests {
                 "runtime/primary_queue_store.rs",
                 include_str!("../../runtime/primary_queue_store.rs"),
                 2,
-                "maintenance: the generic red_queue_meta read helper and the \
+                "maintenance: the generic red.queue.meta read helper and the \
                  resident-only next-position fallback, which must not collide with \
                  rows invisible to the writer's snapshot",
             ),

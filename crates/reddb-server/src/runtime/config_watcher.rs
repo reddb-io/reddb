@@ -2,7 +2,7 @@
 //!
 //! Watches the config file (default `/etc/reddb/config.json`, override
 //! via `REDDB_CONFIG_FILE`) for changes and applies hot-reloadable keys
-//! to `red_config` without a server restart.
+//! to `red.config` without a server restart.
 //!
 //! **Hot-reloadable:** `red.logging.*`, `slow_query.*`, `disk_space.critical_pct`.
 //!

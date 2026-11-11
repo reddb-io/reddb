@@ -123,7 +123,7 @@ impl RedDBRuntime {
         // Partition metadata (Phase 2.2 PG parity).
         //
         // When the CREATE TABLE carries a `PARTITION BY RANGE|LIST|HASH (col)`
-        // clause, stamp the partition config into `red_config` under
+        // clause, stamp the partition config into `red.config` under
         // `partition.{table}.{by,column}`. Children are registered separately
         // via `ALTER TABLE parent ATTACH PARTITION child ...`.
         if let Some(spec) = &query.partition_by {
@@ -444,7 +444,7 @@ impl RedDBRuntime {
         // Issue #522 — wire `SIGNED_BY (...)` into the runtime. The parser
         // already produces a validated 32-byte pubkey list; installing
         // the registry stamps the per-collection signer set into
-        // `red_config` so the INSERT path can load it cheaply.
+        // `red.config` so the INSERT path can load it cheaply.
         if !query.allowed_signers.is_empty() {
             let actor = crate::runtime::impl_core::current_user_projected()
                 .unwrap_or_else(|| "@system/create-collection".to_string());
@@ -987,7 +987,7 @@ impl RedDBRuntime {
                     messages.push(format!("column '{}' renamed to '{}'", from, to));
                 }
                 AlterOperation::AttachPartition { child, bound } => {
-                    // Persist child → parent binding in red_config so the
+                    // Persist child → parent binding in red.config so the
                     // future planner-side pruner can enumerate children and
                     // evaluate their bounds.
                     store.set_config_tree(
@@ -1014,7 +1014,7 @@ impl RedDBRuntime {
                         .rls_enabled_tables
                         .write()
                         .insert(query.name.clone());
-                    // Persist flag so RLS survives restart via red_config.
+                    // Persist flag so RLS survives restart via red.config.
                     store.set_config_tree(
                         &format!("rls.enabled.{}", query.name),
                         &crate::serde_json::Value::Bool(true),
@@ -1068,7 +1068,7 @@ impl RedDBRuntime {
                 }
                 AlterOperation::SetVersioned(on) => {
                     // Opt the collection into (or out of) Git-for-Data.
-                    // Persists a row in red_vcs_settings; next AS OF /
+                    // Persists a row in red.vcs.settings; next AS OF /
                     // merge / diff against this table honours the
                     // flag. Retroactive: existing row versions whose
                     // xmins are still pinned by commits become
@@ -2333,19 +2333,19 @@ fn apply_alter_operations_to_contract(
                 }
             }
             // Partition ops don't touch the column contract — metadata is
-            // persisted separately via `red_config.partition.*`.
+            // persisted separately via `red.config.partition.*`.
             AlterOperation::AttachPartition { .. } | AlterOperation::DetachPartition { .. } => {}
             // RLS toggles don't touch the column contract — flag is persisted
-            // separately via `red_config.rls.enabled.{table}` and enforced
+            // separately via `red.config.rls.enabled.{table}` and enforced
             // through the in-memory `rls_enabled_tables` set.
             AlterOperation::EnableRowLevelSecurity | AlterOperation::DisableRowLevelSecurity => {}
-            // Phase 2.5.4: tenancy toggles persist via `red_config.tenant_tables.*`
+            // Phase 2.5.4: tenancy toggles persist via `red.config.tenant_tables.*`
             // and are enforced through `tenant_tables` + RLS auto-policy.
             AlterOperation::EnableTenancy { .. } | AlterOperation::DisableTenancy => {}
             AlterOperation::SetAppendOnly(on) => {
                 contract.append_only = *on;
             }
-            // VCS opt-in is persisted to red_vcs_settings by the
+            // VCS opt-in is persisted to red.vcs.settings by the
             // executor, not the contract — nothing to do here.
             AlterOperation::SetVersioned(_) => {}
             AlterOperation::EnableEvents(subscription) => {
@@ -2382,7 +2382,7 @@ fn apply_alter_operations_to_contract(
             AlterOperation::DropSubscription { name } => {
                 contract.subscriptions.retain(|s| s.name != *name);
             }
-            // Signer registry mutations live in `red_config` outside the
+            // Signer registry mutations live in `red.config` outside the
             // contract surface — the executor applied them directly via
             // `signed_writes_kind::{add,revoke}_signer`. Nothing to fold
             // into the column-shaped contract.

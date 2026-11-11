@@ -2,7 +2,7 @@
 //! "shim slice" of bidirectional streaming.
 //!
 //! Scope of this module:
-//!   - [`StreamConfig`]: capture the `stream.*` namespace from `red_config`
+//!   - [`StreamConfig`]: capture the `stream.*` namespace from `red.config`
 //!     at lease open and freeze it for the lease's lifetime (acceptance
 //!     criterion: KV mutations mid-stream do not retroactively change
 //!     behaviour).
@@ -74,7 +74,7 @@ impl Clock for FakeClock {
 }
 
 /// Frozen snapshot of the `stream.*` namespace at lease open. Acceptance
-/// criterion: a `red_config` mutation while a stream is running does not
+/// criterion: a `red.config` mutation while a stream is running does not
 /// retroactively change the running stream's behaviour — that is, the
 /// per-lease config is value-typed and not a back-reference.
 #[derive(Debug, Clone, Copy)]
@@ -121,7 +121,7 @@ impl StreamConfig {
         default_verify: crate::runtime::integrity_tombstone::VerifyMode::None,
     };
 
-    /// Read every `stream.*` key from `red_config` over the runtime's KV
+    /// Read every `stream.*` key from `red.config` over the runtime's KV
     /// store, including paged generations. Missing keys keep their defaults;
     /// storage errors must not silently widen capacity or disable verification.
     pub fn load(runtime: &RedDBRuntime) -> crate::RedDBResult<Self> {

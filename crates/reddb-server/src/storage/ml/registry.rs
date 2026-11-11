@@ -8,7 +8,7 @@
 //! swap.
 //!
 //! Persistence: the registry is a pure in-memory structure in this
-//! sprint. A future sprint wires it to `red_config` KV so state
+//! sprint. A future sprint wires it to `red.config` KV so state
 //! survives restart. Keeping the storage backend behind this façade
 //! means the runtime API won't change when we plug persistence in.
 

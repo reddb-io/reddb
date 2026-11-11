@@ -106,7 +106,7 @@ impl RedDBRuntime {
     }
 
     /// Issue #765 / S6 — lazily hydrate the integrity-tombstone cache from
-    /// `red_config` on first access. Returns `true` when at least one
+    /// `red.config` on first access. Returns `true` when at least one
     /// tombstone range is present. Subsequent calls observe the cached state
     /// flag (`1` empty / `2` present) and skip the store scan.
     pub(crate) fn ensure_integrity_tombstones_loaded(&self) -> RedDBResult<bool> {
@@ -146,7 +146,7 @@ impl RedDBRuntime {
     /// Issue #765 / S6 — durably record an integrity tombstone over the
     /// inclusive RID range `[lo, hi]` of `table` (the committed rows of an
     /// input stream whose end-to-end SHA-256 digest did not match). The range
-    /// is persisted to `red_config` (survives restart) and folded into the
+    /// is persisted to `red.config` (survives restart) and folded into the
     /// in-memory cache so the same process filters it immediately.
     pub fn record_integrity_tombstone(&self, table: &str, lo: u64, hi: u64) -> RedDBResult<()> {
         self.record_integrity_tombstones(&[

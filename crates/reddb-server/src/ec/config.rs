@@ -160,7 +160,7 @@ impl EcRegistry {
     }
 
     pub fn load_from_config_store(&self, store: &crate::storage::unified::store::UnifiedStore) {
-        let manager = match store.get_collection("red_config") {
+        let manager = match store.get_collection("red.config") {
             Some(m) => m,
             None => return,
         };
@@ -204,7 +204,7 @@ impl EcRegistry {
             for field in fields {
                 let mut config = EcFieldConfig::new(&collection, &field);
 
-                // Load per-field overrides from red_config
+                // Load per-field overrides from red.config
                 let prefix = format!("red.config.ec.{}.{}", collection, field);
                 manager.for_each_entity(|entity| {
                     if let Some(row) = entity.data.as_row() {

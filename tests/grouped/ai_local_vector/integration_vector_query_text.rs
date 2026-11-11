@@ -198,7 +198,7 @@ fn register_installed_local_model(rt: &RedDBRuntime, name: &str, dimensions: u32
     );
     EntityUseCases::new(rt)
         .create_kv(reddb::application::CreateKvInput {
-            collection: "red_config".to_string(),
+            collection: "red.config".to_string(),
             key: format!("red.config.ai.models.{name}"),
             value: Value::text(payload),
             metadata: Vec::new(),

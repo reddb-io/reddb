@@ -26,7 +26,7 @@
 //!   on the future path without sprinkling `config_bool` everywhere
 //!   on the hot path.
 //! - `set_enabled(bool)` is called by the runtime at boot after it
-//!   has resolved the matrix value (env > file > red_config >
+//!   has resolved the matrix value (env > file > red.config >
 //!   default). Defaults to `true` so a library-only user gets
 //!   Lehman-Yao semantics once the storage changes land.
 //! - `HighKey` is the on-disk shape for the leaf-page upper bound.

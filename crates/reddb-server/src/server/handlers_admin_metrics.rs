@@ -1073,7 +1073,7 @@ impl RedDBServer {
 
         // Queue lifecycle counters — slice 10 of issue #527 / ADR-0017.
         // Process-local counters per (queue, group, mode); the
-        // pending gauge is scraped live from `red_queue_meta` so it
+        // pending gauge is scraped live from `red.queue.meta` so it
         // cannot drift from the source of truth. Cardinality is
         // bounded by the catalog: only queues/groups the operator
         // already created appear here.

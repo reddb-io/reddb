@@ -67,7 +67,7 @@ pub fn referenced_collections(body: &str) -> HashSet<String> {
 /// `existing`: list of (migration_name, body) for all existing migrations
 ///
 /// Returns a list of `(new_name, depends_on_name)` edges that should be stored
-/// as inferred=true in `red_migration_deps`.
+/// as inferred=true in `red.migration.dependencies`.
 ///
 /// Ambiguity rule: if multiple existing migrations reference the same collection,
 /// the inference is skipped for that collection (requires explicit DEPENDS ON).
@@ -208,8 +208,8 @@ mod tests {
 
     #[test]
     fn excludes_system_collections() {
-        let cols = referenced_collections("SELECT * FROM red_migrations");
-        assert!(!cols.contains("red_migrations"));
+        let cols = referenced_collections("SELECT * FROM red.migration.definitions");
+        assert!(!cols.contains("red.migration.definitions"));
     }
 
     #[test]

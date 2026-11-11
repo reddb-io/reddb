@@ -196,7 +196,7 @@ impl RedDBRuntime {
         kind: &str,
         reject_legacy_hex: bool,
     ) -> RedDBResult<Vec<ProbabilisticStateEntry>> {
-        let Some(manager) = self.inner.db.store().get_collection("red_config") else {
+        let Some(manager) = self.inner.db.store().get_collection("red.config") else {
             return Ok(Vec::new());
         };
         let mut latest: std::collections::HashMap<String, (u64, Option<Value>)> =
@@ -271,7 +271,7 @@ impl RedDBRuntime {
     }
 
     fn probabilistic_raw_encoding_marker(&self) -> RedDBResult<bool> {
-        let Some(manager) = self.inner.db.store().get_collection("red_config") else {
+        let Some(manager) = self.inner.db.store().get_collection("red.config") else {
             return Ok(false);
         };
         let mut latest: Option<(u64, bool)> = None;
@@ -698,7 +698,7 @@ impl RedDBRuntime {
 
     fn compact_config_key(&self, key: &str) -> RedDBResult<()> {
         let store = self.inner.db.store();
-        let Some(manager) = store.get_collection("red_config") else {
+        let Some(manager) = store.get_collection("red.config") else {
             return Ok(());
         };
         let mut ids = Vec::new();
@@ -711,18 +711,18 @@ impl RedDBRuntime {
             true
         })?;
         for id in ids {
-            store.delete("red_config", id)?;
+            store.delete("red.config", id)?;
         }
         Ok(())
     }
 
     fn insert_config_value(&self, key: &str, value: Value) -> RedDBResult<()> {
         let store = self.inner.db.store();
-        let _ = store.get_or_create_collection("red_config");
+        let _ = store.get_or_create_collection("red.config");
         let entity = UnifiedEntity::new(
             EntityId::new(0),
             EntityKind::TableRow {
-                table: std::sync::Arc::from("red_config"),
+                table: std::sync::Arc::from("red.config"),
                 row_id: 0,
             },
             EntityData::Row(crate::storage::RowData {
@@ -739,7 +739,7 @@ impl RedDBRuntime {
             }),
         );
         store
-            .insert_auto("red_config", entity)
+            .insert_auto("red.config", entity)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         Ok(())
     }

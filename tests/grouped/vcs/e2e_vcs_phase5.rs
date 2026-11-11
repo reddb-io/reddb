@@ -1,5 +1,5 @@
 //! Phase 5 e2e: cherry-pick + revert commit bookkeeping, non-FF
-//! merge conflict materialisation in `red_conflicts`.
+//! merge conflict materialisation in `red.vcs.conflicts`.
 //!
 //! These tests cover the commit-graph + merge-state layer. Data
 //! body reconciliation lands in Phase 6; here we validate that the
@@ -201,7 +201,7 @@ fn non_ff_merge_records_conflicts_count() {
     assert_eq!(outcome.conflicts.len(), 0);
     let msid = outcome.merge_state_id.unwrap();
     // conflicts_list reads back what materialize_merge_conflicts
-    // wrote to red_conflicts; should match outcome.conflicts.
+    // wrote to red.vcs.conflicts; should match outcome.conflicts.
     let listed = vcs(&rt).conflicts_list(&msid).expect("conflicts_list");
     assert_eq!(listed.len(), 0);
 }

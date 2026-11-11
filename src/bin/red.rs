@@ -2385,28 +2385,25 @@ fn run_cli() {
             let store = rt.db().store();
             let mut targets: Vec<String> = match flag_string(&result.flags, "collection") {
                 Some(name) if !name.is_empty() => {
+                    let name =
+                        reddb_engine::storage::system_collection_names::canonical_or_self(&name)
+                            .to_string();
                     let mut names = vec![name];
-                    if names.iter().all(|name| name != "red_config")
-                        && store.get_collection("red_config").is_some()
+                    if names.iter().all(|name| name != "red.config")
+                        && store.get_collection("red.config").is_some()
                     {
-                        names.push("red_config".to_string());
+                        names.push("red.config".to_string());
                     }
                     names
                 }
                 _ => store.list_collections(),
             };
-            // Keep the stable dump identity for configuration rows even when
-            // the store lists their canonical internal collection name.
-            for name in &mut targets {
-                if name == "red.config" {
-                    *name = "red_config".to_string();
-                }
-            }
             targets.sort();
             targets.dedup();
             // Virtual system rows are rebuilt by the runtime, not writable imports.
             targets.retain(|name| {
-                name == "red.vault"
+                name == "red.config"
+                    || name == "red.vault"
                     || (name != "red"
                         && !name.starts_with("red.")
                         && !name.starts_with("__red_schema_"))
@@ -2773,8 +2770,12 @@ fn run_cli() {
                             .get("collection")
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());
-                        let coll = if embedded_collection.as_deref() == Some("red_config") {
-                            embedded_collection
+                        let embedded_config = embedded_collection.as_deref().is_some_and(|name| {
+                            reddb_engine::storage::system_collection_names::canonical_or_self(name)
+                                == "red.config"
+                        });
+                        let coll = if embedded_config {
+                            Some("red.config".to_string())
                         } else {
                             override_collection.clone().or(embedded_collection)
                         };

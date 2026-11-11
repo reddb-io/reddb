@@ -227,7 +227,7 @@ pub fn snapshot_store_with_declarations(
     contracts: Option<&[CollectionContract]>,
 ) -> CatalogModelSnapshot {
     let queue_policies = store
-        .get_collection("red_queue_meta")
+        .get_collection("red.queue.meta")
         .map(|manager| queue_policies_from_entities(&manager.query_all(|_| true)))
         .unwrap_or_default();
     let result = snapshot_store_observations(
@@ -260,7 +260,7 @@ pub fn try_snapshot_store_with_declarations(
     // Admission is performed by the caller before taking the publication fence.
     let _publication = store.vault_publication_lock.lock();
     let mut queue_policies = HashMap::new();
-    if let Some(manager) = store.get_collection("red_queue_meta") {
+    if let Some(manager) = store.get_collection("red.queue.meta") {
         manager.try_for_each_entity_unordered(read_bytes_max, |entity| {
             if let Some((queue, policy)) = queue_policy_from_entity(entity) {
                 queue_policies.insert(queue, policy);
@@ -306,7 +306,7 @@ pub fn try_snapshot_store_inventory_with_declarations(
 ) -> Result<CatalogModelSnapshot, crate::storage::StoreError> {
     let _publication = store.vault_publication_lock.lock();
     let mut queue_policies = HashMap::new();
-    if let Some(manager) = store.get_collection("red_queue_meta") {
+    if let Some(manager) = store.get_collection("red.queue.meta") {
         manager.try_for_each_entity_unordered(read_bytes_max, |entity| {
             if let Some((queue, policy)) = queue_policy_from_entity(entity) {
                 queue_policies.insert(queue, policy);
@@ -603,7 +603,7 @@ fn snapshot_store_observations<E>(
 
 /// Hot-fields snapshot of per-queue policy, materialised at catalog
 /// snapshot time so `QueueLifecycle` (and the descriptor) can read
-/// values without re-scanning `red_queue_meta`.
+/// values without re-scanning `red.queue.meta`.
 #[derive(Debug, Clone)]
 pub struct QueuePolicySnapshot {
     pub mode: QueueMode,

@@ -4,7 +4,7 @@
 //! persisted by the server bootstrap path. It is intentionally a thin
 //! translation layer over existing public surfaces: `AuthStore` for users
 //! and IAM policies, `ConfigRegistry` for managed guardrails, and
-//! `red_config` rows for config values.
+//! `red.config` rows for config values.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -850,11 +850,11 @@ fn insert_config_value_if_absent(
 
 fn insert_config_value(runtime: &RedDBRuntime, key: &str, value: Value) -> Result<(), String> {
     let store = runtime.db().store();
-    let _ = store.get_or_create_collection("red_config");
+    let _ = store.get_or_create_collection("red.config");
     let entity = UnifiedEntity::new(
         EntityId::new(0),
         EntityKind::TableRow {
-            table: Arc::from("red_config"),
+            table: Arc::from("red.config"),
             row_id: 0,
         },
         EntityData::Row(RowData {
@@ -871,7 +871,7 @@ fn insert_config_value(runtime: &RedDBRuntime, key: &str, value: Value) -> Resul
         }),
     );
     store
-        .insert_auto("red_config", entity)
+        .insert_auto("red.config", entity)
         .map(|_| ())
         .map_err(|err| format!("persist config `{key}`: {err}"))
 }

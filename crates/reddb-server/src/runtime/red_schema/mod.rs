@@ -60,7 +60,7 @@ pub(super) const QUEUE_PENDING_INTERNAL: &str = "__red_schema_queue_pending";
 // oldest_pending_age, dlq_target, attention, internal)`. Hot fields
 // (mode, depth, dlq_target, attention) come from the catalog
 // descriptor; total_pending / oldest_pending_age are computed via a
-// single pass over `red_queue_meta` pending rows (`queue_pending`
+// single pass over `red.queue.meta` pending rows (`queue_pending`
 // legacy and `queue_pending_lc` lifecycle) so they remain consistent
 // with the source of truth. `internal` exists so the `SHOW QUEUES`
 // desugar can hide DLQ-target queues by default and surface them

@@ -1,6 +1,6 @@
 //! Foundation for `KIND blockchain` collections (issue #523).
 //!
-//! Persists kind in `red_config`, exposes the reserved-column set used by
+//! Persists kind in `red.config`, exposes the reserved-column set used by
 //! every block row, scans the collection to derive the current chain tip,
 //! and wraps the hash helpers from [`crate::storage::blockchain`].
 //!

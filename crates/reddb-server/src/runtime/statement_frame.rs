@@ -1992,9 +1992,9 @@ mod tests {
         // resolve to a concrete xid and surface it via the Interface.
         let frame = StatementExecutionFrame::build(
             &rt,
-            StatementIdentity::Text("SELECT * FROM red_commits AS OF SNAPSHOT 1"),
+            StatementIdentity::Text("SELECT * FROM red.vcs.commits AS OF SNAPSHOT 1"),
         )
-        .expect("AS OF SNAPSHOT 1 on red_commits resolves");
+        .expect("AS OF SNAPSHOT 1 on red.vcs.commits resolves");
 
         let f: &dyn ReadFrame = &frame;
         assert_eq!(
@@ -2357,7 +2357,7 @@ mod tests {
         reset_thread_locals();
         let rt = fresh_runtime();
 
-        let mut table = reddb_rql::ast::TableQuery::new("red_commits");
+        let mut table = reddb_rql::ast::TableQuery::new("red.vcs.commits");
         table.as_of = Some(reddb_rql::ast::AsOfClause::Snapshot(1));
         let expr = QueryExpr::Table(table);
 

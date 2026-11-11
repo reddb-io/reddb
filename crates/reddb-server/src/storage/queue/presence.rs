@@ -37,7 +37,7 @@
 //! Durability follow-up: this slice is the typed contract + the
 //! metadata snapshot every consumer of presence (Red UI, `red.*`
 //! virtual tables, drivers) talks to. Mirroring writes into
-//! `red_queue_meta` rows so presence survives restart is the
+//! `red.queue.meta` rows so presence survives restart is the
 //! immediately-next slice; the public surface here does not change
 //! when that lands.
 

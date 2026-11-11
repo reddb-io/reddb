@@ -459,12 +459,12 @@ pub(super) fn timeseries_snapshot(
         .collect())
 }
 /// Issue #748 — read the `downsample_policies` array persisted in
-/// the `red_timeseries_meta` collection by
+/// the `red.timeseries.meta` collection by
 /// `super::impl_timeseries::save_timeseries_metadata`. Returns the
 /// sorted list of policy spec strings (empty when none / collection
 /// is not a timeseries).
 fn read_downsample_policies(store: &UnifiedStore, collection: &str) -> Vec<String> {
-    const META: &str = "red_timeseries_meta";
+    const META: &str = "red.timeseries.meta";
     let Some(manager) = store.get_collection(META) else {
         return Vec::new();
     };

@@ -393,7 +393,7 @@ pub(super) fn materialized_views_snapshot(runtime: &RedDBRuntime) -> Vec<Unified
 }
 /// Issue #536 — per-row pending-delivery drill-down.
 ///
-/// Reads from the `red_queue_meta` rows that the user-facing
+/// Reads from the `red.queue.meta` rows that the user-facing
 /// `QUEUE READ` path writes (`kind = "queue_pending"` legacy and
 /// `kind = "queue_pending_lc"` lifecycle). Cold scan, no caching:
 /// every read walks the live meta collection.
@@ -427,7 +427,7 @@ pub(super) fn queue_pending_snapshot(
             .collect::<Vec<_>>(),
     );
     let store = runtime.db().store();
-    let Some(manager) = store.get_collection("red_queue_meta") else {
+    let Some(manager) = store.get_collection("red.queue.meta") else {
         return Ok(Vec::new());
     };
 
@@ -542,7 +542,7 @@ pub(super) fn queue_pending_snapshot(
 /// `SHOW QUEUES` desugar. Hot fields (`mode`, `depth`, `dlq_target`,
 /// `attention`) come from the catalog descriptor — sub-ms reads, no
 /// B-tree walk per row. `total_pending` and `oldest_pending_age` are
-/// derived from a single pass over `red_queue_meta` queue_pending
+/// derived from a single pass over `red.queue.meta` queue_pending
 /// rows so they cannot drift from the source of truth that
 /// `red.queue_pending` and `queue_pending_gauge` already render
 /// from.
@@ -576,7 +576,7 @@ pub(super) fn queues_snapshot(
         .collect();
     let mut per_queue: HashMap<String, (u64, u64)> = HashMap::new();
     let mut seen_pending: HashSet<(String, String, u64)> = HashSet::new();
-    if let Some(manager) = store.get_collection("red_queue_meta") {
+    if let Some(manager) = store.get_collection("red.queue.meta") {
         let entities = manager.query_all(|entity| {
             entity.data.as_row().is_some_and(|row| {
                 matches!(

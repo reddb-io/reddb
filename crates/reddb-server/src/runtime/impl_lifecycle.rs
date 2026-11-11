@@ -419,7 +419,7 @@ impl RedDBRuntime {
                     // Sourced from the matrix: Tier B key
                     // `concurrency.locking.deadlock_timeout_ms`
                     // (default 5000). Env var wins at boot so
-                    // operators can tune without touching red_config.
+                    // operators can tune without touching red.config.
                     let env = crate::runtime::config_overlay::collect_env_overrides();
                     let timeout_ms = env
                         .get("concurrency.locking.deadlock_timeout_ms")
@@ -749,7 +749,7 @@ impl RedDBRuntime {
         }
         runtime.recover_transactional_replication()?;
 
-        // Save system info to red_config on boot
+        // Save system info to red.config on boot
         {
             let sys = SystemInfo::collect();
             let store = runtime.inner.db.store();
@@ -772,10 +772,10 @@ impl RedDBRuntime {
                 )
             });
 
-            // Seed defaults on first boot (only if red_config is empty or missing defaults)
+            // Seed defaults on first boot (only if red.config is empty or missing defaults)
             let store = runtime.inner.db.store();
             if store
-                .get_collection("red_config")
+                .get_collection("red.config")
                 .map(|m| m.query_all(|_| true).len())
                 .unwrap_or(0)
                 <= 10
@@ -939,7 +939,7 @@ impl RedDBRuntime {
 
             // Phase 5 — Lehman-Yao runtime flag. Read the Tier A
             // `storage.btree.lehman_yao` value from the matrix (env
-            // > file > red_config > default) and publish it to the
+            // > file > red.config > default) and publish it to the
             // storage layer's atomic so the B-tree read / split
             // paths can branch without re-reading the config on
             // every hot-path call.
@@ -991,7 +991,7 @@ impl RedDBRuntime {
             );
         }
 
-        // Migrations — create the `red_migrations` / `red_migration_deps`
+        // Migrations — create the `red.migration.definitions` / `red.migration.dependencies`
         // system collections on first boot. Idempotent.
         {
             let store = runtime.inner.db.store();
@@ -1132,13 +1132,13 @@ impl RedDBRuntime {
                 );
         }
 
-        // Start backup scheduler if enabled via red_config
+        // Start backup scheduler if enabled via red.config
         {
             let store = runtime.inner.db.store();
             let mut backup_enabled = false;
             let mut backup_interval = 3600u64;
 
-            if let Some(manager) = store.get_collection("red_config") {
+            if let Some(manager) = store.get_collection("red.config") {
                 manager.for_each_entity(|entity| {
                     if let Some(row) = entity.data.as_row() {
                         let key = row.get_field("key").and_then(|v| match v {
@@ -1172,7 +1172,7 @@ impl RedDBRuntime {
             }
         }
 
-        // Load EC registry from red_config and start worker
+        // Load EC registry from red.config and start worker
         {
             runtime
                 .inner

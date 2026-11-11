@@ -5,12 +5,12 @@
 //! executors that must buffer by design — aggregation (GROUP BY),
 //! sort (ORDER BY) and window functions — cannot stream, so they get
 //! an explicit cap instead: `stream.executor.max_materialized_rows`
-//! in `red_config`. When an executor's in-memory row count crosses
+//! in `red.config`. When an executor's in-memory row count crosses
 //! the cap the query terminates with
 //! [`RedDBError::MaterializationLimitExceeded`] naming the executor
 //! and the live count.
 //!
-//! The limit is read fresh from `red_config` per query, so a config
+//! The limit is read fresh from `red.config` per query, so a config
 //! hot-reload affects new queries only — an in-flight query keeps the
 //! ceiling it started with (the read happens once at the materialise
 //! point, not on a back-reference). The same guard fires identically
@@ -22,7 +22,7 @@ use crate::RedDB;
 use reddb_types::Value;
 
 /// Collection that backs `red.config` over the runtime KV store.
-const RED_CONFIG_COLLECTION: &str = "red_config";
+const RED_CONFIG_COLLECTION: &str = "red.config";
 
 /// The single config key this guard consults.
 const CONFIG_KEY: &str = "stream.executor.max_materialized_rows";
@@ -33,9 +33,9 @@ const CONFIG_KEY: &str = "stream.executor.max_materialized_rows";
 /// process memory before it fires.
 pub(crate) const DEFAULT_MAX_MATERIALIZED_ROWS: usize = 1_000_000;
 
-/// Read `stream.executor.max_materialized_rows` from `red_config`.
+/// Read `stream.executor.max_materialized_rows` from `red.config`.
 ///
-/// `red_config` is append-only — `SET CONFIG` inserts a fresh row each
+/// `red.config` is append-only — `SET CONFIG` inserts a fresh row each
 /// time rather than updating in place — so a naive first-match read
 /// returns a stale value after a hot-reload. We resolve the newest
 /// value by highest entity id, the same rule the runtime's own
@@ -100,7 +100,7 @@ pub(crate) fn check(executor: &'static str, current: usize, limit: usize) -> Red
     Ok(())
 }
 
-/// Read the live ceiling from `red_config` and enforce it against
+/// Read the live ceiling from `red.config` and enforce it against
 /// `current`. Convenience wrapper over [`check`] for the executor call
 /// sites that hold a `&RedDB`.
 pub(crate) fn guard(db: &RedDB, executor: &'static str, current: usize) -> RedDBResult<()> {

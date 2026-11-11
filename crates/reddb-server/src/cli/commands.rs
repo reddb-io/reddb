@@ -544,29 +544,29 @@ fn server_flags() -> Vec<FlagSchema> {
         FlagSchema::new("http-max-handlers").with_description(
             "Max admitted in-flight HTTP requests, including queued execution \
              (env: REDDB_HTTP_MAX_HANDLERS; \
-             red_config: red.http.max_handlers; default: (2 x num_cpus).clamp(8, 256))",
+             red.config: red.http.max_handlers; default: (2 x num_cpus).clamp(8, 256))",
         ),
         FlagSchema::new("http-execution-workers").with_description(
             "Max buffered non-health HTTP engine calls executed concurrently; excess admitted \
              requests wait FIFO (env: REDDB_HTTP_EXECUTION_WORKERS; \
-             red_config: red.http.execution_workers; default: num_cpus)",
+             red.config: red.http.execution_workers; default: num_cpus)",
         ),
         FlagSchema::new("http-handler-timeout-ms")
             .with_description(
                 "Per-handler total-time budget in ms (env: REDDB_HTTP_HANDLER_TIMEOUT_MS; \
-             red_config: red.http.handler_timeout_ms)",
+             red.config: red.http.handler_timeout_ms)",
             )
             .with_default("30000"),
         FlagSchema::new("http-retry-after-secs")
             .with_description(
                 "Retry-After seconds on limiter 503 (env: REDDB_HTTP_RETRY_AFTER_SECS; \
-             red_config: red.http.retry_after_secs; clamped to [1, 30])",
+             red.config: red.http.retry_after_secs; clamped to [1, 30])",
             )
             .with_default("5"),
         FlagSchema::new("http-max-inflight-per-principal").with_description(
             "Max concurrent in-flight HTTP requests per principal; over-cap requests \
              get a structured 429 (env: REDDB_HTTP_MAX_INFLIGHT_PER_PRINCIPAL; \
-             red_config: red.http.max_inflight_per_principal; 0 disables; default: \
+             red.config: red.http.max_inflight_per_principal; 0 disables; default: \
              min(64, max_handlers - 1))",
         ),
     ]

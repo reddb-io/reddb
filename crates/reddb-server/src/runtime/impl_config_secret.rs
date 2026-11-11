@@ -98,7 +98,7 @@ mod tests {
             .expect("queue wait limit");
         store.persist().expect("checkpoint");
         let manager = store
-            .get_collection("red_config")
+            .get_collection("red.config")
             .expect("config collection");
         assert!(manager.has_backing(), "fixture must read persisted rows");
         assert!(
@@ -280,7 +280,7 @@ impl RedDBRuntime {
         guard.as_ref().and_then(|s| s.vault_secret_key())
     }
 
-    /// Resolve a boolean flag from `red_config`. Defaults to `default`
+    /// Resolve a boolean flag from `red.config`. Defaults to `default`
     /// when the key is missing or not coercible. If the same key has
     /// been written multiple times (SET CONFIG appends new rows), the
     /// most recent entity wins. Env-var overrides

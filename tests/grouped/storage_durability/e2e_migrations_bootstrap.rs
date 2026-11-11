@@ -1,6 +1,6 @@
 //! Bootstrap tests for native migrations (issue #8).
 //!
-//! Verifies that `red_migrations` and `red_migration_deps` exist after
+//! Verifies that `red.migration.definitions` and `red.migration.dependencies` exist after
 //! engine startup and that querying them returns zero rows on a fresh
 //! in-memory instance.
 
@@ -45,28 +45,28 @@ fn vcs(rt: &RedDBRuntime) -> VcsUseCases<'_, RedDBRuntime> {
 }
 
 #[test]
-fn red_migrations_exists_and_is_empty() {
+fn canonical_migration_definitions_exist_and_are_empty() {
     let rt = rt();
     let result = rt
-        .execute_query("SELECT * FROM red_migrations")
-        .expect("SELECT * FROM red_migrations should not error");
+        .execute_query("SELECT * FROM red.migration.definitions")
+        .expect("SELECT * FROM red.migration.definitions should not error");
     assert_eq!(
         result.result.records.len(),
         0,
-        "red_migrations should be empty on a fresh instance"
+        "red.migration.definitions should be empty on a fresh instance"
     );
 }
 
 #[test]
-fn red_migration_deps_exists_and_is_empty() {
+fn canonical_migration_dependencies_exist_and_are_empty() {
     let rt = rt();
     let result = rt
-        .execute_query("SELECT * FROM red_migration_deps")
-        .expect("SELECT * FROM red_migration_deps should not error");
+        .execute_query("SELECT * FROM red.migration.dependencies")
+        .expect("SELECT * FROM red.migration.dependencies should not error");
     assert_eq!(
         result.result.records.len(),
         0,
-        "red_migration_deps should be empty on a fresh instance"
+        "red.migration.dependencies should be empty on a fresh instance"
     );
 }
 
@@ -106,7 +106,7 @@ fn migration_registration_is_global_across_vcs_branches() {
         .expect("checkout main");
 
     let migrations = rt
-        .execute_query("SELECT name FROM red_migrations")
+        .execute_query("SELECT name FROM red.migration.definitions")
         .expect("list migrations from main");
     let names: Vec<&str> = migrations
         .result
@@ -163,7 +163,7 @@ fn apply_migration_all_applies_pending_migrations_in_dependency_order() {
     );
 
     let migrations = rt
-        .execute_query("SELECT name, status, vcs_commit_hash FROM red_migrations")
+        .execute_query("SELECT name, status, vcs_commit_hash FROM red.migration.definitions")
         .expect("list migrations");
     assert_eq!(migrations.result.records.len(), 5);
     for record in &migrations.result.records {
@@ -247,7 +247,7 @@ fn rollback_migration_refuses_when_applied_dependents_exist() {
     );
 
     let migrations = rt
-        .execute_query("SELECT name, status FROM red_migrations")
+        .execute_query("SELECT name, status FROM red.migration.definitions")
         .expect("list migrations");
     for record in &migrations.result.records {
         assert_eq!(text(record.get("status")), "applied");
@@ -266,7 +266,7 @@ fn rollback_migration_keeps_status_when_vcs_revert_fails() {
     rt.execute_query("APPLY MIGRATION revert_target")
         .expect("apply migration");
     rt.execute_query(
-        "UPDATE red_migrations \
+        "UPDATE red.migration.definitions \
          SET vcs_commit_hash = 'not-a-real-commit' \
          WHERE name = 'revert_target'",
     )
@@ -282,7 +282,9 @@ fn rollback_migration_keeps_status_when_vcs_revert_fails() {
     );
 
     let migrations = rt
-        .execute_query("SELECT name, status FROM red_migrations WHERE name = 'revert_target'")
+        .execute_query(
+            "SELECT name, status FROM red.migration.definitions WHERE name = 'revert_target'",
+        )
         .expect("list migration");
     assert_eq!(migrations.result.records.len(), 1);
     assert_eq!(text(migrations.result.records[0].get("status")), "applied");
