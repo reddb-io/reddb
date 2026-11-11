@@ -300,6 +300,8 @@ fn decode_result_cache_payload(
 impl RedDBRuntime {
     fn invalidate_result_cache_during_wal_capture(&self) {
         DEFERRED_CACHE_INVALIDATION.with(|pending| pending.set(true));
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         let _promotion = self.inner.result_blob_promotion.lock();
         let mut entries = self.inner.result_blob_entries.write();
         entries.0.clear();
@@ -342,6 +344,7 @@ impl RedDBRuntime {
         if crate::storage::UnifiedStore::deferred_store_wal_capture_active() {
             return None;
         }
+        let _publication = store.vault_publication_lock.lock();
         let _format = self.inner.result_cache_format_lock.lock();
         if store.result_cache_format_fenced() {
             return store.result_cache_read_epoch();
@@ -482,19 +485,26 @@ impl RedDBRuntime {
                 .then(|| entry.result.clone());
             }
         }
-        let (hit, revision) = {
+        // Do not retain the result-map lock while L2 may reclaim an expired
+        // entry through the store publication fence. Writers enter that fence
+        // before invalidating this map; retaining the map lock here would
+        // invert the canonical order.
+        let revision = self.inner.result_blob_entries.read().3;
+        let hit = self
+            .inner
+            .result_blob_cache
+            .get(RESULT_CACHE_BLOB_NAMESPACE, key)?;
+        {
             let cache = self.inner.result_blob_entries.read();
-            let hit = self
-                .inner
-                .result_blob_cache
-                .get(RESULT_CACHE_BLOB_NAMESPACE, key)?;
+            if cache.3 != revision {
+                return None;
+            }
             if let Some(entry) = cache.0.get(key) {
                 return self
                     .result_cache_entry_reusable(entry)
                     .then(|| entry.result.clone());
             }
-            (hit, cache.3)
-        };
+        }
 
         let (result, scopes, data_epoch) = decode_result_cache_payload(hit.value())?;
         if data_epoch != epoch || self.inner.db.store().result_cache_epoch() != Some(epoch) {
@@ -536,11 +546,15 @@ impl RedDBRuntime {
     // promotion runs at a time, and it does not hold the result-map lock
     // during L2 I/O. Invalidation and foreground puts take the same gate.
     pub(super) fn promote_volatile_result_cache_entry(&self) {
+        let store = self.inner.db.store();
+        let Some(_publication) = store.vault_publication_lock.try_lock() else {
+            return;
+        };
         let Some(_promotion) = self.inner.result_blob_promotion.try_lock() else {
             return;
         };
         let ttl = self.result_cache_ttl_secs();
-        let Some(epoch) = self.inner.db.store().result_cache_epoch() else {
+        let Some(epoch) = store.result_cache_epoch() else {
             return;
         };
         let candidate = {
@@ -629,6 +643,8 @@ impl RedDBRuntime {
         let put = crate::storage::cache::BlobCachePut::new(bytes)
             .with_dependencies(dependencies)
             .with_policy(policy);
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         let _promotion = self.inner.result_blob_promotion.lock();
         let mut cache = self.inner.result_blob_entries.write();
         if cache.3 != revision
@@ -707,6 +723,8 @@ impl RedDBRuntime {
             self.invalidate_result_cache_during_wal_capture();
             return;
         }
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         let _promotion = self.inner.result_blob_promotion.lock();
         let mut blob_entries = self.inner.result_blob_entries.write();
         blob_entries.0.clear();
@@ -736,6 +754,8 @@ impl RedDBRuntime {
             self.invalidate_result_cache_during_wal_capture();
             return;
         }
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         let _promotion = self.inner.result_blob_promotion.lock();
         {
             let mut blob_entries = self.inner.result_blob_entries.write();
@@ -889,6 +909,85 @@ mod crash_tests {
             1,
             "invalidation must remove the cached result"
         );
+    }
+
+    #[test]
+    fn durable_cache_publication_and_write_invalidation_do_not_invert_locks() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(
+            directory.path().join("cache-lock-order.rdb"),
+        ))
+        .expect("runtime");
+        for sql in [
+            "CREATE TABLE locked_write (id INT)",
+            "CREATE TABLE cache_fill (id INT)",
+            "INSERT INTO locked_write (id) VALUES (1)",
+            "INSERT INTO cache_fill (id) VALUES (1)",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        runtime.result_cache_snapshot();
+        std::thread::sleep(super::RESULT_CACHE_WRITE_QUIET_PERIOD + Duration::from_millis(50));
+
+        let (write_paused_tx, write_paused_rx) = mpsc::channel();
+        let (resume_write_tx, resume_write_rx) = mpsc::channel();
+        let writer = runtime.clone();
+        let (writer_done_tx, writer_done_rx) = mpsc::channel();
+        let writer_thread = std::thread::spawn(move || {
+            let store = writer.db().store();
+            let _publication = store.vault_publication_lock.lock();
+            write_paused_tx
+                .send(store.vault_publication_lock.is_owned_by_current_thread())
+                .expect("report paused writer");
+            resume_write_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("resume writer");
+            writer.invalidate_result_cache_for_table("locked_write");
+            writer_done_tx.send(()).expect("report writer result");
+        });
+        assert!(
+            write_paused_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("writer did not reach invalidation"),
+            "write invalidation must still own the durable publication fence"
+        );
+
+        let cache_filler = runtime.clone();
+        let (cache_done_tx, cache_done_rx) = mpsc::channel();
+        let cache_thread = std::thread::spawn(move || {
+            let result = cache_filler.execute_query("SELECT id FROM cache_fill ORDER BY id");
+            cache_done_tx
+                .send(result)
+                .expect("report cache publication result");
+        });
+
+        // Before the fix, a result-cache fill takes the promotion gate and then
+        // waits for the durable publication fence. Resuming the writer makes it
+        // wait for that same promotion gate and closes the AB/BA cycle. With the
+        // canonical order, the fill waits for the durable fence without holding
+        // the promotion gate, so the writer can always finish.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if runtime.inner.result_blob_promotion.try_lock().is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        resume_write_tx.send(()).expect("resume writer");
+
+        let writer_result = writer_done_rx.recv_timeout(Duration::from_secs(3));
+        let cache_result = cache_done_rx.recv_timeout(Duration::from_secs(3));
+        assert!(
+            writer_result.is_ok() && cache_result.is_ok(),
+            "durable cache publication deadlocked with write invalidation"
+        );
+        writer_result.unwrap();
+        cache_result.unwrap().expect("cache publication result");
+        writer_thread.join().expect("writer thread");
+        cache_thread.join().expect("cache thread");
     }
 
     #[test]

@@ -37,6 +37,39 @@ fn hot_hit_does_not_require_exclusive_shard_access() {
 }
 
 #[test]
+fn internal_l2_put_enters_store_publication_before_cache_locks() {
+    let directory = tempfile::tempdir().expect("cache fixture");
+    let runtime = crate::RedDBRuntime::with_options(crate::RedDBOptions::persistent(
+        directory.path().join("internal-l2-lock-order.rdb"),
+    ))
+    .expect("runtime");
+    let store = runtime.db().store();
+    let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook_store = Arc::clone(&store);
+    let hook_observed = Arc::clone(&observed);
+    PUT_PREPARED_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            hook_observed.store(
+                hook_store
+                    .vault_publication_lock
+                    .is_owned_by_current_thread(),
+                Ordering::Relaxed,
+            );
+        }));
+    });
+
+    runtime
+        .result_blob_cache()
+        .put("lock-order", "key", BlobCachePut::new(vec![1; 32]))
+        .expect("publish internal L2 entry");
+
+    assert!(
+        observed.load(Ordering::Relaxed),
+        "internal L2 put reached cache locks before the store publication fence"
+    );
+}
+
+#[test]
 fn prepared_put_rechecks_version_before_publishing_either_tier() {
     let directory = tempfile::tempdir().expect("cache fixture");
     let path = directory.path().join("cache.rdb");
