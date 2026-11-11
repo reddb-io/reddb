@@ -1,16 +1,14 @@
 # Workflow cost policy
 
-The automatic validation tier has two layers. `quick-checks.yml` checks changed
-whitespace, workflow syntax, root/workspace manifests and this trigger policy on
-one standard Ubuntu runner with a three-minute limit. `ci.yml` runs the core
-correctness lane on code pull requests, merge groups and pushes to `main` or
-`develop`; `ci-docs.yml` supplies the same required contexts for docs-only pull
-requests without compiling the product.
+Requested by the maintainer on 2026-11-11: keep automatic CI small and make
+expensive validation optional. `quick-checks.yml` is the only automatic quality
+workflow. It checks changed whitespace, workflow syntax, root/workspace
+manifests and this trigger policy on one standard Ubuntu runner, with a
+three-minute limit. It does not compile products or run full test suites.
 
-Broader browser tests, coverage, benchmarks, cross-platform matrices and
-operational deployments remain available through `workflow_dispatch`. The
-expensive `full_ci` jobs inside `ci.yml` remain opt-in. Recurring validation and
-watcher schedules are off.
+Integration/browser tests, coverage, benchmarks, cross-platform matrices and
+operational deployments are available through `workflow_dispatch`. They are
+not required PR statuses. Recurring validation and watcher schedules are off.
 Existing issue/comment routing remains available; releases only react to
 intentional version tags, release events or an explicit manual action.
 Artifact source/version/checksum and publication checks stay with publication.
@@ -63,8 +61,8 @@ identity and version requirements; this policy does not publish anything itself.
 | `browser-release.yml` | push, workflow_dispatch |
 | `browser.yml` | workflow_dispatch |
 | `changesets.yml` | workflow_dispatch |
-| `ci-docs.yml` | pull_request, workflow_dispatch |
-| `ci.yml` | merge_group, push, pull_request, workflow_dispatch |
+| `ci-docs.yml` | workflow_dispatch |
+| `ci.yml` | workflow_dispatch |
 | `client-codecs.yml` | workflow_dispatch |
 | `columnar-read-bench.yml` | workflow_dispatch |
 | `crypto-coverage.yml` | workflow_dispatch |
@@ -125,8 +123,8 @@ The lightweight `Select platforms` job filters matrices before platform runners
 are allocated. Disabled platforms create no build/test runner. All native
 platforms can be disabled; jobs that require their artifacts then skip. Portable
 web packages and platform-independent orchestration keep their existing behavior. The
-automatic Quick checks and core correctness lane remain separate from manual
-release-adjacent jobs.
+the automatic Quick checks lane remains separate from manual release-adjacent
+jobs.
 
 Example (change only future runs):
 

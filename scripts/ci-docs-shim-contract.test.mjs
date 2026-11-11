@@ -1,8 +1,6 @@
-// Keep the automatic CI and docs-shim context names aligned with ADR 0059.
-// The core correctness lane and quick-checks.yml run automatically; broader
-// release-adjacent validation remains opt-in.
-// Check the merge-group classifier and failure-propagating aggregate separately
-// so a future trigger change cannot silently bypass the guarded heavy jobs.
+// Keep the on-demand CI and docs-shim context names aligned with ADR 0059.
+// Quick checks run automatically; compilation and broader release-adjacent
+// validation remain explicitly requested.
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -83,20 +81,16 @@ test("every required context is actually produced by ci.yml (manifest reflects r
   }
 });
 
-test("core CI and the docs shim run automatically, with manual full-CI retained", () => {
+test("core CI and the docs shim are manual while quick checks stay automatic", () => {
   const ciTriggers = read(CI).match(/^on:\n([\s\S]*?)(?=^[^\s#])/m)?.[1];
   assert.ok(ciTriggers, `${CI} must define triggers`);
-  for (const event of ["merge_group", "push", "pull_request", "workflow_dispatch"]) {
-    assert.match(ciTriggers, new RegExp(`^  ${event}:`, "m"));
-  }
-  assert.doesNotMatch(ciTriggers, /^  schedule:/m);
+  assert.match(ciTriggers, /^  workflow_dispatch:/m);
+  assert.doesNotMatch(ciTriggers, /^  (merge_group|push|pull_request|schedule):/m);
 
   const shimTriggers = read(SHIM).match(/^on:\n([\s\S]*?)(?=^[^\s#])/m)?.[1];
   assert.ok(shimTriggers, `${SHIM} must define triggers`);
-  for (const event of ["pull_request", "workflow_dispatch"]) {
-    assert.match(shimTriggers, new RegExp(`^  ${event}:`, "m"));
-  }
-  assert.doesNotMatch(shimTriggers, /^  (push|merge_group|schedule):/m);
+  assert.match(shimTriggers, /^  workflow_dispatch:/m);
+  assert.doesNotMatch(shimTriggers, /^  (pull_request|push|merge_group|schedule):/m);
 
   const quick = read(".github/workflows/quick-checks.yml");
   for (const event of ["pull_request", "push", "merge_group"]) {
@@ -104,7 +98,7 @@ test("core CI and the docs shim run automatically, with manual full-CI retained"
   }
 });
 
-test("platform selection precedes the gate and the gate classifies merge-group diffs", () => {
+test("platform selection precedes the explicit manual gate", () => {
   const ci = read(CI);
   const jobs = jobBlocks(ci);
   assert.deepEqual([...jobs.keys()].slice(0, 2), ["platforms", "gate"]);
@@ -116,29 +110,18 @@ test("platform selection precedes the gate and the gate classifies merge-group d
   const gate = jobs.get("gate");
   assert.match(gate, /needs:\n\s+- platforms/);
   assert.match(gate, /run_heavy: \$\{\{ steps\.classify\.outputs\.run_heavy \}\}/);
-  assert.match(gate, /fetch-depth: 2/, "the fast classifier should fetch only the merge commit and its parent");
-  assert.match(gate, /BASE_SHA: \$\{\{ github\.event\.merge_group\.base_sha \}\}/);
-  assert.match(gate, /HEAD_SHA: \$\{\{ github\.event\.merge_group\.head_sha \}\}/);
-  assert.match(gate, /git diff --name-only "\$BASE_SHA" "\$HEAD_SHA"/);
-  assert.match(gate, /run_heavy=true/);
-  assert.match(gate, /! grep -Eqv "\$DOCS_ONLY_PATTERN" "\$changed_files"; then\n {14}run_heavy=false/);
-
-  const pattern = gate.match(/DOCS_ONLY_PATTERN: '([^']+)'/)?.[1];
-  assert.ok(pattern, "gate must declare its docs-only path pattern");
-  const docsOnly = ["README.md", "guides/install.md", "docs/index.html", "CHANGELOG", "CHANGELOG.md", "LICENSE", "LICENSE-APACHE"];
-  const codeTouching = ["src/lib.rs", "Cargo.toml", "scripts/check.sh", "nested/CHANGELOG", "nested/LICENSE"];
-  for (const file of docsOnly) assert.match(file, new RegExp(pattern));
-  for (const file of codeTouching) assert.doesNotMatch(file, new RegExp(pattern));
+  assert.match(gate, /echo "run_heavy=true" >> "\$GITHUB_OUTPUT"/);
+  assert.doesNotMatch(gate, /actions\/checkout|merge_group|pull_request/);
 });
 
-test("docs-only merge groups skip every heavy job and code diffs keep them enabled", () => {
+test("every on-demand CI job remains guarded by the explicit manual gate", () => {
   const jobs = jobBlocks(read(CI));
   jobs.delete("gate");
   jobs.delete("platforms");
   assert.ok(jobs.size > 0);
   for (const [jobId, block] of jobs) {
     assert.ok(block.includes("needs.gate.outputs.run_heavy == 'true'"),
-      `${jobId} is not guarded by the merge-group classifier`);
+      `${jobId} is not guarded by the manual gate`);
   }
 });
 

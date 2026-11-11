@@ -1572,7 +1572,7 @@ mod tests {
     }
 
     #[test]
-    fn dml_index_lookup_retries_when_publication_races_target_selection() {
+    fn dml_target_selection_preserves_snapshot_when_publication_races() {
         use std::sync::{mpsc, Arc, Mutex};
         use std::time::Duration;
         reset_thread_locals();
@@ -1601,7 +1601,7 @@ mod tests {
         let first = std::sync::atomic::AtomicBool::new(true);
         *rt.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
             if collection == "dml_lookup_race"
-                && phase == super::super::index_store::MutationTestPhase::DmlIndexLookupStarted
+                && phase == super::super::index_store::MutationTestPhase::DmlTargetSelectionStarted
                 && first.swap(false, std::sync::atomic::Ordering::SeqCst)
             {
                 started_tx.send(()).expect("notify writer");
