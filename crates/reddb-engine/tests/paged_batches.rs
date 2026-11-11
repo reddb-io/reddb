@@ -139,3 +139,56 @@ fn oversized_preparation_never_publishes_a_prefix() {
         );
     }
 }
+
+#[test]
+fn full_storage_is_rejected_before_the_prepared_frame_is_sealed() {
+    let pager = open(None);
+    let original = pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("allocate original page");
+    pager
+        .write_page(original.page_id(), page(original.page_id(), 1))
+        .expect("write original page");
+    pager.sync().expect("publish baseline");
+    let baseline = pager
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("baseline image");
+    drop(pager);
+
+    let mut file = MemoryFile::from_bytes(baseline.clone());
+    file.max_len = Some(u64::try_from(baseline.len()).expect("fixture length fits u64"));
+    let pager = Pager::open_owned(
+        file,
+        "full.rdb".into(),
+        PagerConfig {
+            cache_size: 1,
+            ..PagerConfig::default()
+        },
+        NoWal,
+        false,
+    )
+    .expect("reopen bounded medium");
+    pager.begin_write_batch().expect("begin prepared batch");
+    let added = pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("allocate provisional page");
+    pager
+        .write_page(added.page_id(), page(added.page_id(), 2))
+        .expect("stage provisional page");
+    assert!(pager.commit_write_batch().is_err());
+    let durable = pager
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("crash image");
+    drop(pager);
+
+    assert_eq!(durable, baseline, "no valid DWB header reached durability");
+    let recovered = open(Some(durable));
+    assert_eq!(
+        recovered
+            .read_page(original.page_id())
+            .expect("old page")
+            .as_bytes()[128],
+        1
+    );
+    assert!(recovered.read_page(added.page_id()).is_err());
+}

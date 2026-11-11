@@ -99,6 +99,11 @@ impl VfsFile for LimitedMemoryFile {
         self.0.set_len(len)
     }
 
+    fn reserve(&self, offset: u64, len: u64) -> io::Result<()> {
+        let required = offset.checked_add(len).ok_or(io::ErrorKind::InvalidInput)?;
+        self.0.set_len(required)
+    }
+
     fn write_all(&mut self, buffer: &[u8]) -> io::Result<()> {
         self.0.write_all(buffer)
     }

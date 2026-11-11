@@ -18,3 +18,5 @@ Pico SDK: the current engine uses Rust `std`, so each firmware target still need
 a compatible Rust runtime/toolchain or a later platform-abstraction slice.
 Physical flash layout, sparse pieces, wear accounting and power-cut behavior
 belong in the concrete board `VfsFile`, never in the SQL engine or `.rdb` format.
+Flash adapters must implement `VfsFile::reserve` so capacity exhaustion is
+reported before a prepared double-write frame is sealed.

@@ -78,8 +78,10 @@ work when a uniqueness rule exists.
 
 One prepared native double-write frame holds at most the existing DWB entry
 capacity. Page images are staged in the canonical on-file DWB zone; RAM retains
-only page identities. An oversized statement fails and fences the writer until
-reopen rather than publishing a prefix.
+only page identities. A bounded VFS reserves backing capacity for every
+destination page before the frame header is sealed, so a full medium rejects
+the operation while recovery still owns the old state. An oversized statement
+fails and fences the writer until reopen rather than publishing a prefix.
 
 ## Verification
 

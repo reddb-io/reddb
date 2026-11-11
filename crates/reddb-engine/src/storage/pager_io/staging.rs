@@ -62,6 +62,22 @@ impl StagedPageBatch {
         if self.pages.is_empty() {
             return Ok(());
         }
+        let last_page = self.pages.iter().copied().max().expect("nonempty batch");
+        let required = (u64::from(last_page) + 1)
+            .checked_mul(PAGE_SIZE as u64)
+            .ok_or_else(|| PagerIoError::InvalidDatabase("prepared file length overflow".into()))?;
+        let length = file.file_len()?;
+        if required > length {
+            let reservation = file.reserve(length, required - length);
+            if let Err(cause) = reservation {
+                if cause.kind() != io::ErrorKind::Unsupported {
+                    return Err(cause.into());
+                }
+            }
+            // Capacity admission and logical extension both precede the valid
+            // header that makes recovery responsible for the destination.
+            file.set_len(required)?;
+        }
         let checksum = checksum(file, self.pages.len())?;
         let count = u32::try_from(self.pages.len()).expect("bounded native DWB frame");
         file.seek(SeekFrom::Start(dwb_zone_offset()))?;

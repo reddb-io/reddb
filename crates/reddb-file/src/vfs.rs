@@ -132,6 +132,8 @@ pub trait VfsFile: Sized {
         self.sync_all()
     }
     /// Best-effort block reservation that does not grow logical length.
+    /// Flash backends must implement this when `set_len` alone does not prove
+    /// that later writes in the range cannot fail solely for lack of capacity.
     fn reserve(&self, _offset: u64, _len: u64) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
