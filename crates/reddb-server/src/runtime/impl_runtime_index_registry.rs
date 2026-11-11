@@ -341,7 +341,12 @@ impl RedDBRuntime {
         // so they need one additional allowance. Document paths can also own an
         // extracted value while encoding the key and therefore need two.
         let scratch = read_bytes_max.saturating_mul(workspace_factor);
-        let reservation = self.try_reserve_query_buffer(scratch).ok_or_else(|| {
+        let mut reservation = self.try_reserve_query_buffer(scratch);
+        if reservation.is_none() {
+            self.reclaim_index_probe_workspace(scratch)?;
+            reservation = self.try_reserve_query_buffer(scratch);
+        }
+        let reservation = reservation.ok_or_else(|| {
             let accounting = self.memory_accounting();
             RedDBError::InvalidOperation(format!(
                 "index probe workspace exceeds the shared memory budget: requested {scratch} bytes, used {}, budget {}",
@@ -350,6 +355,30 @@ impl RedDBRuntime {
             ))
         })?;
         Ok((reservation, read_bytes_max))
+    }
+
+    fn reclaim_index_probe_workspace(&self, scratch: usize) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        if self.inner.db.options().read_only
+            || self.inner.lifecycle.phase() != super::lifecycle::Phase::Ready
+            || !store.is_paged()
+            || self
+                .memory_accounting()
+                .used_bytes(crate::storage::memory_pools::MemoryPool::QueryBuffers)
+                >= u64::try_from(scratch).unwrap_or(u64::MAX)
+            || store.vault_publication_lock.is_owned_by_current_thread()
+            || crate::storage::UnifiedStore::deferred_store_wal_capture_active()
+            || self.current_xid().is_some()
+        {
+            return Ok(());
+        }
+        // Probe admission runs before publication and source locks. Avoid
+        // waiting on a concurrent publisher; if we can acquire the fence,
+        // checkpointing releases committed overlay memory before one retry.
+        let Some(_publication) = store.vault_publication_lock.try_lock() else {
+            return Ok(());
+        };
+        self.checkpoint_local()
     }
 
     fn reserve_index_workspace_with_limit(

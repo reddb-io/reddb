@@ -207,8 +207,7 @@ fn batch_entity_payload_contains_text(actions: &[Vec<u8>], needle: &str) -> bool
             StoreWalAction::UpsertEntityRecord { record, .. } => {
                 action_contains_text(&record, needle)
             }
-            StoreWalAction::BulkUpsertEntityRecords { records, .. }
-            | StoreWalAction::RefreshCollection { records, .. } => records
+            StoreWalAction::BulkUpsertEntityRecords { records, .. } => records
                 .iter()
                 .any(|record| action_contains_text(record, needle)),
             _ => false,

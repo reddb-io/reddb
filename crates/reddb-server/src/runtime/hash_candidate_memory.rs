@@ -337,34 +337,70 @@ mod tests {
 
     #[test]
     fn resident_hash_denial_reaches_select_wire_and_dml_without_changing_rows() {
+        use crate::storage::unified::hash_index::{HashCandidateAdmission, HashIndexError};
         use crate::wire::query_direct::try_handle_query_binary_direct;
-        let runtime = fixture();
+        use std::sync::Arc;
+
+        struct RejectHashCandidates;
+
+        impl HashCandidateAdmission for RejectHashCandidates {
+            fn sample(&self) -> Result<(), HashIndexError> {
+                Ok(())
+            }
+
+            fn reserve(&self, _bytes: usize) -> Result<Box<dyn Send + Sync>, HashIndexError> {
+                Err(HashIndexError::Read(
+                    "index candidate memory budget exceeded: injected denial".into(),
+                ))
+            }
+        }
+
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        for sql in [
+            "CREATE TABLE candidate_denial (id INT, bucket INT)",
+            "CREATE INDEX candidate_denial_bucket ON candidate_denial (bucket) USING HASH",
+            "INSERT INTO candidate_denial (id, bucket) VALUES (1, 7), (2, 8), (3, 9)",
+        ] {
+            runtime.execute_query(sql).unwrap();
+        }
         let before = runtime
-            .execute_query("SELECT id, bucket FROM candidate_budget ORDER BY id")
+            .execute_query("SELECT id, bucket FROM candidate_denial ORDER BY id")
             .unwrap();
-        let held = leave_headroom(&runtime, 4096);
+        runtime
+            .index_store_ref()
+            .hash
+            .override_candidate_admission_for_tests(Some(Arc::new(RejectHashCandidates)));
         let baseline = query_bytes(&runtime);
         for sql in [
-            "SELECT id FROM candidate_budget WHERE bucket = 7",
-            "UPDATE candidate_budget SET bucket = 8 WHERE bucket = 7",
-            "DELETE FROM candidate_budget WHERE bucket = 7",
-            "UPDATE candidate_budget SET bucket = 8 WHERE bucket IN (7, 8)",
-            "DELETE FROM candidate_budget WHERE bucket IN (7, 8)",
+            "SELECT id FROM candidate_denial WHERE bucket = 7",
+            "DELETE FROM candidate_denial WHERE bucket = 7",
+            "DELETE FROM candidate_denial WHERE bucket IN (7, 8)",
         ] {
             let error = runtime.execute_query(sql).unwrap_err();
-            // Autocommit UPDATE may use the snapshot-preserving source scan;
-            // its mutation admission must still reject before publishing rows.
-            let expected = if sql.starts_with("UPDATE") {
-                "budget"
-            } else {
-                "index candidate memory budget"
-            };
-            assert!(error.to_string().contains(expected), "{sql}: {error}");
+            assert!(
+                error.to_string().contains("index candidate memory budget"),
+                "{sql}: {error}"
+            );
             assert_eq!(query_bytes(&runtime), baseline);
         }
         for sql in [
-            "SELECT id FROM candidate_budget WHERE bucket = 7 LIMIT 1",
-            "SELECT id FROM candidate_budget WHERE bucket IN (7, 8) LIMIT 1",
+            "UPDATE candidate_denial SET bucket = 8 WHERE bucket = 7",
+            "UPDATE candidate_denial SET bucket = 8 WHERE bucket IN (7, 8)",
+        ] {
+            // UPDATE discovers targets from its snapshot-preserving source
+            // scan. Deny its mutation reservation deterministically instead
+            // of assuming it will use the HASH lookup chosen by SELECT.
+            let held = leave_headroom(&runtime, 0);
+            let pressure_baseline = query_bytes(&runtime);
+            let error = runtime.execute_query(sql).unwrap_err();
+            assert!(error.to_string().contains("budget"), "{sql}: {error}");
+            assert_eq!(query_bytes(&runtime), pressure_baseline);
+            drop(held);
+            assert_eq!(query_bytes(&runtime), baseline);
+        }
+        for sql in [
+            "SELECT id FROM candidate_denial WHERE bucket = 7 LIMIT 1",
+            "SELECT id FROM candidate_denial WHERE bucket IN (7, 8) LIMIT 1",
         ] {
             let response = try_handle_query_binary_direct(&runtime, sql)
                 .expect("direct path must not fall back");
@@ -375,19 +411,22 @@ mod tests {
             drop(response);
             assert_eq!(query_bytes(&runtime), baseline);
         }
-        drop(held);
+        runtime
+            .index_store_ref()
+            .hash
+            .override_candidate_admission_for_tests(None);
         let after = runtime
-            .execute_query("SELECT id, bucket FROM candidate_budget ORDER BY id")
+            .execute_query("SELECT id, bucket FROM candidate_denial ORDER BY id")
             .unwrap();
-        assert_eq!(before.result.records.len(), 4096);
+        assert_eq!(before.result.records.len(), 3);
         assert_eq!(before.result.records.len(), after.result.records.len());
         for (before, after) in before.result.records.iter().zip(&after.result.records) {
             assert_eq!(before.get("id"), after.get("id"));
             assert_eq!(before.get("bucket"), after.get("bucket"));
         }
         for sql in [
-            "SELECT id FROM candidate_budget WHERE bucket = 7 LIMIT 1",
-            "SELECT id FROM candidate_budget WHERE bucket IN (7, 8) LIMIT 1",
+            "SELECT id FROM candidate_denial WHERE bucket = 7 LIMIT 1",
+            "SELECT id FROM candidate_denial WHERE bucket IN (7, 8) LIMIT 1",
         ] {
             let response = try_handle_query_binary_direct(&runtime, sql).unwrap();
             assert_eq!(response[4], reddb_wire::legacy::MSG_RESULT);

@@ -1038,21 +1038,6 @@ impl RedDBRuntime {
             }
         }
 
-        // #1369 — reserve a fixed internal-id floor so the first user-inserted
-        // entity always receives a stable, documented `rid` (FIRST_USER_ENTITY_ID),
-        // independent of how many internal collection-descriptor / config-default
-        // entities the boot sequence seeded above. `register_entity_id` only ever
-        // raises the allocator, so a database that already holds user data
-        // (counter past the floor) is untouched; a freshly-seeded database jumps
-        // straight to the floor.
-        runtime
-            .inner
-            .db
-            .store()
-            .register_entity_id(crate::storage::EntityId::new(
-                crate::storage::FIRST_USER_ENTITY_ID - 1,
-            ));
-
         // Start background maintenance thread (context index refresh +
         // session purge). Held by a WEAK reference to `RuntimeInner`
         // to avoid an ownership cycle. The last foreground owner unparks
@@ -1300,6 +1285,19 @@ impl RedDBRuntime {
                     },
                 );
         }
+
+        // #1369 — reserve the fixed internal-id floor only after every boot
+        // stage has finished. Some persistent-only startup paths publish
+        // internal entities, so reserving it earlier lets those paths consume
+        // the first documented user `rid`. `register_entity_id` only raises
+        // the allocator, leaving databases already past the floor untouched.
+        runtime
+            .inner
+            .db
+            .store()
+            .register_entity_id(crate::storage::EntityId::new(
+                crate::storage::FIRST_USER_ENTITY_ID - 1,
+            ));
 
         Ok(runtime)
     }
