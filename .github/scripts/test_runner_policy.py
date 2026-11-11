@@ -27,6 +27,21 @@ class RunnerPolicy(unittest.TestCase):
         workflow = {'on': {'workflow_dispatch': {}}, 'jobs': {'build': {'runs-on': 'ubuntu-24.04-arm'}}}
         self.assertEqual(self.check_workflow(workflow).returncode, 0)
 
+    def test_automatic_validation_is_limited_to_core_ci(self):
+        workflow = {'on': {'pull_request': {}}, 'jobs': {'check': {'runs-on': 'ubuntu-24.04'}}}
+        self.assertEqual(self.check_workflow(workflow, 'ci.yml').returncode, 0)
+        result = self.check_workflow(workflow, 'expensive-validation.yml')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('core CI allowlist', result.stderr)
+
+    def test_non_core_pushes_remain_release_tag_only(self):
+        release = {'on': {'push': {'tags': ['v*']}}, 'jobs': {'build': {'runs-on': 'ubuntu-24.04'}}}
+        self.assertEqual(self.check_workflow(release, 'release.yml').returncode, 0)
+        release['on']['push'] = {'branches': ['main']}
+        result = self.check_workflow(release, 'release.yml')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('release-tag pushes', result.stderr)
+
     def test_paid_labels_are_rejected_in_jobs_and_embedded_platform_matrices(self):
         for job in [{'runs-on': 'blacksmith-8vcpu-ubuntu-2404'},
                     {'runs-on': '${{ matrix.os }}', 'env': {'PLATFORM_MATRICES': json.dumps({

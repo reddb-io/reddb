@@ -1,6 +1,6 @@
-// Keep the optional CI and docs-shim context names aligned with ADR 0059.
-// Full workflows are manually dispatched under the current cost policy;
-// quick-checks.yml runs automatically for PRs, pushes, and merge groups.
+// Keep the automatic CI and docs-shim context names aligned with ADR 0059.
+// The core correctness lane and quick-checks.yml run automatically; broader
+// release-adjacent validation remains opt-in.
 // Check the merge-group classifier and failure-propagating aggregate separately
 // so a future trigger change cannot silently bypass the guarded heavy jobs.
 
@@ -83,13 +83,21 @@ test("every required context is actually produced by ci.yml (manifest reflects r
   }
 });
 
-test("expensive CI and the docs shim remain manually dispatched, with automatic quick checks", () => {
-  for (const file of [CI, SHIM]) {
-    const triggers = read(file).match(/^on:\n([\s\S]*?)(?=^[^\s#])/m)?.[1];
-    assert.ok(triggers, `${file} must define triggers`);
-    assert.match(triggers, /^  workflow_dispatch:/m);
-    assert.doesNotMatch(triggers, /^  (push|pull_request|merge_group|schedule):/m);
+test("core CI and the docs shim run automatically, with manual full-CI retained", () => {
+  const ciTriggers = read(CI).match(/^on:\n([\s\S]*?)(?=^[^\s#])/m)?.[1];
+  assert.ok(ciTriggers, `${CI} must define triggers`);
+  for (const event of ["merge_group", "push", "pull_request", "workflow_dispatch"]) {
+    assert.match(ciTriggers, new RegExp(`^  ${event}:`, "m"));
   }
+  assert.doesNotMatch(ciTriggers, /^  schedule:/m);
+
+  const shimTriggers = read(SHIM).match(/^on:\n([\s\S]*?)(?=^[^\s#])/m)?.[1];
+  assert.ok(shimTriggers, `${SHIM} must define triggers`);
+  for (const event of ["pull_request", "workflow_dispatch"]) {
+    assert.match(shimTriggers, new RegExp(`^  ${event}:`, "m"));
+  }
+  assert.doesNotMatch(shimTriggers, /^  (push|merge_group|schedule):/m);
+
   const quick = read(".github/workflows/quick-checks.yml");
   for (const event of ["pull_request", "push", "merge_group"]) {
     assert.match(quick, new RegExp(`^  ${event}:`, "m"));

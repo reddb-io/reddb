@@ -1,6 +1,22 @@
 name: CI
 
 on:
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [ main, develop ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'CHANGELOG**'
+      - 'LICENSE**'
+  pull_request:
+    branches: [ main, develop ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'CHANGELOG**'
+      - 'LICENSE**'
   workflow_dispatch:
     inputs:
       full_ci:
