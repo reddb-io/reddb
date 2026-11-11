@@ -1741,6 +1741,77 @@ fn compact_rewrites_live_records_and_preserves_source() {
 }
 
 #[test]
+fn compact_rewrites_a_source_with_page_aligned_trailing_allocation() {
+    use std::io::Write;
+
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source.rdb");
+    fixture(&source);
+    let committed_bytes = std::fs::metadata(&source).expect("source metadata").len();
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&source)
+            .expect("open source tail");
+        file.write_all(&vec![0xA5; 2 * 16384])
+            .expect("append stale page-aligned allocation");
+        file.sync_all().expect("sync source tail");
+    }
+    let before = std::fs::read(&source).expect("source image");
+    let destination = directory.path().join("compacted");
+
+    let report = compact_paged(&source, &destination).expect("compact trailing allocation");
+
+    assert_eq!(report.source_bytes, committed_bytes + 2 * 16384);
+    assert_eq!(std::fs::read(&source).expect("preserved source"), before);
+    assert!(report.destination_bytes < committed_bytes);
+    let pager = Pager::open(
+        destination.join("source.rdb"),
+        PagerConfig {
+            read_only: true,
+            create: false,
+            ..PagerConfig::default()
+        },
+    )
+    .expect("reopen compacted source");
+    assert_eq!(
+        pager.page_count().expect("compacted page count") as u64 * 16384,
+        report.destination_bytes
+    );
+}
+
+#[test]
+fn compact_rejects_truncated_or_partial_trailing_allocation() {
+    let directory = tempfile::tempdir().expect("directory");
+    for (name, length_adjustment) in [("truncated", -16384_i64), ("partial-tail", 1_i64)] {
+        let source = directory.path().join(format!("{name}.rdb"));
+        fixture(&source);
+        let committed_bytes = std::fs::metadata(&source).expect("source metadata").len();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .expect("open source")
+            .set_len(
+                committed_bytes
+                    .checked_add_signed(length_adjustment)
+                    .expect("fixture length"),
+            )
+            .expect("resize source");
+        let destination = directory.path().join(format!("{name}-compacted"));
+
+        let error = compact_paged(&source, &destination).expect_err("reject unsafe boundary");
+
+        assert!(
+            error
+                .to_string()
+                .contains("source allocation boundary differs from file length"),
+            "unexpected {name} error: {error}"
+        );
+        assert!(!destination.exists());
+    }
+}
+
+#[test]
 fn scrub_paged_trees_reports_corruption_without_changing_source() {
     use std::io::{Read, Seek, SeekFrom, Write};
 
