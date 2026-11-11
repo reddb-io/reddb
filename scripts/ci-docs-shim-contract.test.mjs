@@ -180,3 +180,20 @@ test("Test Suite shards on free runners and reports one failure-propagating requ
   assert.notEqual(cacheKey(clientSize), cacheKey(shards),
     "test shards must not restore a cache containing the release-size build");
 });
+
+test("Bun lanes install the linked workspace client before running tests", () => {
+  const jobs = jobBlocks(read(CI));
+  for (const jobId of ["driver-wire-conformance", "driver-runnable-examples"]) {
+    const block = jobs.get(jobId);
+    assert.ok(block, `ci.yml must define ${jobId}`);
+    const setupNode = block.indexOf("uses: actions/setup-node@");
+    const install = block.indexOf("name: Install Bun workspace dependencies");
+    const setupBun = block.indexOf("uses: oven-sh/setup-bun@");
+    const bunTests = block.indexOf("name: Bun ");
+    assert.ok(setupNode >= 0 && setupNode < install, `${jobId} must set up Node before pnpm`);
+    assert.ok(install < setupBun && setupBun < bunTests,
+      `${jobId} must install the workspace before running Bun tests`);
+    assert.match(block,
+      /pnpm install --frozen-lockfile --ignore-scripts --filter @reddb-io\/client-bun\.\.\./);
+  }
+});
