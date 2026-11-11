@@ -319,16 +319,17 @@ SEARCH SPATIAL RADIUS 48.8566 2.3522 3.0 COLLECTION stores COLUMN location;
 ```text
  entity_id | distance_km
 -----------+---------------------
-      1027 | 1.1570046974814778
-      1030 | 2.117879817147935
+<louvre-rid> | 1.1570046974814778
+<gare-de-lyon-rid> | 2.117879817147935
 ```
 
 Two things to read off that result. Sacre-Coeur (3.41 km) and the Eiffel Tower
 (4.23 km) are absent — correctly, they are beyond 3 km. And `entity_id` is the
 **engine-assigned entity id**, not the `id` column you inserted: in this fresh
-in-memory example, `1027` is the Louvre, `1030` the Gare de Lyon. Internal
-metadata also consumes entity ids, so these numbers depend on the store's
-history. Join back to your own key by selecting it.
+in-memory example, `<louvre-rid>` and `<gare-de-lyon-rid>` stand for the numeric
+values returned by `INSERT ... RETURNING rid`. Internal metadata also consumes
+entity ids, so the concrete numbers depend on the store's history. Do not guess
+them; retain the returned `rid` or join back to your own key.
 
 The two nearest, regardless of distance — the same two rows, since `NEAREST`
 ranks rather than filters:
@@ -347,8 +348,8 @@ SEARCH SPATIAL BBOX 48.85 2.30 48.89 2.40 COLLECTION stores COLUMN location LIMI
 ```text
  entity_id
 -----------
-      1029
-      1027
+<sacre-coeur-rid>
+<louvre-rid>
 ```
 
 ### Over a document collection
