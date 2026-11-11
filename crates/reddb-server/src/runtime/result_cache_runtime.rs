@@ -473,7 +473,7 @@ impl RedDBRuntime {
         key: &str,
         epoch: u64,
     ) -> Option<RuntimeQueryResult> {
-        {
+        let (hit, revision) = {
             let cache = self.inner.result_blob_entries.read();
             if cache.4.contains(key) {
                 let entry = cache.0.get(key)?;
@@ -481,9 +481,6 @@ impl RedDBRuntime {
                     && entry.cached_at.elapsed().as_secs() < self.result_cache_ttl_secs())
                 .then(|| entry.result.clone());
             }
-        }
-        let (hit, revision) = {
-            let cache = self.inner.result_blob_entries.read();
             let hit = self
                 .inner
                 .result_blob_cache
