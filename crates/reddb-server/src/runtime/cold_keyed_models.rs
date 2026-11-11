@@ -405,10 +405,23 @@ fn complete_runtime_cold_reopen_restores_unique_secondary_indexes() {
         RedDBRuntime::with_options(options)
     })
     .expect("real indexed cold constructor");
+    let collection_names = cold.db().store().list_collections();
+    assert!(
+        collection_names
+            .iter()
+            .any(|name| name == "red.index.registry"),
+        "the canonical registry identity must be published: {collection_names:?}"
+    );
+    assert!(
+        collection_names
+            .iter()
+            .all(|name| name != "red_index_registry"),
+        "the legacy registry name is an input alias, not a second authority: {collection_names:?}"
+    );
     let registry = cold
         .db()
         .store()
-        .get_collection("red_index_registry")
+        .get_collection("red.index.registry")
         .expect("persisted index registry");
     let mut persisted = false;
     registry
@@ -467,6 +480,99 @@ fn complete_runtime_cold_reopen_restores_unique_secondary_indexes() {
         .execute_query("SELECT COUNT(*) AS n FROM cold_indexed_rows")
         .expect("unchanged source rows");
     assert_eq!(result.result.records[0].get("n"), Some(&Value::Integer(2)));
+}
+
+#[test]
+fn cold_mvcc_indexes_restore_visible_heads_before_and_after_vacuum() {
+    let directory = tempfile::tempdir().expect("MVCC index restart fixture");
+    let options = RedDBOptions::persistent(directory.path().join("mvcc-indexes.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_storage_profile(
+            crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+        )
+        .expect("profile");
+    let seed = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+    for sql in [
+        "CREATE TABLE mvcc_indexed_rows (id TEXT, org_id TEXT, payload TEXT)",
+        "CREATE UNIQUE INDEX mvcc_by_id ON mvcc_indexed_rows (id) USING HASH",
+        "CREATE INDEX mvcc_by_org ON mvcc_indexed_rows (org_id) USING BTREE",
+        "INSERT INTO mvcc_indexed_rows (id, org_id, payload) VALUES ('db-1', 'org-a', 'v0')",
+    ] {
+        seed.execute_query(sql).expect(sql);
+    }
+    for version in 1..=3 {
+        seed.execute_query("BEGIN").expect("begin update");
+        seed.execute_query(&format!(
+            "UPDATE mvcc_indexed_rows SET payload = 'v{version}' WHERE id = 'db-1'"
+        ))
+        .expect("versioned update");
+        seed.execute_query("COMMIT").expect("commit update");
+    }
+    let manager = seed
+        .db()
+        .store()
+        .get_collection("mvcc_indexed_rows")
+        .expect("seed table");
+    assert_eq!(
+        manager
+            .query_all(|entity| entity.logical_id() != entity.id || entity.xmax != 0)
+            .len(),
+        4,
+        "fixture must retain the full physical MVCC chain"
+    );
+    seed.flush().expect("MVCC checkpoint");
+    drop(seed);
+
+    let open = || {
+        crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options.clone())
+        })
+        .expect("cold MVCC runtime")
+    };
+    let assert_reads = |runtime: &RedDBRuntime, phase: &str| {
+        runtime.invalidate_result_cache();
+        for sql in [
+            "SELECT payload FROM mvcc_indexed_rows WHERE id = 'db-1'",
+            "SELECT payload FROM mvcc_indexed_rows WHERE org_id >= 'org-a'",
+            "SELECT payload FROM mvcc_indexed_rows WHERE payload = 'v3'",
+        ] {
+            let result = runtime.execute_query(sql).unwrap_or_else(|error| {
+                panic!("{phase}: {sql}: {error}");
+            });
+            assert_eq!(result.result.records.len(), 1, "{phase}: {sql}");
+            assert_eq!(
+                result.result.records[0].get("payload"),
+                Some(&Value::text("v3")),
+                "{phase}: {sql}"
+            );
+        }
+    };
+
+    let cold = open();
+    assert!(cold
+        .index_store_ref()
+        .hash
+        .is_paged("mvcc_indexed_rows", "mvcc_by_id"));
+    assert!(cold
+        .index_store_ref()
+        .paged_btree_lookup(
+            "mvcc_indexed_rows",
+            &reddb_rql::ast::Filter::Compare {
+                field: reddb_rql::ast::FieldRef::column("mvcc_indexed_rows", "org_id"),
+                op: reddb_rql::ast::CompareOp::Ge,
+                value: Value::text("org-a"),
+            },
+        )
+        .expect("cold BTREE probe")
+        .is_some());
+    assert_reads(&cold, "cold before scan");
+    cold.execute_query("VACUUM mvcc_indexed_rows")
+        .expect("vacuum history");
+    cold.flush().expect("post-vacuum checkpoint");
+    drop(cold);
+
+    let reopened = open();
+    assert_reads(&reopened, "cold after vacuum and reopen");
 }
 
 #[test]

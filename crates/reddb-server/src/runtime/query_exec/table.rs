@@ -113,89 +113,167 @@ fn indexed_table_records(
     columns: &[String],
     limit: usize,
     mut matches: impl FnMut(&UnifiedEntity) -> RedDBResult<bool>,
-) -> RedDBResult<Vec<UnifiedRecord>> {
+) -> RedDBResult<Option<Vec<UnifiedRecord>>> {
     if limit == 0 {
-        return Ok(Vec::new());
+        return Ok(Some(Vec::new()));
     }
     let store = db.store();
     let Some(manager) = store.get_collection(table) else {
-        return Ok(Vec::new());
+        return Ok(Some(Vec::new()));
     };
     let schema = manager.column_schema();
     let resolver = TableRowMvccReadResolver::current_statement();
     let mut records = Vec::with_capacity(entity_ids.len().min(limit));
+    let mut seen_logical_ids = std::collections::HashSet::<EntityId>::new();
     let mut failure = None;
-    let mut consume = |position, entity: &UnifiedEntity| {
-        if failure.is_some() {
-            return false;
+    let accepted_count = std::cell::Cell::new(0usize);
+    let mut consume_visible = |position, entity: &UnifiedEntity| -> RedDBResult<bool> {
+        crate::runtime::function_budget::charge(1)?;
+        if !db.entity_visible_at_read(table, entity) || !matches(entity)? {
+            return Ok(true);
         }
-        let result = (|| -> RedDBResult<bool> {
-            crate::runtime::function_budget::charge(1)?;
-            if resolver.resolve_read_candidate(entity).is_none()
-                || !db.entity_visible_at_read(table, entity)
-                || !matches(entity)?
-            {
-                return Ok(true);
-            }
-            let record = match &entity.data {
-                EntityData::Row(row)
-                    if !columns.is_empty() && (row.named.is_some() || row.schema.is_some()) =>
-                {
-                    super::super::record_search::runtime_table_record_from_entity_ref_projected(
-                        entity, columns,
-                    )
+        let record = match (&entity.data, columns.is_empty()) {
+            (EntityData::Row(row), true) if row.named.is_none() && row.schema.is_none() => {
+                let mut owned = entity.clone();
+                if let EntityData::Row(row) = &mut owned.data {
+                    row.schema = schema.clone();
                 }
-                _ => {
-                    // Keep the owned materializer's model-specific behavior.
-                    // Compact recovered rows also need their collection schema.
-                    // At most one accepted entity is copied at a time.
-                    let mut owned = entity.clone();
-                    if let EntityData::Row(row) = &mut owned.data {
-                        if row.schema.is_none() {
-                            row.schema = schema.clone();
-                        }
-                    }
-                    if columns.is_empty() {
-                        super::super::record_search::runtime_table_record_lean_in_collection(
-                            owned, table,
-                        )
-                    } else {
-                        runtime_table_record_from_entity_projected(owned, columns)
+                super::super::record_search::runtime_table_record_lean_in_collection(owned, table)
+            }
+            (_, true) => super::super::record_search::runtime_table_record_lean_ref(entity),
+            (EntityData::Row(row), false) if row.named.is_some() || row.schema.is_some() => {
+                super::super::record_search::runtime_table_record_from_entity_ref_projected(
+                    entity, columns,
+                )
+            }
+            (_, false) => {
+                // Keep the owned materializer's model-specific behavior.
+                // Compact recovered rows also need their collection schema.
+                // At most one accepted entity is copied at a time.
+                let mut owned = entity.clone();
+                if let EntityData::Row(row) = &mut owned.data {
+                    if row.schema.is_none() {
+                        row.schema = schema.clone();
                     }
                 }
-            };
-            if let Some(record) = record {
-                records.push((position, record));
+                runtime_table_record_from_entity_projected(owned, columns)
             }
-            Ok(records.len() < limit)
-        })();
-        match result {
-            Ok(keep_scanning) => keep_scanning,
-            Err(error) => {
-                failure = Some(error);
-                false
-            }
+        };
+        if let Some(record) = record {
+            records.push((position, record));
+            accepted_count.set(accepted_count.get().saturating_add(1));
         }
+        Ok(accepted_count.get() < limit)
     };
     if limit < entity_ids.len() {
         for (position, id) in entity_ids.iter().enumerate() {
-            let mut keep_scanning = true;
+            let mut found = false;
+            let mut unresolved = None;
             manager.try_for_each_id(std::slice::from_ref(id), usize::MAX, |_, entity| {
-                keep_scanning = consume(position, entity);
-                keep_scanning
+                found = true;
+                if resolver.resolve_read_candidate(entity).is_some() {
+                    if matches!(entity.kind, EntityKind::TableRow { .. }) {
+                        let logical_id = entity.logical_id();
+                        if !seen_logical_ids.insert(logical_id) {
+                            return true;
+                        }
+                    }
+                    match consume_visible(position, entity) {
+                        Ok(keep_scanning) => keep_scanning,
+                        Err(error) => {
+                            failure = Some(error);
+                            false
+                        }
+                    }
+                } else if matches!(entity.kind, EntityKind::TableRow { .. }) {
+                    unresolved = Some(entity.logical_id());
+                    true
+                } else {
+                    true
+                }
             })?;
-            if !keep_scanning {
+            if let Some(error) = failure.take() {
+                return Err(error);
+            }
+            let logical_id = unresolved.or_else(|| (!found).then_some(*id));
+            if let Some(logical_id) = logical_id {
+                let entity = resolver.try_resolve_logical_id(&store, table, logical_id)?;
+                if entity.is_none() && !found {
+                    return Ok(None);
+                }
+                if let Some(entity) = entity {
+                    let logical_id = entity.logical_id();
+                    if seen_logical_ids.insert(logical_id) {
+                        if !consume_visible(position, &entity)? {
+                            break;
+                        }
+                    }
+                }
+            }
+            if accepted_count.get() >= limit {
                 break;
             }
         }
     } else {
-        manager.try_for_each_id(entity_ids, usize::MAX, &mut consume)?;
-    }
-    if let Some(error) = failure {
-        return Err(error);
+        let mut found = vec![false; entity_ids.len()];
+        let mut unresolved = Vec::<(usize, EntityId, bool)>::new();
+        manager.try_for_each_id(entity_ids, usize::MAX, |position, entity| {
+            found[position] = true;
+            if resolver.resolve_read_candidate(entity).is_some() {
+                if matches!(entity.kind, EntityKind::TableRow { .. }) {
+                    let logical_id = entity.logical_id();
+                    if !seen_logical_ids.insert(logical_id) {
+                        return true;
+                    }
+                }
+                match consume_visible(position, entity) {
+                    Ok(keep_scanning) => keep_scanning,
+                    Err(error) => {
+                        failure = Some(error);
+                        false
+                    }
+                }
+            } else if matches!(entity.kind, EntityKind::TableRow { .. }) {
+                unresolved.push((position, entity.logical_id(), false));
+                true
+            } else {
+                true
+            }
+        })?;
+        if let Some(error) = failure.take() {
+            return Err(error);
+        }
+        unresolved.extend(
+            found
+                .into_iter()
+                .enumerate()
+                .filter(|(_, found)| !found)
+                .map(|(position, _)| (position, entity_ids[position], true)),
+        );
+        unresolved.sort_unstable_by_key(|(position, _, _)| *position);
+        for (position, logical_id, missing_posting) in unresolved {
+            if seen_logical_ids.contains(&logical_id) {
+                continue;
+            }
+            let entity = resolver.try_resolve_logical_id(&store, table, logical_id)?;
+            if entity.is_none() && missing_posting {
+                return Ok(None);
+            }
+            let Some(entity) = entity else {
+                continue;
+            };
+            let logical_id = entity.logical_id();
+            seen_logical_ids.insert(logical_id);
+            if !consume_visible(position, &entity)? {
+                break;
+            }
+        }
     }
     records.sort_unstable_by_key(|(position, _)| *position);
-    Ok(records.into_iter().map(|(_, record)| record).collect())
+    records.truncate(limit);
+    Ok(Some(
+        records.into_iter().map(|(_, record)| record).collect(),
+    ))
 }
 
 /// Build the JSON result from a set of entity IDs (from index lookup).
@@ -1003,12 +1081,6 @@ fn execute_runtime_canonical_table_query_inner(
                     ),
                 })
             };
-            let store = db.store();
-            // Use lean materialization (skip red_* system fields) when SELECT *
-            // was requested.  Explicit projection columns still go through the full
-            // path below so user-specified system fields (e.g. SELECT rid,
-            // age FROM t) are not silently dropped.
-            let lean = explicit_cols.is_empty(); // SELECT * → lean path
             let limit =
                 if (query.order_by.is_empty() && query.offset.is_none()) || paged_order_satisfied {
                     query
@@ -1026,69 +1098,7 @@ fn execute_runtime_canonical_table_query_inner(
                     usize::MAX
                 };
 
-            // Lean/SELECT-* path uses the borrow-based
-            // `SegmentManager::for_each_id` → `runtime_table_record_lean_ref`
-            // combination to skip the `UnifiedEntity::clone` inside
-            // `get_batch` (~20% of scan CPU on `select_range`/`filtered`).
-            // Explicit projections borrow only their selected fields below.
-            if lean {
-                let manager = match store.get_collection(&query.table) {
-                    Some(m) => m,
-                    None => return Ok(Vec::new()),
-                };
-                let mut records: Vec<UnifiedRecord> =
-                    Vec::with_capacity(entity_ids.len().min(limit));
-                let table_row_resolver = TableRowMvccReadResolver::current_statement();
-                crate::runtime::function_budget::charge(entity_ids.len() as u64)?;
-                crate::runtime::function_budget::visit_result(
-                    |visit| {
-                        manager
-                            .try_for_each_id(&entity_ids, usize::MAX, |_idx, entity| visit(entity))
-                            .map_err(RedDBError::from)
-                    },
-                    |entity| {
-                        if records.len() >= limit {
-                            return Ok(false);
-                        }
-                        if table_row_resolver.resolve_read_candidate(entity).is_none() {
-                            return Ok(true);
-                        }
-                        if !db.entity_visible_at_read(&query.table, entity) {
-                            return Ok(true);
-                        }
-                        if let Some(cf) = compiled_filter.as_ref() {
-                            if !compiled_entity_filter_matches(
-                                db,
-                                cf,
-                                entity,
-                                filter,
-                                table_name,
-                                table_alias,
-                            )? {
-                                return Ok(true);
-                            }
-                        }
-                        if let Some(record) =
-                            super::super::record_search::runtime_table_record_lean_ref(entity)
-                        {
-                            records.push(record);
-                        }
-                        Ok(true)
-                    },
-                )?;
-                return finish_ordered_index_records(
-                    db,
-                    query,
-                    &effective_projections,
-                    paged_order_satisfied,
-                    records,
-                    table_name,
-                    table_alias,
-                    has_added_order_by_columns,
-                );
-            }
-
-            let records = indexed_table_records(
+            let Some(records) = indexed_table_records(
                 db,
                 &query.table,
                 &entity_ids,
@@ -1104,7 +1114,10 @@ fn execute_runtime_canonical_table_query_inner(
                         table_alias,
                     )
                 },
-            )?;
+            )?
+            else {
+                return execute_runtime_canonical_table_query_inner(db, query, None);
+            };
             return finish_ordered_index_records(
                 db,
                 query,
@@ -1197,7 +1210,7 @@ fn execute_runtime_canonical_table_query_inner(
                             let has_added_order_by_columns =
                                 append_order_by_columns(&mut explicit_cols, query);
 
-                            let records = indexed_table_records(
+                            let Some(records) = indexed_table_records(
                                 db,
                                 &query.table,
                                 &intersection_ids,
@@ -1213,7 +1226,12 @@ fn execute_runtime_canonical_table_query_inner(
                                         table_alias,
                                     )
                                 },
-                            )?;
+                            )?
+                            else {
+                                return execute_runtime_canonical_table_query_inner(
+                                    db, query, None,
+                                );
+                            };
                             return finish_ordered_index_records(
                                 db,
                                 query,
@@ -1380,7 +1398,7 @@ fn execute_runtime_canonical_table_query_inner(
                     }
                 };
 
-                let records = indexed_table_records(
+                let Some(records) = indexed_table_records(
                     db,
                     &query.table,
                     &entity_ids,
@@ -1396,7 +1414,10 @@ fn execute_runtime_canonical_table_query_inner(
                             table_alias,
                         )
                     },
-                )?;
+                )?
+                else {
+                    return execute_runtime_canonical_table_query_inner(db, query, None);
+                };
                 return finish_ordered_index_records(
                     db,
                     query,
@@ -1492,7 +1513,7 @@ fn execute_runtime_canonical_table_query_inner(
                     }
                         });
                         let explicit_cols = extract_select_column_names(&effective_projections);
-                        let records = indexed_table_records(
+                        let Some(records) = indexed_table_records(
                             db,
                             &query.table,
                             &entity_ids,
@@ -1508,7 +1529,10 @@ fn execute_runtime_canonical_table_query_inner(
                                     table_alias,
                                 )
                             },
-                        )?;
+                        )?
+                        else {
+                            return execute_runtime_canonical_table_query_inner(db, query, None);
+                        };
                         return Ok(records);
                     } // end else (hash batch path)
                 }
@@ -3436,7 +3460,7 @@ mod tests {
             }
         }
         assert_eq!(manager.stats().sealed_count, 1);
-        let candidates = [2, 4, 1, 99, 3].map(|id| EntityId::new(1_000_000 + id));
+        let candidates = [2, 4, 1, 3].map(|id| EntityId::new(1_000_000 + id));
         let columns = vec!["id".to_string()];
         let ids = |records: Vec<crate::storage::query::unified::UnifiedRecord>| {
             records
@@ -3452,8 +3476,23 @@ mod tests {
             usize::MAX,
             |_| Ok(true),
         )
-        .expect("all candidates");
+        .expect("all candidates")
+        .expect("candidate set is valid");
         assert_eq!(ids(records), [2, 4, 1, 3].map(Value::Integer));
+        let dangling = [EntityId::new(1_000_099)];
+        assert!(
+            super::indexed_table_records(
+                &runtime.db(),
+                "index_window",
+                &dangling,
+                &columns,
+                usize::MAX,
+                |_| Ok(true),
+            )
+            .expect("classify missing candidate")
+            .is_none(),
+            "a missing physical candidate must invalidate the index result"
+        );
         let mut visited = Vec::new();
         let records = super::indexed_table_records(
             &runtime.db(),
@@ -3466,7 +3505,8 @@ mod tests {
                 Ok(entity.id.raw() % 2 == 1)
             },
         )
-        .expect("filtered prefix");
+        .expect("filtered prefix")
+        .expect("candidate set is valid");
         assert_eq!(ids(records), vec![Value::Integer(1)]);
         assert_eq!(visited, vec![1_000_002, 1_000_004, 1_000_001]);
         let result = super::indexed_table_records(
@@ -3497,8 +3537,270 @@ mod tests {
             0,
             |_| panic!("LIMIT 0 must not evaluate candidates"),
         )
-        .expect("zero window");
+        .expect("zero window")
+        .expect("zero window is authoritative");
         assert!(zero.is_empty());
+    }
+
+    #[test]
+    fn indexed_queries_follow_stale_mvcc_postings_to_the_visible_head() {
+        let runtime = rt();
+        for (table, method) in [("stale_hash", "HASH"), ("stale_btree", "BTREE")] {
+            exec(
+                &runtime,
+                &format!("CREATE TABLE {table} (id TEXT, org_id TEXT, payload TEXT)"),
+            );
+            exec(
+                &runtime,
+                &format!("CREATE INDEX {table}_org ON {table} (org_id) USING {method}"),
+            );
+            exec(
+                &runtime,
+                &format!(
+                    "INSERT INTO {table} (id, org_id, payload) VALUES ('db-1', 'org-a', 'before')"
+                ),
+            );
+            let manager = runtime
+                .db()
+                .store()
+                .get_collection(table)
+                .expect("table manager");
+            let old = manager
+                .query_all(|entity| entity.xmax == 0)
+                .pop()
+                .expect("original physical version");
+
+            exec(
+                &runtime,
+                &format!("UPDATE {table} SET payload = 'after' WHERE org_id = 'org-a'"),
+            );
+            let current = manager
+                .query_all(|entity| entity.xmax == 0)
+                .pop()
+                .expect("current physical version");
+            assert_ne!(old.id, current.id, "UPDATE must create an MVCC version");
+            assert_eq!(old.logical_id(), current.logical_id());
+
+            let key = crate::runtime::index_store::value_to_bytes(&Value::text("org-a"));
+            let index = runtime
+                .index_store_ref()
+                .find_index_for_column(table, "org_id")
+                .expect("registered index");
+            match method {
+                "HASH" => {
+                    assert!(runtime
+                        .index_store_ref()
+                        .hash
+                        .remove(table, index.hash_lookup_name().as_ref(), &key, current.id,)
+                        .expect("remove current HASH posting"));
+                    runtime
+                        .index_store_ref()
+                        .hash
+                        .insert(
+                            table,
+                            index.hash_lookup_name().as_ref(),
+                            key.clone(),
+                            old.id,
+                        )
+                        .expect("install stale HASH posting");
+                }
+                "BTREE" => {
+                    runtime.index_store_ref().sorted.delete_one(
+                        table,
+                        "org_id",
+                        &Value::text("org-a"),
+                        current.id,
+                    );
+                    runtime.index_store_ref().sorted.insert_one(
+                        table,
+                        "org_id",
+                        &Value::text("org-a"),
+                        old.id,
+                    );
+                }
+                _ => unreachable!(),
+            }
+
+            let candidates = if method == "HASH" {
+                runtime
+                    .index_store_ref()
+                    .hash_lookup(table, index.hash_lookup_name().as_ref(), &key)
+                    .expect("read injected HASH posting")
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+            } else {
+                runtime
+                    .index_store_ref()
+                    .sorted
+                    .ge_lookup(
+                        table,
+                        "org_id",
+                        crate::runtime::index_store::value_to_sorted_key(&Value::text("org-a"))
+                            .expect("ordered key"),
+                    )
+                    .expect("read injected BTREE posting")
+            };
+            assert_eq!(candidates, vec![old.id], "{method} stale fixture");
+            let resolved = super::indexed_table_records(
+                &runtime.db(),
+                table,
+                &candidates,
+                &["payload".to_string()],
+                usize::MAX,
+                |_| Ok(true),
+            )
+            .expect("resolve stale posting")
+            .expect("stale physical posting retains a logical identity");
+            assert_eq!(resolved.len(), 1, "{method} logical head");
+            assert_eq!(
+                resolved[0].get("payload"),
+                Some(&Value::text("after")),
+                "{method} stale posting resolves to current payload"
+            );
+
+            runtime.invalidate_result_cache();
+            let sql = if method == "HASH" {
+                format!("SELECT payload FROM {table} WHERE org_id = 'org-a'")
+            } else {
+                format!("SELECT payload FROM {table} WHERE org_id >= 'org-a'")
+            };
+            let result = runtime.execute_query(&sql).expect("indexed MVCC lookup");
+            assert_eq!(
+                result.result.records.len(),
+                1,
+                "{method} returned {result:?}"
+            );
+            assert_eq!(
+                result.result.records[0].get("payload"),
+                Some(&Value::text("after")),
+                "{method} must follow the posting's logical identity"
+            );
+        }
+    }
+
+    #[test]
+    fn dangling_hash_and_btree_postings_fall_back_to_the_authoritative_scan() {
+        let runtime = rt();
+        for (table, method) in [("dangling_hash", "HASH"), ("dangling_btree", "BTREE")] {
+            exec(
+                &runtime,
+                &format!("CREATE TABLE {table} (id TEXT, org_id TEXT, payload TEXT)"),
+            );
+            exec(
+                &runtime,
+                &format!("CREATE INDEX {table}_org ON {table} (org_id) USING {method}"),
+            );
+            exec(
+                &runtime,
+                &format!(
+                    "INSERT INTO {table} (id, org_id, payload) VALUES ('db-1', 'org-a', 'present')"
+                ),
+            );
+            let current = runtime
+                .db()
+                .store()
+                .get_collection(table)
+                .expect("table manager")
+                .query_all(|entity| entity.xmax == 0)
+                .pop()
+                .expect("current row");
+            let dangling = EntityId::new(current.id.raw().saturating_add(1_000_000));
+            let key = crate::runtime::index_store::value_to_bytes(&Value::text("org-a"));
+            let index = runtime
+                .index_store_ref()
+                .find_index_for_column(table, "org_id")
+                .expect("registered index");
+            match method {
+                "HASH" => {
+                    assert!(runtime
+                        .index_store_ref()
+                        .hash
+                        .remove(table, index.hash_lookup_name().as_ref(), &key, current.id,)
+                        .expect("remove current HASH posting"));
+                    runtime
+                        .index_store_ref()
+                        .hash
+                        .insert(
+                            table,
+                            index.hash_lookup_name().as_ref(),
+                            key.clone(),
+                            dangling,
+                        )
+                        .expect("install dangling HASH posting");
+                }
+                "BTREE" => {
+                    runtime.index_store_ref().sorted.delete_one(
+                        table,
+                        "org_id",
+                        &Value::text("org-a"),
+                        current.id,
+                    );
+                    runtime.index_store_ref().sorted.insert_one(
+                        table,
+                        "org_id",
+                        &Value::text("org-a"),
+                        dangling,
+                    );
+                }
+                _ => unreachable!(),
+            }
+
+            let candidates = if method == "HASH" {
+                runtime
+                    .index_store_ref()
+                    .hash_lookup(table, index.hash_lookup_name().as_ref(), &key)
+                    .expect("read injected HASH posting")
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+            } else {
+                runtime
+                    .index_store_ref()
+                    .sorted
+                    .ge_lookup(
+                        table,
+                        "org_id",
+                        crate::runtime::index_store::value_to_sorted_key(&Value::text("org-a"))
+                            .expect("ordered key"),
+                    )
+                    .expect("read injected BTREE posting")
+            };
+            assert_eq!(candidates, vec![dangling], "{method} corruption fixture");
+            assert!(
+                super::indexed_table_records(
+                    &runtime.db(),
+                    table,
+                    &candidates,
+                    &["payload".to_string()],
+                    usize::MAX,
+                    |_| Ok(true),
+                )
+                .expect("classify dangling posting")
+                .is_none(),
+                "{method} dangling posting must invalidate the candidate set"
+            );
+
+            runtime.invalidate_result_cache();
+            let sql = if method == "HASH" {
+                format!("SELECT payload FROM {table} WHERE org_id = 'org-a'")
+            } else {
+                format!("SELECT payload FROM {table} WHERE org_id >= 'org-a'")
+            };
+            let result = runtime
+                .execute_query(&sql)
+                .expect("dangling posting lookup");
+            assert_eq!(
+                result.result.records.len(),
+                1,
+                "{method} returned {result:?}"
+            );
+            assert_eq!(
+                result.result.records[0].get("payload"),
+                Some(&Value::text("present")),
+                "{method} dangling posting must not become an authoritative miss"
+            );
+        }
     }
 
     #[test]
@@ -3542,7 +3844,8 @@ mod tests {
                 usize::MAX,
                 |_| Ok(true),
             )
-            .expect("schema-restored projection");
+            .expect("schema-restored projection")
+            .expect("candidate set is valid");
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].get("id"), Some(&Value::Integer(1)));
             assert_eq!(records[0].get("tenant"), Some(&Value::text("tenant-a")));
