@@ -24,13 +24,6 @@ name: CI (docs shim)
 # silently drift out of sync with the gate.
 
 on:
-  pull_request:
-    branches: [ main, develop ]
-    paths:
-      - '**.md'
-      - 'docs/**'
-      - 'CHANGELOG**'
-      - 'LICENSE**'
   workflow_dispatch:
 
 concurrency:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fast repository sanity and the Actions runner policy."""
+"""Fast repository sanity and the on-demand Actions cost policy."""
 import json
 from pathlib import Path
 import re
@@ -8,7 +8,6 @@ import yaml
 
 root = Path.cwd()
 metadata = ['red-issues-needs-triage.yml']
-automatic_validation = {'ci.yml', 'ci-docs.yml', 'quick-checks.yml'}
 for path in [root / "package.json", *root.glob("packages/*/package.json"), *root.glob("apps/*/package.json")]:
     if path.is_file():
         json.loads(path.read_text(encoding="utf-8-sig"))
@@ -33,15 +32,16 @@ for path in sorted((root / ".github/workflows").glob("*.y*ml")):
         manual = events.get('workflow_dispatch') or {}
         if set(events) != {'workflow_dispatch'} or manual.get('inputs', {}).get('testbox_id', {}).get('required') is not True:
             raise SystemExit(f"{path}: paid Testbox comparisons require an explicit manual session")
+    if path.name == "quick-checks.yml":
+        continue
     if "schedule" in events:
         raise SystemExit(f"{path}: schedules are opt-in; use workflow_dispatch")
     if path.name in metadata:
         continue
-    automatic_events = {"pull_request", "pull_request_target", "merge_group"} & set(events)
-    if automatic_events and path.name not in automatic_validation:
-        raise SystemExit(f"{path}: automatic validation is restricted to the core CI allowlist")
-    if "push" in events and path.name not in automatic_validation:
+    if any(event in events for event in ["pull_request", "pull_request_target", "merge_group"]):
+        raise SystemExit(f"{path}: quality checks must be manually dispatched")
+    if "push" in events:
         push = events["push"] or {}
         if not isinstance(push, dict) or not push.get("tags") or push.get("branches"):
             raise SystemExit(f"{path}: only intentional release-tag pushes are automatic")
-print("Workflow syntax, manifests and runner policy passed.")
+print("Workflow syntax, manifests and on-demand CI policy passed.")

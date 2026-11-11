@@ -1,22 +1,6 @@
 name: CI
 
 on:
-  merge_group:
-    types: [checks_requested]
-  push:
-    branches: [ main, develop ]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'CHANGELOG**'
-      - 'LICENSE**'
-  pull_request:
-    branches: [ main, develop ]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'CHANGELOG**'
-      - 'LICENSE**'
   workflow_dispatch:
     inputs:
       full_ci:
@@ -24,15 +8,15 @@ on:
         type: boolean
         default: false
 
-# Cost guard: new pushes cancel older runs on the same ref. Release-grade
-# validation lives in release.yml; CI push runs should stay quick.
+# Cost guard: manually requested runs cancel older runs on the same ref.
+# Release-grade validation lives in release.yml; automatic pull requests and
+# pushes use quick-checks.yml instead of compiling the workspace here.
 #
 # This public repository uses standard GitHub-hosted runners for all CI lanes.
 # Feature matrices, cross-platform builds, driver conformance, containers,
 # fuzz smoke, and packaging remain opt-in through `workflow_dispatch` with
 # full_ci=true. Stable release builds remain
-# authoritative in release.yml. rust-cache saves are restricted to non-PR runs
-# (save-if) so PR branches never persist multi-GB caches.
+# authoritative in release.yml.
 
       preview_platforms:
         type: boolean
@@ -59,8 +43,7 @@ env:
   ENABLE_LINUX_ARMV7: ${{ vars.ENABLE_LINUX_ARMV7 || 'false' }}
   ENABLE_LINUX_X86: ${{ vars.ENABLE_LINUX_X86 || 'false' }}
 jobs:
-  # Sentinel job — short-circuits everything else when the PR is a draft or from
-  # Dependabot (Dependabot PRs run the dedicated dependabot.yml workflow instead).
+  # Lightweight selector keeps disabled platforms from allocating runners.
   platforms:
     name: Select platforms
     runs-on: ubuntu-24.04
@@ -121,31 +104,13 @@ jobs:
     name: gate
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    if: |-
-      ${{ !inputs.preview_platforms && ((github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) && (needs.platforms.outputs.any == 'true')) }}
+    if: ${{ !inputs.preview_platforms && needs.platforms.outputs.any == 'true' }}
     outputs:
       run_heavy: ${{ steps.classify.outputs.run_heavy }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: github.event_name == 'merge_group'
-        with:
-          fetch-depth: 2
-      - name: Classify merge-group diff
+      - name: Enable manually requested validation
         id: classify
-        env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha }}
-          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
-          DOCS_ONLY_PATTERN: '(^docs/|\.md$|^CHANGELOG[^/]*$|^LICENSE[^/]*$)'
-        run: |
-          run_heavy=true
-          if [ "$GITHUB_EVENT_NAME" = "merge_group" ]; then
-            changed_files="$RUNNER_TEMP/merge-group-paths"
-            git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$changed_files"
-            if [ -s "$changed_files" ] && ! grep -Eqv "$DOCS_ONLY_PATTERN" "$changed_files"; then
-              run_heavy=false
-            fi
-          fi
-          echo "run_heavy=$run_heavy" >> "$GITHUB_OUTPUT"
+        run: echo "run_heavy=true" >> "$GITHUB_OUTPUT"
 
     needs:
       - platforms
