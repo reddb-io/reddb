@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.32.1
+
+### Patch Changes
+
+- [#2779](https://github.com/reddb-io/reddb/pull/2779) [`db363d4`](https://github.com/reddb-io/reddb/commit/db363d448d82191509085c690fc8a7ce01ffc5f3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow offline compaction to discard page-aligned physical allocation beyond the
+  committed database high-water mark while still rejecting truncated or partial
+  pages.
+
 ## 1.32.0
 
 ### Minor Changes
