@@ -18,6 +18,7 @@
 //!     `Lifecycle::mark_draining`).
 //!   * Drive transitions; assert gate state + audit lines together.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -51,6 +52,9 @@ pub struct LeaseLifecycle {
     ttl_ms: u64,
     current: Mutex<Option<WriterLease>>,
     transition: Mutex<()>,
+    snapshot_publication:
+        Option<Arc<crate::runtime::serverless_snapshot_publication::SnapshotPublicationStore>>,
+    initial_snapshot_path: Option<PathBuf>,
 }
 
 impl LeaseLifecycle {
@@ -76,7 +80,19 @@ impl LeaseLifecycle {
             ttl_ms,
             current: Mutex::new(None),
             transition: Mutex::new(()),
+            snapshot_publication: None,
+            initial_snapshot_path: None,
         }
+    }
+
+    pub fn with_snapshot_publication(
+        mut self,
+        publication: Arc<crate::runtime::serverless_snapshot_publication::SnapshotPublicationStore>,
+        initial_snapshot_path: impl Into<PathBuf>,
+    ) -> Self {
+        self.snapshot_publication = Some(publication);
+        self.initial_snapshot_path = Some(initial_snapshot_path.into());
+        self
     }
 
     pub fn holder_id(&self) -> &str {
@@ -113,6 +129,30 @@ impl LeaseLifecycle {
             term,
         ) {
             Ok(lease) => {
+                if let Some(publication) = &self.snapshot_publication {
+                    let local_snapshot =
+                        self.initial_snapshot_path.as_deref().ok_or_else(|| {
+                            RedDBError::Internal(
+                                "snapshot publication configured without a local snapshot path"
+                                    .to_string(),
+                            )
+                        })?;
+                    if let Err(err) = publication.claim(&lease, local_snapshot) {
+                        let _ = self.store.release(&lease);
+                        self.audit_log.record_event(
+                            AuditEvent::builder("lease/acquire")
+                                .principal(self.holder_id.clone())
+                                .source(AuditAuthSource::System)
+                                .resource(self.database_key.clone())
+                                .outcome(Outcome::Error)
+                                .field(AuditFieldEscaper::field("error", err.to_string()))
+                                .build(),
+                        );
+                        return Err(RedDBError::ReadOnly(format!(
+                            "writer lease acquired but snapshot head claim failed: {err}"
+                        )));
+                    }
+                }
                 if Instant::now() >= deadline {
                     self.on_refresh_lost("acquire response arrived after the local lease deadline");
                     return Err(RedDBError::ReadOnly(
@@ -150,6 +190,43 @@ impl LeaseLifecycle {
                 Err(RedDBError::Internal(format!("acquire writer lease: {err}")))
             }
         }
+    }
+
+    /// Publish a checkpoint through the generation-fenced immutable-snapshot
+    /// protocol. Returns `Ok(false)` for legacy/test lifecycles that have no
+    /// publication store attached.
+    pub fn publish_snapshot(
+        &self,
+        prepare_snapshot: impl FnOnce() -> RedDBResult<reddb_file::ServerlessWriterLeaseTempFile>,
+    ) -> RedDBResult<bool> {
+        let Some(publication) = &self.snapshot_publication else {
+            return Ok(false);
+        };
+        let _transition = self.transition.lock().expect("poisoned lease transition");
+        if self.write_gate.lease_state() != LeaseGateState::Held {
+            self.on_refresh_lost("local writer lease expired before snapshot publication");
+            return Err(RedDBError::ReadOnly(
+                "writer lease expired before snapshot publication".to_string(),
+            ));
+        }
+        let lease = self
+            .current
+            .lock()
+            .expect("poisoned lease mutex")
+            .clone()
+            .ok_or_else(|| {
+                RedDBError::ReadOnly(
+                    "snapshot publication requires an acquired writer lease".to_string(),
+                )
+            })?;
+        let local_snapshot = prepare_snapshot()?;
+        if let Err(err) = publication.publish(&lease, local_snapshot.path()) {
+            self.on_refresh_lost(&err);
+            return Err(RedDBError::ReadOnly(format!(
+                "writer snapshot publication lost its fence: {err}"
+            )));
+        }
+        Ok(true)
     }
 
     /// Refresh the held lease. On success, updates the in-memory

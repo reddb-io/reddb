@@ -424,10 +424,55 @@ impl RedDB {
             }
         }
 
+        // Keep the writer fence across hydration and open: replacing a cached
+        // snapshot must never overwrite another live runtime's local artifact.
+        let mut bootstrap_writer_lock = None;
         // If remote backend configured, download before opening
         if let Some(backend) = &options.remote_backend {
             let local_path = options.resolved_path(reddb_file::default_database_path());
-            if !local_path.exists() {
+            if let Some(snapshot_key) = &options.remote_bootstrap_key {
+                if options.read_only {
+                    return Err(
+                        "serverless snapshot hydration requires a writable local cache".into(),
+                    );
+                }
+                if embedded_single_file_selected(options) {
+                    bootstrap_writer_lock =
+                        Some(reddb_file::EmbeddedRdbWriterLock::acquire(&local_path)?);
+                }
+                if let Some(parent) = local_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let snapshot = reddb_file::ServerlessWriterLeaseTempFile::new("snapshot-hydration");
+                match backend.download(snapshot_key, snapshot.path()) {
+                    Ok(true) => {
+                        if bootstrap_writer_lock.is_some() {
+                            std::fs::copy(snapshot.path(), &local_path)?;
+                        } else {
+                            // Operational hydration must use an isolated cache,
+                            // never replace a live native pager or reuse its WAL.
+                            let mut output = std::fs::OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .open(&local_path)?;
+                            std::io::copy(&mut File::open(snapshot.path())?, &mut output)?;
+                            output.sync_all()?;
+                        }
+                    }
+                    Ok(false) => {
+                        return Err(format!(
+                            "serverless bootstrap snapshot '{snapshot_key}' does not exist"
+                        )
+                        .into());
+                    }
+                    Err(err) => {
+                        return Err(format!(
+                            "serverless bootstrap snapshot download failed: {err}"
+                        )
+                        .into());
+                    }
+                }
+            } else if !local_path.exists() {
                 // Ensure parent directory exists for the download target
                 if let Some(parent) = local_path.parent() {
                     if !parent.exists() {
@@ -524,7 +569,9 @@ impl RedDB {
         // Taken before reading the snapshot: every writer holds the whole
         // store in memory and checkpoints it on close, so a second writer
         // process would silently discard the first one's commits.
-        let embedded_writer_lock = if embedded_single_file_selected(options)
+        let embedded_writer_lock = if bootstrap_writer_lock.is_some() {
+            bootstrap_writer_lock
+        } else if embedded_single_file_selected(options)
             && !options.bounded_disk_residency
             && !options.read_only
             && (path_buf.exists() || options.create_if_missing)

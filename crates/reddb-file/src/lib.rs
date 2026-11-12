@@ -366,15 +366,17 @@ pub use scrub::{
     scrub_embedded_store, StorageScrubFinding, StorageScrubReport, StorageScrubVerifiedCounters,
 };
 pub use serverless::{
-    decode_serverless_writer_lease_json, encode_serverless_writer_lease_json,
-    serverless_writer_lease_key, serverless_writer_lease_temp_path, ServerlessBootIndex,
-    ServerlessBootIndexEntry, ServerlessBootPlan, ServerlessCacheEntry,
-    ServerlessCacheEvictionPlan, ServerlessCachePolicy, ServerlessContentHash,
-    ServerlessExtentIndex, ServerlessExtentRef, ServerlessFilePlan, ServerlessGenerationPointer,
-    ServerlessHydratedRange, ServerlessHydrationPlan, ServerlessHydrationRequest,
-    ServerlessLocalCache, ServerlessManifest, ServerlessManifestEntry, ServerlessPackKind,
-    ServerlessSecondaryIndex, ServerlessSecondaryIndexEntry, ServerlessWriterLease,
-    ServerlessWriterLeaseTempFile, SERVERLESS_WRITER_LEASE_DEFAULT_TERM,
+    decode_serverless_snapshot_head_json, decode_serverless_writer_lease_json,
+    encode_serverless_snapshot_head_json, encode_serverless_writer_lease_json,
+    serverless_snapshot_head_key, serverless_snapshot_key, serverless_writer_lease_key,
+    serverless_writer_lease_temp_path, ServerlessBootIndex, ServerlessBootIndexEntry,
+    ServerlessBootPlan, ServerlessCacheEntry, ServerlessCacheEvictionPlan, ServerlessCachePolicy,
+    ServerlessContentHash, ServerlessExtentIndex, ServerlessExtentRef, ServerlessFilePlan,
+    ServerlessGenerationPointer, ServerlessHydratedRange, ServerlessHydrationPlan,
+    ServerlessHydrationRequest, ServerlessLocalCache, ServerlessManifest, ServerlessManifestEntry,
+    ServerlessPackKind, ServerlessSecondaryIndex, ServerlessSecondaryIndexEntry,
+    ServerlessSnapshotHead, ServerlessWriterLease, ServerlessWriterLeaseTempFile,
+    SERVERLESS_SNAPSHOT_HEAD_FORMAT_VERSION, SERVERLESS_WRITER_LEASE_DEFAULT_TERM,
 };
 pub use shm::{
     initialize_shm_file, read_shm_header_from_file, write_shm_header_to_file, ShmHeader,
