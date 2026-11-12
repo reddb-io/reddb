@@ -1,4 +1,4 @@
-use super::pager::MemoryFile;
+use super::pager::{MemoryFile, Operation};
 use reddb_engine::storage::{
     btree::BTree,
     page::{Page, PageType, PAGE_SIZE},
@@ -238,5 +238,71 @@ fn page_proofs_cover_cold_point_cursor_overflow_and_prior_valid_images() {
             .get(&key.to_be_bytes())
             .expect("repeated cold reopen")
             .is_some());
+    }
+}
+
+#[test]
+fn catalog_publication_fences_fallback_headers_and_failed_updates() {
+    let pager = open(None);
+    pager.fence_required_capabilities(reddb_file::FILE_CAPABILITY_CATALOG_ROOT)
+        .expect("fence the catalog byte contract before publication");
+    let make_root = |payload: &[u8]| {
+        let mut page = pager.allocate_page(PageType::Header).expect("new catalog root");
+        page.content_mut()[..payload.len()].copy_from_slice(payload);
+        page.update_checksum();
+        let reference = reddb_file::page_proof::PageReference {
+            page_id: page.page_id(), digest: reddb_file::page_proof::page_digest(page.as_bytes())
+        };
+        pager.write_page(page.page_id(), page).expect("complete catalog image");
+        reference
+    };
+    let previous = make_root(b"previous catalog");
+    let replacement = make_root(b"replacement catalog");
+    pager.sync().expect("all prospective roots are durable");
+    pager.publish_manifest_reference(previous).expect("publish first root");
+    let baseline = durable(&pager);
+    drop(pager);
+
+    let healthy = open(Some(baseline.clone()));
+    healthy.with_file(|file| file.operations.borrow_mut().clear()).expect("start publication trace");
+    healthy.publish_manifest_reference(replacement).expect("publish both replacement headers");
+    let boundaries = healthy.with_file(|file| {
+        let operations = file.operations.borrow();
+        assert_eq!(operations.iter().filter(|operation| matches!(operation, Operation::Write(_, _))).count(), 2);
+        operations.len()
+    }).expect("publication boundaries");
+    let published = durable(&healthy);
+    drop(healthy);
+    for copy in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+        let mut sibling_recovery = published.clone();
+        sibling_recovery[copy * reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE] ^= 1;
+        let reopened = open(Some(sibling_recovery));
+        assert_eq!(reopened.header().expect("fallback header").manifest_reference, replacement);
+        assert_eq!(reopened.read_manifest_page().expect("fallback root").page_id(), replacement.page_id);
+    }
+
+    for boundary in 1..=boundaries {
+        for prefix in [0, 17] {
+            let writer = open(Some(baseline.clone()));
+            writer.with_file(|file| {
+                file.operations.borrow_mut().clear();
+                file.fail_at = Some(boundary);
+                file.fail_prefix = Some(prefix);
+            }).expect("inject publication I/O failure");
+            writer.publish_manifest_reference(replacement).expect_err("interrupted superblock publication");
+            assert!(writer.allocate_page(PageType::BTreeLeaf).is_err(), "failed publication requires reopen");
+            let crash_images = writer.with_file(|file| [file.durable.borrow().clone(), file.bytes.borrow().clone()])
+                .expect("both legal power-loss outcomes");
+            drop(writer);
+            for image in crash_images {
+                let reopened = open(Some(image));
+                let reference = reopened.header().expect("selected durable header").manifest_reference;
+                assert!(reference == previous || reference == replacement, "no uncommitted root bytes");
+                let root = reopened.read_manifest_page().expect("complete selected root");
+                assert_eq!(reddb_file::page_proof::page_digest(root.as_bytes()), reference.digest);
+                reopened.publish_manifest_reference(replacement).expect("healthy publication makes progress");
+                assert_eq!(reopened.header().expect("completed retry").manifest_reference, replacement);
+            }
+        }
     }
 }

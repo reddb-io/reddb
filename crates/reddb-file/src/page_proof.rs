@@ -30,6 +30,20 @@ pub fn page_digest(bytes: &[u8; crate::PAGED_PAGE_SIZE]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
 }
 
+/// Seals the complete physical catalog chain, including its links and page IDs.
+#[derive(Default)]
+pub struct CatalogDigest(blake3::Hasher);
+
+impl CatalogDigest {
+    pub fn add_page(&mut self, bytes: &[u8; crate::PAGED_PAGE_SIZE]) {
+        self.0.update(bytes);
+    }
+
+    pub fn finish(self) -> [u8; 32] {
+        *self.0.finalize().as_bytes()
+    }
+}
+
 pub fn encode_reference(out: &mut [u8], reference: PageReference) {
     assert_eq!(out.len(), PROOF_REFERENCE_BYTES);
     out[..4].copy_from_slice(&reference.page_id.to_le_bytes());

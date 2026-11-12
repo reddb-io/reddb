@@ -14,7 +14,14 @@ impl Catalog {
         !self.references.is_empty()
     }
     pub fn read(source: &Source) -> Result<Self> {
-        let page = source.raw_page(1, true)?;
+        let reference = source.header.manifest_reference;
+        let root = source.header.manifest_page_id();
+        if root >= FIRST_ALLOCATABLE_PAGE {
+            source.claim(root)?;
+        }
+        let page = source.raw_page(root, true)?;
+        let mut digest = f::page_proof::CatalogDigest::default();
+        digest.add_page(page.as_bytes());
         ensure(
             page.page_type()? == PageType::Header,
             "invalid catalog page",
@@ -32,6 +39,7 @@ impl Catalog {
             while next != 0 {
                 source.claim(next)?;
                 let page = source.raw_page(next, true)?;
+                digest.add_page(page.as_bytes());
                 ensure(
                     page.page_type()? == PageType::Overflow,
                     "invalid catalog continuation",
@@ -51,6 +59,10 @@ impl Catalog {
             ensure(payload.len() == total, "incomplete catalog")?;
             data = payload;
         }
+        ensure(
+            reference.page_id == 0 || digest.finish() == reference.digest,
+            "catalog generation proof does not match the superblock",
+        )?;
         let header = f::decode_native_paged_metadata_header(&data)?
             .ok_or("source is not a native paged catalog")?;
         ensure(

@@ -1736,8 +1736,44 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// ADR 0074 §2: manifest corruption fails the open didactically, naming the
     /// zone — it never falls back to a sidecar and never returns garbage.
     pub fn read_manifest_page(&self) -> Result<Page, PagerError> {
-        self.read_page(1)
+        let root = self.header_read()?.manifest_page_id();
+        self.read_page(root)
             .map_err(|_| PagerError::ManifestZoneCorrupt(self.path.clone()))
+    }
+
+    /// The new catalog and all its children must already be durable. Both
+    /// fallback headers stop naming its predecessor before that root is freed.
+    pub fn publish_manifest_reference(
+        &self,
+        reference: reddb_file::page_proof::PageReference,
+    ) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        if reference.page_id < FIRST_ALLOCATABLE_PAGE
+            || reference.page_id >= self.page_count()?
+            || reference.digest == [0; 32]
+            || self.header_read()?.required_capabilities & reddb_file::FILE_CAPABILITY_CATALOG_ROOT
+                == 0
+        {
+            return Err(PagerError::InvalidDatabase(
+                "invalid catalog generation publication".into(),
+            ));
+        }
+        self.header_write()?.manifest_reference = reference;
+        let result = (|| {
+            for _ in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+                self.write_header_and_sync()?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.writeback_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
     }
 
     /// Write pages through the double-write buffer for torn page protection.

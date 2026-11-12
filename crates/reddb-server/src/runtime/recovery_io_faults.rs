@@ -1,6 +1,6 @@
 //! Recovery must retain its evidence across a second storage failure and process death.
 use super::*;
-use crate::storage::engine::{pager, PAGE_SIZE};
+use crate::storage::engine::{pager, Page, PAGE_SIZE};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -95,7 +95,7 @@ fn child(path: &Path, stage: &str, fault: &str) {
             ] {
                 runtime.execute_query(sql).expect(sql);
             }
-            pager::test_fail_next_pager_write(Some(PAGE_SIZE as u64), 17);
+            std::env::set_var("REDDB_TEST_CATALOG_HOME_IO_PREFIX", "17");
             let error = runtime
                 .checkpoint()
                 .expect_err("leave a durable DWB catalog frame");
@@ -106,7 +106,21 @@ fn child(path: &Path, stage: &str, fault: &str) {
             std::process::exit(199);
         }
         "recover" => {
-            let home = Some(PAGE_SIZE as u64);
+            let bytes = std::fs::read(path).expect("staged recovery evidence");
+            let start = usize::try_from(reddb_engine::storage::pager_io::dwb_zone_offset())
+                .expect("DWB offset");
+            let entries = reddb_file::decode_paged_dwb_frame(
+                &bytes[start..start + reddb_engine::storage::pager_io::DWB_ZONE_BYTES],
+            )
+            .expect("complete staged frame");
+            let home = entries
+                .iter()
+                .find(|entry| {
+                    Page::from_bytes(entry.page).page_type().ok()
+                        == Some(crate::storage::engine::PageType::Header)
+                })
+                .map(|entry| u64::from(entry.page_id) * PAGE_SIZE as u64);
+            assert!(home.is_some(), "recovery must contain the catalog root");
             let clear = Some(reddb_engine::storage::pager_io::dwb_zone_offset());
             match fault {
                 "home-empty" => pager::test_fail_next_pager_write(home, 0),
@@ -213,7 +227,11 @@ fn interrupted_dwb_recovery_preserves_rows_indexes_and_progress() {
         let entries =
             reddb_file::decode_paged_dwb_frame(frame).expect("complete durable DWB frame");
         assert!(
-            entries.iter().any(|entry| entry.page_id == 1),
+            entries.iter().any(|entry| {
+                entry.page_id >= reddb_engine::storage::pager_io::FIRST_ALLOCATABLE_PAGE
+                    && Page::from_bytes(entry.page).page_type().ok()
+                        == Some(crate::storage::engine::PageType::Header)
+            }),
             "catalog recovery must be exercised"
         );
         for _ in 0..if fault.starts_with("home-") { 2 } else { 1 } {

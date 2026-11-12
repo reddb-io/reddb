@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
+#[path = "catalog_publication_faults.rs"]
+mod catalog_publication_faults;
+
 fn open(path: &Path) -> RedDBResult<RedDBRuntime> {
     let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
         RedDBRuntime::with_options(
@@ -53,7 +56,7 @@ fn collection_root(path: &Path, collection: &str) -> (u32, Page) {
         },
     )
     .expect("read fixture roots");
-    let catalog = pager.read_page(1).expect("catalog");
+    let catalog = pager.read_manifest_page().expect("catalog");
     let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
         .expect("catalog trailer")
         .expect("resume roots");
@@ -197,6 +200,101 @@ fn checksum_valid_future_page_lsn_is_rejected() {
     image.update_checksum();
     replace_page(&path, root, &image);
     assert_authoritative_read_rejected(&path, "LSN");
+}
+
+#[test]
+fn checksum_valid_old_catalog_contents_are_rejected_by_the_superblock() {
+    let directory = tempfile::tempdir().expect("isolated catalog generations");
+    let path = directory.path().join("stale-catalog.rdb");
+    seed(&path);
+    let old = {
+        let pager = Pager::open(
+            &path,
+            PagerConfig {
+                read_only: true,
+                create: false,
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
+        )
+        .expect("prior catalog");
+        pager.read_manifest_page().expect("prior root image")
+    };
+    {
+        let runtime = open(&path).expect("healthy writer");
+        runtime
+            .execute_query("INSERT INTO records (id,payload) VALUES (3,'confirmed')")
+            .expect("confirmed new row");
+        runtime
+            .graceful_shutdown(false)
+            .expect("publish newer catalog");
+    }
+    let root = {
+        let pager = Pager::open(
+            &path,
+            PagerConfig {
+                read_only: true,
+                create: false,
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
+        )
+        .expect("current catalog");
+        let page = pager.read_manifest_page().expect("current root");
+        let mut old_at_current_address = Page::new(PageType::Header, page.page_id());
+        old_at_current_address
+            .content_mut()
+            .copy_from_slice(old.content());
+        old_at_current_address.update_checksum();
+        assert_ne!(page.as_bytes(), old_at_current_address.as_bytes());
+        old_at_current_address
+    };
+    replace_page(&path, root.page_id(), &root);
+    assert_authoritative_read_rejected(&path, "generation");
+}
+
+#[test]
+fn checksum_valid_catalog_continuation_change_is_rejected() {
+    let directory = tempfile::tempdir().expect("isolated large catalog");
+    let path = directory.path().join("catalog-overflow.rdb");
+    seed(&path);
+    {
+        let runtime = open(&path).expect("healthy DDL writer");
+        for table in 0..48 {
+            runtime
+                .execute_query(&format!(
+                    "CREATE TABLE table_{table}_{} (id INT)",
+                    "x".repeat(224)
+                ))
+                .expect("grow real catalog past one page");
+        }
+        runtime
+            .graceful_shutdown(false)
+            .expect("checkpoint large catalog");
+    }
+    let mut continuation = {
+        let pager = Pager::open(
+            &path,
+            PagerConfig {
+                read_only: true,
+                create: false,
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
+        )
+        .expect("healthy overflow catalog");
+        let root = pager.read_manifest_page().expect("catalog root");
+        let header = reddb_file::decode_native_metadata_overflow_header(root.content())
+            .expect("catalog framing")
+            .expect("fixture must overflow");
+        pager
+            .read_page(header.next_overflow_page_id)
+            .expect("first continuation")
+    };
+    continuation.content_mut()[8 + 31] ^= 1;
+    continuation.update_checksum();
+    replace_page(&path, continuation.page_id(), &continuation);
+    assert_authoritative_read_rejected(&path, "generation");
 }
 
 #[test]

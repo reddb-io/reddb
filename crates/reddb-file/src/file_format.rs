@@ -35,9 +35,11 @@ pub const PAGE_FILE_VERSION: u32 = PAGE_REQUIRED_CAPABILITIES_FILE_VERSION;
 pub const FILE_CAPABILITY_TEMPERATURE: u64 = 1 << 0;
 /// The file's published trees require a disk-resident writer.
 pub const FILE_CAPABILITY_DISK_RESIDENCY: u64 = 1 << 1;
+/// A copy-on-write catalog is independently sealed by both superblock copies.
+pub const FILE_CAPABILITY_CATALOG_ROOT: u64 = 1 << 2;
 /// Capabilities understood by this reader. Unknown mandatory bits are fatal.
 pub const FILE_CAPABILITIES_SUPPORTED: u64 =
-    FILE_CAPABILITY_TEMPERATURE | FILE_CAPABILITY_DISK_RESIDENCY;
+    FILE_CAPABILITY_TEMPERATURE | FILE_CAPABILITY_DISK_RESIDENCY | FILE_CAPABILITY_CATALOG_ROOT;
 
 /// Whether a pre-capability format version implies disk residency.
 /// Capability-aware callers must use [`DatabaseHeader::requires_disk_residency`].
@@ -368,6 +370,10 @@ const DB_CHECKPOINT_IN_PROGRESS_OFFSET: usize = PAGED_PAGE_HEADER_SIZE + 192;
 const DB_CHECKPOINT_TARGET_LSN_OFFSET: usize = PAGED_PAGE_HEADER_SIZE + 193;
 const DB_REQUIRED_CAPABILITIES_OFFSET: usize = PAGED_PAGE_HEADER_SIZE + 208;
 const DB_HEADER_MIN_LEN: usize = DB_REQUIRED_CAPABILITIES_OFFSET + 8;
+// Keep the legacy encryption envelope (bytes 64..160) and all existing fields intact.
+const DB_MANIFEST_REFERENCE_OFFSET: usize = 256;
+const DB_MANIFEST_REFERENCE_END: usize = DB_MANIFEST_REFERENCE_OFFSET + 36;
+const _: () = assert!(DB_MANIFEST_REFERENCE_END < PAGED_SUPERBLOCK_TRAILER_OFFSET);
 
 /// Double-write-buffer file magic: `RDDW`.
 pub const DWB_MAGIC: [u8; 4] = [0x52, 0x44, 0x44, 0x57];
@@ -506,10 +512,20 @@ pub struct DatabaseHeader {
     pub checkpoint_target_lsn: u64,
     /// Monotonic set of byte-level features required to decode this file.
     pub required_capabilities: u64,
+    /// Digest over the root page followed by every catalog continuation page.
+    /// The zero reference retains the legacy fixed page-1 bootstrap catalog.
+    pub manifest_reference: crate::page_proof::PageReference,
     pub physical: PhysicalFileHeader,
 }
 
 impl DatabaseHeader {
+    pub fn manifest_page_id(&self) -> u32 {
+        if self.manifest_reference.page_id == 0 {
+            1
+        } else {
+            self.manifest_reference.page_id
+        }
+    }
     /// Whether the file requires a writer that participates in the bounded
     /// disk-residency protocol.
     ///
@@ -538,6 +554,7 @@ impl Default for DatabaseHeader {
             checkpoint_in_progress: false,
             checkpoint_target_lsn: 0,
             required_capabilities: 0,
+            manifest_reference: crate::page_proof::PageReference::default(),
             physical: PhysicalFileHeader::default(),
         }
     }
@@ -583,6 +600,7 @@ pub struct PhysicalFileHeader {
 pub enum DatabaseHeaderError {
     ShortPage { need: usize, got: usize },
     InvalidMagic,
+    InvalidManifestReference,
     UnsupportedPageSize(u32),
     UnsupportedDatabaseVersion { file_version: u32, supported: u32 },
     UnsupportedRequiredCapabilities(u64),
@@ -595,6 +613,7 @@ impl fmt::Display for DatabaseHeaderError {
                 write!(f, "database header page too short: need {need} bytes, got {got}")
             }
             Self::InvalidMagic => write!(f, "invalid database header magic"),
+            Self::InvalidManifestReference => write!(f, "invalid catalog generation reference"),
             Self::UnsupportedPageSize(size) => write!(f, "Unsupported page size: {size}"),
             Self::UnsupportedDatabaseVersion {
                 file_version,
@@ -709,6 +728,15 @@ pub fn decode_database_header(page: &[u8]) -> Result<DatabaseHeader, DatabaseHea
         checkpoint_in_progress: page[DB_CHECKPOINT_IN_PROGRESS_OFFSET] != 0,
         checkpoint_target_lsn: read_u64(page, DB_CHECKPOINT_TARGET_LSN_OFFSET)?,
         required_capabilities,
+        manifest_reference: if required_capabilities & FILE_CAPABILITY_CATALOG_ROOT != 0 {
+            ensure_len(page, DB_MANIFEST_REFERENCE_END)?;
+            crate::page_proof::decode_reference(
+                &page[DB_MANIFEST_REFERENCE_OFFSET..DB_MANIFEST_REFERENCE_END],
+            )
+            .ok_or(DatabaseHeaderError::InvalidManifestReference)?
+        } else {
+            crate::page_proof::PageReference::default()
+        },
         physical: PhysicalFileHeader {
             format_version: read_u32(page, DB_PHYSICAL_FORMAT_VERSION_OFFSET)?,
             sequence: read_u64(page, DB_PHYSICAL_SEQUENCE_OFFSET)?,
@@ -869,7 +897,13 @@ pub fn encode_database_header(
         page,
         DB_REQUIRED_CAPABILITIES_OFFSET,
         header.required_capabilities,
-    )
+    )?;
+    ensure_len(page, DB_MANIFEST_REFERENCE_END)?;
+    crate::page_proof::encode_reference(
+        &mut page[DB_MANIFEST_REFERENCE_OFFSET..DB_MANIFEST_REFERENCE_END],
+        header.manifest_reference,
+    );
+    Ok(())
 }
 
 // ── Paged superblock zone (ADR 0038 §2 phase 1) ─────────────────────────
@@ -1395,7 +1429,11 @@ mod tests {
             checkpoint_lsn: 99,
             checkpoint_in_progress: true,
             checkpoint_target_lsn: 123,
-            required_capabilities: FILE_CAPABILITY_TEMPERATURE,
+            required_capabilities: FILE_CAPABILITY_TEMPERATURE | FILE_CAPABILITY_CATALOG_ROOT,
+            manifest_reference: crate::page_proof::PageReference {
+                page_id: 39,
+                digest: [40; 32],
+            },
             physical: PhysicalFileHeader {
                 format_version: 11,
                 sequence: 12,
