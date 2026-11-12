@@ -1982,43 +1982,5 @@ fn hypertable_from_json_value(
     })
 }
 
-fn page_location_json_value(loc: PhysicalPageLocation) -> serde_json::Value {
-    let mut object = serde_json::Map::new();
-    object.insert("page_id".to_string(), json_u64(loc.page_id as u64));
-    object.insert("offset".to_string(), json_u64(loc.offset as u64));
-    object.insert("length".to_string(), json_u64(loc.length as u64));
-    serde_json::Value::Object(object)
-}
-
-fn page_location_from_json_value(value: &serde_json::Value) -> RdbFileResult<PhysicalPageLocation> {
-    let object = expect_object(value, "page location")?;
-    Ok(PhysicalPageLocation {
-        page_id: json_u64_required(object, "page_id")? as u32,
-        offset: json_u64_required(object, "offset")? as u32,
-        length: json_u64_required(object, "length")? as u32,
-    })
-}
-
-fn manifest_event_kind_as_str(kind: ManifestEventKind) -> &'static str {
-    match kind {
-        ManifestEventKind::Insert => "insert",
-        ManifestEventKind::Update => "update",
-        ManifestEventKind::Remove => "remove",
-        ManifestEventKind::Checkpoint => "checkpoint",
-    }
-}
-
-fn manifest_event_kind_from_str(value: &str) -> RdbFileResult<ManifestEventKind> {
-    match value {
-        "insert" => Ok(ManifestEventKind::Insert),
-        "update" => Ok(ManifestEventKind::Update),
-        "remove" => Ok(ManifestEventKind::Remove),
-        "checkpoint" => Ok(ManifestEventKind::Checkpoint),
-        other => Err(invalid(format!(
-            "unsupported manifest event kind '{other}'"
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod tests;

@@ -74,6 +74,8 @@ macro_rules! exact_function_cases {
         $case!("MONEY_ASSET", "SELECT MONEY_ASSET(MONEY('USD 12.34')) AS value", Value::AssetCode("USD".to_string()));
         $case!("MONEY_MINOR", "SELECT MONEY_MINOR(MONEY('USD 12.34')) AS value", Value::BigInt(1_234));
         $case!("MONEY_SCALE", "SELECT MONEY_SCALE(MONEY('USD 12.34')) AS value", Value::Integer(2));
+        $case!("TEMPERATURE", "SELECT TEMPERATURE('20 C') AS value", Value::Temperature(reddb_types::Temperature::new(20, 0, reddb_types::TemperatureUnit::Celsius).expect("valid temperature")));
+        $case!("TEMPERATURE_UNIT", "SELECT TEMPERATURE_UNIT(TEMPERATURE('20 C')) AS value", Value::text("C"));
         $case!("JSON_PARSE", "SELECT JSON_PARSE('{\"a\":1}') AS value", Value::Json(br#"{"a":1}"#.to_vec()));
         $case!("JSON_EXTRACT", "SELECT JSON_EXTRACT('{\"a\":\"x\"}', '$.a') AS value", Value::text("\"x\""));
         $case!("JSON_EXTRACT_TEXT", "SELECT JSON_EXTRACT_TEXT('{\"a\":\"x\"}', '$.a') AS value", Value::text("x"));
@@ -114,6 +116,7 @@ macro_rules! float_function_cases {
         $case!("DEGREES", "SELECT DEGREES(PI()) AS value", 180.0);
         $case!("RADIANS", "SELECT RADIANS(180) AS value", std::f64::consts::PI);
         $case!("PI", "SELECT PI() AS value", std::f64::consts::PI);
+        $case!("TEMPERATURE_VALUE", "SELECT TEMPERATURE_VALUE(TEMPERATURE('20 C'), 'F') AS value", 68.0);
     };
 }
 
