@@ -65,5 +65,9 @@ require stale-frame rejection with unchanged source/WAL, authorized current
 repair, HASH/BTREE parity, UNIQUE enforcement and bounded forward progress.
 Offline tests cover interrupted staging and clearing on a preserved copy.
 
-The change remains part of draft qualification. The legacy migration and
-retirement lifecycle still needs verification before the parent PR can merge.
+The legacy migration/retirement journey now verifies the first protected
+publication, either-superblock fallback, exact cold reads and subsequent
+update/vacuum/overflow recreation cycles with actual address reuse. Retained
+legacy trees receive independent proofs without moving their data; existing
+reader pins continue to prevent premature reclamation. Native and offline
+readers reject missing retired descriptors in a proof-bearing catalog.

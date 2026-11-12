@@ -256,6 +256,30 @@ impl<P: PageStore> TreePageStore<P> {
         })
     }
 
+    pub(super) fn prepare_legacy(&self, pages: &[u32]) -> Result<Self, PagerError> {
+        if self.proof.is_some() {
+            return Err(invalid(0, "legacy preparation requires an unverified tree"));
+        }
+        let prepared = Self::verified(Arc::clone(&self.inner), PageProofRoot::default())?;
+        {
+            let mut state = prepared.proof.as_ref().expect("verified state").write();
+            for &id in pages {
+                let page = self.inner.read_page(id)?;
+                if page.page_id() != id {
+                    return Err(invalid(id, "legacy preparation found a misdirected page"));
+                }
+                page.verify_checksum()?;
+                state.set(
+                    self.inner.as_ref(),
+                    id,
+                    page_proof::page_digest(page.as_bytes()),
+                )?;
+            }
+            state.sealed = true;
+        }
+        Ok(prepared)
+    }
+
     fn available(&self) -> Result<(), PagerError> {
         if self.failed.load(AtomicOrdering::Acquire) {
             return Err(invalid(

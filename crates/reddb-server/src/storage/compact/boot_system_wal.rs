@@ -161,7 +161,7 @@ impl BootSystemWalPlan {
         catalog.retain_canonical_system_config()?;
         let mut identities = HashMap::new();
         if legacy_root != 0 {
-            let tree = source.tree(legacy_root, true)?;
+            let tree = source.tree(legacy_root)?;
             let mut cursor = tree.cursor_first()?;
             while let Some((key, bytes)) = cursor.next_with_budget(32 * 1024 * 1024)? {
                 ensure(

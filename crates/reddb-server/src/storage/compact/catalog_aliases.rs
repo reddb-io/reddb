@@ -299,7 +299,7 @@ fn read_rows(
     bytes_read: &mut usize,
     floors: &mut (u64, u64, u64),
 ) -> Result<BTreeMap<Vec<String>, Row>> {
-    let tree = source.tree(root, true)?;
+    let tree = source.tree(root)?;
     let mut cursor = tree.cursor_first()?;
     let mut rows = BTreeMap::<Vec<String>, Row>::new();
     while let Some((key, bytes)) = cursor.next_with_budget(READ_BUDGET)? {

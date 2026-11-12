@@ -49,10 +49,16 @@ fn run_child(path: &Path, phase: &str, expected: i32) {
 
 /// Homes are already durable at the before-publication crash. Publish only
 /// one sealed header to reproduce a crash between the two superblock writes.
-fn publish_one_slot(path: &Path) -> reddb_file::page_proof::PageReference {
+pub(super) fn publish_one_slot(path: &Path) -> reddb_file::page_proof::PageReference {
     let bytes = std::fs::read(path).expect("prepared catalog pages");
     let previous = reference(path);
-    let prior_offset = usize::try_from(previous.page_id).expect("prior root") * PAGE_SIZE;
+    let prior_offset = usize::try_from(if previous.page_id == 0 {
+        1
+    } else {
+        previous.page_id
+    })
+    .expect("prior root")
+        * PAGE_SIZE;
     let prior =
         Page::from_slice(&bytes[prior_offset..prior_offset + PAGE_SIZE]).expect("prior catalog");
     let epoch =

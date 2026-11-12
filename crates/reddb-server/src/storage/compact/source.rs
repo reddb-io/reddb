@@ -181,7 +181,7 @@ impl Source {
         )
     }
 
-    pub fn tree(self: &Arc<Self>, root: u32, required: bool) -> Result<BTree<Source>> {
+    pub fn tree(self: &Arc<Self>, root: u32) -> Result<BTree<Source>> {
         let proofs = self
             .tree_proofs
             .get()
@@ -193,9 +193,7 @@ impl Source {
         match (root, proof) {
             (0, _) if proofs.is_some() => Ok(BTree::new_verified(Arc::clone(self))?),
             (_, Some(proof)) => Ok(BTree::with_verified_root(Arc::clone(self), root, proof)?),
-            (_, None) if required && proofs.is_some() => {
-                Err("missing catalog tree generation proof".into())
-            }
+            (_, None) if proofs.is_some() => Err("missing catalog tree generation proof".into()),
             _ => Ok(BTree::with_root(Arc::clone(self), root)),
         }
     }
@@ -203,7 +201,7 @@ impl Source {
     /// Account for a discarded tree without trusting its damaged data pages.
     /// Legacy trees still require the caller's structural recovery checks.
     pub fn claim_published_tree(self: &Arc<Self>, root: u32) -> Result<bool> {
-        let Some(pages) = self.tree(root, true)?.published_owned_pages()? else {
+        let Some(pages) = self.tree(root)?.published_owned_pages()? else {
             return Ok(false);
         };
         for id in pages {

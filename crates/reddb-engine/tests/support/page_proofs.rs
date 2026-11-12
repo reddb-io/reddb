@@ -37,6 +37,91 @@ fn value(key: u64) -> Vec<u8> {
     vec![u8::try_from(key % 251).expect("bounded byte"); 128]
 }
 
+#[test]
+fn legacy_preparation_keeps_data_addresses_and_existing_reader_pins() {
+    let pager = open(None);
+    let legacy = BTree::new(Arc::clone(&pager));
+    for key in 0_u64..512 {
+        legacy
+            .insert(&key.to_be_bytes(), &value(key))
+            .expect("legacy row");
+    }
+    let mut state = 0x4d595df4d0f33173_u64;
+    let large = (0..48_000)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[0]
+        })
+        .collect::<Vec<_>>();
+    legacy
+        .insert(&999_u64.to_be_bytes(), &large)
+        .expect("legacy overflow");
+    let root = legacy.root_page_id();
+    let pages = legacy.retired_pages().expect("legacy ownership");
+    let before = durable(&pager);
+    let mut cursor = legacy.cursor_first().expect("reader predates preparation");
+    assert_eq!(
+        cursor.next().expect("first old row"),
+        Some((0_u64.to_be_bytes().to_vec(), value(0)))
+    );
+    pager
+        .fence_required_capabilities(
+            reddb_file::file_format::FILE_CAPABILITY_TREE_PROOFS
+                | reddb_file::file_format::FILE_CAPABILITY_DWB_PUBLICATION,
+        )
+        .expect("fence protected preparation");
+    let prepared = legacy
+        .prepare_legacy_page_proofs()
+        .expect("prepare frozen generation");
+    assert_eq!(prepared.root_page_id(), root);
+    drop(legacy);
+    assert!(
+        prepared.has_retirement_readers(),
+        "old cursor must still prevent reclamation"
+    );
+    for key in 1_u64..512 {
+        assert_eq!(
+            cursor.next().expect("old reader continues"),
+            Some((key.to_be_bytes().to_vec(), value(key)))
+        );
+    }
+    assert_eq!(
+        cursor.next().expect("old overflow reader"),
+        Some((999_u64.to_be_bytes().to_vec(), large.clone()))
+    );
+    assert_eq!(cursor.next().expect("old cursor complete"), None);
+    drop(cursor);
+    assert!(
+        !prepared.has_retirement_readers(),
+        "reader release must allow reclamation"
+    );
+    let (new_root, proof) = prepared
+        .seal_page_proofs()
+        .expect("seal prepared generation")
+        .expect("proof enabled");
+    let after = durable(&pager);
+    for id in pages {
+        let start = id as usize * PAGE_SIZE;
+        assert!(
+            before[start..start + PAGE_SIZE] == after[start..start + PAGE_SIZE],
+            "preparation rewrote legacy data page {id}"
+        );
+    }
+    drop(prepared);
+    drop(pager);
+    let (_, cold) = restored(after, new_root, proof);
+    assert_eq!(
+        cold.get(&0_u64.to_be_bytes()).expect("cold point read"),
+        Some(value(0))
+    );
+    assert_eq!(
+        cold.get(&999_u64.to_be_bytes()).expect("cold overflow"),
+        Some(large)
+    );
+}
+
 fn replace(bytes: &mut [u8], page_id: u32, page: &Page) {
     assert_eq!(page.page_id(), page_id);
     page.verify_checksum().expect("fault must pass its own CRC");

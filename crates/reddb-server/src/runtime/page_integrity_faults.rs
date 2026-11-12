@@ -11,6 +11,9 @@ mod catalog_publication_faults;
 #[path = "resident_generation_faults.rs"]
 mod resident_generation_faults;
 
+#[path = "legacy_generation_faults.rs"]
+mod legacy_generation_faults;
+
 fn open(path: &Path) -> RedDBResult<RedDBRuntime> {
     let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
         RedDBRuntime::with_options(

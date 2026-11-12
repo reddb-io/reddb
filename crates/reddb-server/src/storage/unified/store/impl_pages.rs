@@ -8,13 +8,12 @@ fn restore_published_tree(
     pager: &Arc<Pager>,
     root: u32,
     proofs: Option<&reddb_file::page_proof::CatalogProofs>,
-    required: bool,
 ) -> Result<BTree, StoreError> {
     let proof = proofs.and_then(|proofs| proofs.get(&root)).copied();
     let tree = match (root, proof) {
         (0, _) if proofs.is_some() => BTree::new_verified(Arc::clone(pager)),
         (_, Some(proof)) => BTree::with_verified_root(Arc::clone(pager), root, proof),
-        (_, None) if required && proofs.is_some() => {
+        (_, None) if proofs.is_some() => {
             return Err(page_integrity(
                 root,
                 None,
@@ -656,11 +655,24 @@ impl UnifiedStore {
         keys: &HashMap<String, PublishedKeyIndex>,
     ) -> Result<(), StoreError> {
         let mut next_xid_summary = None;
+        let publishes_proofs = pager
+            .header()
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+            .required_capabilities
+            & reddb_file::file_format::FILE_CAPABILITY_TREE_PROOFS
+            != 0;
+        if publishes_proofs {
+            pager
+                .fence_required_capabilities(
+                    reddb_file::file_format::FILE_CAPABILITY_DWB_PUBLICATION,
+                )
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        }
         let mut retired = self.retired_btrees.lock();
         let mut roots = Vec::new();
         let mut reclaim = Vec::new();
         let mut remove = std::collections::HashSet::new();
-        for (index, entry) in retired.iter().enumerate() {
+        for (index, entry) in retired.iter_mut().enumerate() {
             if live
                 .values()
                 .chain(keys.values().flat_map(PublishedKeyIndex::trees))
@@ -688,6 +700,12 @@ impl UnifiedStore {
                 );
                 remove.insert(index);
             } else if entry.tree.root_page_id() != 0 {
+                if publishes_proofs && !entry.tree.has_page_proofs() {
+                    let prepared = entry.tree.prepare_legacy_page_proofs().map_err(|error| {
+                        page_integrity(entry.tree.root_page_id(), None, error.to_string())
+                    })?;
+                    entry.tree = Arc::new(prepared);
+                }
                 roots.push(entry.tree.root_page_id());
             }
         }
@@ -723,13 +741,7 @@ impl UnifiedStore {
             reddb_file::native_store::encode_native_paged_ownership_epoch(metadata, catalog_epoch)
                 .map_err(|e| StoreError::Serialization(e.to_string()))?;
         }
-        if pager
-            .header()
-            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
-            .required_capabilities
-            & reddb_file::file_format::FILE_CAPABILITY_TREE_PROOFS
-            != 0
-        {
+        if publishes_proofs {
             let mut proofs = reddb_file::page_proof::CatalogProofs::new();
             for tree in live
                 .values()
@@ -2241,8 +2253,7 @@ impl UnifiedStore {
                     }
                     // Load B-tree with root page if it exists
                     if root_page > 0 || counters.is_some() {
-                        let btree =
-                            restore_published_tree(pager, root_page, proofs.as_ref(), true)?;
+                        let btree = restore_published_tree(pager, root_page, proofs.as_ref())?;
 
                         // Load all entities from B-tree into the collection
                         let mut cursor = btree.cursor_first().map_err(|err| {
@@ -2366,8 +2377,7 @@ impl UnifiedStore {
                         let key_tree = counters
                             .and_then(|state| state.key_index_root)
                             .map(|root| {
-                                restore_published_tree(pager, root, proofs.as_ref(), true)
-                                    .map(Arc::new)
+                                restore_published_tree(pager, root, proofs.as_ref()).map(Arc::new)
                             })
                             .transpose()?;
                         if let Some(counters) = counters {
@@ -2381,11 +2391,11 @@ impl UnifiedStore {
                                                 codec_version: index.codec_version,
                                                 definition: index.definition,
                                             },
-                                            tree: Arc::new(restore_published_tree(pager, index.root_page, proofs.as_ref(), true)?),
+                                            tree: Arc::new(restore_published_tree(pager, index.root_page, proofs.as_ref())?),
                                         }))
                                     }).collect::<Result<_, StoreError>>()?,
                                     source: Arc::downgrade(&btree),
-                                    tree: match &key_tree { Some(tree) => Arc::clone(tree), None => Arc::new(restore_published_tree(pager, 0, proofs.as_ref(), true)?) },
+                                    tree: match &key_tree { Some(tree) => Arc::clone(tree), None => Arc::new(restore_published_tree(pager, 0, proofs.as_ref())?) },
                                 },
                             );
                         }
@@ -2538,12 +2548,7 @@ impl UnifiedStore {
                         ));
                     }
                     self.retired_btrees.lock().push(RetiredBTree {
-                        tree: Arc::new(restore_published_tree(
-                            pager,
-                            root,
-                            proofs.as_ref(),
-                            false,
-                        )?),
+                        tree: Arc::new(restore_published_tree(pager, root, proofs.as_ref())?),
                         published: true,
                     });
                 }
@@ -2556,7 +2561,6 @@ impl UnifiedStore {
                         pager,
                         root,
                         proofs.as_ref(),
-                        false,
                     )?));
                 }
                 if proofs.as_ref().is_some_and(|proofs| {

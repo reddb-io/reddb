@@ -20,6 +20,8 @@ pub(crate) mod boot_system_wal;
 mod catalog;
 pub(crate) mod catalog_aliases;
 mod internal_metadata;
+#[cfg(test)]
+pub(crate) mod legacy_fixture;
 mod salvage;
 mod scrub;
 mod source;
@@ -954,7 +956,7 @@ fn compact_paged_inner(
                     }
                     match source.raw_page(index.root_page, true) {
                         Ok(_) => {
-                            let tree = source.tree(index.root_page, true)?;
+                            let tree = source.tree(index.root_page)?;
                             let skipped = tree.visit_recoverable_leaves(
                                 |id| {
                                     source.claim(id).map_err(|error| {
@@ -1215,7 +1217,7 @@ fn rewrite_recoverable_tree(
         !roots.contains_key(&loss.root_page),
         "duplicate live tree owner",
     )?;
-    let original = source.tree(loss.root_page, true)?;
+    let original = source.tree(loss.root_page)?;
     let destination = new_output_tree(target)?;
     let mut hash = blake3::Hasher::new();
     let mut count = 0u64;
@@ -1256,7 +1258,7 @@ fn verify_recovered_tree(
     count: u64,
     expected: blake3::Hash,
 ) -> Result<()> {
-    let tree = source.tree(root, true)?;
+    let tree = source.tree(root)?;
     let (owned, _) = inventory_tree(source, &tree, false)?;
     ensure(owned == count, "recovered tree record count differs")?;
     let mut cursor = tree.cursor_first()?;
@@ -1285,7 +1287,7 @@ fn rewrite_tree(
         return Ok(0);
     }
     ensure(!roots.contains_key(&root), "duplicate live tree owner")?;
-    let tree = source.tree(root, true)?;
+    let tree = source.tree(root)?;
     let (expected, repairs) = inventory_tree(source, &tree, true)?;
     *repaired_leaf_backlinks += repairs;
     let destination = new_output_tree(target)?;
@@ -1367,8 +1369,8 @@ fn verify_tree(
     new: u32,
     rewritten: Option<&(u32, Vec<u8>, Vec<u8>)>,
 ) -> Result<()> {
-    let old = source.tree(old, true)?;
-    let new = destination.tree(new, true)?;
+    let old = source.tree(old)?;
+    let new = destination.tree(new)?;
     inventory_tree(destination, &new, false)?;
     let mut left = old.cursor_first()?;
     let mut right = new.cursor_first()?;

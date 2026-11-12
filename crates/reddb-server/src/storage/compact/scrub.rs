@@ -158,7 +158,7 @@ fn inspect_tree(
             )?;
             return Ok(0);
         }
-        let tree = source.tree(root, true)?;
+        let tree = source.tree(root)?;
         let (expected, _) = inventory_tree(source, &tree, true)?;
         let mut cursor = tree.cursor_first()?;
         let mut previous: Option<Vec<u8>> = None;

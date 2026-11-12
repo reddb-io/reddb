@@ -39,8 +39,8 @@ the current page with that address's old checksummed image, then read at cold bo
 The original resume catalog stored root addresses, counts and index definitions without sealing
 every expected page image independently. A stamp read from the suspect page itself is not an
 independent generation proof. The follow-up now binds tree-image maps to the independent catalog
-root; the original SQL counterexample passes. Scenario 2 still requires qualification of recovery
-source authority, legacy retirement and offline rewrites before merge.
+root; the original SQL counterexample passes. The qualification sections below cover recovery-source
+authority, legacy retirement and offline rewrites.
 
 Reference fault patterns: [MariaDB's future-LSN test recalculates the page CRC](https://github.com/MariaDB/server/blob/11.8/mysql-test/suite/innodb/t/corrupted_during_recovery.test).
 [PostgreSQL's amcheck documentation](https://www.postgresql.org/docs/current/amcheck.html) distinguishes
@@ -72,7 +72,7 @@ explicit required capability; changing catalog formats cannot silently re-enable
 Resource sketch: publication adds two sealed-header writes and their existing fsync barriers. It
 hashes the bounded catalog chain while encoding/reading it; it does not scan collection data at boot.
 
-## Generation proof implementation in progress
+## Generation proof mechanism
 
 The follow-up adds an authenticated page map to the shared B-tree. Its persisted byte contract is
 owned by `reddb-file::page_proof`; `BTree::new_verified` and `with_verified_root` route point reads,
@@ -185,9 +185,9 @@ After these ownership changes, all 51 portable engine integration cases passed i
 `cargo check --locked -p reddb-io-server -j1` also passed. The four existing atomic-API deprecation
 warnings remain outside this change.
 
-This remains a draft qualification. The DWB follow-up below supplies independent frame authority;
-a frame's own CRC is not proof of freshness. Legacy preparation and retirement still need their full
-migration/reuse journey. None of these local
+The DWB follow-up below supplies independent frame authority; a frame's own CRC is not proof of
+freshness. The final follow-up covers the legacy preparation and retirement migration/reuse journey.
+None of these local
 results closes the other promotion, cross-pod retry, concurrent UNIQUE rebuild, backup or multimodel
 resilience scenarios.
 
@@ -216,3 +216,37 @@ recovery after interrupted staging/clearing. The stale-frame native regression a
 with its explicit read-only rejection check in 12.33 seconds. The four portable DWB journeys were
 repeated with short staging-header prefixes (0, 1, 4, 5, 8, 9, 12 and 17 bytes); all passed in 9.80
 seconds. All 365 existing file-codec tests passed in 7.66 seconds.
+
+## Legacy preparation and retirement
+
+A new native journey constructs a pre-proof file in a fresh test directory using the existing
+record/catalog/resume contracts, with its fixed page-1 bootstrap, disk-residency capability, persisted
+HASH/BTREE indexes and overflow records. Fixture construction verifies the modern source and creates
+new unverified trees; it does not downgrade an existing database or add an alternate runtime writer.
+
+The first run failed in 13.33 seconds: root 67 remained in the retirement ledger of the first protected
+catalog without an independent proof. Retained legacy trees now receive proofs over their existing
+pages before publication. Identity, CRC, topology and overflow ownership are checked during preparation.
+Their data addresses and images remain unchanged, and the prepared handle shares the old reader pin.
+Preparation establishes a baseline from the legacy integrity checks; freshness guarantees begin with
+the independently published generation, rather than proving history that predates those roots.
+Catalogs that contain a proof block require descriptors for every nonzero live/key/secondary/retired
+tree; native and offline readers no longer have an exception for unverified retired roots.
+
+The portable preparation journey checks an existing ordered cursor and overflow read across conversion,
+unchanged data bytes, release of the reader pin and a verified cold reopen. The first native positive
+round passed in 87.66 seconds: crashes before/after publication and loss of the newest one-slot header,
+then six cold update/vacuum/overflow delete/recreate cycles per crash phase. Exact indexed/scan rows,
+UNIQUE rejection, complete ownership proofs and actual reuse of legacy addresses are required. Every
+child has a 60-second progress deadline; file-backed child output avoids a blocked logging pipe.
+
+The expanded native round additionally removes one retired descriptor, then correctly re-seals the
+catalog and both header copies. Both native and offline readers must reject that structurally incomplete
+generation without altering the source. The patch release entry lives in
+`.changeset/native-generation-authority.md`; no version number or release tag is edited manually.
+
+The complete native page-integrity round passed all ten cases in 291.11 seconds, including this
+malformed-publication rejection. All 56 portable engine cases passed in 199.54 seconds, and all 56
+offline cases passed in 212.00 seconds. The native repeated-recovery I/O matrix passed again in
+59.52 seconds. These results qualify the native generation changes; the remaining promotion,
+cross-pod retry, concurrent UNIQUE rebuild, backup and multimodel fault scenarios remain separate work.

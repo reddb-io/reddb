@@ -1,6 +1,23 @@
 use super::*;
 
 impl<P: PageStore> BTree<P> {
+    /// Authenticate a frozen legacy generation without moving or rewriting its
+    /// data. The host must fence the reader capability and deferred reclamation,
+    /// sync the new proof pages, and publish their root before allowing reuse.
+    /// Existing cursors retain their retirement pin across this transition.
+    pub fn prepare_legacy_page_proofs(&self) -> BTreeResult<Self> {
+        let _writer = self.writer.lock();
+        let pages = self.retired_pages()?;
+        let pager = self.pager.prepare_legacy(&pages)?;
+        Ok(Self {
+            retirement_pin: Arc::clone(&self.retirement_pin),
+            pager: Arc::new(pager),
+            root_page_id: RwLock::new(self.root_page_id()),
+            rightmost_leaf: RwLock::new(None),
+            writer: parking_lot::ReentrantMutex::new(()),
+        })
+    }
+
     pub fn has_retirement_readers(&self) -> bool {
         Arc::strong_count(&self.retirement_pin) != 1
     }

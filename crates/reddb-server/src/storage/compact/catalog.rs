@@ -143,8 +143,10 @@ impl Catalog {
                 .filter(|root| *root != 0)
                 .collect::<std::collections::BTreeSet<_>>();
             ensure(
-                live.iter().all(|root| proofs.contains_key(root)),
-                "live tree has no generation proof",
+                live.iter()
+                    .chain(retired_roots.iter())
+                    .all(|root| proofs.contains_key(root)),
+                "published tree has no generation proof",
             )?;
             ensure(
                 proofs.iter().all(|(root, proof)| {
@@ -172,7 +174,7 @@ impl Catalog {
     /// ownership proof. Never treat arbitrary unclassified pages as garbage.
     pub fn claim_retired(&self, source: &Arc<Source>) -> Result<()> {
         for root in &self.retired_roots {
-            let tree = source.tree(*root, false)?;
+            let tree = source.tree(*root)?;
             for page in tree.retired_pages()? {
                 source.claim(page)?;
             }
