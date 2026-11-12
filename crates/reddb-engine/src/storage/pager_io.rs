@@ -75,8 +75,20 @@ pub fn read_page<F: VfsFile>(
     // Page 0 contains independently sealed superblocks, not a page checksum.
     if verify_checksum && page_id != 0 {
         page.verify_checksum()?;
+        check_page_identity(&page, page_id)?;
     }
     Ok(page)
+}
+
+/// Check plaintext identity only; encrypted envelopes are authenticated by the host.
+pub fn check_page_identity(page: &Page, expected: u32) -> Result<(), PagerIoError> {
+    if expected != 0 && page.page_id() != expected {
+        return Err(PagerIoError::InvalidDatabase(format!(
+            "page identity mismatch: requested {expected}, found {}",
+            page.page_id()
+        )));
+    }
+    Ok(())
 }
 
 /// Raw write, without a durability barrier. The owner controls publication.

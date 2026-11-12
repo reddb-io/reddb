@@ -183,6 +183,18 @@ impl Default for PagerConfig {
 pub trait WalBarrier {
     fn flush_until(&self, lsn: u64) -> std::io::Result<()>;
 
+    /// A cold page must not claim changes beyond the host's durable WAL.
+    /// LSN zero and the completed physical checkpoint need no live WAL handle.
+    fn validate_page_lsn(&self, lsn: u64, checkpoint_lsn: u64) -> std::io::Result<()> {
+        if lsn <= checkpoint_lsn {
+            return Ok(());
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "page LSN has no durable WAL authority",
+        ))
+    }
+
     /// A checkpoint host can preserve the first image of an existing page
     /// before the cache accepts an overwrite. Newly reserved pages need no undo.
     fn needs_page_image(&self, _page_id: u32) -> std::io::Result<bool> {
@@ -751,21 +763,30 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// Read a page from disk (bypassing cache)
     fn read_page_raw(&self, page_id: u32) -> Result<Page, PagerError> {
         let mut file = self.file_lock()?;
-        if let Some(batch) = self
+        let page = match self
             .staged_pages
             .lock()
             .map_err(|_| PagerError::LockPoisoned)?
             .as_ref()
         {
-            if let Some(page) = batch.read(&mut *file, page_id)? {
-                return Ok(page);
-            }
+            Some(batch) => match batch.read(&mut *file, page_id)? {
+                Some(page) => page,
+                None => pager_io::read_page(&mut *file, page_id, self.config.verify_checksums)?,
+            },
+            None => pager_io::read_page(&mut *file, page_id, self.config.verify_checksums)?,
+        };
+        drop(file);
+        if self.config.verify_checksums && page_id != 0 && page.lsn() != 0 {
+            self.wal
+                .validate_page_lsn(page.lsn(), self.header_read()?.checkpoint_lsn)
+                .map_err(|error| {
+                    PagerError::InvalidDatabase(format!(
+                        "page {page_id} has unverified LSN {}: {error}",
+                        page.lsn()
+                    ))
+                })?;
         }
-        Ok(pager_io::read_page(
-            &mut *file,
-            page_id,
-            self.config.verify_checksums,
-        )?)
+        Ok(page)
     }
 
     fn ensure_writeback_available(&self) -> Result<(), PagerError> {
@@ -932,6 +953,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             return Err(PagerError::ReadOnly);
         }
 
+        pager_io::check_page_identity(&page, page_id)?;
         self.capture_page_before_write(page_id)?;
 
         // Update checksum
