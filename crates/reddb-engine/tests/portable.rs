@@ -132,6 +132,76 @@ fn paged_layout_version_is_independent_of_current_writer_version() {
 }
 
 #[test]
+fn cold_page_lsn_is_authorized_by_a_completed_checkpoint_without_a_live_wal() {
+    use reddb_engine::storage::{
+        page::PageType,
+        pager::{NoWal, Pager, PagerConfig, WalBarrier},
+    };
+    struct DurableWal;
+    impl WalBarrier for DurableWal {
+        fn flush_until(&self, _: u64) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let writer = Pager::open_owned(
+        pager::MemoryFile::default(),
+        "checkpoint-lsn.rdb".into(),
+        PagerConfig::default(),
+        DurableWal,
+        true,
+    )
+    .expect("create checkpoint fixture");
+    let mut page = writer
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("allocate leaf");
+    let id = page.page_id();
+    page.insert_cell(b"key", b"committed").expect("leaf value");
+    page.set_lsn(42);
+    writer.write_page(id, page).expect("stage committed page");
+    writer.sync().expect("durable WAL and page");
+    writer
+        .complete_checkpoint(42)
+        .expect("publish completed checkpoint");
+    let bytes = writer
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("checkpoint image");
+    let reader = Pager::open_owned(
+        pager::MemoryFile::from_bytes(bytes.clone()),
+        "checkpoint-lsn.rdb".into(),
+        PagerConfig::default(),
+        NoWal,
+        false,
+    )
+    .expect("cold open");
+    assert_eq!(
+        reader
+            .read_page(id)
+            .expect("checkpoint authorizes the page")
+            .lsn(),
+        42
+    );
+
+    let mut future = reader.read_page(id).expect("copy page");
+    future.set_lsn(43);
+    future.update_checksum();
+    let mut corrupted = bytes;
+    let start = usize::try_from(id).expect("fixture page ID") * reddb_file::PAGED_PAGE_SIZE;
+    corrupted[start..start + reddb_file::PAGED_PAGE_SIZE].copy_from_slice(future.as_bytes());
+    let reader = Pager::open_owned(
+        pager::MemoryFile::from_bytes(corrupted),
+        "checkpoint-lsn.rdb".into(),
+        PagerConfig::default(),
+        NoWal,
+        false,
+    )
+    .expect("open header");
+    let error = reader
+        .read_page(id)
+        .expect_err("LSN beyond checkpoint needs WAL proof");
+    assert!(error.to_string().contains("LSN"), "{error}");
+}
+
+#[test]
 fn unjournaled_trunk_allocation_preserves_unconsumed_free_pages_after_crash() {
     use reddb_engine::storage::{
         page::PageType,
