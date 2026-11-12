@@ -17,12 +17,19 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// The host must exclude readers and other mutations through completion.
     /// Prepare at most one native DWB frame; neither old homes nor allocator
     /// roots are changed while images are staged. This is not SQL isolation.
+    /// Guarded formats require independent frame publication and cannot use
+    /// this legacy preparation path.
     pub fn begin_write_batch(&self) -> Result<(), PagerError> {
         let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if !self.dwb_enabled || self.batch_active()? {
             return Err(PagerError::InvalidDatabase(
                 "write batch requires double-write protection and no active batch".into(),
+            ));
+        }
+        if pager_io::requires_dwb_publication(&mut *self.file_lock()?)? {
+            return Err(PagerError::InvalidDatabase(
+                "prepared batches cannot publish guarded DWB authority".into(),
             ));
         }
         self.sync()?;

@@ -246,3 +246,37 @@ fn bounded_writer_rejects_catalog_extensions_it_cannot_preserve() {
         .expect("bounded writer must reject unknown catalog extensions");
     assert!(error.to_string().contains("cannot preserve"));
 }
+
+#[test]
+fn bounded_hosts_reject_guarded_recovery_that_exceeds_their_read_budget() {
+    let pager = Pager::open_owned(
+        LimitedMemoryFile::empty(),
+        "guarded-bounded.rdb".into(),
+        PagerConfig::default(),
+        NoWal,
+        true,
+    )
+    .expect("create canonical file");
+    pager
+        .fence_required_capabilities(reddb_file::file_format::FILE_CAPABILITY_DWB_PUBLICATION)
+        .expect("enable guarded recovery before dependent writes");
+    let baseline = pager.into_inner().0.durable.into_inner();
+    for read_only in [true, false] {
+        let file = LimitedMemoryFile(MemoryFile::from_bytes(baseline.clone()));
+        let operations = file.0.operations.clone();
+        let error = Pager::open_owned(
+            file,
+            "guarded-bounded.rdb".into(),
+            PagerConfig {
+                read_only,
+                ..PagerConfig::default()
+            },
+            NoWal,
+            false,
+        )
+        .err()
+        .expect("host cannot allocate the guarded recovery buffer");
+        assert!(error.to_string().contains("owned read budget"), "{error}");
+        assert!(operations.borrow().is_empty());
+    }
+}

@@ -1,6 +1,6 @@
 use reddb_file::{
-    decode_database_header, paged_superblock_slot_generation, FILE_CAPABILITY_TEMPERATURE,
-    PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE,
+    decode_published_database_header, paged_superblock_slot_generation,
+    FILE_CAPABILITY_TEMPERATURE, PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE,
 };
 use reddb_server::storage::compact::compact_paged;
 use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
@@ -21,7 +21,7 @@ fn assert_temperature_capability_in_both_superblocks(path: &std::path::Path) {
             paged_superblock_slot_generation(slot, copy_index).is_some(),
             "superblock copy {copy_index} must be valid"
         );
-        let header = decode_database_header(slot).expect("decode superblock header");
+        let header = decode_published_database_header(slot).expect("decode superblock header");
         assert_ne!(
             header.required_capabilities & FILE_CAPABILITY_TEMPERATURE,
             0,

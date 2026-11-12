@@ -60,6 +60,7 @@ pub mod native_value;
 #[cfg(feature = "full")]
 pub mod operational_manifest;
 pub mod page_ownership_journal;
+pub mod page_proof;
 pub mod physical_metadata;
 pub mod physical_metadata_policy;
 #[cfg(feature = "full")]
@@ -181,10 +182,10 @@ pub use file_format::{
     clear_paged_page_checksum, database_header_freelist_head, database_header_magic_matches,
     database_header_page_count, database_header_page_size, decode_database_header,
     decode_paged_dwb_frame, decode_paged_dwb_header, decode_paged_encryption_header,
-    decode_paged_page_header, encode_database_header, encode_paged_dwb_frame,
-    encode_paged_dwb_header, encode_paged_encryption_header, encode_paged_page_header,
-    init_database_header_page, paged_cell_bytes, paged_cell_key_value, paged_cell_len,
-    paged_cell_pointer, paged_cell_pointer_is_valid, paged_cell_pointer_offset,
+    decode_paged_page_header, decode_published_database_header, encode_database_header,
+    encode_paged_dwb_frame, encode_paged_dwb_header, encode_paged_encryption_header,
+    encode_paged_page_header, init_database_header_page, paged_cell_bytes, paged_cell_key_value,
+    paged_cell_len, paged_cell_pointer, paged_cell_pointer_is_valid, paged_cell_pointer_offset,
     paged_cell_total_len, paged_encryption_header_bytes, paged_encryption_marker_present,
     paged_page_cell_count, paged_page_checksum, paged_page_free_end, paged_page_free_start,
     paged_page_id, paged_page_lsn, paged_page_parent_id, paged_page_right_child, paged_page_type,
@@ -197,10 +198,10 @@ pub use file_format::{
     write_paged_encryption_marker_and_header, DatabaseHeader, DatabaseHeaderError, PagedDwbEntry,
     PagedDwbFrameError, PagedEncryptionHeader, PagedPageHeader, PagedSuperblockSelection,
     PhysicalFileHeader, BLOOM_SEGMENT_V2_MAGIC, COLUMN_BLOCK_MAGIC, COLUMN_BLOCK_VERSION_V1,
-    DWB_MAGIC, FILE_CAPABILITIES_SUPPORTED, FILE_CAPABILITY_DISK_RESIDENCY,
-    FILE_CAPABILITY_TEMPERATURE, PAGED_CELL_HEADER_SIZE, PAGED_CELL_POINTER_SIZE,
-    PAGED_DWB_ENTRY_HEADER_SIZE, PAGED_DWB_ENTRY_SIZE, PAGED_DWB_HEADER_SIZE,
-    PAGED_ENCRYPTION_HEADER_SIZE, PAGED_ENCRYPTION_KEY_CHECK_BLOB_SIZE,
+    DWB_MAGIC, FILE_CAPABILITIES_SUPPORTED, FILE_CAPABILITY_CATALOG_ROOT,
+    FILE_CAPABILITY_DISK_RESIDENCY, FILE_CAPABILITY_TEMPERATURE, PAGED_CELL_HEADER_SIZE,
+    PAGED_CELL_POINTER_SIZE, PAGED_DWB_ENTRY_HEADER_SIZE, PAGED_DWB_ENTRY_SIZE,
+    PAGED_DWB_HEADER_SIZE, PAGED_ENCRYPTION_HEADER_SIZE, PAGED_ENCRYPTION_KEY_CHECK_BLOB_SIZE,
     PAGED_ENCRYPTION_KEY_CHECK_PLAINTEXT_SIZE, PAGED_ENCRYPTION_MARKER,
     PAGED_ENCRYPTION_MARKER_OFFSET, PAGED_ENCRYPTION_SALT_SIZE, PAGED_PAGE_HEADER_SIZE,
     PAGED_PAGE_SIZE, PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE,

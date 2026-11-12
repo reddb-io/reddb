@@ -158,7 +158,7 @@ fn inspect_tree(
             )?;
             return Ok(0);
         }
-        let tree = BTree::with_root(Arc::clone(source), root);
+        let tree = source.tree(root)?;
         let (expected, _) = inventory_tree(source, &tree, true)?;
         let mut cursor = tree.cursor_first()?;
         let mut previous: Option<Vec<u8>> = None;

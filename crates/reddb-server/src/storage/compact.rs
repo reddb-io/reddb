@@ -20,6 +20,8 @@ pub(crate) mod boot_system_wal;
 mod catalog;
 pub(crate) mod catalog_aliases;
 mod internal_metadata;
+#[cfg(test)]
+pub(crate) mod legacy_fixture;
 mod salvage;
 mod scrub;
 mod source;
@@ -828,6 +830,13 @@ fn compact_paged_inner(
         },
     )?);
     let mut roots = BTreeMap::new();
+    if source.header.required_capabilities & f::file_format::FILE_CAPABILITY_TREE_PROOFS != 0 {
+        target.fence_required_capabilities(
+            f::file_format::FILE_CAPABILITY_TREE_PROOFS
+                | f::file_format::FILE_CAPABILITY_DWB_PUBLICATION,
+        )?;
+    }
+    let mut tree_proofs = f::page_proof::CatalogProofs::new();
     let mut recovered_trees = BTreeMap::new();
     let mut records = 0;
     let mut repaired_leaf_backlinks = 0;
@@ -839,7 +848,8 @@ fn compact_paged_inner(
                 .find(|loss| loss.collection == collection.collection && collection.root_page != 0)
         });
         let count = if let Some(loss) = loss {
-            let (count, hash) = rewrite_recoverable_tree(&source, &target, loss, &mut roots)?;
+            let (count, hash) =
+                rewrite_recoverable_tree(&source, &target, loss, &mut roots, &mut tree_proofs)?;
             recovered_trees.insert(loss.root_page, (count, hash));
             count
         } else {
@@ -849,6 +859,7 @@ fn compact_paged_inner(
                 collection.root_page,
                 &mut roots,
                 &mut repaired_leaf_backlinks,
+                &mut tree_proofs,
             )?
         };
         if let Some(resume) = &catalog.resume {
@@ -876,6 +887,7 @@ fn compact_paged_inner(
                     root,
                     &mut roots,
                     &mut repaired_leaf_backlinks,
+                    &mut tree_proofs,
                 )?;
                 records += count;
                 completed_trees += 1;
@@ -894,6 +906,7 @@ fn compact_paged_inner(
                     index.root_page,
                     &mut roots,
                     &mut repaired_leaf_backlinks,
+                    &mut tree_proofs,
                 )?;
                 records += count;
                 completed_trees += 1;
@@ -922,8 +935,14 @@ fn compact_paged_inner(
         let old_root = record.root;
         let key = record.key.clone();
         let value = record.rewrite(document)?;
-        let tree = BTree::with_root(Arc::clone(&target), roots[&old_root]);
+        let previous_root = roots[&old_root];
+        let tree = match tree_proofs.get(&previous_root).copied() {
+            Some(proof) => BTree::with_verified_root(Arc::clone(&target), previous_root, proof)?,
+            None => BTree::with_root(Arc::clone(&target), previous_root),
+        };
         tree.upsert(&key, &value)?;
+        tree_proofs.remove(&previous_root);
+        remember_output_proof(&tree, &mut tree_proofs)?;
         roots.insert(old_root, tree.root_page_id());
         rewritten_metadata = Some((old_root, key, value));
     }
@@ -932,9 +951,12 @@ fn compact_paged_inner(
         if let Some(salvage) = salvage {
             for index in &salvage.indexes {
                 if index.root_page != 0 {
+                    if source.claim_published_tree(index.root_page)? {
+                        continue;
+                    }
                     match source.raw_page(index.root_page, true) {
                         Ok(_) => {
-                            let tree = BTree::with_root(Arc::clone(&source), index.root_page);
+                            let tree = source.tree(index.root_page)?;
                             let skipped = tree.visit_recoverable_leaves(
                                 |id| {
                                     source.claim(id).map_err(|error| {
@@ -974,7 +996,9 @@ fn compact_paged_inner(
         if let Some(losses) = lost_collections {
             for collection in &losses.collections {
                 if collection.skipped_pages == [collection.root_page] {
-                    source.claim(collection.root_page)?;
+                    if !source.claim_published_tree(collection.root_page)? {
+                        source.claim(collection.root_page)?;
+                    }
                 }
             }
         }
@@ -983,17 +1007,32 @@ fn compact_paged_inner(
             "unclassified source pages require separate recovery verification",
         )?;
     }
-    catalog::write_catalog(&target, &catalog.encode(&roots)?)?;
+    // The unpublished output has no readers or prior authoritative generation.
+    let (pending, _) = target.deferred_reclamation_pages()?;
+    target.complete_deferred_publication(&[], &pending)?;
+    let enabled =
+        target.header()?.required_capabilities & f::file_format::FILE_CAPABILITY_TREE_PROOFS != 0;
+    catalog::write_catalog(
+        &target,
+        &catalog.encode_with_proofs(&roots, enabled.then_some(&tree_proofs))?,
+    )?;
     target.update_physical_header(physical)?;
-    if source.header.required_capabilities != 0 {
-        target.fence_required_capabilities(source.header.required_capabilities)?;
+    let capabilities = (source.header.required_capabilities
+        & !f::file_format::FILE_CAPABILITY_RECOVERY_READ_ONLY)
+        | if source.header.requires_disk_residency() {
+            f::FILE_CAPABILITY_DISK_RESIDENCY
+        } else {
+            0
+        };
+    if capabilities != 0 {
+        target.fence_required_capabilities(capabilities)?;
     }
-    target.fence_file_format_version(source.header.version)?;
+    target.fence_file_format_version(source.header.version.max(target.header()?.version))?;
     target.sync()?;
     // Preserve source schema/LSN, but retain the newly allocated page boundary.
     for _ in 0..2 {
         target.commit_superblock(|slot| {
-            let mut header = f::decode_database_header(slot).map_err(|error| {
+            let mut header = f::decode_published_database_header(slot).map_err(|error| {
                 reddb_engine::storage::pager::PagerError::InvalidDatabase(error.to_string())
             })?;
             header.schema_version = source.header.schema_version;
@@ -1003,20 +1042,10 @@ fn compact_paged_inner(
             })
         })?;
     }
-    if lost_collections.is_some() {
+    if lost_collections.is_some() || source.header.is_recovery_read_only() {
         // Both copies must be fenced before the recovered filename is published.
         // Old engines reject this newer version; this engine admits it read-only.
-        for _ in 0..2 {
-            target.commit_superblock(|slot| {
-                f::set_database_header_version(
-                    slot,
-                    f::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION,
-                )
-                .map_err(|error| {
-                    reddb_engine::storage::pager::PagerError::InvalidDatabase(error.to_string())
-                })
-            })?;
-        }
+        target.fence_required_capabilities(f::file_format::FILE_CAPABILITY_RECOVERY_READ_ONLY)?;
     }
     let assets_verification = assets.into_verification();
     drop(target);
@@ -1031,7 +1060,8 @@ fn compact_paged_inner(
     )?;
     let rewritten_catalog = Catalog::read(&reopened)?;
     ensure(
-        rewritten_catalog.encode(&identity_roots(&roots))? == catalog.encode(&roots)?,
+        rewritten_catalog.encode(&identity_roots(&roots))?
+            == catalog.encode_with_proofs(&roots, enabled.then_some(&tree_proofs))?,
         "rewritten catalog differs from source",
     )?;
     for (&old, &new) in &roots {
@@ -1153,18 +1183,42 @@ fn hash_record(hasher: &mut blake3::Hasher, key: &[u8], value: &[u8]) {
     hasher.update(value);
 }
 
+fn new_output_tree(target: &Arc<Pager>) -> Result<BTree<Pager>> {
+    if target.header()?.required_capabilities & f::file_format::FILE_CAPABILITY_TREE_PROOFS != 0 {
+        Ok(BTree::new_verified(Arc::clone(target))?)
+    } else {
+        Ok(BTree::new(Arc::clone(target)))
+    }
+}
+
+fn remember_output_proof(
+    tree: &BTree<Pager>,
+    proofs: &mut f::page_proof::CatalogProofs,
+) -> Result<()> {
+    if let Some((root, proof)) = tree.seal_page_proofs()? {
+        if root != 0 {
+            ensure(
+                proofs.insert(root, proof).is_none(),
+                "duplicate output tree proof",
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn rewrite_recoverable_tree(
     source: &Arc<Source>,
     target: &Arc<Pager>,
     loss: &PagedCollectionLoss,
     roots: &mut BTreeMap<u32, u32>,
+    proofs: &mut f::page_proof::CatalogProofs,
 ) -> Result<(u64, blake3::Hash)> {
     ensure(
         !roots.contains_key(&loss.root_page),
         "duplicate live tree owner",
     )?;
-    let original = BTree::with_root(Arc::clone(source), loss.root_page);
-    let destination = BTree::new(Arc::clone(target));
+    let original = source.tree(loss.root_page)?;
+    let destination = new_output_tree(target)?;
     let mut hash = blake3::Hasher::new();
     let mut count = 0u64;
     let mut batch = Vec::new();
@@ -1193,6 +1247,7 @@ fn rewrite_recoverable_tree(
         "damaged pages changed during recovery",
     )?;
     destination.bulk_insert_sorted(&batch)?;
+    remember_output_proof(&destination, proofs)?;
     roots.insert(loss.root_page, destination.root_page_id());
     Ok((count, hash.finalize()))
 }
@@ -1203,7 +1258,7 @@ fn verify_recovered_tree(
     count: u64,
     expected: blake3::Hash,
 ) -> Result<()> {
-    let tree = BTree::with_root(Arc::clone(source), root);
+    let tree = source.tree(root)?;
     let (owned, _) = inventory_tree(source, &tree, false)?;
     ensure(owned == count, "recovered tree record count differs")?;
     let mut cursor = tree.cursor_first()?;
@@ -1226,15 +1281,16 @@ fn rewrite_tree(
     root: u32,
     roots: &mut BTreeMap<u32, u32>,
     repaired_leaf_backlinks: &mut u64,
+    proofs: &mut f::page_proof::CatalogProofs,
 ) -> Result<u64> {
     if root == 0 {
         return Ok(0);
     }
     ensure(!roots.contains_key(&root), "duplicate live tree owner")?;
-    let tree = BTree::with_root(Arc::clone(source), root);
+    let tree = source.tree(root)?;
     let (expected, repairs) = inventory_tree(source, &tree, true)?;
     *repaired_leaf_backlinks += repairs;
-    let destination = BTree::new(Arc::clone(target));
+    let destination = new_output_tree(target)?;
     let mut cursor = tree.cursor_first()?;
     let mut count = 0;
     let mut previous: Option<Vec<u8>> = None;
@@ -1260,6 +1316,7 @@ fn rewrite_tree(
         }
     }
     destination.bulk_insert_sorted(&batch)?;
+    remember_output_proof(&destination, proofs)?;
     ensure(count == expected, "tree cursor omits owned records")?;
     roots.insert(root, destination.root_page_id());
     Ok(count)
@@ -1312,8 +1369,8 @@ fn verify_tree(
     new: u32,
     rewritten: Option<&(u32, Vec<u8>, Vec<u8>)>,
 ) -> Result<()> {
-    let old = BTree::with_root(Arc::clone(source), old);
-    let new = BTree::with_root(Arc::clone(destination), new);
+    let old = source.tree(old)?;
+    let new = destination.tree(new)?;
     inventory_tree(destination, &new, false)?;
     let mut left = old.cursor_first()?;
     let mut right = new.cursor_first()?;

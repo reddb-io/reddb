@@ -1170,6 +1170,17 @@ impl StoreCommitCoordinator {
                 // Readers validate ownership but never reclaim or finish an epoch.
                 return Ok(());
             };
+            let manifest_reference = pager
+                .manifest_reference()
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            if !plan.release.is_empty() && manifest_reference.page_id != 0 {
+                // A crash can leave only one header naming the selected catalog.
+                // Retiring its predecessor must first fence that same authority
+                // into both fallback copies, before any allocator writeback.
+                pager
+                    .publish_manifest_reference(manifest_reference)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+            }
             pager
                 .recover_unowned_pages(&plan.release)
                 .map_err(|error| io::Error::other(error.to_string()))?;
@@ -2135,7 +2146,7 @@ impl UnifiedStore {
             )))
         })?;
 
-        self.swap_collection_state(name, new_manager, &prepared, &serialized, true);
+        self.swap_collection_state(name, new_manager, &prepared, &serialized, true)?;
 
         self.finish_paged_write([StoreWalAction::RefreshCollection {
             collection: name.to_string(),
@@ -2157,15 +2168,12 @@ impl UnifiedStore {
         prepared: &[UnifiedEntity],
         serialized: &[Vec<u8>],
         update_btrees: bool,
-    ) {
+    ) -> Result<(), StoreError> {
         self.resident
             .swap_collection_state(name, new_manager, prepared);
 
-        if let Some(pager) = self
-            .pager
-            .as_ref()
-            .filter(|_| update_btrees && self.config.resident_memory_bytes_max.is_none())
-        {
+        let immutable = self.immutable_paged_base()?;
+        if let Some(pager) = self.pager.as_ref().filter(|_| update_btrees && !immutable) {
             let new_btree = Arc::new(BTree::new(Arc::clone(pager)));
             let mut sorted: Vec<(Vec<u8>, Vec<u8>)> = prepared
                 .iter()
@@ -2174,13 +2182,16 @@ impl UnifiedStore {
                 .collect();
             sorted.sort_by(|a, b| a.0.cmp(&b.0));
             if !sorted.is_empty() {
-                let _ = new_btree.bulk_insert_sorted(&sorted);
+                new_btree
+                    .bulk_insert_sorted(&sorted)
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
             }
             self.btree_indices
                 .write()
                 .insert(name.to_string(), new_btree);
             self.mark_paged_registry_dirty();
         }
+        Ok(())
     }
 
     fn apply_replayed_refresh_collection(
@@ -2196,7 +2207,7 @@ impl UnifiedStore {
             self.format_version(),
             &self.config.manager_config,
         )?;
-        self.swap_collection_state(collection, new_manager, &prepared, records, update_btrees);
+        self.swap_collection_state(collection, new_manager, &prepared, records, update_btrees)?;
         Ok(())
     }
 
@@ -2256,11 +2267,8 @@ impl UnifiedStore {
             &self.config.manager_config,
         )?;
 
-        if let Some(pager) = self
-            .pager
-            .as_ref()
-            .filter(|_| update_btrees && self.config.resident_memory_bytes_max.is_none())
-        {
+        let immutable = self.immutable_paged_base()?;
+        if let Some(pager) = self.pager.as_ref().filter(|_| update_btrees && !immutable) {
             let mut btree_indices = self.btree_indices.write();
             let btree = btree_indices
                 .entry(collection.to_string())
@@ -2294,11 +2302,9 @@ impl UnifiedStore {
         update_btrees: bool,
     ) -> Result<(), StoreError> {
         let collection = Self::canonical_collection(collection);
+        let immutable = self.immutable_paged_base()?;
         self.resident.apply_replayed_delete(collection, id, || {
-            if self.pager.is_some()
-                && update_btrees
-                && self.config.resident_memory_bytes_max.is_none()
-            {
+            if self.pager.is_some() && update_btrees && !immutable {
                 let btree_indices = self.btree_indices.read();
                 if let Some(btree) = btree_indices.get(collection) {
                     let root_before = btree.root_page_id();

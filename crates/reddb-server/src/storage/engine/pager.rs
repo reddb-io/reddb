@@ -385,6 +385,9 @@ impl reddb_engine::storage::page_store::PageStore for Pager {
     fn page_count(&self) -> Result<u32, PagerError> {
         self.core.page_count()
     }
+    fn enable_deferred_reclamation(&self) -> Result<(), PagerError> {
+        self.core.enable_deferred_reclamation()
+    }
     fn prefetch_hint(&self, id: u32) {
         self.prefetch_hint(id)
     }

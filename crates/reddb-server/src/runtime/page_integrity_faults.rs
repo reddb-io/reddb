@@ -1,8 +1,18 @@
 //! A valid CRC must not authorize a misdirected page or an unproven WAL LSN.
 use super::*;
 use crate::storage::engine::{Page, PageType, Pager, PagerConfig, PAGE_SIZE};
+use std::collections::BTreeMap;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
+
+#[path = "catalog_publication_faults.rs"]
+mod catalog_publication_faults;
+
+#[path = "resident_generation_faults.rs"]
+mod resident_generation_faults;
+
+#[path = "legacy_generation_faults.rs"]
+mod legacy_generation_faults;
 
 fn open(path: &Path) -> RedDBResult<RedDBRuntime> {
     let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
@@ -52,11 +62,19 @@ fn collection_root(path: &Path, collection: &str) -> (u32, Page) {
         },
     )
     .expect("read fixture roots");
-    let catalog = pager.read_page(1).expect("catalog");
-    let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
-        .expect("catalog trailer")
-        .expect("resume roots");
-    let root = resume.collections[collection].root_page;
+    let catalog = pager.read_manifest_page().expect("catalog");
+    let header = reddb_file::decode_native_paged_metadata_header(catalog.content())
+        .expect("catalog header")
+        .expect("native catalog");
+    let mut position = reddb_file::METADATA_HEADER_BYTES;
+    let root = (0..header.collection_count)
+        .map(|_| {
+            reddb_file::decode_native_paged_collection_root(catalog.content(), &mut position)
+                .expect("collection root")
+        })
+        .find(|root| root.collection == collection)
+        .expect("fixture collection")
+        .root_page;
     let page = pager.read_page(root).expect("healthy collection leaf");
     assert_eq!(page.page_type().expect("page type"), PageType::BTreeLeaf);
     page.verify_checksum().expect("fixture checksum");
@@ -78,6 +96,37 @@ fn replace_page(path: &Path, destination: u32, image: &Page) {
     file.sync_all().expect("persist fault");
 }
 
+fn authorize_current_dwb(path: &Path, frame: &[u8]) {
+    use reddb_file::{file_format as f, PAGED_SUPERBLOCK_SLOT_SIZE};
+    let bytes = std::fs::read(path).expect("fixture headers");
+    let selected = reddb_file::select_paged_superblock(&bytes).expect("valid fixture superblock");
+    let start = selected.copy_index * PAGED_SUPERBLOCK_SLOT_SIZE;
+    let mut image = [0; PAGED_SUPERBLOCK_SLOT_SIZE];
+    image.copy_from_slice(&bytes[start..start + PAGED_SUPERBLOCK_SLOT_SIZE]);
+    let authority = f::DwbPublication {
+        phase: f::DwbPhase::Ready,
+        frame_bytes: u32::try_from(frame.len()).expect("bounded fixture frame"),
+        digest: f::dwb_frame_digest(frame),
+    };
+    f::set_database_header_dwb_publication(&mut image, Some(authority))
+        .expect("known-current authority");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("fixture header writer");
+    for step in 1..=reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+        let copy = (selected.copy_index + step) % reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT;
+        reddb_file::seal_paged_superblock_slot(&mut image, copy, selected.generation + step as u64)
+            .expect("fixture header seal");
+        file.seek(SeekFrom::Start(reddb_file::paged_superblock_slot_offset(
+            copy,
+        )))
+        .expect("header offset");
+        file.write_all(&image).expect("persist fixture authority");
+        file.sync_all().expect("durable fixture authority");
+    }
+}
+
 fn assert_authoritative_read_rejected(path: &Path, reason: &str) {
     let before = std::fs::read(path).expect("preserve source evidence");
     let wal_path = reddb_file::layout::unified_wal_path(path);
@@ -93,9 +142,9 @@ fn assert_authoritative_read_rejected(path: &Path, reason: &str) {
         },
     };
     assert!(error.to_string().contains(reason), "{reason}: {error}");
-    assert_eq!(
-        std::fs::read(path).expect("unchanged corrupt source"),
-        before
+    assert!(
+        std::fs::read(path).expect("unchanged corrupt source") == before,
+        "rejected {reason} recovery changed the source evidence"
     );
     assert_eq!(std::fs::read(wal_path).expect("unchanged WAL"), wal_before);
 }
@@ -155,6 +204,7 @@ fn complete_dwb_repairs_misdirected_and_future_lsn_home_pages() {
             file.write_all(&frame).expect("stage trusted current image");
             file.sync_all().expect("durable DWB frame");
         }
+        authorize_current_dwb(&path, &frame);
         let bad = if fault == "identity" {
             collection_root(&path, "unrelated").1
         } else {
@@ -196,4 +246,186 @@ fn checksum_valid_future_page_lsn_is_rejected() {
     image.update_checksum();
     replace_page(&path, root, &image);
     assert_authoritative_read_rejected(&path, "LSN");
+}
+
+#[test]
+fn checksum_valid_old_catalog_contents_are_rejected_by_the_superblock() {
+    let directory = tempfile::tempdir().expect("isolated catalog generations");
+    let path = directory.path().join("stale-catalog.rdb");
+    seed(&path);
+    let old = {
+        let pager = Pager::open(
+            &path,
+            PagerConfig {
+                read_only: true,
+                create: false,
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
+        )
+        .expect("prior catalog");
+        pager.read_manifest_page().expect("prior root image")
+    };
+    {
+        let runtime = open(&path).expect("healthy writer");
+        runtime
+            .execute_query("INSERT INTO records (id,payload) VALUES (3,'confirmed')")
+            .expect("confirmed new row");
+        runtime
+            .graceful_shutdown(false)
+            .expect("publish newer catalog");
+    }
+    let root = {
+        let pager = Pager::open(
+            &path,
+            PagerConfig {
+                read_only: true,
+                create: false,
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
+        )
+        .expect("current catalog");
+        let page = pager.read_manifest_page().expect("current root");
+        let mut old_at_current_address = Page::new(PageType::Header, page.page_id());
+        old_at_current_address
+            .content_mut()
+            .copy_from_slice(old.content());
+        old_at_current_address.update_checksum();
+        assert_ne!(page.as_bytes(), old_at_current_address.as_bytes());
+        old_at_current_address
+    };
+    replace_page(&path, root.page_id(), &root);
+    assert_authoritative_read_rejected(&path, "generation");
+}
+
+#[test]
+fn checksum_valid_catalog_continuation_change_is_rejected() {
+    let directory = tempfile::tempdir().expect("isolated large catalog");
+    let path = directory.path().join("catalog-overflow.rdb");
+    seed(&path);
+    {
+        let runtime = open(&path).expect("healthy DDL writer");
+        for table in 0..48 {
+            runtime
+                .execute_query(&format!(
+                    "CREATE TABLE table_{table}_{} (id INT)",
+                    "x".repeat(224)
+                ))
+                .expect("grow real catalog past one page");
+        }
+        runtime
+            .graceful_shutdown(false)
+            .expect("checkpoint large catalog");
+    }
+    let mut continuation = {
+        let pager = Pager::open(
+            &path,
+            PagerConfig {
+                read_only: true,
+                create: false,
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
+        )
+        .expect("healthy overflow catalog");
+        let root = pager.read_manifest_page().expect("catalog root");
+        let header = reddb_file::decode_native_metadata_overflow_header(root.content())
+            .expect("catalog framing")
+            .expect("fixture must overflow");
+        pager
+            .read_page(header.next_overflow_page_id)
+            .expect("first continuation")
+    };
+    continuation.content_mut()[8 + 31] ^= 1;
+    continuation.update_checksum();
+    replace_page(&path, continuation.page_id(), &continuation);
+    assert_authoritative_read_rejected(&path, "generation");
+}
+
+#[test]
+fn checksum_valid_old_image_of_reused_collection_page_is_rejected() {
+    let directory = tempfile::tempdir().expect("isolated database");
+    let path = directory.path().join("stale.rdb");
+    let (root, old_image) = reused_collection_page(&path);
+    replace_page(&path, root, &old_image);
+    assert_authoritative_read_rejected(&path, "generation");
+}
+
+#[test]
+fn complete_old_dwb_frame_is_rejected_before_changing_the_source() {
+    let directory = tempfile::tempdir().expect("isolated database");
+    let path = directory.path().join("stale-dwb.rdb");
+    let (root, old_image) = reused_collection_page(&path);
+    let frame = reddb_file::encode_paged_dwb_frame([(root, old_image.as_bytes())]);
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("DWB target");
+        file.seek(SeekFrom::Start(
+            reddb_engine::storage::pager_io::dwb_zone_offset(),
+        ))
+        .expect("DWB offset");
+        file.write_all(&frame)
+            .expect("inject complete old DWB frame");
+        file.sync_all().expect("persist old recovery image");
+    }
+    let evidence = std::fs::read(&path).expect("stale DWB evidence");
+    let error = match Pager::open(
+        &path,
+        PagerConfig {
+            read_only: true,
+            create: false,
+            disk_residency: true,
+            ..PagerConfig::default()
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("read-only recovery accepted an old frame"),
+    };
+    assert!(
+        error.to_string().contains("DWB generation authority"),
+        "{error}"
+    );
+    assert!(std::fs::read(&path).expect("read-only source") == evidence);
+    assert_authoritative_read_rejected(&path, "generation");
+}
+
+fn reused_collection_page(path: &Path) -> (u32, Page) {
+    seed(path);
+    let (old_root, old_image) = collection_root(path, "records");
+    let mut previous = BTreeMap::from([(old_root, old_image)]);
+    for generation in 1..=16 {
+        let runtime = open(path).expect("healthy writer");
+        let payload = format!("committed-{generation}");
+        runtime
+            .execute_query(&format!(
+                "UPDATE records SET payload = '{payload}' WHERE id = 1"
+            ))
+            .expect("committed MVCC update");
+        let updated = runtime
+            .execute_query("SELECT payload FROM records WHERE id = 1")
+            .expect("updated HASH lookup");
+        assert_eq!(updated.result.records.len(), 1);
+        assert_eq!(
+            updated.result.records[0].get("payload"),
+            Some(&Value::text(payload.as_str()))
+        );
+        runtime
+            .graceful_shutdown(false)
+            .expect("publish newer generation");
+        drop(runtime);
+        let (root, current) = collection_root(path, "records");
+        if let Some(old_image) = previous.insert(root, current.clone()) {
+            assert_eq!(old_image.page_id(), root);
+            assert_ne!(
+                current.as_bytes(),
+                old_image.as_bytes(),
+                "fixture must change the page"
+            );
+            return (root, old_image);
+        }
+    }
+    panic!("fixture must reuse a collection page within sixteen checkpoints");
 }

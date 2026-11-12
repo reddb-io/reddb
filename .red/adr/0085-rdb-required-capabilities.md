@@ -1,4 +1,4 @@
-# ADR 0083 — Required capabilities in paged `.rdb` superblocks
+# ADR 0085 — Required capabilities in paged `.rdb` superblocks
 
 Status: accepted
 Date: 2026-11-10
@@ -24,6 +24,9 @@ logical `.rdb` must remain readable by the canonical engine.
 - Bit 0 is the native temperature codec. Bit 1 is bounded disk residency.
   Readers reject unknown required bits while decoding the selected superblock,
   before scanning data pages.
+- Bits 2 and 4 bind copy-on-write catalogs and tree-image proofs respectively.
+  Bit 3 keeps recovery output with unknown identity floors read-only. Bit 5
+  requires independent DWB frame publication ([ADR 0084](0084-independent-dwb-frame-publication.md)).
 - A writer durably publishes a new required capability to both recoverable
   superblock copies before it publishes a schema or value that depends on the
   capability. If either fence write fails, further writes remain fenced until
@@ -46,7 +49,7 @@ logical `.rdb` must remain readable by the canonical engine.
   open; it does not discover incompatibility halfway through a query.
 - A conservatively declared but unused capability can survive a crash. The
   inverse state — dependent bytes without the capability — is forbidden.
-- The two-copy fence costs two small synchronous superblock writes only when a
+- The capability fence costs two small synchronous superblock writes only when a
   file first enables a capability, not per row.
 - Cross-platform compatibility is tested at the logical `.rdb` boundary. MCU
   flash containers and host filesystems may differ below that boundary.

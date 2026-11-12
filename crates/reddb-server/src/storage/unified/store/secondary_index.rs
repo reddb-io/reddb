@@ -289,7 +289,7 @@ impl UnifiedStore {
                     continue;
                 }
             }
-            builds.push((name, spec, Arc::new(BTree::new(Arc::clone(pager)))));
+            builds.push((name, spec, Self::new_derived_btree(pager)?));
         }
         if builds.is_empty() {
             return Ok(next);

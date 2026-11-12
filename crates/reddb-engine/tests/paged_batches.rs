@@ -192,3 +192,69 @@ fn full_storage_is_rejected_before_the_prepared_frame_is_sealed() {
     );
     assert!(recovered.read_page(added.page_id()).is_err());
 }
+
+#[test]
+fn guarded_files_reject_prepared_batches_without_modifying_the_source() {
+    let pager = open(None);
+    pager
+        .fence_required_capabilities(reddb_file::file_format::FILE_CAPABILITY_DWB_PUBLICATION)
+        .expect("enable guarded recovery");
+    let baseline = pager
+        .with_file(|file| file.bytes.borrow().clone())
+        .expect("guarded source");
+    pager
+        .begin_write_batch()
+        .expect_err("prepared batches do not publish independent DWB authority");
+    assert!(pager
+        .with_file(|file| file.bytes.borrow().as_slice() == baseline)
+        .expect("source remains unchanged"));
+    let home = pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("normal allocation");
+    pager
+        .write_page(home.page_id(), page(home.page_id(), 3))
+        .expect("normal write");
+    pager.sync().expect("guarded write still makes progress");
+    let cold = open(Some(pager.into_inner().durable.into_inner()));
+    assert_eq!(
+        cold.read_page(home.page_id())
+            .expect("cold guarded page")
+            .as_bytes()[128],
+        3
+    );
+}
+
+#[test]
+fn capability_fence_rejects_an_active_prepared_batch_without_abandoning_it() {
+    let pager = open(None);
+    let home = pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("allocate home");
+    pager
+        .write_page(home.page_id(), page(home.page_id(), 1))
+        .expect("seed");
+    pager.sync().expect("baseline");
+    pager.begin_write_batch().expect("legacy batch");
+    pager
+        .write_page(home.page_id(), page(home.page_id(), 2))
+        .expect("prepare");
+    let staged = pager
+        .with_file(|file| file.bytes.borrow().clone())
+        .expect("staged source");
+    pager
+        .fence_required_capabilities(reddb_file::file_format::FILE_CAPABILITY_DWB_PUBLICATION)
+        .expect_err("capability fence must not authorize an unpublished prepared frame");
+    assert!(pager
+        .with_file(|file| file.bytes.borrow().as_slice() == staged)
+        .expect("failed fence remains read-only"));
+    pager
+        .commit_write_batch()
+        .expect("legacy batch can still commit");
+    let cold = open(Some(pager.into_inner().durable.into_inner()));
+    assert_eq!(
+        cold.read_page(home.page_id())
+            .expect("cold prepared page")
+            .as_bytes()[128],
+        2
+    );
+}

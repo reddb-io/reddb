@@ -190,7 +190,8 @@ mod tests {
                 child.kill().expect("stop stuck recovery");
                 let output = child.wait_with_output().expect("stuck recovery output");
                 panic!(
-                    "recovery made no progress: {}",
+                    "recovery child exceeded 60s\nstdout: {}\nstderr: {}",
+                    String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
                 );
             }
@@ -216,6 +217,7 @@ mod tests {
     fn overflow_checkpoint_undo_survives_interrupted_recovery_and_publication() {
         let config = || UnifiedStoreConfig::default().with_page_cache_slots(4);
         if let Some(path) = std::env::var_os(CHILD) {
+            eprintln!("checkpoint undo: opening store");
             if std::env::var_os("REDDB_TEST_PAGE_UNDO_IO").is_some()
                 || std::env::var_os("REDDB_TEST_PAGE_REPLAY_IO").is_some()
             {
@@ -230,12 +232,15 @@ mod tests {
             if std::env::var_os("REDDB_TEST_EXIT_DURING_PAGE_UNDO").is_some() {
                 panic!("recovery interruption was not reached");
             }
+            eprintln!("checkpoint undo: seeding overflow rows");
             for id in 1..=32 {
                 store
                     .insert_auto("rows", row(id, 1))
                     .expect("seed overflow row");
             }
+            eprintln!("checkpoint undo: persisting baseline");
             store.persist().expect("baseline");
+            eprintln!("checkpoint undo: updating overflow rows");
             let manager = store.get_collection("rows").expect("rows");
             let mut actions = Vec::new();
             for id in 1..=32 {
@@ -248,6 +253,7 @@ mod tests {
                     store.format_version(),
                 ));
             }
+            eprintln!("checkpoint undo: appending durable redo");
             let references = store
                 .commit
                 .as_ref()
@@ -256,6 +262,7 @@ mod tests {
                 .expect("durable rows");
             store.remember_checkpoint_rows(actions, references);
             let fault = std::env::var("REDDB_PAGE_UNDO_FAULT").expect("fault");
+            eprintln!("checkpoint undo: interrupting publication at {fault}");
             std::env::set_var(&fault, "1");
             store.persist().expect("injected checkpoint exit");
             panic!("checkpoint interruption was not reached");

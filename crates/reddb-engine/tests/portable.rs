@@ -82,6 +82,15 @@ mod storage;
 #[path = "support/pager.rs"]
 mod pager;
 
+#[path = "support/page_proofs.rs"]
+mod page_proofs;
+
+#[path = "support/dwb_publication.rs"]
+mod dwb_publication;
+
+#[path = "support/dwb_extent.rs"]
+mod dwb_extent;
+
 #[test]
 fn paged_layout_version_is_independent_of_current_writer_version() {
     use reddb_engine::storage::pager::{NoWal, Pager, PagerConfig, PagerError};

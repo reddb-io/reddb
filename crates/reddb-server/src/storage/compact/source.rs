@@ -7,10 +7,13 @@ use std::io::{Read, Seek, SeekFrom};
 pub(super) struct Source {
     file: parking_lot::Mutex<File>,
     pub header: f::DatabaseHeader,
+    pub manifest_reference: f::page_proof::PageReference,
     pub bytes: u64,
     pub pending_double_write: bool,
     // One byte per addressable page, capped at 64 MiB. No page payload cache.
     ownership: parking_lot::Mutex<Vec<u8>>,
+    // Installed only after the independent catalog digest and trailer validate.
+    tree_proofs: std::sync::OnceLock<Option<Arc<f::page_proof::CatalogProofs>>>,
 }
 impl Source {
     pub fn open(path: &Path) -> Result<Self> {
@@ -62,8 +65,12 @@ impl Source {
         )?;
         let selected = f::select_paged_superblock(&zero).ok_or("no valid native superblock")?;
         let start = selected.copy_index * f::PAGED_SUPERBLOCK_SLOT_SIZE;
-        let header =
-            f::decode_database_header(&zero[start..start + f::PAGED_SUPERBLOCK_SLOT_SIZE])?;
+        let header = f::decode_published_database_header(
+            &zero[start..start + f::PAGED_SUPERBLOCK_SLOT_SIZE],
+        )?;
+        let manifest_reference = f::file_format::database_header_manifest_reference(
+            &zero[start..start + f::PAGED_SUPERBLOCK_SLOT_SIZE],
+        )?;
         ensure(
             allow_unified_wal || !header.checkpoint_in_progress,
             "source needs checkpoint recovery",
@@ -118,30 +125,37 @@ impl Source {
         file.read_exact(&mut double_write)?;
         let pending_double_write =
             !reddb_engine::storage::pager_io::dwb_zone_is_clear(&double_write);
-        if pending_double_write {
+        let guarded_dwb =
+            header.required_capabilities & f::file_format::FILE_CAPABILITY_DWB_PUBLICATION != 0;
+        if pending_double_write || guarded_dwb {
             ensure(
-                allow_unified_wal,
+                allow_unified_wal || !pending_double_write,
                 "source has pending double-write recovery",
             )?;
-            let entries = f::decode_paged_dwb_frame(&double_write)?;
-            ensure(!entries.is_empty(), "empty double-write frame")?;
+            let entries = if guarded_dwb {
+                // Preparing/Consumed can safely discard an interrupted stage or
+                // clear. Ready requires the exact independently sealed image.
+                reddb_engine::storage::pager_io::read_dwb_pages(&mut f::BorrowedStdFile(&mut file))?
+            } else {
+                let entries = f::decode_paged_dwb_frame(&double_write)?;
+                ensure(!entries.is_empty(), "empty double-write frame")?;
+                entries
+                    .into_iter()
+                    .map(|entry| (entry.page_id, Page::from_bytes(entry.page)))
+                    .collect()
+            };
             let mut seen = std::collections::HashSet::new();
-            for entry in entries {
+            for (id, page) in entries {
                 ensure(
-                    entry.page_id > 0
-                        && (entry.page_id < DWB_ZONE_START_PAGE
-                            || entry.page_id >= FIRST_ALLOCATABLE_PAGE)
-                        && u64::from(entry.page_id) < bytes.div_ceil(PAGE_SIZE as u64)
-                        && seen.insert(entry.page_id),
+                    id > 0
+                        && (id < DWB_ZONE_START_PAGE || id >= FIRST_ALLOCATABLE_PAGE)
+                        && u64::from(id) < bytes.div_ceil(PAGE_SIZE as u64)
+                        && seen.insert(id),
                     "invalid double-write page ownership",
                 )?;
-                let page = Page::from_bytes(entry.page);
-                ensure(
-                    page.page_id() == entry.page_id,
-                    "double-write page identity mismatch",
-                )?;
+                ensure(page.page_id() == id, "double-write page identity mismatch")?;
                 page.page_type()?;
-                if entry.page_id != 2 {
+                if id != 2 {
                     page.verify_checksum()?;
                 }
             }
@@ -153,13 +167,55 @@ impl Source {
             bytes,
             pending_double_write,
             header,
+            manifest_reference,
             ownership: parking_lot::Mutex::new(ownership),
+            tree_proofs: std::sync::OnceLock::new(),
         };
         if !allow_unified_wal {
             source.validate_freelist()?;
         }
         Ok(source)
     }
+
+    pub fn install_tree_proofs(
+        &self,
+        proofs: Option<Arc<f::page_proof::CatalogProofs>>,
+    ) -> Result<()> {
+        ensure(
+            self.tree_proofs.get_or_init(|| proofs.clone()) == &proofs,
+            "catalog tree generation changed under the source lock",
+        )
+    }
+
+    pub fn tree(self: &Arc<Self>, root: u32) -> Result<BTree<Source>> {
+        let proofs = self
+            .tree_proofs
+            .get()
+            .ok_or("catalog tree authority is not initialized")?;
+        let proof = proofs
+            .as_ref()
+            .and_then(|proofs| proofs.get(&root))
+            .copied();
+        match (root, proof) {
+            (0, _) if proofs.is_some() => Ok(BTree::new_verified(Arc::clone(self))?),
+            (_, Some(proof)) => Ok(BTree::with_verified_root(Arc::clone(self), root, proof)?),
+            (_, None) if proofs.is_some() => Err("missing catalog tree generation proof".into()),
+            _ => Ok(BTree::with_root(Arc::clone(self), root)),
+        }
+    }
+
+    /// Account for a discarded tree without trusting its damaged data pages.
+    /// Legacy trees still require the caller's structural recovery checks.
+    pub fn claim_published_tree(self: &Arc<Self>, root: u32) -> Result<bool> {
+        let Some(pages) = self.tree(root)?.published_owned_pages()? else {
+            return Ok(false);
+        };
+        for id in pages {
+            self.claim(id)?;
+        }
+        Ok(true)
+    }
+
     pub fn raw_page(&self, id: u32, checksum: bool) -> Result<Page> {
         ensure(
             id < self.header.page_count,
@@ -207,7 +263,7 @@ impl Source {
                 f::paged_superblock_slot_generation(slot, copy).is_some(),
                 "superblock damage requires separate recovery",
             )?;
-            f::decode_database_header(slot)?;
+            f::decode_published_database_header(slot)?;
         }
         Ok(())
     }
@@ -283,6 +339,10 @@ impl Drop for Source {
     }
 }
 impl PageStore for Source {
+    fn enable_deferred_reclamation(&self) -> std::result::Result<(), PagerError> {
+        // Verification needs the host contract; all mutation methods stay read-only.
+        Ok(())
+    }
     fn read_page(&self, id: u32) -> std::result::Result<Page, PagerError> {
         self.raw_page(id, true).map_err(|error| {
             match error.downcast::<reddb_engine::storage::page::PageError>() {

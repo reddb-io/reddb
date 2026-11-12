@@ -109,7 +109,7 @@ impl UnifiedStore {
                 next.insert(name.clone(), reused);
                 continue;
             }
-            let keys = Arc::new(BTree::new(Arc::clone(pager)));
+            let keys = Self::new_derived_btree(pager)?;
             let source = PagedCollection::new(Arc::clone(data));
             let mut cursor = source.scan()?;
             let mut indexed = true;
@@ -138,7 +138,7 @@ impl UnifiedStore {
                 keys
             } else {
                 self.retire_btree(keys);
-                Arc::new(BTree::new(Arc::clone(pager)))
+                Self::new_derived_btree(pager)?
             };
             next.insert(
                 name.clone(),

@@ -25,7 +25,7 @@ impl<P: PageStore> BTree<P> {
     pub fn new(pager: Arc<P>) -> Self {
         Self {
             retirement_pin: Arc::new(()),
-            pager,
+            pager: Arc::new(super::page_proofs::TreePageStore::legacy(pager)),
             root_page_id: RwLock::new(0),
             rightmost_leaf: RwLock::new(None),
             writer: parking_lot::ReentrantMutex::new(()),
@@ -36,7 +36,7 @@ impl<P: PageStore> BTree<P> {
     pub fn with_root(pager: Arc<P>, root_page_id: u32) -> Self {
         Self {
             retirement_pin: Arc::new(()),
-            pager,
+            pager: Arc::new(super::page_proofs::TreePageStore::legacy(pager)),
             root_page_id: RwLock::new(root_page_id),
             rightmost_leaf: RwLock::new(None),
             writer: parking_lot::ReentrantMutex::new(()),
@@ -49,6 +49,49 @@ impl<P: PageStore> BTree<P> {
             .root_page_id
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Start an authenticated tree. Retired proof paths remain owned until
+    /// the host publishes its replacement catalog through the pager fence.
+    pub fn new_verified(pager: Arc<P>) -> BTreeResult<Self> {
+        Self::with_verified_root(pager, 0, reddb_file::page_proof::PageProofRoot::default())
+    }
+
+    pub fn has_page_proofs(&self) -> bool {
+        self.pager.has_page_proofs()
+    }
+
+    /// Restore independently sealed page-image authority without scanning data.
+    pub fn with_verified_root(
+        pager: Arc<P>,
+        root_page_id: u32,
+        proof: reddb_file::page_proof::PageProofRoot,
+    ) -> BTreeResult<Self> {
+        if root_page_id != 0 && proof.reference.page_id == 0 {
+            return Err(BTreeError::Corrupted(
+                "missing published page generation proof".into(),
+            ));
+        }
+        if root_page_id == 0 && proof.reference.page_id != 0 {
+            return Err(BTreeError::Corrupted(
+                "empty tree retains a published page generation proof".into(),
+            ));
+        }
+        Ok(Self {
+            retirement_pin: Arc::new(()),
+            pager: Arc::new(super::page_proofs::TreePageStore::verified(pager, proof)?),
+            root_page_id: RwLock::new(root_page_id),
+            rightmost_leaf: RwLock::new(None),
+            writer: parking_lot::ReentrantMutex::new(()),
+        })
+    }
+
+    /// The host must sync before publishing this pair in its catalog.
+    pub fn seal_page_proofs(
+        &self,
+    ) -> BTreeResult<Option<(u32, reddb_file::page_proof::PageProofRoot)>> {
+        let _writer = self.writer.lock();
+        Ok(self.pager.seal()?.map(|proof| (self.root_page_id(), proof)))
     }
 
     /// Check if tree is empty
@@ -154,21 +197,34 @@ impl<P: PageStore> BTree<P> {
         let _writer = self.writer.lock();
         let root_id = self.root_page_id();
 
-        // Empty tree - create root leaf
+        // Dispatch before reserving the existing-tree page buffers. A bulk
+        // checkpoint can create proof pages on the same worker stack.
         if root_id == 0 {
-            let mut page = self.pager.allocate_page(PageType::BTreeLeaf)?;
-            clear_leaf_cells(&mut page);
-            insert_into_leaf(&mut page, key, value)?;
-            init_leaf_links(&mut page, 0, 0);
-            page.update_checksum();
-            let new_root = page.page_id();
-            self.pager.write_page(new_root, page)?;
-            *self.root_page_id.write().map_err(|e| {
-                BTreeError::LockPoisoned(format!("insert: root_page_id write lock: {e}"))
-            })? = new_root;
-            return Ok(());
+            return self.insert_encoded_new_root(key, value);
         }
+        self.insert_encoded_existing_root(root_id, key, value)
+    }
 
+    fn insert_encoded_new_root(&self, key: &[u8], value: &[u8]) -> BTreeResult<()> {
+        let mut page = self.pager.allocate_page(PageType::BTreeLeaf)?;
+        clear_leaf_cells(&mut page);
+        insert_into_leaf(&mut page, key, value)?;
+        init_leaf_links(&mut page, 0, 0);
+        page.update_checksum();
+        let new_root = page.page_id();
+        self.pager.write_page(new_root, page)?;
+        *self.root_page_id.write().map_err(|e| {
+            BTreeError::LockPoisoned(format!("insert: root_page_id write lock: {e}"))
+        })? = new_root;
+        Ok(())
+    }
+
+    fn insert_encoded_existing_root(
+        &self,
+        root_id: u32,
+        key: &[u8],
+        value: &[u8],
+    ) -> BTreeResult<()> {
         // D2 fastpath: if key > cached rightmost high_key, go directly to
         // the cached leaf without descending from the root. This cuts
         // tree descent entirely for monotonic append workloads (timeseries,
@@ -720,6 +776,7 @@ impl<P: PageStore> BTree<P> {
 
                     if page.cell_count() == 0 && page_id == root_id {
                         self.pager.free_page(root_id)?;
+                        self.pager.reset_empty()?;
                         *self.root_page_id.write().map_err(|e| {
                             BTreeError::LockPoisoned(format!(
                                 "delete: root_page_id write lock: {e}"
@@ -1012,50 +1069,42 @@ impl<P: PageStore> BTree<P> {
     fn insert_into_parent(
         &self,
         mut path: Vec<u32>,
-        left_child: u32,
+        mut left_child: u32,
         key: &[u8],
-        right_child: u32,
+        mut right_child: u32,
     ) -> BTreeResult<()> {
-        // If path is empty, need new root
-        if path.is_empty() {
-            let mut new_root = self.pager.allocate_page(PageType::BTreeInterior)?;
-            // Single separator with two children — seed the page via the
-            // canonical slotted builder so the header is consistent.
-            write_interior_entries(&mut new_root, &[key.to_vec()], &[left_child, right_child])?;
-
-            new_root.update_checksum();
-            let new_root_id = new_root.page_id();
-            self.pager.write_page(new_root_id, new_root)?;
-            *self.root_page_id.write().map_err(|e| {
-                BTreeError::LockPoisoned(format!(
-                    "insert_into_parent: root_page_id write lock: {e}"
-                ))
-            })? = new_root_id;
-            return Ok(());
-        }
-
-        // Insert into parent — path is non-empty (checked above)
-        let parent_id = path.pop().ok_or_else(|| {
-            BTreeError::Corrupted("insert_into_parent: path unexpectedly empty".into())
-        })?;
-        let mut parent = self.pager.read_page(parent_id)?;
-
-        // Can we fit?
-        if can_insert_interior(&parent, key) {
-            insert_into_interior(&mut parent, key, left_child, right_child)?;
+        let mut key = std::borrow::Cow::Borrowed(key);
+        loop {
+            let Some(parent_id) = path.pop() else {
+                let mut new_root = self.pager.allocate_page(PageType::BTreeInterior)?;
+                write_interior_entries(&mut new_root, &[key.to_vec()], &[left_child, right_child])?;
+                new_root.update_checksum();
+                let new_root_id = new_root.page_id();
+                self.pager.write_page(new_root_id, new_root)?;
+                *self.root_page_id.write().map_err(|e| {
+                    BTreeError::LockPoisoned(format!(
+                        "insert_into_parent: root_page_id write lock: {e}"
+                    ))
+                })? = new_root_id;
+                return Ok(());
+            };
+            let mut parent = self.pager.read_page(parent_id)?;
+            if can_insert_interior(&parent, &key) {
+                insert_into_interior(&mut parent, &key, left_child, right_child)?;
+                parent.update_checksum();
+                self.pager.write_page(parent_id, parent)?;
+                return Ok(());
+            }
+            let (new_interior, separator) =
+                self.split_interior(&mut parent, &key, left_child, right_child)?;
             parent.update_checksum();
             self.pager.write_page(parent_id, parent)?;
-            return Ok(());
+            // Only compact identities ascend; 16-KiB page buffers must not
+            // accumulate recursively while a salvage visitor is also active.
+            left_child = parent_id;
+            right_child = new_interior;
+            key = std::borrow::Cow::Owned(separator);
         }
-
-        // Need to split interior node
-        let (new_interior, separator) =
-            self.split_interior(&mut parent, key, left_child, right_child)?;
-        parent.update_checksum();
-        self.pager.write_page(parent_id, parent.clone())?;
-
-        // Propagate up
-        self.insert_into_parent(path, parent.page_id(), &separator, new_interior.page_id())
     }
 
     /// Split an interior node
@@ -1065,7 +1114,7 @@ impl<P: PageStore> BTree<P> {
         new_key: &[u8],
         left_child: u32,
         right_child: u32,
-    ) -> BTreeResult<(Page, Vec<u8>)> {
+    ) -> BTreeResult<(u32, Vec<u8>)> {
         let (mut keys, mut children) = read_interior_keys_children(page)?;
         let key_insert_pos = keys.partition_point(|key| key.as_slice() < new_key);
         let child_insert_pos = children
@@ -1089,9 +1138,9 @@ impl<P: PageStore> BTree<P> {
 
         new_page.update_checksum();
         let new_page_id = new_page.page_id();
-        self.pager.write_page(new_page_id, new_page.clone())?;
+        self.pager.write_page(new_page_id, new_page)?;
 
-        Ok((new_page, separator))
+        Ok((new_page_id, separator))
     }
 
     fn rebalance_leaf(&self, leaf_id: u32, mut path: Vec<u32>) -> BTreeResult<()> {
