@@ -20,8 +20,10 @@ RedDB has separate stores with separate semantics.
 
 Reserved RedDB namespaces:
 
-- `red.config.*` is reserved for RedDB-owned config.
-- `red.secret.*` is reserved for RedDB-owned secrets.
+- `red.config` is the protected physical Config collection. Content keys are
+  bare dotted paths such as `backup.enabled`; they never repeat `red.` or
+  `red.config.` inside the collection.
+- `red.secret.*` is reserved for RedDB-owned secret paths.
 
 Canonical system storage uses protected keyed collections:
 
@@ -45,7 +47,7 @@ Reserved namespaces must not be written to the wrong store:
 
 ```sql
 SET CONFIG red.secret.mtls.private_key = '...'; -- reject
-SET SECRET red.config.backup.enabled = true;    -- reject
+SET SECRET red.config.backup.enabled = true;    -- reject: Config address in Vault
 ```
 
 ## 2. SQL Surface
@@ -53,7 +55,7 @@ SET SECRET red.config.backup.enabled = true;    -- reject
 Config writes:
 
 ```sql
-SET CONFIG red.config.backup.enabled = true;
+SET CONFIG backup.enabled = true;
 SET CONFIG mycompany.C.Z.W = 123;
 DELETE CONFIG mycompany.C.Z.W;
 SET CONFIG mycompany.C.Z.W = NULL; -- delete
@@ -78,7 +80,7 @@ SET CONFIG mycompany.payments.api_key = &mycompany.payments.stripe.key;
 Variable reads:
 
 ```sql
-SELECT $red.config.backup.enabled;
+SELECT $config.backup.enabled;
 SELECT $config.mycompany.C.Z.W;
 
 SELECT $red.secret.ai.providers.openai.tokens.default; -- returns ***
@@ -87,7 +89,8 @@ SELECT $secret.mycompany.payments.stripe.key; -- returns ***
 
 Rules:
 
-- `$red.config.*` reads config.
+- `$red.config.*` is a collection-qualified config read; the part after
+  `red.config` is still a bare content key.
 - `$config.*` reads config.
 - `$red.secret.*` reads a vault secret.
 - `$secret.*` reads a vault secret.
@@ -186,7 +189,7 @@ Required runtime model:
 
 - Load config into an in-memory `ConfigStore` snapshot.
 - Load vault secrets into an in-memory `SecretStore` snapshot after unseal.
-- Use O(1) path lookup. Do not scan `red_config` on `$config`, `CONFIG()`, or
+- Use O(1) path lookup. Do not scan `red.config` on `$config`, `CONFIG()`, or
   internal RedDB config reads.
 - Store config and secret snapshots behind lock-light copy-on-write publishing,
   such as `ArcSwap` or an equivalent mechanism.
@@ -270,7 +273,7 @@ Projection still returns `***` even when the caller can use the secret.
 `&path` is a secret reference syntax. It is valid as a config value.
 
 ```sql
-SET CONFIG red.config.tls.private_key = &red.secret.mtls.private_key;
+SET CONFIG tls.private_key = &red.secret.mtls.private_key;
 SET CONFIG mycompany.payments.api_key = &mycompany.payments.stripe.key;
 ```
 
@@ -350,7 +353,7 @@ Restore should publish config and secret restore events after import.
 ## 10. Internal API Consumers
 
 Any RedDB subsystem that consumes a secret stored through RedDB must use the
-vault-backed `SecretResolver`. It must not read plaintext from `red_config`.
+vault-backed `SecretResolver`. It must not read plaintext from `red.config`.
 
 Initial consumers:
 
@@ -364,11 +367,14 @@ AI credential storage contract:
 
 ```text
 red.secret.ai.providers.<provider>.tokens.<alias>
-red.config.ai.providers.<provider>.tokens.<alias>.secret_ref = 'red.secret.ai.providers.<provider>.tokens.<alias>'
-red.config.ai.<provider>.<alias>.base_url = 'https://...'
-red.config.ai.default.provider = 'openai'
-red.config.ai.default.model = '...'
+ai.providers.<provider>.tokens.<alias>.secret_ref = 'red.secret.ai.providers.<provider>.tokens.<alias>'
+ai.providers.<provider>.base_url = 'https://...'
+ai.default.provider = '<provider>'
+ai.default.model = '...'
 ```
+
+The `ai.*` lines above are content keys stored inside `red.config`; the
+collection name is deliberately not part of the key.
 
 `/ai/credentials` must write API keys to the vault and write only a secret
 reference into config. If called without a vault and the payload includes an

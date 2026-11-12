@@ -326,6 +326,12 @@ pub fn encode(value: &Value, out: &mut Vec<u8>) {
             write_varint(out, bytes.len() as u64);
             out.extend_from_slice(bytes);
         }
+        Value::Temperature(value) => {
+            out.push(DataType::Temperature.to_byte());
+            out.push(value.unit() as u8);
+            out.push(value.scale());
+            out.extend_from_slice(&value.minor_units().to_le_bytes());
+        }
         Value::Money {
             asset_code,
             minor_units,
@@ -835,6 +841,24 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), ValueError> {
                 .map_err(|_| ValueError::InvalidUtf8)?;
             offset += len as usize;
             Value::AssetCode(code)
+        }
+        DataType::Temperature => {
+            if data.len() < offset + 10 {
+                return Err(ValueError::TruncatedData);
+            }
+            let unit = crate::TemperatureUnit::from_byte(data[offset])
+                .ok_or(ValueError::InvalidType(data[offset]))?;
+            let scale = data[offset + 1];
+            let amount = i64::from_le_bytes(
+                data[offset + 2..offset + 10]
+                    .try_into()
+                    .expect("fixed temperature payload"),
+            );
+            offset += 10;
+            Value::Temperature(
+                crate::Temperature::new(amount, scale, unit)
+                    .map_err(|_| ValueError::InvalidType(DataType::Temperature.to_byte()))?,
+            )
         }
         DataType::Money => {
             let (len, len_bytes) = read_varint(&data[offset..])?;

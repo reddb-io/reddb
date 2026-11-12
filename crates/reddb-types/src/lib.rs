@@ -67,3 +67,6 @@ pub use table::{
     ColumnDef, Constraint, ConstraintType, IndexDef, IndexType, TableDef, TableDefError,
 };
 pub use types::{DataType, Row, SqlTypeName, TypeCategory, TypeModifier, Value, ValueError};
+
+pub mod temperature;
+pub use temperature::{Temperature, TemperatureUnit};

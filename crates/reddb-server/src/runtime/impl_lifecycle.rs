@@ -693,7 +693,7 @@ impl RedDBRuntime {
                     .unwrap_or(0)
             })
             .unwrap_or(0)
-            .max(runtime.config_u64("red.config.timeline.last_archived_lsn", 0));
+            .max(runtime.config_u64("timeline.last_archived_lsn", 0));
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
         runtime
             .inner
@@ -763,7 +763,7 @@ impl RedDBRuntime {
             let store = runtime.inner.db.store();
             store.with_boot_system_info_update(|| {
                 store.set_config_tree(
-                    "red.system",
+                    "system",
                     &crate::serde_json::json!({
                         "pid": sys.pid,
                         "cpu_cores": sys.cpu_cores,
@@ -788,7 +788,7 @@ impl RedDBRuntime {
                 .unwrap_or(0)
                 <= 10
             {
-                store.set_config_tree("red.ai", &crate::json!({
+                store.set_config_tree("ai", &crate::json!({
                     "default": crate::json!({
                         "provider": "openai",
                         "model": crate::ai::DEFAULT_OPENAI_PROMPT_MODEL
@@ -798,7 +798,7 @@ impl RedDBRuntime {
                     "timeout": crate::json!({ "connect_secs": 10, "read_secs": 90, "write_secs": 30 })
                 }));
                 store.set_config_tree(
-                    "red.server",
+                    "server",
                     &crate::json!({
                         "max_scan_limit": 1000,
                         "max_body_size": 1048576,
@@ -807,7 +807,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.storage",
+                    "storage",
                     &crate::json!({
                         "page_size": 4096,
                         "page_cache_capacity": 100000,
@@ -825,7 +825,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.search",
+                    "search",
                     &crate::json!({
                         "rag": crate::json!({
                             "max_chunks_per_source": 10,
@@ -843,7 +843,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.auth",
+                    "auth",
                     &crate::json!({
                         "enabled": false,
                         "session_ttl_secs": 3600,
@@ -851,14 +851,14 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.query",
+                    "query",
                     &crate::json!({
                         "connection_pool": crate::json!({ "max_connections": 64, "max_idle": 16 }),
                         "max_recursion_depth": 1000
                     }),
                 );
                 store.set_config_tree(
-                    "red.indexes",
+                    "indexes",
                     &crate::json!({
                         "auto_select": true,
                         "bloom_filter": crate::json!({
@@ -872,7 +872,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.probabilistic",
+                    "probabilistic",
                     &crate::json!({
                         "hll_registers": 16384,
                         "sketch_default_width": 1000,
@@ -881,7 +881,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.timeseries",
+                    "timeseries",
                     &crate::json!({
                         "default_chunk_size": 1024,
                         "compression": crate::json!({
@@ -892,7 +892,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.queue",
+                    "queue",
                     &crate::json!({
                         "default_max_size": 0,
                         "default_max_attempts": 3,
@@ -901,7 +901,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.backup",
+                    "backup",
                     &crate::json!({
                         "enabled": false,
                         "interval_secs": 3600,
@@ -911,7 +911,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.wal",
+                    "wal",
                     &crate::json!({
                         "archive": crate::json!({
                             "enabled": false,
@@ -921,14 +921,14 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.cdc",
+                    "cdc",
                     &crate::json!({
                         "enabled": true,
                         "buffer_size": 100000
                     }),
                 );
                 store.set_config_tree(
-                    "red.config.secret",
+                    "secret",
                     &crate::json!({
                         "auto_encrypt": true,
                         "auto_decrypt": true
@@ -977,7 +977,7 @@ impl RedDBRuntime {
                 let _ = store.get_or_create_collection(*name);
             }
             // Seed VCS config namespace with sensible defaults on first
-            // boot, matching the pattern used by red.ai / red.storage.
+            // boot, matching the pattern used by ai / storage.
             store.set_config_tree(
                 crate::application::vcs_collections::CONFIG_NAMESPACE,
                 &crate::json!({
@@ -1154,13 +1154,13 @@ impl RedDBRuntime {
                             _ => None,
                         });
                         let val = row.get_field("value");
-                        if key == Some("red.config.backup.enabled") {
+                        if key == Some("backup.enabled") {
                             backup_enabled = match val {
                                 Some(reddb_types::Value::Boolean(true)) => true,
                                 Some(reddb_types::Value::Text(s)) => &**s == "true",
                                 _ => false,
                             };
-                        } else if key == Some("red.config.backup.interval_secs") {
+                        } else if key == Some("backup.interval_secs") {
                             if let Some(reddb_types::Value::Integer(n)) = val {
                                 backup_interval = *n as u64;
                             }

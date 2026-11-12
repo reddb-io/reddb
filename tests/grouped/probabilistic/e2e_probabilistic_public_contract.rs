@@ -16,10 +16,10 @@ use reddb_types::Value;
 use serde_json::{json, Value as JsonValue};
 use support::{checkpoint_and_reopen, PersistentDbPath};
 
-const PROB_HLL_STATE_PREFIX: &str = "red.probabilistic.hll.";
-const PROB_SKETCH_STATE_PREFIX: &str = "red.probabilistic.sketch.";
-const PROB_FILTER_STATE_PREFIX: &str = "red.probabilistic.filter.";
-const PROB_ENCODING_MARKER_KEY: &str = "red.probabilistic.state_encoding";
+const PROB_HLL_STATE_PREFIX: &str = "probabilistic.hll.";
+const PROB_SKETCH_STATE_PREFIX: &str = "probabilistic.sketch.";
+const PROB_FILTER_STATE_PREFIX: &str = "probabilistic.filter.";
+const PROB_ENCODING_MARKER_KEY: &str = "probabilistic.state_encoding";
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("runtime")

@@ -2012,7 +2012,7 @@ fn build_topology_for_hello_ack(runtime: &RedDBRuntime) -> Option<reddb_wire::to
 
     let db = runtime.db();
     let primary_endpoint = Endpoint {
-        addr: runtime.config_string("red.redwire.advertise_addr", ""),
+        addr: runtime.config_string("redwire.advertise_addr", ""),
         region: db.options().replication.region.clone(),
     };
     let (replicas, current_lsn, epoch) = match db.replication.as_ref() {

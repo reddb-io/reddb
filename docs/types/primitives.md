@@ -197,5 +197,5 @@ Value::Secret(ciphertext_bytes)
 
 Notes:
 - `SECRET('...')` marks plaintext for encryption on `INSERT` or `UPDATE`.
-- Encryption requires a bootstrapped vault AES key and is controlled by `red.config.secret.auto_encrypt` (default `true`).
-- Reads stay masked as `"***"` unless the runtime has the vault AES key and `red.config.secret.auto_decrypt` is enabled.
+- Encryption requires a bootstrapped vault AES key and is controlled by `secret.auto_encrypt` in `red.config` (default `true`).
+- Reads stay masked as `"***"` unless the runtime has the vault AES key and `secret.auto_decrypt` in `red.config` is enabled.

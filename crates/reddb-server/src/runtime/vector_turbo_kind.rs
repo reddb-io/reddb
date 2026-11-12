@@ -1,7 +1,7 @@
 //! Foundation for `KIND vector.turbo` collections (PRD #668, issue #693).
 //!
 //! Mirrors `blockchain_kind` for the marker side of the contract:
-//! `red.collection.{name}.kind = "turbo"` is the durable signal that
+//! `collection.{name}.kind = "turbo"` is the durable signal that
 //! distinguishes a TurboQuant-backed vector collection from the legacy
 //! `vector` kind. Routing in `impl_ddl`, `create_vector`, and the
 //! vector-search executor reads `is_turbo` to branch.
@@ -29,7 +29,7 @@ use reddb_file::{
 };
 use reddb_types::Value;
 
-/// Value stored under `red.collection.{name}.kind` for vector.turbo
+/// Value stored under `collection.{name}.kind` for vector.turbo
 /// collections. Must be distinct from `blockchain_kind::CHAIN_KIND_TAG`
 /// and from any future kind marker.
 pub const TURBO_KIND_TAG: &str = "turbo";
@@ -42,7 +42,7 @@ pub const TURBO_KIND_TAG: &str = "turbo";
 pub const TURBO_CODEC_SEED: u64 = 0x7155_8807_FED4_2913;
 
 fn kind_key(collection: &str) -> String {
-    format!("red.collection.{collection}.kind")
+    format!("collection.{collection}.kind")
 }
 
 /// Persist the `turbo` kind marker. Called once at collection creation.
@@ -382,7 +382,7 @@ pub fn spawn_background_rebuild(
                 return;
             }
             store.set_config_tree(
-                &format!("red.collection.{collection}.vector.turbo.ready"),
+                &format!("collection.{collection}.vector.turbo.ready"),
                 &crate::serde_json::Value::Bool(true),
             );
         })
@@ -395,7 +395,7 @@ pub fn spawn_background_rebuild(
 /// process tooling). The in-memory `TurboCollectionState::is_ready`
 /// is the authoritative live signal; this is the persisted shadow.
 pub fn ready_flag_from_catalog(store: &UnifiedStore, collection: &str) -> bool {
-    let key = format!("red.collection.{collection}.vector.turbo.ready");
+    let key = format!("collection.{collection}.vector.turbo.ready");
     match store.get_config(&key) {
         Some(Value::Boolean(b)) => b,
         _ => false,

@@ -90,7 +90,7 @@ fn register(addr: &str) {
 
 fn configure_cache_dir(addr: &str, path: &Path) {
     let body = format!(r#"{{"value":"{}"}}"#, path.display());
-    let (status, _) = send(addr, "PUT", "/config/red.config.ai.local.cache_dir", &body);
+    let (status, _) = send(addr, "PUT", "/config/ai.local.cache_dir", &body);
     assert_eq!(status, 200);
 }
 
@@ -313,12 +313,7 @@ fn fixture_dir_via_config_works_when_request_omits_it() {
 
     let fixture = make_fixture("config_fixture");
     let body = format!(r#"{{"value":"{}"}}"#, fixture.display());
-    let (status, _) = send(
-        &addr,
-        "PUT",
-        "/config/red.config.ai.local.fixture_dir",
-        &body,
-    );
+    let (status, _) = send(&addr, "PUT", "/config/ai.local.fixture_dir", &body);
     assert_eq!(status, 200);
 
     let (status, body) = send(&addr, "POST", "/ai/models/minilm-l6-v2/pull", "{}");

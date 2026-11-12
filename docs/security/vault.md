@@ -295,7 +295,7 @@ new cert with the same salt cannot exist by construction).
 
 The vault exposes a key-value store for arbitrary application secrets.
 Keys must use the `red.secret.*` prefix; the parser routes them to the
-encrypted store rather than the plaintext `red_config` collection.
+encrypted store rather than the plaintext `red.config` collection.
 
 ```bash
 # Set a secret (over HTTP — same auth rules as any admin call)
@@ -315,15 +315,15 @@ curl -X DELETE http://127.0.0.1:5000/secrets/red.secret.stripe.api_key \
 
 ```sql
 -- Or from SQL
-SET CONFIG red.secret.stripe.api_key = 'sk_live_...';
-SHOW CONFIG red.secret.stripe;
+SET SECRET red.secret.stripe.api_key = 'sk_live_...';
+SHOW SECRETS red.secret.stripe;
 ```
 
 | Key prefix              | Purpose                                              | Access in sealed mode |
 |:------------------------|:-----------------------------------------------------|:----------------------|
 | `red.secret.aes_key`    | 32-byte AES-256 key used by `Value::Secret` columns; auto-generated on first boot | unreadable |
 | `red.secret.<your.app>.*` | Application-defined secrets (Stripe keys, OAuth client secrets, third-party tokens) | unreadable |
-| `red.config.*`          | Plaintext, non-sensitive configuration               | always readable       |
+| `red.config` collection with bare content keys such as `ai.*` | Plaintext, non-sensitive configuration | always readable |
 
 ### Locking down secrets by path with policies
 

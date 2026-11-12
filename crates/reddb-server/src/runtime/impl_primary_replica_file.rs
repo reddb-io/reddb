@@ -104,8 +104,11 @@ impl RedDBRuntime {
             crate::storage::unified::UnifiedStoreConfig::default(),
         )
         .map_err(|err| RedDBError::Internal(format!("validate basebackup snapshot: {err}")))?;
+        loaded
+            .normalize_red_config_keys()
+            .map_err(RedDBError::from)?;
         loaded.set_config_tree(
-            "red.replication",
+            "replication",
             &crate::json!({
                 "last_applied_lsn": manifest.checkpoint_lsn,
                 "state": "healthy",
@@ -155,7 +158,7 @@ impl RedDBRuntime {
         let replica_id = self.resolve_replica_id();
         let bootstrapper =
             crate::replication::replica::ReplicaBootstrapper::new(replica_id.clone());
-        let source_lsn = self.config_u64("red.replication.last_applied_lsn", 0);
+        let source_lsn = self.config_u64("replication.last_applied_lsn", 0);
         let _ = std::fs::remove_file(&pending_path);
 
         let chunk_bytes = chunk_bytes.max(1);
@@ -267,7 +270,7 @@ impl RedDBRuntime {
                     &pending_path,
                 )?;
                 self.inner.db.store().set_config_tree(
-                    "red.replication",
+                    "replication",
                     &crate::json!({
                         "state": "rebootstrap_ready",
                         "rebootstrap_pending_path": pending_path.display().to_string(),
@@ -467,7 +470,7 @@ impl RedDBRuntime {
             reddb_file::RejoinDecision::Reclone => ("reclone_required", 0, 0, 0),
         };
         self.inner.db.store().set_config_tree(
-            "red.replication",
+            "replication",
             &crate::json!({
                 "state": state,
                 "rejoin_node_timeline": node_timeline.0,

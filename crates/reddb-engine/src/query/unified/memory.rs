@@ -253,6 +253,7 @@ fn scalar_heap_bytes(value: &Value) -> usize {
         | Value::Currency(_)
         | Value::ColorAlpha(_)
         | Value::BigInt(_)
-        | Value::PageRef(_) => 0,
+        | Value::PageRef(_)
+        | Value::Temperature(_) => 0,
     }
 }

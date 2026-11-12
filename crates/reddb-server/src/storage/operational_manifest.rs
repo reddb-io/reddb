@@ -47,7 +47,7 @@ mod tests {
             let store = UnifiedStore::open(&path).unwrap();
             assert_eq!(
                 store
-                    .try_get_config("red.storage.legacy_manifest_imported")
+                    .try_get_config("storage.legacy_manifest_imported")
                     .unwrap(),
                 Some(reddb_types::Value::Boolean(true))
             );

@@ -147,7 +147,7 @@ impl RedDBRuntime {
     /// `Value::Secret` produced by the parser and apply the real
     /// crypto transform. `Password` is always hashed with argon2id.
     /// `Secret` is encrypted with AES-256-GCM keyed by the vault
-    /// when `red.config.secret.auto_encrypt = true` (default).
+    /// when `secret.auto_encrypt = true` (default).
     pub(crate) fn resolve_crypto_sentinel(&self, value: Value) -> RedDBResult<Value> {
         match value {
             Value::Password(marked) => {
@@ -161,7 +161,7 @@ impl RedDBRuntime {
                 if bytes.starts_with(PLAINTEXT_SENTINEL.as_bytes()) {
                     if !self.secret_auto_encrypt() {
                         return Err(RedDBError::Query(
-                            "SECRET() literal rejected: red.config.secret.auto_encrypt \
+                            "SECRET() literal rejected: secret.auto_encrypt \
                              is false. Insert pre-encrypted bytes directly instead."
                                 .to_string(),
                         ));

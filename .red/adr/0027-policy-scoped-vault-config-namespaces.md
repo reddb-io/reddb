@@ -8,7 +8,7 @@ so an operator can write rules like:
 - `Deny vault:* on vault:red.vault/red.secret.ai.custom.*` —
   no principal, including admin, can read or write secrets in the
   `red.secret.ai.custom.*` namespace.
-- `Allow config:read on config:red_config/red.config.custom.stuff.*` —
+- `Allow config:read on config:red.config/custom.stuff.*` —
   attached to a specific user, grants visibility into one config
   sub-tree while a default-deny posture covers the rest.
 
@@ -27,9 +27,9 @@ Canonical actions on the vault and config surfaces:
 | `vault:write`           | `VAULT PUT`, `VAULT ROTATE`, `VAULT DELETE` (write-side mutations on entries). |
 | `vault:unseal`          | The master-key seal/unseal lifecycle of a vault collection (orthogonal to reading individual secrets). |
 | `vault:purge`           | Hard-purges a deleted secret beyond the tombstone window. |
-| `config:read`           | Reading from a `red_config` key. |
-| `config:write`          | Writing/updating a `red_config` key. |
-| `config:delete`         | Deleting a `red_config` key. |
+| `config:read`           | Reading from a `red.config` key. |
+| `config:write`          | Writing/updating a `red.config` key. |
+| `config:delete`         | Deleting a `red.config` key. |
 
 `vault:read` was introduced specifically so that policies can scope
 *value reveal* independently from *metadata listing* and from the
@@ -44,7 +44,24 @@ Resource references compile into one of three patterns:
 - `Wildcard` — `*` matches every resource.
 - `Exact { kind, name }` — `vault:red.vault/red.secret.api.user.alice`.
 - `Glob(raw)` — `vault:red.vault/red.secret.ai.*` or
-  `config:red_config/red.config.custom.stuff.*`.
+  `config:red.config/custom.stuff.*`.
+
+## Canonical `red.config` content keys
+
+`red.config` is the physical system Config collection. Keys stored inside it
+are bare dotted paths such as `ai.inference.provider`, `auth.require_auth`, and
+`backup.enabled`; they never repeat the collection namespace as `red.*` or
+`red.config.*`. External policy and audit resources qualify the collection with
+the slash form `config:red.config/<key>`.
+
+Writable boot migrates legacy `red.<key>` and `red.config.<key>` rows before
+the first config consumer runs. An existing canonical history wins; otherwise
+the legacy spelling with the newest physical row wins and its complete history
+is retained. Read-only boot refuses a database that still requires this
+migration, and all new config write surfaces reject redundant `red.*` keys.
+
+Logical restore normalizes both historical spellings at the import boundary;
+the restored `red.config` rows are published only with canonical content keys.
 
 Glob matching is segment-aware (`compile_glob` /
 `glob_matches` in `crates/reddb-server/src/auth/policies.rs`), so a

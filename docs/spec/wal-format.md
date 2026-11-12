@@ -133,7 +133,7 @@ The `prev_hash` field forms a forward-only chain across all archived segments in
    - Reorder — a segment claiming `prev_hash = null` appears after an earlier one.
 3. Legacy archives without a sidecar at all skip the chain check with `tracing::warn!`. Once the engine writes a v2 sidecar, the chain becomes mandatory from that point forward.
 
-The runtime persists the active chain head at `red.config.timeline.last_segment_hash` in the database's `red_config` store. Each successful `archive_change_records` call advances this value to the new segment's `sha256`.
+The runtime persists the active chain head at content key `timeline.last_segment_hash` in the database's `red.config` collection. Each successful `archive_change_records` call advances this value to the new segment's `sha256`.
 
 ## 5. Versioning Policy
 

@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, SyncSender};
 use std::sync::{atomic::Ordering, Arc};
 use std::time::Duration;
 
-const CONFIG_KEY: &str = "red.config.ai.collection_descriptions.auto_enrich";
+const CONFIG_KEY: &str = "ai.collection_descriptions.auto_enrich";
 
 #[derive(Default)]
 pub(super) struct QueueState {
@@ -307,7 +307,7 @@ mod tests {
         );
         runtime.set_auth_store(auth);
         runtime.inner.db.store().set_config_tree(
-            "red.config.ai.providers.openai.base_url",
+            "ai.providers.openai.base_url",
             &crate::serde_json::Value::String(api_base),
         );
         runtime

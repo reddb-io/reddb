@@ -362,6 +362,7 @@ fn coarse_type_for(value: &StorageValue) -> &'static str {
         StorageValue::Blob(_) | StorageValue::Secret(_) => "binary",
         StorageValue::Array(_) => "array",
         StorageValue::Json(_) | StorageValue::Money { .. } => "object",
+        StorageValue::Temperature(_) => "object",
         StorageValue::Vector(_) => "vector",
         StorageValue::NodeRef(_)
         | StorageValue::EdgeRef(_)

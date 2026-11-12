@@ -66,6 +66,5 @@ pub const TAG_REF_PREFIX: &str = "refs/tags/";
 pub const HEAD_ID_PREFIX: &str = "HEAD:";
 
 /// `red.config` namespace for VCS configuration (retention, protected
-/// branches, merge policy). Matches the `red.logging.*` / `red.ml.*`
-/// namespacing convention.
-pub const CONFIG_NAMESPACE: &str = "red.vcs";
+/// branches, merge policy).
+pub const CONFIG_NAMESPACE: &str = "vcs";

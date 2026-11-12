@@ -197,32 +197,30 @@ fn runtime_persists_rejoin_plan_from_timeline_history_chain() {
         }
     );
     assert!(
-        primary_replica_file::show_config_value(&runtime, "red.replication.state")
+        primary_replica_file::show_config_value(&runtime, "replication.state")
             .contains("rejoin_rewind_required")
+    );
+    assert!(
+        primary_replica_file::show_config_value(&runtime, "replication.rejoin_node_timeline")
+            .contains("1")
     );
     assert!(primary_replica_file::show_config_value(
         &runtime,
-        "red.replication.rejoin_node_timeline"
-    )
-    .contains("1"));
-    assert!(primary_replica_file::show_config_value(
-        &runtime,
-        "red.replication.rejoin_target_timeline"
+        "replication.rejoin_target_timeline"
     )
     .contains("3"));
+    assert!(
+        primary_replica_file::show_config_value(&runtime, "replication.rejoin_rewind_to_lsn")
+            .contains("42")
+    );
     assert!(primary_replica_file::show_config_value(
         &runtime,
-        "red.replication.rejoin_rewind_to_lsn"
-    )
-    .contains("42"));
-    assert!(primary_replica_file::show_config_value(
-        &runtime,
-        "red.replication.rejoin_rewind_confirmed_lsn"
+        "replication.rejoin_rewind_confirmed_lsn"
     )
     .contains("0"));
     assert!(primary_replica_file::show_config_value(
         &runtime,
-        "red.replication.rejoin_rewind_confirmed_timeline"
+        "replication.rejoin_rewind_confirmed_timeline"
     )
     .contains("0"));
 

@@ -192,7 +192,7 @@ pub struct AuthStore {
     /// keeps its current authorization posture until the operator
     /// flips it explicitly. The bootstrap path sets this to
     /// `PolicyOnly` for fresh installs; the boot-time config loader
-    /// supersedes both when a `red.config.policy.enforcement_mode`
+    /// supersedes both when a `policy.enforcement_mode` key in `red.config`
     /// value is present in the configured value store.
     enforcement_mode: RwLock<PolicyEnforcementMode>,
     /// Once-per-boot flag used by [`AuthStore::take_legacy_rbac_warn_once`]

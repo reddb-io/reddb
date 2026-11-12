@@ -32,7 +32,7 @@ use crate::{RedDBError, RedDBResult};
 use reddb_types::Value;
 
 const RED_CONFIG_COLLECTION: &str = "red.config";
-const AI_MODEL_KEY_PREFIX: &str = "red.config.ai.models.";
+const AI_MODEL_KEY_PREFIX: &str = "ai.models.";
 const STATUS_INSTALLED: &str = "installed";
 const TASK_EMBEDDING: &str = "embedding";
 const PROVIDER_LOCAL: &str = "local";
@@ -70,7 +70,7 @@ const LOCAL_MODELS_DISABLED_MESSAGE: &str =
 /// Materialised view of a single embedding request handed to a backend.
 #[derive(Debug, Clone)]
 pub struct LocalEmbeddingRequest {
-    /// Registered model name (registry key under `red.config.ai.models.{name}`).
+    /// Registered model name (registry key under `ai.models.{name}`).
     pub name: String,
     /// HuggingFace repo id or other source identifier (from the registry).
     pub source: String,

@@ -4,7 +4,7 @@
 > **Replica-side WAL consumption is live.** A replica started via
 > `red replica --primary-addr ...` now polls `pull_wal_records`
 > over gRPC on the primary, applies records locally, and persists
-> `red.replication.last_applied_lsn` so restarts resume where they
+> `replication.last_applied_lsn` in `red.config` so restarts resume where they
 > stopped. See `RedDBRuntime::run_replica_loop` in
 > `src/runtime/impl_core.rs`. Automatic failover, synchronous
 > replication, and multi-replica quorum are separate follow-ons

@@ -444,7 +444,7 @@ pub(super) fn try_lookup_latest_kv_value(
     // The parser rebuilds dotted paths by concatenating token display
     // strings; any segment that collides with a SQL keyword (DEFAULT,
     // LEFT, IN, …) comes back uppercase, but SET CONFIG stores keys
-    // lowercase. Normalise here so CONFIG(red.ai.default.provider)
+    // lowercase. Normalise here so CONFIG(ai.default.provider)
     // matches the key persisted by SET CONFIG.
     let key_lc = key.to_ascii_lowercase();
     super::function_budget::try_scan(

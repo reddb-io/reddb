@@ -113,12 +113,18 @@ fn active_rebootstrap_matches_ready_marker(
             data_path.display()
         )
     })?;
+    store.normalize_red_config_keys().map_err(|err| {
+        format!(
+            "normalize config keys in active replica rebootstrap candidate {}: {err}",
+            data_path.display()
+        )
+    })?;
     Ok(matches!(
-        store.get_config("red.replication.last_applied_lsn"),
+        store.get_config("replication.last_applied_lsn"),
         Some(reddb_types::Value::Integer(value))
             if value >= 0 && value as u64 == ready.checkpoint_lsn
     ) || matches!(
-        store.get_config("red.replication.last_applied_lsn"),
+        store.get_config("replication.last_applied_lsn"),
         Some(reddb_types::Value::UnsignedInteger(value))
             if value == ready.checkpoint_lsn
     ))
@@ -188,6 +194,7 @@ fn operational_store_from_embedded_artifact(
         return Ok(None);
     };
     let source = UnifiedStore::load_from_bytes_with_config(&snapshot, config.clone())?;
+    source.normalize_red_config_keys()?;
 
     std::fs::remove_file(path)?;
     let store = UnifiedStore::open_with_config(path, config)?;
@@ -733,6 +740,18 @@ impl RedDB {
             )
         };
 
+        if options.read_only {
+            store.require_normalized_red_config_keys()?;
+        } else {
+            let normalized_config_keys = store.normalize_red_config_keys()?;
+            if normalized_config_keys > 0 {
+                tracing::warn!(
+                    migrated = normalized_config_keys,
+                    "normalized legacy red.config keys before database initialization"
+                );
+            }
+        }
+
         let remote_key = options.remote_key.clone();
 
         let store = Arc::new(store);
@@ -741,7 +760,7 @@ impl RedDB {
         store.load_result_cache_epoch()?;
         if let Some((snapshot_lsn, replica_id)) = &replica_bootstrap {
             store.set_config_tree(
-                "red.replication",
+                "replication",
                 &crate::json!({
                     "last_applied_lsn": snapshot_lsn,
                     "replica_id": replica_id,

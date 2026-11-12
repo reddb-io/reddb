@@ -586,7 +586,7 @@ pub(crate) fn try_current_config_value(path: &str) -> RedDBResult<Option<Value>>
         // #1370 — `$config.<path>` desugars to `CONFIG("red.config/<path>")`,
         // but `SET CONFIG <path>` stores under the bare key. Mirror the secret
         // resolver: after the namespaced key, fall back to the stripped bare
-        // key, then the dotted `red.config.<rest>` legacy form. Track the key
+        // key. Track the key
         // that matched so the `config:read` gate authorizes the real target.
         let found = {
             let values = resolver
@@ -601,10 +601,6 @@ pub(crate) fn try_current_config_value(path: &str) -> RedDBResult<Option<Value>>
                         values
                             .get(rest)
                             .map(|value| (rest.to_string(), value.clone()))
-                            .or_else(|| {
-                                let legacy = format!("red.config.{rest}");
-                                values.get(&legacy).map(|value| (legacy, value.clone()))
-                            })
                     })
                 })
         };
@@ -737,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn config_snapshot_keeps_legacy_and_namespaced_aliases_after_collection_migration() {
+    fn config_snapshot_keeps_bare_and_namespaced_aliases_for_canonical_keys() {
         use crate::storage::{EntityData, EntityId, RowData, UnifiedEntity};
         let runtime = super::super::RedDBRuntime::in_memory().expect("runtime");
         let store = runtime.db().store();
@@ -748,7 +744,7 @@ mod tests {
         ));
         for (id, key, value, tombstone) in [
             (1, "theme", "dark", false),
-            (2, "red.config.theme", "light", false),
+            (2, "theme", "light", false),
             (3, "other", "hidden", true),
         ] {
             let mut entity =
@@ -765,9 +761,9 @@ mod tests {
             manager.insert(entity).expect("config row");
         }
         let values = latest_config_snapshot(runtime.db().as_ref()).expect("snapshot");
-        assert_eq!(values.get("theme"), Some(&Value::text("dark")));
-        assert_eq!(values.get("red.config.theme"), Some(&Value::text("light")));
+        assert_eq!(values.get("theme"), Some(&Value::text("light")));
         assert_eq!(values.get("red.config/theme"), Some(&Value::text("light")));
+        assert!(!values.contains_key("red.config.theme"));
         assert_eq!(values.get("other"), Some(&Value::text("hidden")));
         assert!(!values.contains_key("red.config/other"));
     }
@@ -850,8 +846,8 @@ mod tests {
 fn latest_config_snapshot(db: &RedDB) -> RedDBResult<HashMap<String, Value>> {
     let mut latest: HashMap<String, (u64, Arc<Value>)> = HashMap::new();
 
-    // The store canonicalizes the legacy `red_config` name to `red.config`.
-    // Scan it once, but preserve both legacy and namespaced resolver keys.
+    // The store canonicalizes the legacy `red_config` collection name to `red.config`.
+    // Scan it once, preserving both bare and namespaced resolver keys.
     if let Some(manager) = db.store().get_collection("red.config") {
         super::function_budget::try_scan(
             |visit| manager.try_for_each_entity(usize::MAX, visit),
@@ -869,15 +865,6 @@ fn latest_config_snapshot(db: &RedDB) -> RedDBResult<HashMap<String, Value>> {
                 // payload at most once for each advancing entity version.
                 let mut shared = None;
                 insert_latest_config_value(&mut latest, key.clone(), id, value, &mut shared);
-                if let Some(rest) = key.strip_prefix("red.config.") {
-                    insert_latest_config_value(
-                        &mut latest,
-                        format!("red.config/{rest}"),
-                        id,
-                        value,
-                        &mut shared,
-                    );
-                }
                 if !matches!(row.get_field("tombstone"), Some(Value::Boolean(true))) {
                     insert_latest_config_value(
                         &mut latest,
@@ -943,7 +930,7 @@ fn is_reserved_config_key(key: &str) -> bool {
 }
 
 /// The canonical system config store reached by the inline resolver. Exact
-/// legacy aliases are normalized at this boundary, while other collections
+/// collection aliases are normalized at this boundary, while other collections
 /// remain unaffected (#1743).
 fn is_config_collection(collection: &str) -> bool {
     let normalized = collection.to_ascii_lowercase();

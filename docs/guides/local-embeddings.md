@@ -81,8 +81,8 @@ candle or onnx backend at boot.
 
 ## Register a model
 
-Local models live in the registry at `red.config.ai.models.{name}`
-(KV under the `red_config` collection). Use the HTTP API:
+Local models live at content key `ai.models.{name}` in the `red.config`
+collection. Use the HTTP API:
 
 ```bash
 curl -X POST http://127.0.0.1:5000/ai/models \
@@ -162,7 +162,7 @@ The pull endpoint:
    the operator either staged the secret or did not, no silent fallback.
 4. Locates the artifact source. Today RedDB pulls from a local fixture
    directory (`fixture_dir` on the request, or
-   `red.config.ai.local.fixture_dir` in `red_config`). Live HuggingFace
+   content key `ai.local.fixture_dir` in `red.config`). Live HuggingFace
    download is a follow-up slice; the surface is wired but does not
    make outbound calls in this slice.
 5. Copies every file into a staging dir, hashes each one (SHA-256),
@@ -191,7 +191,7 @@ A successful pull returns the manifest and the resolved `cache_dir`.
 
 `cache_root` resolves in this order:
 
-1. `red.config.ai.local.cache_dir` in `red_config` (operator override).
+1. Content key `ai.local.cache_dir` in `red.config` (operator override).
 2. `<db-path-parent>/ai_models_cache` (alongside the data files).
 3. `$TMPDIR/ai_models_cache` if the engine is running fully in-memory.
 
@@ -277,7 +277,7 @@ indirection → env fallback (`REDDB_HUGGINGFACE_API_KEY_{ALIAS}`). A non-empty
 resolution is required when `credential_alias` is set — RedDB does not silently
 fall back to "no auth" if the operator named an alias. The old
 `red.secret.ai.huggingface.{alias}.api_key` vault shape and the legacy plaintext
-`red.config.ai.huggingface.{alias}.key` path were removed in the same release
+`ai.huggingface.{alias}.key` content path in `red.config` were removed in the same release
 (issue #1745, no deprecation window).
 
 **The boundary never accepts plaintext.** Both the model-register

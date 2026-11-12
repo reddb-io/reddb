@@ -315,6 +315,8 @@ pub enum DataType {
     Money = 54,
     /// Exact JSON numeric literal stored as canonical decimal text
     DecimalText = 55,
+    /// Exact measured temperature with explicit C/F/K unit.
+    Temperature = 56,
 }
 
 /// Type categories used by the Fase 3 coercion resolver. Mirrors
@@ -416,6 +418,7 @@ impl DataType {
             | DataType::Currency
             | DataType::AssetCode
             | DataType::Money
+            | DataType::Temperature
             | DataType::Enum => TypeCategory::Domain,
             DataType::Uuid => TypeCategory::Uuid,
             DataType::Secret | DataType::Password => TypeCategory::Opaque,
@@ -528,6 +531,7 @@ impl DataType {
             53 => Some(DataType::AssetCode),
             54 => Some(DataType::Money),
             55 => Some(DataType::DecimalText),
+            56 => Some(DataType::Temperature),
             _ => None,
         }
     }
@@ -589,6 +593,7 @@ impl DataType {
             "CURRENCY" => DataType::Currency,
             "ASSETCODE" | "ASSET_CODE" | "ASSET" => DataType::AssetCode,
             "MONEY" => DataType::Money,
+            "TEMPERATURE" => DataType::Temperature,
             "DECIMAL_TEXT" | "DECIMALTEXT" => DataType::DecimalText,
             "ENUM" => DataType::Enum,
             "ARRAY" => DataType::Array,
@@ -625,45 +630,46 @@ impl DataType {
             // Cross-references (variable-length IDs)
             DataType::NodeRef => None,
             DataType::EdgeRef => None,
-            DataType::VectorRef => Some(8),   // u64 vector ID
-            DataType::RowRef => None,         // table_id (varint) + row_id (u64)
-            DataType::Color => Some(3),       // RGB
-            DataType::Email => None,          // variable-length string
-            DataType::Url => None,            // variable-length string
-            DataType::Phone => Some(8),       // u64
-            DataType::Semver => Some(4),      // u32
-            DataType::Cidr => Some(5),        // u32 + u8
-            DataType::Date => Some(4),        // i32
-            DataType::Time => Some(4),        // u32
-            DataType::Decimal => Some(8),     // i64
-            DataType::DecimalText => None,    // variable-length exact decimal text
-            DataType::Enum => Some(1),        // u8
-            DataType::Array => None,          // variable-length
-            DataType::TimestampMs => Some(8), // i64
-            DataType::Ipv4 => Some(4),        // u32
-            DataType::Ipv6 => Some(16),       // [u8; 16]
-            DataType::Subnet => Some(8),      // u32 + u32
-            DataType::Port => Some(2),        // u16
-            DataType::Latitude => Some(4),    // i32
-            DataType::Longitude => Some(4),   // i32
-            DataType::GeoPoint => Some(8),    // i32 + i32
-            DataType::Country2 => Some(2),    // [u8; 2]
-            DataType::Country3 => Some(3),    // [u8; 3]
-            DataType::Lang2 => Some(2),       // [u8; 2]
-            DataType::Lang5 => Some(5),       // [u8; 5]
-            DataType::Currency => Some(3),    // [u8; 3]
-            DataType::ColorAlpha => Some(4),  // [u8; 4]
-            DataType::BigInt => Some(8),      // i64
-            DataType::AssetCode => None,      // variable-length normalized code
-            DataType::Money => None,          // variable-length asset + scale + i64
-            DataType::KeyRef => None,         // variable-length (collection + key)
-            DataType::DocRef => None,         // variable-length (collection + u64)
-            DataType::TableRef => None,       // variable-length (table name)
-            DataType::PageRef => Some(4),     // u32
-            DataType::Secret => None,         // variable-length ciphertext
-            DataType::Password => None,       // variable-length hash string
-            DataType::TextZstd => None,       // variable-length compressed text
-            DataType::BlobZstd => None,       // variable-length compressed blob
+            DataType::VectorRef => Some(8),    // u64 vector ID
+            DataType::RowRef => None,          // table_id (varint) + row_id (u64)
+            DataType::Color => Some(3),        // RGB
+            DataType::Email => None,           // variable-length string
+            DataType::Url => None,             // variable-length string
+            DataType::Phone => Some(8),        // u64
+            DataType::Semver => Some(4),       // u32
+            DataType::Cidr => Some(5),         // u32 + u8
+            DataType::Date => Some(4),         // i32
+            DataType::Time => Some(4),         // u32
+            DataType::Decimal => Some(8),      // i64
+            DataType::DecimalText => None,     // variable-length exact decimal text
+            DataType::Enum => Some(1),         // u8
+            DataType::Array => None,           // variable-length
+            DataType::TimestampMs => Some(8),  // i64
+            DataType::Ipv4 => Some(4),         // u32
+            DataType::Ipv6 => Some(16),        // [u8; 16]
+            DataType::Subnet => Some(8),       // u32 + u32
+            DataType::Port => Some(2),         // u16
+            DataType::Latitude => Some(4),     // i32
+            DataType::Longitude => Some(4),    // i32
+            DataType::GeoPoint => Some(8),     // i32 + i32
+            DataType::Country2 => Some(2),     // [u8; 2]
+            DataType::Country3 => Some(3),     // [u8; 3]
+            DataType::Lang2 => Some(2),        // [u8; 2]
+            DataType::Lang5 => Some(5),        // [u8; 5]
+            DataType::Currency => Some(3),     // [u8; 3]
+            DataType::ColorAlpha => Some(4),   // [u8; 4]
+            DataType::BigInt => Some(8),       // i64
+            DataType::AssetCode => None,       // variable-length normalized code
+            DataType::Temperature => Some(10), // unit + scale + i64 minor units
+            DataType::Money => None,           // variable-length asset + scale + i64
+            DataType::KeyRef => None,          // variable-length (collection + key)
+            DataType::DocRef => None,          // variable-length (collection + u64)
+            DataType::TableRef => None,        // variable-length (table name)
+            DataType::PageRef => Some(4),      // u32
+            DataType::Secret => None,          // variable-length ciphertext
+            DataType::Password => None,        // variable-length hash string
+            DataType::TextZstd => None,        // variable-length compressed text
+            DataType::BlobZstd => None,        // variable-length compressed blob
         }
     }
 
@@ -785,6 +791,7 @@ impl fmt::Display for DataType {
             DataType::Currency => write!(f, "CURRENCY"),
             DataType::AssetCode => write!(f, "ASSET_CODE"),
             DataType::Money => write!(f, "MONEY"),
+            DataType::Temperature => write!(f, "TEMPERATURE"),
             DataType::DecimalText => write!(f, "DECIMAL_TEXT"),
             DataType::ColorAlpha => write!(f, "COLOR_ALPHA"),
             DataType::BigInt => write!(f, "BIGINT"),
@@ -891,6 +898,8 @@ pub enum Value {
     Currency([u8; 3]),
     /// General asset code, normalized uppercase text
     AssetCode(String),
+    /// Exact measured temperature retaining its input unit and decimal scale.
+    Temperature(crate::Temperature),
     /// Monetary amount stored as integer minor units plus explicit scale and asset code
     Money {
         asset_code: String,
@@ -930,6 +939,7 @@ impl std::hash::Hash for Value {
         // Discriminant first — ensures different variants never collide
         std::mem::discriminant(self).hash(state);
         match self {
+            Value::Temperature(v) => v.hash(state),
             Value::Null => {}
             Value::Integer(v) => v.hash(state),
             Value::UnsignedInteger(v) => v.hash(state),
@@ -1084,6 +1094,7 @@ impl Value {
             Value::Currency(_) => DataType::Currency,
             Value::AssetCode(_) => DataType::AssetCode,
             Value::Money { .. } => DataType::Money,
+            Value::Temperature(_) => DataType::Temperature,
             Value::ColorAlpha(_) => DataType::ColorAlpha,
             Value::BigInt(_) => DataType::BigInt,
             Value::KeyRef(..) => DataType::KeyRef,
@@ -1350,7 +1361,7 @@ pub fn decimal_to_f64(value: i64) -> f64 {
     value as f64 / 10_i64.pow(DECIMAL_SCALE as u32) as f64
 }
 
-fn format_scaled_i64(value: i64, scale: u8) -> String {
+pub(crate) fn format_scaled_i64(value: i64, scale: u8) -> String {
     let negative = value < 0;
     let abs = (value as i128).abs();
     if scale == 0 {
@@ -1371,6 +1382,7 @@ fn format_scaled_i64(value: i64, scale: u8) -> String {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Value::Temperature(v) => write!(f, "{v}"),
             Value::Null => write!(f, "NULL"),
             Value::Integer(v) => write!(f, "{}", v),
             Value::UnsignedInteger(v) => write!(f, "{}", v),
@@ -3002,7 +3014,8 @@ mod tests {
         }
         assert_eq!(DataType::from_sql_name("definitely_not_a_type"), None);
         assert_eq!(DataType::from_byte(0), None);
-        assert_eq!(DataType::from_byte(56), None);
+        assert_eq!(DataType::from_byte(56), Some(DataType::Temperature));
+        assert_eq!(DataType::from_byte(57), None);
     }
 
     #[test]

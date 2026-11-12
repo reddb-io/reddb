@@ -45,19 +45,25 @@ pub fn coerce_via_catalog(
         return Ok(value.clone());
     }
 
+    // SQL text contents are already decoded; Display adds SQL quoting.
+    let input = match value {
+        Value::Text(text) => text.to_string(),
+        _ => value.display_string(),
+    };
+
     // Catalog lookup at Assignment context (INSERT/UPDATE RHS).
     if find_cast(src_type, target, CastContext::Assignment).is_some() {
         // Catalog says the cast is legal. Delegate the actual byte-level
         // conversion to the legacy `coerce()` text parser using the
         // value's display form.  When the catalog grows native cast
         // function pointers, this branch materializes the function.
-        return coerce(&value.display_string(), target, enum_variants);
+        return coerce(&input, target, enum_variants);
     }
 
     // No catalog entry. Try legacy `coerce()` for backwards compat.
     // Any `Value::text(_)` succeeds via the legacy text parsers; other
     // shapes go through display_string + parse round-trip.
-    coerce(&value.display_string(), target, enum_variants)
+    coerce(&input, target, enum_variants)
 }
 
 /// Coerce a string input into the target type. Returns error description on failure.
@@ -106,6 +112,18 @@ pub fn coerce(
         DataType::Currency => parse_currency(input),
         DataType::AssetCode => parse_asset_code(input),
         DataType::Money => parse_money(input),
+        DataType::Temperature => {
+            let (amount, unit) = input
+                .trim()
+                .rsplit_once(char::is_whitespace)
+                .ok_or("temperature requires value and unit C/F/K")?;
+            let unit = crate::TemperatureUnit::parse(&unit.to_ascii_uppercase())
+                .ok_or_else(|| format!("invalid temperature unit: {unit:?} in {input:?}"))?;
+            let (minor_units, scale) = parse_normalized_decimal(amount)?;
+            crate::Temperature::new(minor_units, scale, unit)
+                .map(Value::Temperature)
+                .map_err(String::from)
+        }
         DataType::ColorAlpha => parse_color_alpha(input),
         DataType::BigInt => input
             .parse::<i64>()

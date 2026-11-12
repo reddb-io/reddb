@@ -12,7 +12,7 @@ use reddb_types::Value;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const REGISTRY_KEY: &str = "red.analytics.sources.entries_json";
+const REGISTRY_KEY: &str = "analytics.sources.entries_json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyticsSourceProfile {

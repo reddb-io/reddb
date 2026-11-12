@@ -571,7 +571,7 @@ impl RedDBRuntime {
     fn local_contiguous_applied_lsn(&self) -> u64 {
         match self.inner.db.options().replication.role {
             crate::replication::ReplicationRole::Replica { .. } => {
-                self.config_u64("red.replication.last_applied_lsn", 0)
+                self.config_u64("replication.last_applied_lsn", 0)
             }
             _ => self.replication_commit_lsn(),
         }
@@ -1153,6 +1153,11 @@ impl RedDBRuntime {
                         "red.secrets.* is reserved for vault secrets; use SET SECRET".to_string(),
                     ));
                 }
+                if key.starts_with("red.") {
+                    return Err(RedDBError::Query(format!(
+                        "config key `{key}` is invalid inside red.config: omit the redundant `red.` prefix"
+                    )));
+                }
                 // ADR-0068 §5 clean break: reject the removed AI config keys
                 // (old `default.*` provider/model and per-alias base_url shape)
                 // with a didactic error naming the replacement key.
@@ -1173,7 +1178,9 @@ impl RedDBRuntime {
                             Value::Boolean(b) => crate::serde_json::Value::Bool(*b),
                             _ => crate::serde_json::Value::String(value.to_string()),
                         };
-                        store.set_config_tree(key, &json_val);
+                        store
+                            .try_set_config_tree(key, &json_val)
+                            .map_err(RedDBError::from)?;
                         update_current_config_value(key, value.clone());
                         // Config changes can flip runtime behavior mid-session
                         // (auto_decrypt, auto_encrypt, etc.) — invalidate the
@@ -1314,6 +1321,9 @@ impl RedDBRuntime {
                 ref prefix,
                 as_json,
             } => {
+                if let Some(prefix) = prefix {
+                    super::impl_config::validate_red_config_content_key("red.config", prefix)?;
+                }
                 self.check_config_read_privilege()?;
                 let store = self.inner.db.store();
                 let all_collections = store.list_collections();
@@ -4438,7 +4448,7 @@ mod security_gate_tests {
         // which host — the exfiltration primitive behind the SET CONFIG gap.
         let err = runtime
             .execute_query(
-                "SET CONFIG red.config.ai.providers.openai.tokens.default.secret_ref = 'red.secret.aes_key'",
+                "SET CONFIG ai.providers.openai.tokens.default.secret_ref = 'red.secret.aes_key'",
             )
             .expect_err("AI provider config must be refused for a non-admin");
         assert!(

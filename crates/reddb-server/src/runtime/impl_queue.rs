@@ -60,7 +60,7 @@ pub(crate) const QUEUE_READ_WAIT_CANCELLED: &str =
 /// Slice B of PRD #718 — `red.config` key naming the maximum WAIT
 /// budget the runtime will honour. Values above the cap are rejected
 /// before any waiter is registered.
-pub(crate) const QUEUE_MAX_WAIT_MS_CONFIG_KEY: &str = "red.config.queue.max_wait_ms";
+pub(crate) const QUEUE_MAX_WAIT_MS_CONFIG_KEY: &str = "queue.max_wait_ms";
 
 /// Default cap when the operator has not set
 /// [`QUEUE_MAX_WAIT_MS_CONFIG_KEY`] — 60 seconds, in milliseconds.

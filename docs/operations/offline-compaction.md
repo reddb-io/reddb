@@ -88,7 +88,7 @@ an operator who has chosen the latter may explicitly add
 `--retain-canonical-system-config`. This retires the old identity only on the
 recovery copy. The operation refuses WAL actions addressed to `red_config`,
 except for committed upserts and deletes proved to affect only the process
-information recreated at boot (`red.system.pid`, CPU/memory observations,
+information recreated at boot (`system.pid`, CPU/memory observations,
 OS, architecture, hostname and start time). Delete identities must resolve
 in the old checkpoint or an earlier committed upsert. User-defined keys,
 unknown identities, references and unsupported action kinds are rejected.

@@ -408,6 +408,18 @@ fn read_meta_payload(pager: &Pager) -> Result<Option<Vec<u8>>, StoreError> {
 }
 
 impl UnifiedStore {
+    pub(crate) fn fence_required_capabilities(&self, capabilities: u64) -> Result<(), StoreError> {
+        if capabilities == 0 {
+            return Ok(());
+        }
+        let Some(pager) = &self.pager else {
+            return Ok(());
+        };
+        pager
+            .fence_required_capabilities(capabilities)
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))
+    }
+
     /// Compare and encode one borrowed row at a time. Begin a new tree only at
     /// the first difference, copying its already-verified prefix in bounded
     /// batches. Unchanged trees require no replacement allocation.
@@ -1197,6 +1209,7 @@ impl UnifiedStore {
         let catalog = store.load_from_pages(false, None)?;
         StoreCommitCoordinator::replay_read_only(&store, &wal_path).map_err(StoreError::Io)?;
         store.load_result_cache_epoch()?;
+        store.require_normalized_red_config_keys()?;
         let pending_drops = store.legacy_pending_collection_drops()?.unwrap_or_default();
         for name in pending_drops {
             if !catalog
@@ -1252,14 +1265,10 @@ impl UnifiedStore {
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
         trace_startup_phase(path, "paged_pager_open", pager_open_started);
 
-        if config.resident_memory_bytes_max.is_none()
-            && reddb_file::file_format::page_format_is_disk_resident(
-                pager
-                    .header()
-                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
-                    .version,
-            )
-        {
+        let header = pager
+            .header()
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        if config.resident_memory_bytes_max.is_none() && header.requires_disk_residency() {
             return Err(StoreError::Io(std::io::Error::new(std::io::ErrorKind::Unsupported,
                 "this database was prepared for disk residency; reopen with the disk-resident storage profile")));
         }
@@ -1335,6 +1344,13 @@ impl UnifiedStore {
                 .map_err(StoreError::Io)?;
         }
         store.load_result_cache_epoch()?;
+        let normalized_config_keys = store.normalize_red_config_keys()?;
+        if normalized_config_keys > 0 {
+            tracing::warn!(
+                migrated = normalized_config_keys,
+                "normalized legacy red.config keys before boot config consumers"
+            );
+        }
         trace_startup_phase(path, "paged_wal_replay", wal_replay_started);
         if catalog_load.migrated {
             // Publish only the renamed catalog keys. Existing row, key and
@@ -1491,7 +1507,7 @@ impl UnifiedStore {
     }
 
     fn legacy_pending_collection_drops(&self) -> Result<Option<Vec<String>>, StoreError> {
-        match self.try_get_config("red.storage.legacy_manifest_imported")? {
+        match self.try_get_config("storage.legacy_manifest_imported")? {
             Some(Value::Boolean(true)) => return Ok(None),
             None => {}
             Some(_) => {
@@ -1525,7 +1541,7 @@ impl UnifiedStore {
             }
         }
         self.try_set_config_tree(
-            "red.storage.legacy_manifest_imported",
+            "storage.legacy_manifest_imported",
             &crate::serde_json::Value::Bool(true),
         )?;
         Ok(())
@@ -1573,11 +1589,10 @@ impl UnifiedStore {
         // `<data>-meta` shadow when page 1 itself is corrupted.
         if let Some(content_vec) = read_meta_payload(pager)? {
             let content: &[u8] = &content_vec;
-            let file_version = pager
+            let header = pager
                 .header()
-                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
-                .version;
-            let prepared = reddb_file::file_format::page_format_is_disk_resident(file_version);
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            let prepared = header.requires_disk_residency();
             let resume = if prepared {
                 reddb_file::native_resume::decode_catalog_resume(content)
                     .map_err(|error| StoreError::Serialization(error.to_string()))?
@@ -1712,7 +1727,8 @@ impl UnifiedStore {
                 })?;
                 for state in resume.collections.values() {
                     if !state.secondary_indices.is_empty()
-                        && file_version < reddb_file::file_format::PAGE_SECONDARY_INDEX_FILE_VERSION
+                        && header.version
+                            < reddb_file::file_format::PAGE_SECONDARY_INDEX_FILE_VERSION
                     {
                         return Err(page_integrity(
                             1,
@@ -4320,7 +4336,7 @@ mod checkpoint_work_tests {
                 true,
                 true,
                 false,
-                Some("red.system.pid"),
+                Some("system.pid"),
                 Some(case),
             );
             let wal = reddb_file::unified_wal_path(&fixture.path);
@@ -4449,14 +4465,14 @@ mod checkpoint_work_tests {
                 true,
                 true,
                 false,
-                Some("red.system.pid"),
+                Some("system.pid"),
             );
             let encode = |action| reddb_file::encode_store_wal_action_frame(&action).unwrap();
             let upsert = |id, value| {
                 encode(Action::UpsertEntityRecord {
                     collection: "red_config".into(),
                     record: UnifiedStore::serialize_entity_record(
-                        &config_recovery_row(id, "red.system.pid", value),
+                        &config_recovery_row(id, "system.pid", value),
                         None,
                         STORE_VERSION_CURRENT,
                     ),
@@ -4546,10 +4562,7 @@ mod checkpoint_work_tests {
                 let manager = recovered.get_collection("red.config").unwrap();
                 assert!(manager.identity_counters().0 > 10001);
                 assert!(manager.identity_counters().1 > 10001);
-                assert_eq!(
-                    recovered.get_config("red.system.pid"),
-                    Some(Value::Integer(2))
-                );
+                assert_eq!(recovered.get_config("system.pid"), Some(Value::Integer(2)));
                 assert!(recovered.get("red.config", EntityId::new(1)).is_none());
                 assert!(recovered.get("red.config", EntityId::new(10000)).is_none());
                 assert!(recovered.get("red.config", EntityId::new(10001)).is_none());
@@ -4570,13 +4583,8 @@ mod checkpoint_work_tests {
     #[test]
     fn canonical_system_config_recovery_requires_stable_boot_identity_evidence() {
         use crate::storage::wal::{WalRecord, WalWriter};
-        let fixture = duplicate_system_catalog_fixture_with_key(
-            true,
-            true,
-            false,
-            false,
-            Some("red.system.pid"),
-        );
+        let fixture =
+            duplicate_system_catalog_fixture_with_key(true, true, false, false, Some("system.pid"));
         let original = std::fs::read(&fixture.path).unwrap();
         let wal = reddb_file::unified_wal_path(&fixture.path);
         {
@@ -4623,22 +4631,17 @@ mod checkpoint_work_tests {
         use crate::storage::wal::{WalRecord, WalWriter};
         use reddb_file::StoreWalActionFrame as Action;
         for (case, checkpoint_key, wal_key, delete_id) in [
-            (
-                "unknown-delete",
-                "red.system.pid",
-                "red.system.pid",
-                Some(90000),
-            ),
+            ("unknown-delete", "system.pid", "system.pid", Some(90000)),
             (
                 "user-key",
-                "red.system.customer_setting",
-                "red.system.customer_setting",
+                "system.customer_setting",
+                "system.customer_setting",
                 None,
             ),
             (
                 "identity-reuse",
                 "red.config.customer_setting",
-                "red.system.pid",
+                "system.pid",
                 None,
             ),
         ] {

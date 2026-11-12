@@ -93,6 +93,7 @@
   - [Temporal Types](/types/temporal.md)
   - [Geo Types](/types/geo.md)
   - [Locale Types](/types/locale.md)
+  - [Temperature](/types/temperature.md)
   - [Reference Types](/types/references.md)
   - [Secret & Password Types](/types/secrets.md)
   - [Validation & Coercion](/types/validation.md)

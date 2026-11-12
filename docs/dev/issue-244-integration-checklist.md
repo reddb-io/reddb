@@ -28,7 +28,7 @@ Scope: final merge verification after the engine, parser/docs, and acceptance-te
   - `catalog::snapshot_store_with_declarations` joins `UnifiedStore::list_collections()` with persisted `CollectionContract`s.
   - `RedDB::collection_contracts()` / `collection_contract_arc()` live under `storage/unified/devx/reddb/impl_registry.rs`.
 - Verify empty-store behavior. If no user collections exist, the result should still have stable columns and zero rows unless the #244 contract explicitly includes internal collections.
-- Decide and test internal collection visibility (`red_config`, future `red.collections`, VCS/internal collections). The acceptance branch should pin this so engine and docs do not drift.
+- Decide and test internal collection visibility (the then-current `red_config` legacy spelling, future `red.collections`, VCS/internal collections). The acceptance branch should pin this so engine and docs do not drift.
 - Verify ordering is deterministic, ideally lexical by collection name, matching `catalog::snapshot_store_with_declarations` output.
 
 ## Wire And Client Seams

@@ -14,7 +14,7 @@
 //!      executes across collections and grounds the answer.
 //!   4. A mutating candidate is refused and never executed under any flag.
 //!   5. The `red.ask.audit` row grows intent, plan summary, executed query.
-//!   6. `red.config.ai.ask.planner_model` selects the planner model
+//!   6. `ai.ask.planner_model` selects the planner model
 //!      independently of the synthesis model.
 //!
 //! The planner routing/refusal logic itself is unit-tested without HTTP in
@@ -47,7 +47,7 @@ fn exec(rt: &RedDBRuntime, sql: &str) {
 fn configure_planner(rt: &RedDBRuntime) {
     rt.execute_query("SET CONFIG runtime.ai.transport_retry_max_attempts = 1")
         .expect("disable transport retries");
-    rt.execute_query("SET CONFIG red.config.ai.ask.planner = true")
+    rt.execute_query("SET CONFIG ai.ask.planner = true")
         .expect("enable planner-first path");
 }
 
@@ -104,7 +104,7 @@ fn factual_ask_generates_executes_and_cites_over_executed_rows() {
 
     configure_planner(&rt);
     // Independent planner model (criterion 9).
-    rt.execute_query("SET CONFIG red.config.ai.ask.planner_model = 'planner-mini'")
+    rt.execute_query("SET CONFIG ai.ask.planner_model = 'planner-mini'")
         .expect("set planner model");
 
     let result = rt
@@ -161,7 +161,7 @@ fn factual_ask_generates_executes_and_cites_over_executed_rows() {
     // (6) Planner and synthesis used distinct, independently-selected models.
     assert!(
         planner_body.contains("planner-mini"),
-        "planner call must use red.config.ai.ask.planner_model"
+        "planner call must use ai.ask.planner_model"
     );
     let synth_body = &bodies[1];
     assert!(

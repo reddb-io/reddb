@@ -17,7 +17,7 @@ use crate::storage::unified::{EntityData, RowData, SegmentManager, UnifiedStore}
 use crate::{RedDBError, RedDBResult};
 use reddb_types::Value;
 
-/// Value stored under `red.collection.{name}.kind` for blockchain collections.
+/// Value stored under `collection.{name}.kind` for blockchain collections.
 pub const CHAIN_KIND_TAG: &str = "chain";
 
 pub const COL_BLOCK_HEIGHT: &str = "block_height";
@@ -55,7 +55,7 @@ impl ChainTip {
 }
 
 fn kind_key(collection: &str) -> String {
-    format!("red.collection.{collection}.kind")
+    format!("collection.{collection}.kind")
 }
 
 /// Legacy best-effort adapter. Authoritative creation uses [`try_mark_as_chain`].
@@ -357,7 +357,7 @@ pub fn try_verify_chain_outcome(
 }
 
 fn integrity_key(collection: &str) -> String {
-    format!("red.collection.{collection}.integrity")
+    format!("collection.{collection}.integrity")
 }
 
 const INTEGRITY_BROKEN: &str = "broken";

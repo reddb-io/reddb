@@ -230,7 +230,7 @@ Entities are the fundamental data units stored in B-tree leaf cells and in binar
 Entity IDs are issued from a single monotonic counter (`UnifiedStore::next_entity_id`,
 seeded at `1`). Ids `1..1023` are reserved for internal collection-descriptor and
 config-default entities (column descriptors, projection metadata, bootstrap markers,
-and the seeded `red_config` defaults). After seeding those, the engine bumps the
+and the seeded `red.config` defaults). After seeding those, the engine bumps the
 counter up to a fixed floor (`FIRST_USER_ENTITY_ID = 1024`) before any user mutation
 runs. As a result:
 

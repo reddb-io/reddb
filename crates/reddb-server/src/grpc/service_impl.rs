@@ -2998,7 +2998,7 @@ impl RedDb for GrpcRuntime {
             }));
         }
         let primary_endpoint = reddb_wire::topology::Endpoint {
-            addr: self.runtime.config_string("red.grpc.advertise_addr", ""),
+            addr: self.runtime.config_string("grpc.advertise_addr", ""),
             region: self.runtime.db().options().replication.region.clone(),
         };
         let db = self.runtime.db();
@@ -3180,15 +3180,15 @@ impl RedDb for GrpcRuntime {
                     "last_applied_lsn".into(),
                     JsonValue::Number(
                         self.runtime
-                            .config_u64("red.replication.last_applied_lsn", 0)
+                            .config_u64("replication.last_applied_lsn", 0)
                             as f64,
                     ),
                 );
                 map.insert(
                     "state".into(),
-                    JsonValue::String(self.runtime.config_string("red.replication.state", "idle")),
+                    JsonValue::String(self.runtime.config_string("replication.state", "idle")),
                 );
-                let last_error = self.runtime.config_string("red.replication.last_error", "");
+                let last_error = self.runtime.config_string("replication.last_error", "");
                 if !last_error.is_empty() {
                     map.insert("last_error".into(), JsonValue::String(last_error));
                 }
@@ -3196,7 +3196,7 @@ impl RedDb for GrpcRuntime {
                     "last_seen_primary_lsn".into(),
                     JsonValue::Number(
                         self.runtime
-                            .config_u64("red.replication.last_seen_primary_lsn", 0)
+                            .config_u64("replication.last_seen_primary_lsn", 0)
                             as f64,
                     ),
                 );
@@ -3204,7 +3204,7 @@ impl RedDb for GrpcRuntime {
                     "last_seen_oldest_lsn".into(),
                     JsonValue::Number(
                         self.runtime
-                            .config_u64("red.replication.last_seen_oldest_lsn", 0)
+                            .config_u64("replication.last_seen_oldest_lsn", 0)
                             as f64,
                     ),
                 );

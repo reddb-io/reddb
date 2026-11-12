@@ -411,6 +411,7 @@ mod checkpoint_cold_append;
 mod checkpoint_delta;
 mod checkpoint_wal;
 mod commit;
+mod config_keys;
 mod impl_entities;
 mod impl_file;
 mod impl_native_a;
