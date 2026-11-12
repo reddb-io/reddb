@@ -133,6 +133,8 @@ pub enum MessageKind {
     MovedRedirect = 0x31,
     /// Authenticated topology refresh. Reply: Result with canonical topology bytes.
     Topology = 0x32,
+    /// Typed single-row insert. Negotiated with FEATURE_TYPED_MUTATIONS.
+    TypedInsert = 0x33,
 }
 
 /// Coarse routing class for a `MessageKind`.
@@ -190,6 +192,7 @@ impl MessageKind {
             | Self::VectorSearch
             | Self::GraphTraverse
             | Self::QueryWithParams
+            | Self::TypedInsert
             | Self::MovedRedirect => MessageClass::DataPlane,
 
             // BulkStream* + RowDescription/StreamEnd describe an
@@ -304,6 +307,7 @@ impl MessageKind {
             | Self::VectorSearch
             | Self::GraphTraverse
             | Self::QueryWithParams
+            | Self::TypedInsert
             | Self::Topology
             | Self::OpenStream
             | Self::StreamCancel
@@ -394,6 +398,7 @@ impl MessageKind {
             0x30 => Some(Self::QueueWaitTimeout),
             0x31 => Some(Self::MovedRedirect),
             0x32 => Some(Self::Topology),
+            0x33 => Some(Self::TypedInsert),
             _ => None,
         }
     }
@@ -488,6 +493,7 @@ mod catalog_tests {
         MessageKind::QueueWaitTimeout,
         MessageKind::MovedRedirect,
         MessageKind::Topology,
+        MessageKind::TypedInsert,
     ];
 
     #[test]
@@ -517,6 +523,7 @@ mod catalog_tests {
             MessageKind::QueryWithParams.class(),
             MessageClass::DataPlane
         );
+        assert_eq!(MessageKind::TypedInsert.class(), MessageClass::DataPlane);
         assert_eq!(MessageKind::MovedRedirect.class(), MessageClass::DataPlane);
 
         // Streamed envelopes.
@@ -672,6 +679,7 @@ mod catalog_tests {
             MessageKind::VectorSearch,
             MessageKind::GraphTraverse,
             MessageKind::QueryWithParams,
+            MessageKind::TypedInsert,
             MessageKind::OpenStream,
             MessageKind::StreamCancel,
             MessageKind::QueueWaitOpen,

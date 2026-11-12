@@ -258,6 +258,12 @@ pub const CAST_CATALOG: &[CastEntry] = &[
     entry(DataType::Text, DataType::Money, CastContext::Explicit, true),
     entry(
         DataType::Text,
+        DataType::Temperature,
+        CastContext::Explicit,
+        true,
+    ),
+    entry(
+        DataType::Text,
         DataType::IpAddr,
         CastContext::Explicit,
         true,

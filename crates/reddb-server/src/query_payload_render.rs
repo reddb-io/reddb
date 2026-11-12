@@ -118,6 +118,7 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
         Value::Lang5(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
         Value::Currency(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
         Value::AssetCode(code) => JsonValue::String(code.clone()),
+        Value::Temperature(_) => value.to_json(),
         Value::Money {
             asset_code,
             minor_units,

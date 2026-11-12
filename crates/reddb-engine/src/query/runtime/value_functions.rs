@@ -260,6 +260,9 @@ pub fn evaluate_value_function_with_host<H: ValueFunctionHost>(
             let exp = value_as_f64(args.get(1)?)?;
             Some(Value::Float(base.powf(exp)))
         }
+        "TEMPERATURE" | "TEMPERATURE_UNIT" | "TEMPERATURE_VALUE" => {
+            temperature_function(name, args)
+        }
         "MONEY" => money_from_args(args),
         "MONEY_ASSET" => match args.first()? {
             Value::Money { asset_code, .. } => Some(Value::AssetCode(asset_code.clone())),
@@ -415,6 +418,32 @@ pub fn value_as_f64(value: &Value) -> Option<f64> {
         Value::Integer(value) => Some(*value as f64),
         Value::UnsignedInteger(value) => Some(*value as f64),
         Value::BigInt(value) => Some(*value as f64),
+        _ => None,
+    }
+}
+
+pub(crate) fn temperature_function(name: &str, args: &[Value]) -> Option<Value> {
+    match name {
+        "TEMPERATURE" => {
+            let Value::Text(text) = args.first()? else {
+                return Some(Value::Null);
+            };
+            Some(
+                reddb_types::coerce::coerce(text, reddb_types::DataType::Temperature, None)
+                    .unwrap_or(Value::Null),
+            )
+        }
+        "TEMPERATURE_UNIT" => match args.first()? {
+            Value::Temperature(value) => Some(Value::text(value.unit().as_str())),
+            _ => Some(Value::Null),
+        },
+        "TEMPERATURE_VALUE" => match (args.first()?, args.get(1)?) {
+            (Value::Temperature(value), Value::Text(unit)) => {
+                let unit = reddb_types::TemperatureUnit::parse(&unit.to_ascii_uppercase())?;
+                Some(Value::Float(value.value_in(unit)))
+            }
+            _ => Some(Value::Null),
+        },
         _ => None,
     }
 }

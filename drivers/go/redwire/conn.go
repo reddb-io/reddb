@@ -149,6 +149,11 @@ func (c *Conn) SupportsParams() bool {
 	return c.features&FeatureParams == FeatureParams
 }
 
+// SupportsTypedMutations reports whether TypedInsert frames are safe to send.
+func (c *Conn) SupportsTypedMutations() bool {
+	return c.features&FeatureTypedMutations == FeatureTypedMutations
+}
+
 // SessionID returns the session id the server assigned during AuthOk.
 func (c *Conn) SessionID() string { return c.sessionID }
 
@@ -614,6 +619,54 @@ func (c *Conn) Insert(ctx context.Context, collection string, payload any) error
 	}
 	_, err = c.bulkInsertJSON(ctx, body)
 	return err
+}
+
+// TypedInsert inserts one row without SQL or a JSON request body.
+func (c *Conn) TypedInsert(
+	ctx context.Context,
+	collection string,
+	fields []Field,
+) (*BulkInsertResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed.Load() {
+		return nil, errors.New("redwire: connection closed")
+	}
+	if !c.SupportsTypedMutations() {
+		return nil, ErrTypedMutationsUnsupported
+	}
+	payload, err := EncodeTypedInsert(collection, fields)
+	if err != nil {
+		return nil, err
+	}
+	cleanup := c.applyDeadline(ctx)
+	defer cleanup()
+	request := NewFrame(KindTypedInsert, c.nextCorr(), payload)
+	if err := c.writeFrame(request); err != nil {
+		return nil, err
+	}
+	resp, err := c.readFrame()
+	if err != nil {
+		return nil, err
+	}
+	if resp.CorrelationID != request.CorrelationID {
+		return nil, errors.New("redwire: typed insert: mismatched correlation id")
+	}
+	switch resp.Kind {
+	case KindBulkOk:
+		result, err := parseBulkInsertResult(resp.Payload)
+		if err != nil {
+			return nil, fmt.Errorf("redwire: decode typed insert result: %w", err)
+		}
+		if result.Affected != 1 || len(result.IDs) != 1 {
+			return nil, errors.New("redwire: typed insert: invalid BulkOk response")
+		}
+		return result, nil
+	case KindError:
+		return nil, fmt.Errorf("redwire: typed insert: %s", string(resp.Payload))
+	default:
+		return nil, fmt.Errorf("redwire: typed insert: unexpected kind 0x%02x", resp.Kind)
+	}
 }
 
 // BulkInsert delivers a batch of rows.

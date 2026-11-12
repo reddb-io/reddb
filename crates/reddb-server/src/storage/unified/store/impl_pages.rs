@@ -408,6 +408,18 @@ fn read_meta_payload(pager: &Pager) -> Result<Option<Vec<u8>>, StoreError> {
 }
 
 impl UnifiedStore {
+    pub(crate) fn fence_required_capabilities(&self, capabilities: u64) -> Result<(), StoreError> {
+        if capabilities == 0 {
+            return Ok(());
+        }
+        let Some(pager) = &self.pager else {
+            return Ok(());
+        };
+        pager
+            .fence_required_capabilities(capabilities)
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))
+    }
+
     /// Compare and encode one borrowed row at a time. Begin a new tree only at
     /// the first difference, copying its already-verified prefix in bounded
     /// batches. Unchanged trees require no replacement allocation.
@@ -1252,14 +1264,10 @@ impl UnifiedStore {
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
         trace_startup_phase(path, "paged_pager_open", pager_open_started);
 
-        if config.resident_memory_bytes_max.is_none()
-            && reddb_file::file_format::page_format_is_disk_resident(
-                pager
-                    .header()
-                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
-                    .version,
-            )
-        {
+        let header = pager
+            .header()
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        if config.resident_memory_bytes_max.is_none() && header.requires_disk_residency() {
             return Err(StoreError::Io(std::io::Error::new(std::io::ErrorKind::Unsupported,
                 "this database was prepared for disk residency; reopen with the disk-resident storage profile")));
         }
@@ -1573,11 +1581,10 @@ impl UnifiedStore {
         // `<data>-meta` shadow when page 1 itself is corrupted.
         if let Some(content_vec) = read_meta_payload(pager)? {
             let content: &[u8] = &content_vec;
-            let file_version = pager
+            let header = pager
                 .header()
-                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
-                .version;
-            let prepared = reddb_file::file_format::page_format_is_disk_resident(file_version);
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            let prepared = header.requires_disk_residency();
             let resume = if prepared {
                 reddb_file::native_resume::decode_catalog_resume(content)
                     .map_err(|error| StoreError::Serialization(error.to_string()))?
@@ -1712,7 +1719,8 @@ impl UnifiedStore {
                 })?;
                 for state in resume.collections.values() {
                     if !state.secondary_indices.is_empty()
-                        && file_version < reddb_file::file_format::PAGE_SECONDARY_INDEX_FILE_VERSION
+                        && header.version
+                            < reddb_file::file_format::PAGE_SECONDARY_INDEX_FILE_VERSION
                     {
                         return Err(page_integrity(
                             1,

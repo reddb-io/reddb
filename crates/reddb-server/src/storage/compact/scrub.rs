@@ -91,8 +91,7 @@ pub fn scrub_paged_trees(path: &Path) -> Result<PagedTreeScrubReport> {
 fn inspect_all_trees(source: &Arc<Source>) -> Result<(PagedTreeScrubReport, Catalog)> {
     let catalog = Catalog::read(source)?;
     ensure(
-        !f::file_format::page_format_is_disk_resident(source.header.version)
-            || catalog.resume.is_some(),
+        !source.header.requires_disk_residency() || catalog.resume.is_some(),
         "prepared disk-resident file has no resume catalog",
     )?;
     let mut report = PagedTreeScrubReport::default();

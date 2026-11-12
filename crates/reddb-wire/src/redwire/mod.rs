@@ -21,6 +21,7 @@ pub mod prepared;
 pub mod queue;
 pub mod scram;
 pub mod stream;
+pub mod typed_insert;
 pub mod ws_gate;
 
 pub use builder::{
@@ -100,6 +101,10 @@ pub use stream::{
     parse_open_stream, parse_stream_cancel, ChunkParseError, InputChunk, InputChunkJson,
     OpenInputParseError, OpenInputRequest, OpenStreamParseError, OpenStreamRequest,
     StreamCancelRequest,
+};
+pub use typed_insert::{
+    decode_typed_insert, encode_typed_insert, TypedInsertError, TypedInsertField,
+    TypedInsertRequest, FEATURE_TYPED_MUTATIONS, TYPED_INSERT_VERSION,
 };
 pub use ws_gate::{evaluate_ws_upgrade, WsUpgradeRefusal};
 

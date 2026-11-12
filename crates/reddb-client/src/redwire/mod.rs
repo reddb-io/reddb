@@ -43,7 +43,7 @@ pub(crate) trait AsyncReadWrite: AsyncRead + AsyncWrite {}
 impl<T: AsyncRead + AsyncWrite + ?Sized> AsyncReadWrite for T {}
 
 use crate::error::{ClientError, ErrorCode, Result};
-use crate::types::{BulkInsertResult, QueryResult};
+use crate::types::{BulkInsertResult, InsertResult, QueryResult};
 
 use handshake::HandshakeOutcome;
 use reddb_wire::legacy::WireValue;
@@ -55,6 +55,7 @@ use reddb_wire::redwire::{
     encode_bulk_binary_payload, encode_bulk_insert_payload, encode_insert_payload,
     encode_key_payload, expect_bulk_ok_or_error, expect_delete_ok_or_error, expect_pong_reply,
     expect_result_or_error, supported_client_preface, BuildError, OperationReplyError,
+    TypedInsertField, TypedInsertRequest, FEATURE_TYPED_MUTATIONS,
 };
 
 /// Authentication credentials for the RedWire handshake.
@@ -389,6 +390,59 @@ impl RedWireClient {
             .map(|result| result.affected)
     }
 
+    /// Insert one row without SQL or a JSON request body.
+    pub async fn typed_insert(
+        &mut self,
+        collection: &str,
+        fields: &[(String, crate::params::Value)],
+    ) -> Result<InsertResult> {
+        if self.server_features & FEATURE_TYPED_MUTATIONS == 0 {
+            return Err(ClientError::new(
+                ErrorCode::TypedMutationsUnsupported,
+                "server did not advertise RedWire typed mutation support",
+            ));
+        }
+        let request = TypedInsertRequest {
+            collection: collection.to_string(),
+            fields: fields
+                .iter()
+                .map(|(name, value)| TypedInsertField {
+                    name: name.clone(),
+                    value: param_to_redwire(value),
+                })
+                .collect(),
+        };
+        let payload = reddb_wire::redwire::encode_typed_insert(&request)
+            .map_err(|error| ClientError::new(ErrorCode::InvalidArgument, error.to_string()))?;
+        let frame = reddb_wire::redwire::build_request_frame(
+            self.next_corr(),
+            MessageKind::TypedInsert,
+            payload,
+        )
+        .map_err(frame_build_err)?;
+        let response = self.exchange(&frame).await?;
+        let payload =
+            expect_bulk_ok_or_error(response.kind, &response.payload).map_err(reply_err)?;
+        let result = decode_bulk_ok_payload(payload).map_err(|error| {
+            ClientError::new(
+                ErrorCode::Protocol,
+                format!("decode typed insert reply: {error}"),
+            )
+        })?;
+        let rid = result.rids.first().cloned();
+        if result.affected != 1 || rid.is_none() {
+            return Err(ClientError::new(
+                ErrorCode::InvalidResponse,
+                "typed insert reply must contain one affected row and its rid",
+            ));
+        }
+        Ok(InsertResult {
+            affected: result.affected,
+            rid: rid.clone(),
+            id: rid,
+        })
+    }
+
     /// Bulk insert. Each entry in `payloads` is a JSON object.
     pub async fn bulk_insert(
         &mut self,
@@ -549,7 +603,95 @@ fn reply_err(err: OperationReplyError) -> ClientError {
 mod tests {
     use super::param_to_redwire;
     use crate::{JsonValue, Value};
-    use reddb_wire::query_with_params::ParamValue as WireValue;
+    use reddb_wire::query_with_params::ParamValue as ParamWireValue;
+
+    #[tokio::test]
+    async fn typed_insert_uses_negotiated_binary_frame() {
+        use super::*;
+        let (client, server) = tokio::io::duplex(4096);
+        let mut client = RedWireClient {
+            stream: Box::pin(client),
+            next_correlation_id: 1,
+            usable: true,
+            session_id: String::new(),
+            server_features: FEATURE_TYPED_MUTATIONS,
+        };
+        let peer = tokio::spawn(async move {
+            let mut server: Stream = Box::pin(server);
+            let request = io::read_frame(&mut server)
+                .await
+                .expect("typed insert request");
+            assert_eq!(request.kind, MessageKind::TypedInsert);
+            let decoded = reddb_wire::redwire::decode_typed_insert(&request.payload)
+                .expect("typed insert payload");
+            assert_eq!(decoded.collection, "users");
+            assert_eq!(decoded.fields.len(), 2);
+            assert_eq!(decoded.fields[0].name, "name");
+            assert_eq!(decoded.fields[0].value, ParamWireValue::Text("Ada".into()));
+            assert_eq!(decoded.fields[1].value, ParamWireValue::Int(37));
+
+            let payload = reddb_wire::redwire::encode_bulk_ok_payload_from_json_id_literals(
+                1,
+                [r#""9007199254740993""#],
+            );
+            let reply = reddb_wire::redwire::build_reply_frame(
+                request.correlation_id,
+                MessageKind::BulkOk,
+                payload,
+            )
+            .expect("typed insert reply");
+            io::write_frame(&mut server, &reply)
+                .await
+                .expect("write reply");
+        });
+
+        let fields = vec![
+            ("name".to_string(), Value::Text("Ada".into())),
+            ("age".to_string(), Value::Int(37)),
+        ];
+        let result = client
+            .typed_insert("users", &fields)
+            .await
+            .expect("typed insert");
+        assert_eq!(result.affected, 1);
+        assert_eq!(result.rid.as_deref(), Some("9007199254740993"));
+        peer.await.expect("peer");
+    }
+
+    #[tokio::test]
+    async fn typed_insert_without_feature_writes_no_frame() {
+        use super::*;
+        let (client, server) = tokio::io::duplex(1024);
+        let mut client = RedWireClient {
+            stream: Box::pin(client),
+            next_correlation_id: 1,
+            usable: true,
+            session_id: String::new(),
+            server_features: 0,
+        };
+        let peer = tokio::spawn(async move {
+            let mut server: Stream = Box::pin(server);
+            let request = io::read_frame(&mut server).await.expect("next request");
+            assert_eq!(request.kind, MessageKind::Ping);
+            let reply = reddb_wire::redwire::build_reply_frame(
+                request.correlation_id,
+                MessageKind::Pong,
+                Vec::new(),
+            )
+            .expect("pong");
+            io::write_frame(&mut server, &reply)
+                .await
+                .expect("write pong");
+        });
+
+        let error = client
+            .typed_insert("users", &[])
+            .await
+            .expect_err("feature is required");
+        assert_eq!(error.code, ErrorCode::TypedMutationsUnsupported);
+        client.ping().await.expect("connection remains usable");
+        peer.await.expect("peer");
+    }
 
     #[tokio::test]
     async fn legacy_json_query_allows_no_binds() {
@@ -715,28 +857,31 @@ mod tests {
     fn param_to_redwire_preserves_all_wire_variants() {
         let uuid = [0x11; 16];
         let cases = vec![
-            (Value::Null, WireValue::Null),
-            (Value::Bool(true), WireValue::Bool(true)),
-            (Value::Int64(42), WireValue::Int(42)),
-            (Value::Float(1.5), WireValue::Float(1.5)),
-            (Value::Text("Ada".into()), WireValue::Text("Ada".into())),
+            (Value::Null, ParamWireValue::Null),
+            (Value::Bool(true), ParamWireValue::Bool(true)),
+            (Value::Int64(42), ParamWireValue::Int(42)),
+            (Value::Float(1.5), ParamWireValue::Float(1.5)),
+            (
+                Value::Text("Ada".into()),
+                ParamWireValue::Text("Ada".into()),
+            ),
             (
                 Value::Bytes(vec![0xde, 0xad]),
-                WireValue::Bytes(vec![0xde, 0xad]),
+                ParamWireValue::Bytes(vec![0xde, 0xad]),
             ),
             (
                 Value::Vector(vec![0.25, 0.5]),
-                WireValue::Vector(vec![0.25, 0.5]),
+                ParamWireValue::Vector(vec![0.25, 0.5]),
             ),
             (
                 Value::Json(JsonValue::object([("role", JsonValue::string("admin"))])),
-                WireValue::Json(br#"{"role":"admin"}"#.to_vec()),
+                ParamWireValue::Json(br#"{"role":"admin"}"#.to_vec()),
             ),
             (
                 Value::Timestamp(1_700_000_000),
-                WireValue::Timestamp(1_700_000_000),
+                ParamWireValue::Timestamp(1_700_000_000),
             ),
-            (Value::Uuid(uuid), WireValue::Uuid(uuid)),
+            (Value::Uuid(uuid), ParamWireValue::Uuid(uuid)),
         ];
 
         for (input, expected) in cases {

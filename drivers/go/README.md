@@ -231,6 +231,7 @@ reddb.Connect(ctx, "red://h", reddb.WithJWT("eyJ..."))
 | `redwire/codec.go`                | pooled zstd compress / decompress                             |
 | `redwire/scram.go`                | RFC 5802 client primitives (HMAC-SHA-256, PBKDF2, proof)      |
 | `redwire/conn.go`                 | TCP / TLS dial, handshake state machine, ops                  |
+| `redwire/typed_insert.go`         | SQL-free typed single-row insert encoder                      |
 | `httpx/client.go`                 | `net/http` mirror of the JS HTTP client                       |
 | `cmd/redgo-smoke/`                | manual smoke runnable against a live server                   |
 | `internal/redserver/`             | opt-in end-to-end smoke that spawns the engine binary         |

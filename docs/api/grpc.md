@@ -39,6 +39,7 @@ grpcurl -plaintext 127.0.0.1:55055 reddb.v1.RedDb/Collections
 | RPC | Request | Description |
 |:----|:--------|:------------|
 | `CreateRow` | `JsonCreateRequest` | Insert a table row |
+| `CreateRowTyped` | `TypedCreateRowRequest` | Insert a table row with protobuf-native values |
 | `CreateNode` | `JsonCreateRequest` | Insert a graph node |
 | `CreateEdge` | `JsonCreateRequest` | Insert a graph edge |
 | `CreateVector` | `JsonCreateRequest` | Insert a vector embedding |
@@ -55,6 +56,34 @@ grpcurl -plaintext 127.0.0.1:55055 reddb.v1.RedDb/Collections
 
 Some protobuf field names remain `id` for wire compatibility. Public docs and
 SDKs treat those values as the RedDB ID `rid`.
+
+### Typed Row Insert
+
+`CreateRowTyped` avoids both SQL construction and a JSON payload. Field values
+reuse the same `QueryValue` union as parameterized queries, including explicit
+null, bool, int64, float64, text, bytes, vector, JSON, timestamp, and UUID.
+
+```protobuf
+message TypedCreateRowRequest {
+  string collection = 1;
+  repeated MutationField fields = 2;
+}
+
+message MutationField {
+  string name = 1;
+  QueryValue value = 2;
+}
+```
+
+The server rejects empty or duplicate field names and missing value variants,
+then lowers the request to the canonical row write path. Collection-contract
+defaults and validation, RLS, tenancy, WAL, indexes, CDC, and commit policy are
+therefore identical to `CreateRow` and SQL inserts.
+
+This RPC types values on the wire; field names remain strings. Compile-time
+field-name and required-field checks require generated models built from the
+collection contract. Drivers that do not use gRPC need an equivalent RedWire
+or HTTP transport before exposing the same helper.
 
 ### TTL over gRPC
 

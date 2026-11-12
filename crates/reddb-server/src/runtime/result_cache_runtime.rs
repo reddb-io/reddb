@@ -366,11 +366,12 @@ impl RedDBRuntime {
         store.ensure_result_cache_epoch().ok()?;
         if self.inner.db.path().is_some() {
             if let Some(pager) = store.pager() {
-                let version = if store.config().resident_memory_bytes_max.is_some() {
+                let required_version = if store.config().resident_memory_bytes_max.is_some() {
                     reddb_file::file_format::PAGE_RESULT_CACHE_DISK_FILE_VERSION
                 } else {
                     reddb_file::file_format::PAGE_RESULT_CACHE_FILE_VERSION
                 };
+                let version = pager.header().ok()?.version.max(required_version);
                 pager.fence_file_format_version(version).ok()?;
             } else {
                 self.checkpoint_local().ok()?;

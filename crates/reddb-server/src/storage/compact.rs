@@ -214,10 +214,10 @@ fn recover_paged_wal_inner(
     copy_physical_metadata_files(&source, &staged_source)?;
     let preserved_audit = detach_recovery_audit_logs(&staged_source, &stage)?;
     let config = crate::storage::unified::UnifiedStoreConfig {
-        resident_memory_bytes_max: (f::file_format::page_format_is_disk_resident(
-            guard.header.version,
-        ))
-        .then_some(64 * 1024 * 1024),
+        resident_memory_bytes_max: guard
+            .header
+            .requires_disk_residency()
+            .then_some(64 * 1024 * 1024),
         ..Default::default()
     };
     if pending_engine {
@@ -362,9 +362,7 @@ fn recover_paged_wal_inner(
     if !probabilistic_deltas.is_empty() {
         let options = crate::RedDBOptions::persistent(&staged_source)
             .with_memory_budget(64 * 1024 * 1024)
-            .with_bounded_disk_residency(f::file_format::page_format_is_disk_resident(
-                guard.header.version,
-            ));
+            .with_bounded_disk_residency(guard.header.requires_disk_residency());
         let runtime = crate::RedDBRuntime::with_options(options)?;
         runtime.persist_offline_probabilistic_recovery(probabilistic_deltas)?;
         runtime.checkpoint()?;
@@ -753,8 +751,7 @@ fn compact_paged_inner(
         catalog.retain_canonical_system_config()?;
     }
     ensure(
-        !f::file_format::page_format_is_disk_resident(source.header.version)
-            || catalog.resume.is_some(),
+        !source.header.requires_disk_residency() || catalog.resume.is_some(),
         "prepared disk-resident file has no resume catalog",
     )?;
     if let Some(salvage) = salvage {
@@ -826,7 +823,7 @@ fn compact_paged_inner(
         &temporary,
         PagerConfig {
             cache_size: 1024,
-            disk_residency: f::file_format::page_format_is_disk_resident(source.header.version),
+            disk_residency: source.header.requires_disk_residency(),
             ..PagerConfig::default()
         },
     )?);
@@ -988,6 +985,9 @@ fn compact_paged_inner(
     }
     catalog::write_catalog(&target, &catalog.encode(&roots)?)?;
     target.update_physical_header(physical)?;
+    if source.header.required_capabilities != 0 {
+        target.fence_required_capabilities(source.header.required_capabilities)?;
+    }
     target.fence_file_format_version(source.header.version)?;
     target.sync()?;
     // Preserve source schema/LSN, but retain the newly allocated page boundary.
