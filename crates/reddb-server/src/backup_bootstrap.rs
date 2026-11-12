@@ -192,16 +192,18 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    #[cfg(windows)]
+    const TEST_CREDENTIALS_PATH: &str = r"C:\var\run\secrets\backup\credentials.json";
+    #[cfg(not(windows))]
+    const TEST_CREDENTIALS_PATH: &str = "/var/run/secrets/backup/credentials.json";
+
     #[test]
     fn mounted_credentials_replace_static_keys_without_fallback() {
         let mut map: HashMap<&str, &str> = [
             ("REDDB_BACKUP_S3_ENDPOINT", "https://s3.example.com"),
             ("REDDB_BACKUP_S3_BUCKET", "synthetic-bucket"),
             ("REDDB_BACKUP_S3_PREFIX", "org/db/"),
-            (
-                "REDDB_BACKUP_S3_CREDENTIALS_FILE",
-                "/var/run/secrets/backup/credentials.json",
-            ),
+            ("REDDB_BACKUP_S3_CREDENTIALS_FILE", TEST_CREDENTIALS_PATH),
         ]
         .into_iter()
         .collect();
@@ -211,7 +213,7 @@ mod tests {
             .expect("backup configured");
         assert_eq!(
             config.credentials_file.as_deref(),
-            Some("/var/run/secrets/backup/credentials.json")
+            Some(TEST_CREDENTIALS_PATH)
         );
         assert!(config.access_key_id.is_empty() && config.secret_access_key.is_empty());
         map.insert("REDDB_BACKUP_S3_ACCESS_KEY_ID", "must-not-fall-back");
@@ -222,10 +224,7 @@ mod tests {
             "relative/credentials.json",
         );
         assert!(from_env(|key| map.get(key).map(|v| v.to_string())).is_err());
-        map.insert(
-            "REDDB_BACKUP_S3_CREDENTIALS_FILE",
-            "/absolute/credentials.json",
-        );
+        map.insert("REDDB_BACKUP_S3_CREDENTIALS_FILE", TEST_CREDENTIALS_PATH);
         map.remove("REDDB_BACKUP_S3_BUCKET");
         assert!(from_env(|key| map.get(key).map(|v| v.to_string())).is_err());
     }
@@ -233,7 +232,7 @@ mod tests {
     #[test]
     fn credentials_file_alone_is_partial_configuration() {
         assert!(
-            from_env(|key| (key == CREDENTIALS_FILE_VAR).then(|| "/absolute/file.json".into()))
+            from_env(|key| (key == CREDENTIALS_FILE_VAR).then(|| TEST_CREDENTIALS_PATH.into()))
                 .is_err()
         );
     }

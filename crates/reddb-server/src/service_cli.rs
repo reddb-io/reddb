@@ -3839,42 +3839,28 @@ mod tests {
         let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         clear_preset_env();
 
-        let manifest_dir = std::env::current_dir()
-            .expect("current dir")
-            .join(".red/tmp/bootstrap-manifest-tests");
-        std::fs::create_dir_all(&manifest_dir).expect("create manifest test dir");
-        let unique = format!(
-            "{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        );
-        let head_password = manifest_dir.join(format!("head-{unique}.secret"));
-        let customer_password = manifest_dir.join(format!("customer-{unique}.secret"));
-        let manifest_path = manifest_dir.join(format!("intent-{unique}.json"));
+        let manifest_dir = tempfile::tempdir().expect("create manifest test dir");
+        let head_password = manifest_dir.path().join("head.secret");
+        let customer_password = manifest_dir.path().join("customer.secret");
+        let manifest_path = manifest_dir.path().join("intent.json");
         std::fs::write(&head_password, "head-pass\n").expect("write head secret");
         std::fs::write(&customer_password, "customer-pass\n").expect("write customer secret");
+        let manifest = ::serde_json::json!({
+            "bootstrap": {
+                "preset": "cloud",
+                "cloud_head_admin": {
+                    "username": "head",
+                    "password_file": head_password,
+                },
+                "customer_admin": {
+                    "username": "customer",
+                    "password_file": customer_password,
+                },
+            },
+        });
         std::fs::write(
             &manifest_path,
-            format!(
-                r#"{{
-                    "bootstrap": {{
-                        "preset": "cloud",
-                        "cloud_head_admin": {{
-                            "username": "head",
-                            "password_file": "{}"
-                        }},
-                        "customer_admin": {{
-                            "username": "customer",
-                            "password_file": "{}"
-                        }}
-                    }}
-                }}"#,
-                head_password.display(),
-                customer_password.display()
-            ),
+            ::serde_json::to_vec(&manifest).expect("serialize manifest"),
         )
         .expect("write manifest");
 
@@ -3913,9 +3899,6 @@ mod tests {
         apply_preset_from_config(&runtime, &auth_store, &config.bootstrap)
             .expect("second boot is idempotent");
 
-        let _ = std::fs::remove_file(&manifest_path);
-        let _ = std::fs::remove_file(&head_password);
-        let _ = std::fs::remove_file(&customer_password);
         clear_preset_env();
     }
 
@@ -4217,18 +4200,8 @@ mod tests {
         let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         clear_preset_env();
 
-        let manifest_dir = std::env::current_dir()
-            .expect("current dir")
-            .join(".red/tmp/bootstrap-manifest-tests");
-        std::fs::create_dir_all(&manifest_dir).expect("create manifest test dir");
-        let manifest_path = manifest_dir.join(format!(
-            "reddb-bootstrap-manifest-{}-{}.json",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        ));
+        let manifest_dir = tempfile::tempdir().expect("create manifest test dir");
+        let manifest_path = manifest_dir.path().join("reddb-bootstrap-manifest.json");
         std::fs::write(
             &manifest_path,
             r#"{
