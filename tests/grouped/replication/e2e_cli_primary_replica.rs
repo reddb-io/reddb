@@ -503,6 +503,16 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    let legacy_payload = backend_root.join("manual-promotion");
+    let legacy_payload_bytes = b"a replica must not publish over this backend object";
+    std::fs::write(&legacy_payload, legacy_payload_bytes).expect("backend payload sentinel");
+    let (status, checkpoint) = http_request(replica_http, "POST", "/checkpoint", None);
+    assert_eq!(status, 200, "replica local checkpoint failed: {checkpoint}");
+    assert_eq!(
+        std::fs::read(&legacy_payload).expect("backend payload after replica checkpoint"),
+        legacy_payload_bytes
+    );
+
     let _ = primary.stop_and_read_output();
     // Older lease-only boots could leave serverless control objects behind.
     // This profile must recover its local replica without consulting them.
@@ -637,6 +647,33 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
     for expected in ["before-promotion", "after-promotion", "after-restart"] {
         assert!(contains_text(&scan, expected), "scan={scan:?}");
     }
+    let (status, checkpoint) = http_request(replica_http, "POST", "/checkpoint", None);
+    assert_eq!(status, 200, "promoted checkpoint failed: {checkpoint}");
+    let backup = reddb::RedDBRuntime::with_options(
+        reddb::RedDBOptions::persistent(backend_root.join("manual-promotion"))
+            .with_storage_profile(reddb::StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("native backup reader profile")
+            .with_read_only(true),
+    )
+    .expect("open the checkpoint's remote backup independently");
+    let restored = backup
+        .execute_query("SELECT id, name FROM failover_probe ORDER BY id")
+        .expect("read all acknowledged rows from the backup");
+    assert_eq!(restored.result.records.len(), 3);
+    let names: Vec<_> = restored
+        .result
+        .records
+        .iter()
+        .map(|row| {
+            row.get("name")
+                .and_then(|value| value.as_text())
+                .expect("backup name")
+        })
+        .collect();
+    assert_eq!(
+        names,
+        ["before-promotion", "after-promotion", "after-restart"]
+    );
     assert_eq!(
         std::fs::read(&foreign_head).expect("unrelated head after restart"),
         foreign_head_bytes

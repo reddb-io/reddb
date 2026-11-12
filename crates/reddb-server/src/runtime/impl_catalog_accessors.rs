@@ -135,6 +135,14 @@ impl RedDBRuntime {
         if self.inner.db.remote_backend.is_none() {
             return Ok(());
         }
+        if matches!(
+            self.inner.write_gate.role(),
+            crate::replication::ReplicationRole::Replica { .. }
+        ) {
+            return Err(RedDBError::ReadOnly(format!(
+                "replica cannot publish remote data — {action} blocked"
+            )));
+        }
         match self.inner.write_gate.lease_state() {
             crate::runtime::write_gate::LeaseGateState::NotHeld => {
                 self.inner.audit_log.record(
@@ -153,6 +161,7 @@ impl RedDBRuntime {
     }
 
     pub(super) fn publish_remote_snapshot(&self) -> RedDBResult<()> {
+        self.assert_remote_write_allowed("snapshot publication")?;
         if let Some(lifecycle) = self.lease_lifecycle() {
             let store = self.inner.db.store();
             // Other snapshot entrypoints already hold this reentrant lock.
@@ -161,6 +170,20 @@ impl RedDBRuntime {
             if lifecycle.publish_snapshot(|| self.capture_serverless_snapshot())? {
                 return Ok(());
             }
+        }
+        if self.inner.db.is_paged()
+            && self.inner.db.remote_backend.is_some()
+            && self.inner.db.remote_key.is_some()
+        {
+            // Native writers hold a lifetime file lock. Copy through the
+            // pager's own handle before handing the checkpoint to a backend.
+            let snapshot = self.capture_serverless_snapshot()?;
+            self.assert_remote_write_allowed("checkpoint upload")?;
+            return self
+                .inner
+                .db
+                .upload_checkpoint_to_remote_backend(snapshot.path())
+                .map_err(|err| RedDBError::Engine(err.to_string()));
         }
         self.inner
             .db

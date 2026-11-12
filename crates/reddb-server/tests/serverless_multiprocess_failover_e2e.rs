@@ -534,7 +534,7 @@ fn lease_only_native_boot_child() -> ExitCode {
         let page = pager.read_page(page_id).expect("cold native data");
         assert_eq!(
             page.read_cell(0).expect("owned cell"),
-            (&b"owned"[..], &b"local-authority"[..])
+            (b"owned".to_vec(), b"local-authority".to_vec())
         );
     }
     ExitCode::SUCCESS
