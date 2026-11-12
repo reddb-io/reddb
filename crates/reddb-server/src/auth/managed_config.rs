@@ -156,6 +156,39 @@ impl<'a> ManagedConfigGate<'a> {
         }
     }
 
+    /// Evaluate a canonical content key from the physical `red.config`
+    /// collection against registry IDs used before content-key normalization.
+    /// A deny from any matching managed entry wins; otherwise the first allow
+    /// wins and a fully unmatched key passes through.
+    pub fn check_red_config_write(
+        &self,
+        auth: &AuthStore,
+        actor: &UserId,
+        ctx: &EvalContext,
+        content_key: &str,
+    ) -> ManagedConfigDecision {
+        let candidates = [
+            content_key.to_string(),
+            format!("red.{content_key}"),
+            format!("red.config.{content_key}"),
+        ];
+        let mut allowed = None;
+        for candidate in &candidates {
+            match self.check_write(auth, actor, ctx, candidate) {
+                denied @ ManagedConfigDecision::Deny { .. } => return denied,
+                decision @ ManagedConfigDecision::Allow { .. } => {
+                    if allowed.is_none() {
+                        allowed = Some(decision);
+                    }
+                }
+                ManagedConfigDecision::PassThrough { .. } => {}
+            }
+        }
+        allowed.unwrap_or_else(|| ManagedConfigDecision::PassThrough {
+            key: content_key.to_string(),
+        })
+    }
+
     /// Most-specific registry entry governing `key`: exact match first,
     /// then dotted-namespace ancestors (`a.b.c` → `a.b` → `a`). Only
     /// entries whose `resource_type` is `config_key` (for exact match)
@@ -358,6 +391,53 @@ mod tests {
             )
             .unwrap();
         assert!(!unmanaged.managed);
+    }
+
+    #[test]
+    fn canonical_content_keys_match_both_legacy_registry_prefixes() {
+        for (registry_id, content_key) in [
+            ("red.ai", "ai.default.provider"),
+            ("red.config.audit", "audit.enabled"),
+        ] {
+            let store = store();
+            let seeder = seed_registry_admin(&store);
+            store.create_user("alice", "p", Role::Read).unwrap();
+            let alice = UserId::platform("alice");
+            let registry = ConfigRegistry::new();
+            registry
+                .register(
+                    &store,
+                    &seeder,
+                    &registry_admin_ctx(),
+                    managed_namespace_draft(registry_id),
+                    1_000,
+                )
+                .unwrap();
+            let ctx = EvalContext {
+                principal_tenant: None,
+                current_tenant: None,
+                peer_ip: None,
+                mfa_present: false,
+                now_ms: 1_700_000_000_001,
+                principal_is_admin_role: false,
+                principal_is_platform_scoped: true,
+            };
+
+            let decision = ManagedConfigGate::new(&registry).check_red_config_write(
+                &store,
+                &alice,
+                &ctx,
+                content_key,
+            );
+            assert!(
+                matches!(
+                    decision,
+                    ManagedConfigDecision::Deny { ref entry_id, .. }
+                        if entry_id == registry_id
+                ),
+                "canonical key {content_key} bypassed managed registry {registry_id}: {decision:?}"
+            );
+        }
     }
 
     // ---- acceptance #2 ---------------------------------------------------

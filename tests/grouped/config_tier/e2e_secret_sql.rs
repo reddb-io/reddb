@@ -249,7 +249,7 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
             "source runtime should open",
         );
         let _auth = attach_vault(&rt, CLI_CERTIFICATE);
-        rt.execute_query("SET CONFIG red.config.demo.enabled = true")
+        rt.execute_query("SET CONFIG demo.enabled = true")
             .expect("SET CONFIG should succeed");
         rt.execute_query("SET SECRET mycompany.payments.key = 'sk_cli_secret'")
             .expect("SET SECRET should succeed");
@@ -292,7 +292,7 @@ fn cli_dump_restore_includes_plaintext_config_and_encrypted_vault_kv() {
 
     let dump_text = std::fs::read_to_string(&dump_path).expect("dump should be readable");
     assert!(dump_text.contains("\"collection\":\"red.config\""));
-    assert!(dump_text.contains("red.config.demo.enabled"));
+    assert!(dump_text.contains("\"key\":\"demo.enabled\""));
     assert!(dump_text.contains("reddb.vault_kv.v1"));
     assert!(
         !dump_text.contains("sk_cli_secret"),
@@ -545,7 +545,7 @@ fn dollar_config_reference_resolves_plaintext_config() {
         .expect("create table");
     rt.execute_query("INSERT INTO tokens (id, token) VALUES (1, 'cfg-match'), (2, 'other')")
         .expect("insert rows");
-    rt.execute_query("SET CONFIG red.config.tokens.active = 'cfg-match'")
+    rt.execute_query("SET CONFIG tokens.active = 'cfg-match'")
         .expect("set config");
 
     let projected = rt

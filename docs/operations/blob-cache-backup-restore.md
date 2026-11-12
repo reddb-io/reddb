@@ -51,14 +51,14 @@ Direct engine callers can explicitly configure the older standalone pager via
 ```bash
 curl -X POST http://<host>:<port>/config \
   -H "Authorization: Bearer $RED_ADMIN_TOKEN" \
-  -d '{"red.config.backup.include_blob_cache": true}'
+  -d '{"backup.include_blob_cache": true}'
 ```
 
 With the knob set, every `POST /admin/backup` (or the scheduled
 backup-loop tick) additionally uploads the L2 pager file and its
 control sidecar to the configured remote backend, under the
 `{snapshot_prefix}blob_cache/` prefix (override via
-`red.config.backup.blob_cache_prefix`). On restore, place those two
+`backup.blob_cache_prefix` in `red.config`). On restore, place those two
 files back at `cache.blob.l2_path` (and `<l2_path>.blob-cache.ctl`)
 **before** server start; the cold-start synopsis rebuild in
 `BlobCache::new` (see `cache/blob/l2.rs::BlobCacheL2::rebuild_l2_synopsis`) re-indexes
@@ -421,7 +421,7 @@ Live (no workaround needed):
 
 | Capability | Where |
 |---|---|
-| `red.config.backup.include_blob_cache` config knob | §1.1, wired in `runtime/impl_core.rs::trigger_backup` |
+| `backup.include_blob_cache` content key in `red.config` | §1.1, wired in `runtime/impl_core.rs::trigger_backup` |
 | `POST /admin/blob_cache/sweep` HTTP handler | §4.1 |
 | `POST /admin/blob_cache/flush_namespace` HTTP handler | §4.2, §5.1 |
 | `GET /admin/blob_cache/stats` HTTP handler | §4.3 |

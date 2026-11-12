@@ -7,7 +7,7 @@
 //!
 //! 1. Persists the per-collection signer registry on the existing
 //!    `red.config` config tree under
-//!    `red.collection.{name}.signed_writes.*` so it survives restarts.
+//!    `collection.{name}.signed_writes.*` so it survives restarts.
 //! 2. Loads the registry on demand for the INSERT-time verification
 //!    path and the `ALTER COLLECTION ... ADD|REVOKE SIGNER` executor.
 //! 3. Builds the canonical bytes the client must have signed by
@@ -27,7 +27,7 @@ use reddb_types::Value;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Marker stored at `red.collection.{name}.signed_writes.enabled = true`
+/// Marker stored at `collection.{name}.signed_writes.enabled = true`
 /// when the collection was created with a non-empty `SIGNED_BY` list.
 const ENABLED_SUFFIX: &str = "signed_writes.enabled";
 
@@ -43,7 +43,7 @@ const ALLOWED_SUFFIX: &str = "signed_writes.allowed_json";
 const HISTORY_SUFFIX: &str = "signed_writes.history_json";
 
 fn key(name: &str, suffix: &str) -> String {
-    format!("red.collection.{name}.{suffix}")
+    format!("collection.{name}.{suffix}")
 }
 
 fn now_ms() -> u128 {

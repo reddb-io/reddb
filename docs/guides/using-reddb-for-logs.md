@@ -339,7 +339,7 @@ SELECT add_retention_policy('access_log', INTERVAL '90 days');
 ```
 
 The retention daemon scans policies every 60s (configurable via
-`red.config.retention.interval_ms`) and drops chunks as they age.
+`retention.interval_ms` in `red.config`) and drops chunks as they age.
 Stats are queryable:
 
 ```sql
@@ -506,7 +506,7 @@ Use RedDB when:
 ## 10. Troubleshooting
 
 **Q: Ingest rate is low.**
-Check `red.config.wal.group_commit = true` (it is by default). Batch
+Check `wal.group_commit = true` in `red.config` (it is by default). Batch
 your writes — 100+ rows per INSERT is the target. Run the ingest on
 the same process as the store when possible (`LogPipeline`).
 

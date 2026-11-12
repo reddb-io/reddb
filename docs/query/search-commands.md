@@ -236,7 +236,7 @@ stable URNs for UI deep-links. See
 
 > [!IMPORTANT]
 > ADR 0068 defines `ASK` as planner-first, but the automatic planner rollout is
-> currently gated by `red.config.ai.ask.planner` and that gate defaults to
+> currently gated by `ai.ask.planner` in `red.config` and that gate defaults to
 > `false`. With the gate off, ordinary `ASK` uses the grounded RAG pipeline.
 > `ASK ... PLAN` always runs the planner explicitly without executing or
 > synthesizing. With the gate on, a factual question generates a read-only RQL
@@ -274,7 +274,7 @@ ASK 'list all users with admin access' USING ollama MODEL 'llama3'
 | `CACHE TTL '5m'` | No | Cache this answer for the supplied TTL |
 | `NOCACHE` | No | Bypass the global ASK cache default |
 | `PLAN` | No | Return the first typed action (metadata tool or candidate query) without executing it and without synthesis |
-| `STEPS n` | No | Per-query plan-step budget, clamped to `red.config.ai.ask.max_plan_steps` |
+| `STEPS n` | No | Per-query plan-step budget, clamped to `ai.ask.max_plan_steps` in `red.config` |
 
 > [!NOTE]
 > `EXECUTE` and `AS RQL` were removed (ADR 0068, #1751). Read-only candidates
@@ -319,7 +319,7 @@ ASK executes a retrieval-then-synthesis pipeline:
 
 3. **LLM Synthesis** — Sends the context + your question to the configured AI provider. The LLM generates a natural-language answer with inline `[^N]` markers, and RedDB validates those markers against `sources_flat`.
 
-When `red.config.ai.ask.planner` is enabled, a **factual** question enters a
+When `ai.ask.planner` in `red.config` is enabled, a **factual** question enters a
 bounded tool loop. It can inspect the visible catalog, describe a collection,
 find an exact field name, or execute a bounded parameterized exploratory query
 with `reddb_query` before producing one final read-only RQL query with
@@ -375,11 +375,11 @@ Manage runtime configuration directly from the query engine. Changes take effect
 
 ```sql
 -- Set a config value
-SET CONFIG red.ai.default.provider = 'groq'
-SET CONFIG red.ai.default.model = 'llama-3.3-70b-versatile'
-SET CONFIG red.storage.hnsw.ef_search = 100
-SET CONFIG red.search.rag.graph_depth = 3
-SET CONFIG red.backup.enabled = true
+SET CONFIG ai.default.provider = 'groq'
+SET CONFIG ai.default.model = 'llama-3.3-70b-versatile'
+SET CONFIG storage.hnsw.ef_search = 100
+SET CONFIG search.rag.graph_depth = 3
+SET CONFIG backup.enabled = true
 ```
 
 ### SHOW CONFIG
@@ -389,16 +389,16 @@ SET CONFIG red.backup.enabled = true
 SHOW CONFIG
 
 -- Show config subtree
-SHOW CONFIG red.ai
-SHOW CONFIG red.storage
-SHOW CONFIG red.backup
+SHOW CONFIG ai
+SHOW CONFIG storage
+SHOW CONFIG backup
 ```
 
 ### Parameters
 
 | Parameter | Required | Description |
 |:----------|:---------|:------------|
-| `key` | Yes (SET) | Dot-notation config key (e.g. `red.ai.default.provider`) |
+| `key` | Yes (SET) | Dot-notation content key in `red.config` (e.g. `ai.default.provider`) |
 | `value` | Yes (SET) | Value to set (string, integer, float, or boolean) |
 | `prefix` | No (SHOW) | Filter by key prefix; omit to show all keys |
 

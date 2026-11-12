@@ -576,12 +576,12 @@ mod tests {
         assert_eq!(store.ensure_result_cache_epoch().expect("initial epoch"), 1);
         store.with_boot_system_info_update(|| {
             store
-                .try_set_config_tree("red.system", &crate::json!({"pid": 7}))
+                .try_set_config_tree("system", &crate::json!({"pid": 7}))
                 .expect("boot telemetry");
         });
         assert_eq!(store.result_cache_epoch(), Some(1));
         store
-            .try_set_config_tree("red.config", &crate::json!({"key": "new"}))
+            .try_set_config_tree("config", &crate::json!({"key": "new"}))
             .expect("user config");
         assert!(store.result_cache_epoch().is_some_and(|epoch| epoch > 1));
     }

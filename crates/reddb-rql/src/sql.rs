@@ -391,6 +391,36 @@ mod tests {
     }
 
     #[test]
+    fn config_paths_accept_reserved_words_as_the_first_segment() {
+        for (query, expected) in [
+            ("SET CONFIG queue.max_wait_ms = 1", "queue.max_wait_ms"),
+            (
+                "SET CONFIG kv.watch.idle_timeout_ms = 1",
+                "kv.watch.idle_timeout_ms",
+            ),
+            (
+                "SET CONFIG server.max_body_size = 1",
+                "server.max_body_size",
+            ),
+            (
+                "SET CONFIG timeseries.default_chunk_size = 1",
+                "timeseries.default_chunk_size",
+            ),
+        ] {
+            assert!(
+                matches!(expr(query), QueryExpr::SetConfig { key, .. } if key == expected),
+                "failed to preserve reserved first segment in {query:?}"
+            );
+        }
+
+        assert!(matches!(
+            expr("SHOW CONFIG queue.max_wait_ms"),
+            QueryExpr::ShowConfig { prefix: Some(prefix), as_json: false }
+                if prefix == "queue.max_wait_ms"
+        ));
+    }
+
+    #[test]
     fn parse_frontend_routes_extended_schema_sql() {
         assert!(matches!(
             expr("CREATE SCHEMA IF NOT EXISTS app"),
@@ -2907,7 +2937,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_dotted_admin_path(&mut self, lowercase: bool) -> Result<String, ParseError> {
-        let path = self.parse_collection_name()?;
+        // Config/secret/KV paths are open dotted namespaces rather than SQL
+        // identifiers. A valid first segment can therefore also be a lexer
+        // keyword (`queue.*`, `kv.*`, `server.*`, ...), just like every
+        // segment after the first dot.
+        let head = self.collection_name_segment(true)?;
+        let path = self.finish_collection_name(head, false)?;
         Ok(if lowercase {
             path.to_ascii_lowercase()
         } else {
@@ -4195,15 +4230,7 @@ impl<'a> Parser<'a> {
                         || self.check(&Token::As)
                         || self.check(&Token::Format))
                     {
-                        let first = self.expect_ident()?;
-                        let mut full = first;
-                        while self.consume(&Token::Dot)? {
-                            let next = self.expect_ident_or_keyword()?;
-                            full = format!("{full}.{next}");
-                        }
-                        // Match SET CONFIG: lowercase so keyword segments
-                        // come out consistent with the stored keys.
-                        Some(full.to_ascii_lowercase())
+                        Some(self.parse_dotted_admin_path(true)?)
                     } else {
                         None
                     };

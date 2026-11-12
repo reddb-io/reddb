@@ -128,7 +128,7 @@ in the slice's PR description.
 
 **Rollback plan:** Each slice (#29, #30, #31, #32) lands behind a
 feature gate `mvcc_promotion = "off" | "snapshot" | "serializable"`
-read from `red.config.mvcc.mode` (KV-backed, hot-reloadable). Set
+read from `mvcc.mode` inside `red.config` (KV-backed, hot-reloadable). Set
 to `"off"` to fall back to the legacy single-mutex path. The gate
 disappears one minor release after #32 ships and the benches stay
 within budget; until then, operators have an opt-out.

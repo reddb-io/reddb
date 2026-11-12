@@ -126,13 +126,13 @@ fn child_replica_cycle() {
 
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {
-        let cursor = config_u64(&replica, "red.replication.last_applied_lsn").unwrap_or(0);
+        let cursor = config_u64(&replica, "replication.last_applied_lsn").unwrap_or(0);
         let relay_applied = replica
             .replica_relay_manifest(REPLICA_ID)
             .expect("read replica relay manifest")
             .map(|manifest| manifest.applied_lsn)
             .unwrap_or(0);
-        let state = config_text(&replica, "red.replication.state");
+        let state = config_text(&replica, "replication.state");
         let healthy = state.as_deref() == Some("healthy");
         if let Some(expected_state) = expected_state.as_deref() {
             if state.as_deref() == Some(expected_state) {
@@ -295,7 +295,7 @@ fn assert_persisted_replica(path: &Path, phase: u8, target_lsn: u64, minimum_seg
         .expect("reopen persisted replica without follower thread");
     assert!(phase_visible(&replica, phase), "phase {phase} rows persist");
     assert_eq!(
-        config_u64(&replica, "red.replication.last_applied_lsn"),
+        config_u64(&replica, "replication.last_applied_lsn"),
         Some(target_lsn),
         "phase {phase} cursor must persist across process restart"
     );

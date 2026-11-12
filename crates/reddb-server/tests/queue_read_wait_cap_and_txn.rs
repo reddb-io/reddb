@@ -5,7 +5,7 @@
 //! Two guarantees the brief calls out:
 //!
 //!   1. `WAIT` durations above the server cap
-//!      (`red.config.queue.max_wait_ms`) are rejected before any
+//!      (`queue.max_wait_ms` in `red.config`) are rejected before any
 //!      waiter is registered, with an error message that names the
 //!      cap so operators can see why their statement was refused.
 //!   2. `WAIT` issued inside an explicit `BEGIN`/`COMMIT` transaction
@@ -41,7 +41,7 @@ fn wait_above_default_cap_is_rejected_with_explicit_message() {
 
     let msg = format!("{err}");
     assert!(
-        msg.contains("red.config.queue.max_wait_ms"),
+        msg.contains("queue.max_wait_ms"),
         "error should name the cap key, got: {msg:?}"
     );
     assert!(
@@ -61,7 +61,7 @@ fn wait_above_operator_set_cap_is_rejected_with_active_cap_value() {
     // Tighten the cap to 250ms; anything above it must reject and
     // the error must name the *active* (overridden) cap, not the
     // default.
-    exec(&rt, "SET CONFIG red.config.queue.max_wait_ms = 250");
+    exec(&rt, "SET CONFIG queue.max_wait_ms = 250");
     exec(&rt, "CREATE QUEUE qwait_cap_tight");
     exec(&rt, "QUEUE GROUP CREATE qwait_cap_tight workers");
 
@@ -74,7 +74,7 @@ fn wait_above_operator_set_cap_is_rejected_with_active_cap_value() {
         "error should reflect the operator-set cap (250), got: {msg:?}"
     );
     assert!(
-        msg.contains("red.config.queue.max_wait_ms"),
+        msg.contains("queue.max_wait_ms"),
         "error should name the cap key, got: {msg:?}"
     );
 

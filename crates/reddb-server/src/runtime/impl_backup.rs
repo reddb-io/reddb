@@ -13,7 +13,7 @@ impl RedDBRuntime {
     /// follow-up): both delegate to
     /// `crate::storage::cache::sweeper::BlobCacheSweeper`, which takes a
     /// `&BlobCache`. Also used by `trigger_backup` when
-    /// `red.config.backup.include_blob_cache=true` to locate the L2
+    /// `backup.include_blob_cache=true` to locate the L2
     /// directory for archival.
     pub fn result_blob_cache(&self) -> &crate::storage::cache::BlobCache {
         &self.inner.result_blob_cache
@@ -36,7 +36,7 @@ impl RedDBRuntime {
                     .unwrap_or_else(|| repl.wal_buffer.current_lsn())
             })
             .unwrap_or_else(|| self.inner.cdc.current_lsn());
-        let last_archived_lsn = self.config_u64("red.config.timeline.last_archived_lsn", 0);
+        let last_archived_lsn = self.config_u64("timeline.last_archived_lsn", 0);
         (current_lsn, last_archived_lsn)
     }
 
@@ -72,14 +72,11 @@ impl RedDBRuntime {
                 let default_snapshot_prefix = self.inner.db.options().default_snapshot_prefix();
                 let default_wal_prefix = self.inner.db.options().default_wal_archive_prefix();
                 let default_head_key = self.inner.db.options().default_backup_head_key();
-                let snapshot_prefix = self.config_string(
-                    "red.config.backup.snapshot_prefix",
-                    &default_snapshot_prefix,
-                );
-                let wal_prefix =
-                    self.config_string("red.config.wal.archive.prefix", &default_wal_prefix);
-                let head_key = self.config_string("red.config.backup.head_key", &default_head_key);
-                let timeline_id = self.config_string("red.config.timeline.id", "main");
+                let snapshot_prefix =
+                    self.config_string("backup.snapshot_prefix", &default_snapshot_prefix);
+                let wal_prefix = self.config_string("wal.archive.prefix", &default_wal_prefix);
+                let head_key = self.config_string("backup.head_key", &default_head_key);
+                let timeline_id = self.config_string("timeline.id", "main");
                 let snapshot_key = crate::storage::wal::archive_snapshot(
                     backend.as_ref(),
                     path,
@@ -99,7 +96,7 @@ impl RedDBRuntime {
                             .unwrap_or_else(|| repl.wal_buffer.current_lsn())
                     })
                     .unwrap_or_else(|| self.inner.cdc.current_lsn());
-                let last_archived_lsn = self.config_u64("red.config.timeline.last_archived_lsn", 0);
+                let last_archived_lsn = self.config_u64("timeline.last_archived_lsn", 0);
                 // Hash the local snapshot bytes so the manifest can carry
                 // the digest for restore-side verification (PLAN.md
                 // Phase 4). Failure to hash is non-fatal — we still
@@ -134,8 +131,7 @@ impl RedDBRuntime {
                 // first archive ever); the segment's `prev_hash` will be
                 // `None` and restore-side validation accepts that only for
                 // the first segment in `plan.wal_segments`.
-                let prev_segment_hash =
-                    self.config_string("red.config.timeline.last_segment_hash", "");
+                let prev_segment_hash = self.config_string("timeline.last_segment_hash", "");
                 let prev_hash_arg = if prev_segment_hash.is_empty() {
                     None
                 } else {
@@ -183,7 +179,7 @@ impl RedDBRuntime {
                         // prior chain head, preserving continuity.
                         if let Some(sha) = &meta.sha256 {
                             self.inner.db.store().set_config_tree(
-                                "red.config.timeline",
+                                "timeline",
                                 &crate::json!({ "last_segment_hash": sha }),
                             );
                         }
@@ -207,7 +203,7 @@ impl RedDBRuntime {
                 crate::storage::wal::publish_backup_head(backend.as_ref(), &head_key, &head)
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
                 self.inner.db.store().set_config_tree(
-                    "red.config.timeline",
+                    "timeline",
                     &crate::json!({
                         "last_archived_lsn": archived_lsn,
                         "id": head.timeline_id
@@ -291,9 +287,9 @@ impl RedDBRuntime {
                 // p99 latency until the cache re-warms. We therefore log
                 // (not fail) on per-file upload errors so a partial L2
                 // upload never aborts a healthy snapshot+WAL backup.
-                if self.config_bool("red.config.backup.include_blob_cache", false) {
+                if self.config_bool("backup.include_blob_cache", false) {
                     let blob_cache_prefix = self.config_string(
-                        "red.config.backup.blob_cache_prefix",
+                        "backup.blob_cache_prefix",
                         &format!("{snapshot_prefix}blob_cache/"),
                     );
                     if let Some(l2_path) = self.inner.result_blob_cache.l2_path() {

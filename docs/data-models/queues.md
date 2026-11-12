@@ -388,16 +388,16 @@ so an immediately-available read returns instantly and never parks.
 
 ### Maximum wait cap
 
-`WAIT` budgets are capped by `red.config.queue.max_wait_ms` (default **60000**,
+`WAIT` budgets are capped by `queue.max_wait_ms` in `red.config` (default **60000**,
 i.e. 60 s). A request whose `WAIT` exceeds the active cap is **rejected
 immediately**, before any waiter is registered, with an error that names both the
 config key and the active cap value. Tighten or relax the cap at runtime — see
 [Configuration](#configuration).
 
 ```sql
-SET CONFIG red.config.queue.max_wait_ms = 5000
+SET CONFIG queue.max_wait_ms = 5000
 QUEUE READ tasks GROUP workers CONSUMER w1 WAIT 999h
--- error: WAIT 999h exceeds red.config.queue.max_wait_ms (5000); no waiter registered
+-- error: WAIT 999h exceeds queue.max_wait_ms (5000); no waiter registered
 ```
 
 ### Autocommit only — no `WAIT` inside a transaction
@@ -551,11 +551,11 @@ mutable at runtime via `SET CONFIG`.
 
 | Key | Default | Effect |
 |-----|---------|--------|
-| `red.config.queue.max_wait_ms` | `60000` (60s) | Maximum budget the runtime will honour on `QUEUE READ … WAIT <duration>`. Requests above the cap are rejected immediately with an error that names the active cap; no waiter is registered. `WAIT` is also rejected inside an explicit `BEGIN`/`COMMIT` transaction — the wait is autocommit-only. |
+| `queue.max_wait_ms` | `60000` (60s) | Maximum budget the runtime will honour on `QUEUE READ … WAIT <duration>`. Requests above the cap are rejected immediately with an error that names the active cap; no waiter is registered. `WAIT` is also rejected inside an explicit `BEGIN`/`COMMIT` transaction — the wait is autocommit-only. |
 
 ```sql
 -- Tighten the cap to 5 seconds for an operator-controlled deployment
-SET CONFIG red.config.queue.max_wait_ms = 5000
+SET CONFIG queue.max_wait_ms = 5000
 ```
 
 ## Telemetry — `/metrics`

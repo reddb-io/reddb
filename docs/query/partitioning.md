@@ -87,7 +87,7 @@ DROP TABLE events_2025_q4;
 
 ## Registry storage
 
-Partition metadata is persisted in `red_config`:
+Partition metadata is persisted in `red.config`:
 
 - `partition.{parent}.by` — kind (`range` / `list` / `hash`)
 - `partition.{parent}.column` — partition key

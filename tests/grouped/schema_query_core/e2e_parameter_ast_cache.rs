@@ -123,7 +123,7 @@ fn parameter_cache_resolves_current_configuration() {
         .expect("row");
     let query = "SELECT $config.mode AS cfg_mode FROM probes WHERE id=$1";
     for mode in ["first", "second", "first"] {
-        rt.execute_query(&format!("SET CONFIG red.config.mode = '{mode}'"))
+        rt.execute_query(&format!("SET CONFIG mode = '{mode}'"))
             .expect("set config");
         let result = rt
             .execute_query_with_params(query, &[Value::Integer(1)])

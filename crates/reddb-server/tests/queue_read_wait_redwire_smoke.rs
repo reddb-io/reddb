@@ -842,7 +842,7 @@ async fn wait_above_server_cap_is_rejected() {
         "rejection must carry the cap code, got {body}"
     );
     assert!(
-        body.contains("red.config.queue.max_wait_ms"),
+        body.contains("queue.max_wait_ms"),
         "rejection should name the cap config key for operators, got {body}"
     );
     assert!(

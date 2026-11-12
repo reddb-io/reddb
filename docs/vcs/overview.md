@@ -210,9 +210,8 @@ on first boot:
 | `red_remotes` | remote repository configuration (Phase 7) |
 | `red_vcs_settings` | per-collection opt-in flag (`id = name`, `versioned = true`) |
 
-Config defaults live in `red_config` under `red.vcs.*` — inherits
-the same dot-notation patterns already used by `red.ai`,
-`red.storage`, and friends.
+Config defaults live in `red.config` under content keys `vcs.*` — inheriting
+the same bare dot-notation pattern used by `ai.*`, `storage.*`, and friends.
 
 ## Next steps
 

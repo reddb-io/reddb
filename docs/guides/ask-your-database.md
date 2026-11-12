@@ -58,7 +58,8 @@ Then restart the server so it picks up the variable. If you prefer a different p
 
 ### Option B: Store in the RedDB vault (persisted)
 
-Store the key inside RedDB itself. The key is saved to the `red_config` collection and survives restarts.
+Store the key inside RedDB itself. The credential is encrypted in `red.vault`; only
+non-secret provider settings are stored as bare content keys in `red.config`.
 
 ```bash
 curl -X POST http://127.0.0.1:5000/ai/credentials \
@@ -81,7 +82,7 @@ The `"default": true` flag tells RedDB to use Groq whenever you omit `USING` fro
 ### Verify configuration
 
 ```bash
-curl -s http://127.0.0.1:5000/config/red.ai.default
+curl -s http://127.0.0.1:5000/config/ai.default
 ```
 
 Expected response:
@@ -89,7 +90,7 @@ Expected response:
 ```json
 {
   "ok": true,
-  "key": "red.ai.default",
+  "key": "ai.default",
   "value": {
     "provider": "groq",
     "model": "llama-3.3-70b-versatile"
@@ -586,7 +587,7 @@ ASK 'question'
   └─ Audit + optional cache             ← red_ask_audit, CACHE TTL / NOCACHE
 ```
 
-With `red.config.ai.ask.planner = false` (the current rollout default), plain
+With `ai.ask.planner = false` in `red.config` (the current rollout default), plain
 `ASK` follows the retrieval-RAG path above. With the planner enabled, factual
 questions enter a bounded tool loop: visible catalog discovery, optional
 parameterized exploratory reads through `reddb_query`, then one final

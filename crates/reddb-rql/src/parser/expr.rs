@@ -693,7 +693,7 @@ impl<'a> Parser<'a> {
         }
 
         // CONFIG()/KV() take bare dotted config paths as arguments
-        // (e.g. `CONFIG(red.ai.default.provider, openai)`,
+        // (e.g. `CONFIG(ai.default.provider, openai)`,
         // `KV(cfg, default.role, guest)`). Parsed through the generic
         // expression grammar these become column references — and a
         // keyword segment like `default` would be folded to `DEFAULT`,
@@ -1958,7 +1958,7 @@ mod tests {
 
     #[test]
     fn config_and_kv_bare_path_args_lowercase_to_text() {
-        let e = parse("CONFIG(Red.AI.Default.Provider, 'openai')");
+        let e = parse("CONFIG(AI.Default.Provider, 'openai')");
         let Expr::FunctionCall { name, args, .. } = e else {
             panic!("expected FunctionCall");
         };
@@ -1967,7 +1967,7 @@ mod tests {
         assert!(matches!(
             &args[0],
             Expr::Literal { value: Value::Text(path), .. }
-                if path.as_ref() == "red.ai.default.provider"
+                if path.as_ref() == "ai.default.provider"
         ));
         assert!(matches!(
             &args[1],

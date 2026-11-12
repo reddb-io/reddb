@@ -88,8 +88,8 @@ class DumpRestore(unittest.TestCase):
 
     def test_selected_collection_retains_config_and_override_preserves_it(self):
         source = self.root / "config-source.rdb"
-        self.cli("query", "--path", source, "SET CONFIG red.config.demo.enabled = true")
-        self.cli("query", "--path", source, "SET CONFIG red.config.demo.enabled = false")
+        self.cli("query", "--path", source, "SET CONFIG demo.enabled = true")
+        self.cli("query", "--path", source, "SET CONFIG demo.enabled = false")
         self.cli("query", "--path", source, "INSERT INTO original (id) VALUES (1)")
         dump = self.root / "selected.jsonl"
         self.cli("dump", "--path", source, "--collection", "original", "-o", dump)
@@ -100,30 +100,77 @@ class DumpRestore(unittest.TestCase):
         _, restored = self.dump(target, "config-restored.jsonl")
         def custom_config(records):
             return [r for r in records if r.get("collection") == "red.config"
-                    and r["fields"].get("key") == "red.config.demo.enabled"]
+                    and r["fields"].get("key") == "demo.enabled"]
         self.assertEqual(custom_config(restored), custom_config(records))
         query = self.cli("query", "--path", target, "--json",
-                         "SELECT $red.config.demo.enabled AS enabled")
+                         "SELECT $config.demo.enabled AS enabled")
         self.assertFalse(json.loads(query.stdout)["data"]["rows"][0]["enabled"])
         self.assertEqual([r["fields"] for r in restored if r.get("collection") == "renamed"],
                          [{"id": 1}])
 
     def test_restore_accepts_legacy_config_identity_and_republishes_canonical(self):
         legacy = self.root / "legacy-config.jsonl"
-        legacy.write_text(json.dumps({
+        legacy.write_text("\n".join(json.dumps(record) for record in [{
             "collection": "red_config",
             "fields": {"key": "red.config.legacy.enabled", "value": True},
-        }) + "\n", encoding="utf-8")
+        }, {
+            "collection": "red.config",
+            "fields": {"key": "red.auth.enabled", "value": False},
+        }, {
+            "collection": "red.config",
+            "fields": {"key": "ai.default.provider", "value": "canonical"},
+        }, {
+            "collection": "red.config",
+            "fields": {"key": "red.ai.default.provider", "value": "legacy-newer"},
+        }, {
+            "collection": "red.config",
+            "fields": {"key": "red.config.queue.timeout", "value": "legacy-older"},
+        }, {
+            "collection": "red.config",
+            "fields": {"key": "red.queue.timeout", "value": "legacy-newer"},
+        }, {
+            "collection": "red.config",
+            "fields": {"key": "red.search.mode", "value": "losing-history"},
+        }, {
+            "collection": "red.config",
+            "fields": {"key": "red.config.search.mode", "value": "winning-history-1"},
+        }, {
+            "collection": "red.config",
+            "fields": {"key": "red.config.search.mode", "value": "winning-history-2"},
+        }]) + "\n", encoding="utf-8")
         target = self.root / "legacy-config.rdb"
         self.cli("restore", "--path", target, "-i", legacy)
 
         _, restored = self.dump(target, "legacy-config-restored.jsonl")
-        rows = [r for r in restored
+        rows = {r["fields"]["key"]: r["fields"]["value"] for r in restored
                 if r.get("collection") == "red.config"
-                and r["fields"].get("key") == "red.config.legacy.enabled"]
-        self.assertEqual(len(rows), 1)
-        self.assertTrue(rows[0]["fields"]["value"])
+                and r["fields"].get("key") in {
+                    "legacy.enabled", "auth.enabled", "ai.default.provider",
+                    "queue.timeout", "search.mode"}}
+        self.assertEqual(rows, {
+            "legacy.enabled": True,
+            "auth.enabled": False,
+            "ai.default.provider": "canonical",
+            "queue.timeout": "legacy-newer",
+            "search.mode": "winning-history-2",
+        })
+        provider_values = [
+            r["fields"].get("value") for r in restored
+            if r.get("collection") == "red.config"
+            and r["fields"].get("key") == "ai.default.provider"]
+        self.assertEqual(provider_values.count("canonical"), 1)
+        self.assertNotIn("legacy-newer", provider_values)
+        search_values = [
+            r["fields"].get("value") for r in restored
+            if r.get("collection") == "red.config"
+            and r["fields"].get("key") == "search.mode"]
+        self.assertEqual(search_values, ["winning-history-1", "winning-history-2"])
+        self.assertNotIn("losing-history", search_values)
         self.assertFalse(any(r.get("collection") == "red_config" for r in restored))
+        self.assertFalse(any(
+            r.get("collection") == "red.config"
+            and r["fields"].get("key", "").startswith("red.")
+            for r in restored))
 
 
 if __name__ == "__main__":

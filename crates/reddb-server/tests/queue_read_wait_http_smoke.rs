@@ -11,7 +11,7 @@
 //!   2. Producer enqueues from a separate HTTP client during the
 //!      waiter's WAIT → the message is delivered over HTTP.
 //!   3. WAIT > server cap → HTTP 400 whose body names the cap key
-//!      (`red.config.queue.max_wait_ms`) and the active cap value.
+//!      (`queue.max_wait_ms` in `red.config`) and the active cap value.
 //!   4. Registry cancellation while a WAIT is parked → HTTP 400 with
 //!      the explicit `QUEUE READ WAIT cancelled` message — not a
 //!      200/empty timeout. Today the only cancellation primitive on
@@ -216,7 +216,7 @@ fn http_wait_above_cap_is_rejected_with_explicit_error() {
         "WAIT > cap should reject with 400, body={body}"
     );
     assert!(
-        body.contains("red.config.queue.max_wait_ms"),
+        body.contains("queue.max_wait_ms"),
         "rejection should name the cap key over HTTP, body={body}"
     );
     assert!(

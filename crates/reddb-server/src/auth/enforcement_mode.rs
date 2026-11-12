@@ -16,15 +16,15 @@
 //!   over after the operator has audited their attached policies.
 //!
 //! The mode is plumbed through [`super::store::AuthStore`] and read on
-//! every policy decision. It is configured by the `red.config.policy.
-//! enforcement_mode` config key — see `runtime::impl_config` for the
+//! every policy decision. It is configured by the `policy.enforcement_mode`
+//! content key in `red.config` — see `runtime::impl_config` for the
 //! write-path validation and the boot-time loader.
 
 use super::action_catalog::{lookup, ActionCategory};
 use super::Role;
 
 /// Config key that selects the enforcement mode.
-pub const ENFORCEMENT_MODE_CONFIG_KEY: &str = "red.config.policy.enforcement_mode";
+pub const ENFORCEMENT_MODE_CONFIG_KEY: &str = "policy.enforcement_mode";
 
 /// Version at which `policy_only` becomes the only accepted mode and the
 /// `legacy_rbac` fallback is removed. Reported by `SHOW POLICIES` so

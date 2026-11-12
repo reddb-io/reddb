@@ -52,12 +52,13 @@ Part of the [glossary map](../CONTEXT-MAP.md). How data is shaped and accessed, 
 
 - **KV** — keyed Collection model for volatile or high-churn application data. Normal KV is the only keyed model that supports Redis-flavor operations such as TTL/EXPIRE, INCR/DECR, ADD/merge, destructive tag invalidation, and physical DELETE semantics.
 - **Config** — keyed Collection model for stable operational configuration. Config values are readable as plaintext, may be typed/schema-validated, keep versioned history for rollback, and never support TTL or counter-style mutation.
+- **`red.config` content-key rule** — `red.config` is the physical system Config collection; it is not part of any key stored inside that collection. Engine-owned keys use bare dotted paths such as `ai.inference.provider`, `auth.require_auth`, and `cdc.enabled`. A stored key beginning with `red.` is invalid. External policy/audit addresses may qualify the collection as `red.config/<key>` without changing the stored key.
 - **Vault** — keyed Collection model for sealed secrets. Vault values are encrypted before WAL/page/snapshot persistence, `GET VAULT` returns redacted metadata only, and plaintext reads require explicit `UNSEAL` plus audit.
 - **SecretRef** — Config value that points at a Vault secret. `GET CONFIG` returns the reference, not plaintext; resolving it is an explicit operation that also requires Vault unseal permission.
 - **Unseal** — privileged plaintext read from Vault. Every unseal attempt is audited and is distinct from metadata reads.
 - **Rotate** — versioned replacement operation for Config and Vault. Used for safe rollout/rollback of stable settings and secrets.
 - **Purge** — privileged irreversible removal of Config/Vault history. Normal `DELETE` on Config/Vault creates a tombstone version instead.
-- **`red.config` / `red.vault`** — bootstrap-created system collections for engine-managed configuration and secrets. Legacy pseudo-paths such as `$config.*`, `$secret.*`, and `red.secret.*` normalize to these explicit system collections; they are not the canonical public model.
+- **`red.config` / `red.vault`** — bootstrap-created system collections for engine-managed configuration and secrets. The `red.config` collection stores bare content keys according to the content-key rule above. Legacy pseudo-paths such as `$config.*`, `$secret.*`, and `red.secret.*` normalize to these explicit system collections; they are not the canonical public model.
 
 ## Events & Subscriptions
 

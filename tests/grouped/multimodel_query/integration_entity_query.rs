@@ -2244,7 +2244,7 @@ fn test_secret_encrypt_and_compute_without_implicit_reveal() {
     // (bytes) which formatters mask.
     query
         .execute(ExecuteQueryInput {
-            query: "SET CONFIG red.config.secret.auto_decrypt = false".into(),
+            query: "SET CONFIG secret.auto_decrypt = false".into(),
         })
         .expect("SET CONFIG should succeed");
 
@@ -2267,7 +2267,7 @@ fn test_secret_encrypt_and_compute_without_implicit_reveal() {
 
     query
         .execute(ExecuteQueryInput {
-            query: "SET CONFIG red.config.secret.auto_decrypt = true".into(),
+            query: "SET CONFIG secret.auto_decrypt = true".into(),
         })
         .expect("SET CONFIG auto_decrypt=true should succeed");
     query
@@ -2300,7 +2300,7 @@ fn test_secret_encrypt_and_compute_without_implicit_reveal() {
 
     query
         .execute(ExecuteQueryInput {
-            query: "SET CONFIG red.config.secret.auto_decrypt = false".into(),
+            query: "SET CONFIG secret.auto_decrypt = false".into(),
         })
         .expect("SET CONFIG auto_decrypt=false should succeed");
     let updated_masked = query
@@ -3125,13 +3125,13 @@ fn test_select_config_function_accepts_bare_path_and_default() {
 
     query
         .execute(ExecuteQueryInput {
-            query: "SET CONFIG red.ai.default.provider = 'groq'".into(),
+            query: "SET CONFIG ai.default.provider = 'groq'".into(),
         })
         .expect("SET CONFIG should succeed");
 
     let configured = query
         .execute(ExecuteQueryInput {
-            query: "SELECT CONFIG(red.ai.default.provider, openai) AS provider".into(),
+            query: "SELECT CONFIG(ai.default.provider, openai) AS provider".into(),
         })
         .expect("scalar CONFIG() select should succeed");
 
@@ -3143,7 +3143,7 @@ fn test_select_config_function_accepts_bare_path_and_default() {
 
     let fallback = query
         .execute(ExecuteQueryInput {
-            query: "SELECT CONFIG(red.ai.default.missing, openai) AS provider".into(),
+            query: "SELECT CONFIG(ai.default.missing, openai) AS provider".into(),
         })
         .expect("CONFIG() fallback select should succeed");
 

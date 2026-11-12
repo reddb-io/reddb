@@ -1590,7 +1590,7 @@ impl RedDBRuntime {
         // ADR 0068 / #1751: `ASK ... PLAN` returns the typed plan (routed
         // intent + candidate query) without executing the candidate and
         // without the synthesis call. It always runs the planner — even when
-        // the `red.config.ai.ask.planner` gate is off — because it is an
+        // the `ai.ask.planner` gate is off — because it is an
         // explicit request to inspect the plan. Zero execution, zero synthesis.
         if ask.plan_only {
             match self.execute_ask_planner_prepass(raw_query, ask, true)? {
@@ -2089,7 +2089,7 @@ impl RedDBRuntime {
     /// this slice can land the factual path without flipping the default
     /// RAG contract (a later slice makes planner-first the default).
     fn ask_planner_enabled(&self) -> bool {
-        self.config_bool("red.config.ai.ask.planner", false)
+        self.config_bool("ai.ask.planner", false)
     }
 
     /// ADR 0068 / #1747 / #1749 — the planner-first pre-pass, end-to-end.
@@ -2131,7 +2131,7 @@ impl RedDBRuntime {
         // Plan budget: a per-query `STEPS N` request clamped to the config
         // cap; total executed plan steps can never exceed it (ADR 0068 §4).
         let max_plan_steps = self.config_u64(
-            "red.config.ai.ask.max_plan_steps",
+            "ai.ask.max_plan_steps",
             ask_planner::DEFAULT_MAX_PLAN_STEPS as u64,
         ) as usize;
         let mut budget = ask_planner::PlanBudget::new(ask.steps, max_plan_steps);

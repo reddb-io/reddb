@@ -11,7 +11,7 @@
 //!
 //! Artifact acquisition is fixture-based here — the slice intentionally
 //! does not call out to HuggingFace. A `fixture_dir` (per-request or via
-//! `red.config.ai.local.fixture_dir`) supplies the bytes that simulate
+//! `ai.local.fixture_dir`) supplies the bytes that simulate
 //! a downloaded model, so tests stay deterministic and offline. Live
 //! pull is a follow-up slice owned by the PRD.
 
@@ -37,9 +37,9 @@ use reddb_file::{
 use reddb_types::Value;
 
 const RED_CONFIG_COLLECTION: &str = "red.config";
-const AI_MODEL_KEY_PREFIX: &str = "red.config.ai.models.";
-const AI_LOCAL_CACHE_DIR_KEY: &str = "red.config.ai.local.cache_dir";
-const AI_LOCAL_FIXTURE_DIR_KEY: &str = "red.config.ai.local.fixture_dir";
+const AI_MODEL_KEY_PREFIX: &str = "ai.models.";
+const AI_LOCAL_CACHE_DIR_KEY: &str = "ai.local.cache_dir";
+const AI_LOCAL_FIXTURE_DIR_KEY: &str = "ai.local.fixture_dir";
 
 /// Body fields the pull endpoint must reject outright: the boundary
 /// never accepts plaintext credentials. Operators stage them in the

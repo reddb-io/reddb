@@ -1209,6 +1209,7 @@ impl UnifiedStore {
         let catalog = store.load_from_pages(false, None)?;
         StoreCommitCoordinator::replay_read_only(&store, &wal_path).map_err(StoreError::Io)?;
         store.load_result_cache_epoch()?;
+        store.require_normalized_red_config_keys()?;
         let pending_drops = store.legacy_pending_collection_drops()?.unwrap_or_default();
         for name in pending_drops {
             if !catalog
@@ -1343,6 +1344,13 @@ impl UnifiedStore {
                 .map_err(StoreError::Io)?;
         }
         store.load_result_cache_epoch()?;
+        let normalized_config_keys = store.normalize_red_config_keys()?;
+        if normalized_config_keys > 0 {
+            tracing::warn!(
+                migrated = normalized_config_keys,
+                "normalized legacy red.config keys before boot config consumers"
+            );
+        }
         trace_startup_phase(path, "paged_wal_replay", wal_replay_started);
         if catalog_load.migrated {
             // Publish only the renamed catalog keys. Existing row, key and
@@ -1499,7 +1507,7 @@ impl UnifiedStore {
     }
 
     fn legacy_pending_collection_drops(&self) -> Result<Option<Vec<String>>, StoreError> {
-        match self.try_get_config("red.storage.legacy_manifest_imported")? {
+        match self.try_get_config("storage.legacy_manifest_imported")? {
             Some(Value::Boolean(true)) => return Ok(None),
             None => {}
             Some(_) => {
@@ -1533,7 +1541,7 @@ impl UnifiedStore {
             }
         }
         self.try_set_config_tree(
-            "red.storage.legacy_manifest_imported",
+            "storage.legacy_manifest_imported",
             &crate::serde_json::Value::Bool(true),
         )?;
         Ok(())
@@ -4328,7 +4336,7 @@ mod checkpoint_work_tests {
                 true,
                 true,
                 false,
-                Some("red.system.pid"),
+                Some("system.pid"),
                 Some(case),
             );
             let wal = reddb_file::unified_wal_path(&fixture.path);
@@ -4457,14 +4465,14 @@ mod checkpoint_work_tests {
                 true,
                 true,
                 false,
-                Some("red.system.pid"),
+                Some("system.pid"),
             );
             let encode = |action| reddb_file::encode_store_wal_action_frame(&action).unwrap();
             let upsert = |id, value| {
                 encode(Action::UpsertEntityRecord {
                     collection: "red_config".into(),
                     record: UnifiedStore::serialize_entity_record(
-                        &config_recovery_row(id, "red.system.pid", value),
+                        &config_recovery_row(id, "system.pid", value),
                         None,
                         STORE_VERSION_CURRENT,
                     ),
@@ -4554,10 +4562,7 @@ mod checkpoint_work_tests {
                 let manager = recovered.get_collection("red.config").unwrap();
                 assert!(manager.identity_counters().0 > 10001);
                 assert!(manager.identity_counters().1 > 10001);
-                assert_eq!(
-                    recovered.get_config("red.system.pid"),
-                    Some(Value::Integer(2))
-                );
+                assert_eq!(recovered.get_config("system.pid"), Some(Value::Integer(2)));
                 assert!(recovered.get("red.config", EntityId::new(1)).is_none());
                 assert!(recovered.get("red.config", EntityId::new(10000)).is_none());
                 assert!(recovered.get("red.config", EntityId::new(10001)).is_none());
@@ -4578,13 +4583,8 @@ mod checkpoint_work_tests {
     #[test]
     fn canonical_system_config_recovery_requires_stable_boot_identity_evidence() {
         use crate::storage::wal::{WalRecord, WalWriter};
-        let fixture = duplicate_system_catalog_fixture_with_key(
-            true,
-            true,
-            false,
-            false,
-            Some("red.system.pid"),
-        );
+        let fixture =
+            duplicate_system_catalog_fixture_with_key(true, true, false, false, Some("system.pid"));
         let original = std::fs::read(&fixture.path).unwrap();
         let wal = reddb_file::unified_wal_path(&fixture.path);
         {
@@ -4631,22 +4631,17 @@ mod checkpoint_work_tests {
         use crate::storage::wal::{WalRecord, WalWriter};
         use reddb_file::StoreWalActionFrame as Action;
         for (case, checkpoint_key, wal_key, delete_id) in [
-            (
-                "unknown-delete",
-                "red.system.pid",
-                "red.system.pid",
-                Some(90000),
-            ),
+            ("unknown-delete", "system.pid", "system.pid", Some(90000)),
             (
                 "user-key",
-                "red.system.customer_setting",
-                "red.system.customer_setting",
+                "system.customer_setting",
+                "system.customer_setting",
                 None,
             ),
             (
                 "identity-reuse",
                 "red.config.customer_setting",
-                "red.system.pid",
+                "system.pid",
                 None,
             ),
         ] {

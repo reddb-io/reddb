@@ -77,7 +77,7 @@ impl RedDBRuntime {
         // like `red.tables` does for `CREATE TABLE`.
         if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
             store.set_config_tree(
-                &format!("red.collection_tenants.{}", query.name),
+                &format!("collection_tenants.{}", query.name),
                 &crate::serde_json::Value::String(tenant_id),
             );
         }

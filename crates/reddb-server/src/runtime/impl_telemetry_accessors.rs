@@ -433,11 +433,11 @@ impl RedDBRuntime {
 
     /// PLAN.md Phase 11.5 — current replica apply health label
     /// (`ok`, `gap`, `divergence`, `apply_error`, `connecting`,
-    /// `stalled_gap`). Read from the persisted `red.replication.state`
+    /// `stalled_gap`). Read from the persisted `replication.state`
     /// config key updated by the replica loop. Returns `None` on
     /// non-replica instances or when no apply has run yet.
     pub fn replica_apply_health(&self) -> Option<String> {
-        let state = self.config_string("red.replication.state", "");
+        let state = self.config_string("replication.state", "");
         if state.is_empty() {
             None
         } else {

@@ -24,7 +24,7 @@ use reddb_types::Value;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const REGISTRY_KEY: &str = "red.ranking.entries_json";
+const REGISTRY_KEY: &str = "ranking.entries_json";
 
 /// Default size of the exact top-K head when `TOP <k>` is omitted.
 ///
@@ -372,7 +372,7 @@ fn read_latest_registry_json(store: &UnifiedStore) -> Option<String> {
 /// The sketch is keyed per `(collection, score column)` (criterion 4), not
 /// per ranking name, so two rankings over the same column share one sketch.
 fn sketch_key(table: &str, column: &str) -> String {
-    format!("red.ranking.sketch.{table}.{column}")
+    format!("ranking.sketch.{table}.{column}")
 }
 
 /// Persist the approximate score sketch for `(table, column)`.

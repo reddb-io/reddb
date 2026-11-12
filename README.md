@@ -326,19 +326,20 @@ curl http://127.0.0.1:5000/collections/settings/kvs/theme
 curl -X DELETE http://127.0.0.1:5000/collections/settings/kvs/theme
 ```
 
-Config keys work the same way -- read, write, or delete any `red_config` setting at runtime:
+Config keys work the same way -- read, write, or delete any setting in the
+`red.config` collection at runtime. The content key itself stays bare:
 
 ```bash
 # Set a config key
-curl -X PUT http://127.0.0.1:5000/config/red.ai.default.provider \
+curl -X PUT http://127.0.0.1:5000/config/ai.default.provider \
   -d '{"value": "groq"}'
 
 # Read a config key
-curl http://127.0.0.1:5000/config/red.ai.default.provider
+curl http://127.0.0.1:5000/config/ai.default.provider
 
 # Or manage config from SQL
-SET CONFIG red.ai.default.provider = 'groq'
-SHOW CONFIG red.ai
+SET CONFIG ai.default.provider = 'groq'
+SHOW CONFIG ai
 ```
 
 ---

@@ -186,7 +186,7 @@ jq --arg id "018f1a2b-3c4d-7e8f-9a0b-1c2d3e4f5a6b" \
 
 | Variable / Config Key | Default | Description |
 |-----------------------|---------|-------------|
-| `RUST_LOG` | `info` | `tracing`-style filter for the developer log. Example: `info,reddb::wire=debug`. Overrides `red.logging.level`. |
+| `RUST_LOG` | `info` | `tracing`-style filter for the developer log. Example: `info,reddb::wire=debug`. Overrides `logging.level` in `red.config`. |
 | `RED_LOG_FORMAT` | `pretty` | `pretty` (human-readable) or `json` (NDJSON for aggregators). |
 | `RED_LOG_DIR` | *(none)* | Directory for rotating file sinks. Omit for stderr-only (CLI / embedded). |
 | `RED_LOG_FILE_PREFIX` | `reddb.log` | Prefix for rotating log files. |

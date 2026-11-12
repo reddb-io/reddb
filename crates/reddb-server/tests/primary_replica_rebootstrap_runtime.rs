@@ -93,7 +93,7 @@ fn runtime_promotes_ready_rebootstrap_pending_file_on_restart() {
         "pending database should be promoted into active path"
     );
     let config = promoted
-        .execute_query("SHOW CONFIG red.replication.last_applied_lsn")
+        .execute_query("SHOW CONFIG replication.last_applied_lsn")
         .expect("show last applied lsn");
     let config_value = config
         .result
@@ -224,7 +224,7 @@ fn runtime_consumes_leftover_rebootstrap_marker_after_completed_rename_crash() {
         .expect("query promoted row");
     assert_eq!(result.result.len(), 1);
     let config_value =
-        primary_replica_file::show_config_value(&reopened, "red.replication.last_applied_lsn");
+        primary_replica_file::show_config_value(&reopened, "replication.last_applied_lsn");
     assert!(
         config_value.contains(&checkpoint_lsn.to_string()),
         "active database must prove it is the checkpointed rebootstrap snapshot, got {config_value}"
