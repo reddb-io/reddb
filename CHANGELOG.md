@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.34.1
+
+### Patch Changes
+
+- [#2814](https://github.com/reddb-io/reddb/pull/2814) [`767b13d`](https://github.com/reddb-io/reddb/commit/767b13db81c84af8d7a5cb33b0f074cb1f981d03) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Raise the measured release-container budget from 64 MiB to 65 MiB after the v1.34.0 image reached 64.08 MiB, while keeping the static binary limit unchanged.
+
 ## 1.34.0
 
 ### Minor Changes
