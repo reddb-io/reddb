@@ -1052,50 +1052,42 @@ impl<P: PageStore> BTree<P> {
     fn insert_into_parent(
         &self,
         mut path: Vec<u32>,
-        left_child: u32,
+        mut left_child: u32,
         key: &[u8],
-        right_child: u32,
+        mut right_child: u32,
     ) -> BTreeResult<()> {
-        // If path is empty, need new root
-        if path.is_empty() {
-            let mut new_root = self.pager.allocate_page(PageType::BTreeInterior)?;
-            // Single separator with two children — seed the page via the
-            // canonical slotted builder so the header is consistent.
-            write_interior_entries(&mut new_root, &[key.to_vec()], &[left_child, right_child])?;
-
-            new_root.update_checksum();
-            let new_root_id = new_root.page_id();
-            self.pager.write_page(new_root_id, new_root)?;
-            *self.root_page_id.write().map_err(|e| {
-                BTreeError::LockPoisoned(format!(
-                    "insert_into_parent: root_page_id write lock: {e}"
-                ))
-            })? = new_root_id;
-            return Ok(());
-        }
-
-        // Insert into parent — path is non-empty (checked above)
-        let parent_id = path.pop().ok_or_else(|| {
-            BTreeError::Corrupted("insert_into_parent: path unexpectedly empty".into())
-        })?;
-        let mut parent = self.pager.read_page(parent_id)?;
-
-        // Can we fit?
-        if can_insert_interior(&parent, key) {
-            insert_into_interior(&mut parent, key, left_child, right_child)?;
+        let mut key = std::borrow::Cow::Borrowed(key);
+        loop {
+            let Some(parent_id) = path.pop() else {
+                let mut new_root = self.pager.allocate_page(PageType::BTreeInterior)?;
+                write_interior_entries(&mut new_root, &[key.to_vec()], &[left_child, right_child])?;
+                new_root.update_checksum();
+                let new_root_id = new_root.page_id();
+                self.pager.write_page(new_root_id, new_root)?;
+                *self.root_page_id.write().map_err(|e| {
+                    BTreeError::LockPoisoned(format!(
+                        "insert_into_parent: root_page_id write lock: {e}"
+                    ))
+                })? = new_root_id;
+                return Ok(());
+            };
+            let mut parent = self.pager.read_page(parent_id)?;
+            if can_insert_interior(&parent, &key) {
+                insert_into_interior(&mut parent, &key, left_child, right_child)?;
+                parent.update_checksum();
+                self.pager.write_page(parent_id, parent)?;
+                return Ok(());
+            }
+            let (new_interior, separator) =
+                self.split_interior(&mut parent, &key, left_child, right_child)?;
             parent.update_checksum();
             self.pager.write_page(parent_id, parent)?;
-            return Ok(());
+            // Only compact identities ascend; 16-KiB page buffers must not
+            // accumulate recursively while a salvage visitor is also active.
+            left_child = parent_id;
+            right_child = new_interior;
+            key = std::borrow::Cow::Owned(separator);
         }
-
-        // Need to split interior node
-        let (new_interior, separator) =
-            self.split_interior(&mut parent, key, left_child, right_child)?;
-        parent.update_checksum();
-        self.pager.write_page(parent_id, parent.clone())?;
-
-        // Propagate up
-        self.insert_into_parent(path, parent.page_id(), &separator, new_interior.page_id())
     }
 
     /// Split an interior node
@@ -1105,7 +1097,7 @@ impl<P: PageStore> BTree<P> {
         new_key: &[u8],
         left_child: u32,
         right_child: u32,
-    ) -> BTreeResult<(Page, Vec<u8>)> {
+    ) -> BTreeResult<(u32, Vec<u8>)> {
         let (mut keys, mut children) = read_interior_keys_children(page)?;
         let key_insert_pos = keys.partition_point(|key| key.as_slice() < new_key);
         let child_insert_pos = children
@@ -1129,9 +1121,9 @@ impl<P: PageStore> BTree<P> {
 
         new_page.update_checksum();
         let new_page_id = new_page.page_id();
-        self.pager.write_page(new_page_id, new_page.clone())?;
+        self.pager.write_page(new_page_id, new_page)?;
 
-        Ok((new_page, separator))
+        Ok((new_page_id, separator))
     }
 
     fn rebalance_leaf(&self, leaf_id: u32, mut path: Vec<u32>) -> BTreeResult<()> {

@@ -46,8 +46,40 @@ fn recovery_page_fixture(path: &std::path::Path) -> (u32, Page) {
         .find(|entry| entry.collection == "rows")
         .unwrap()
         .root_page;
-    let page = pager.read_page(root).unwrap();
-    (root, page)
+    let mut page = pager.read_page(root).unwrap();
+    if root + 1 == pager.page_count().unwrap() {
+        return (root, page);
+    }
+    // Keep the torn-tail scenarios about the data page. A COW checkpoint now
+    // allocates its catalog after the data; swap the two complete fixture pages
+    // before injecting faults, and seal their new addresses in both headers.
+    assert_eq!(header.collection_count, 1);
+    assert!(
+        reddb_file::native_resume::decode_catalog_resume(catalog.content())
+            .unwrap()
+            .is_none()
+    );
+    let data_root = catalog.page_id();
+    assert_eq!(data_root + 1, pager.page_count().unwrap());
+    let mut data_header = page.header().unwrap();
+    data_header.page_id = data_root;
+    page.set_header(&data_header);
+    page.update_checksum();
+    let mut relocated_catalog = Page::new(PageType::Header, root);
+    relocated_catalog
+        .content_mut()
+        .copy_from_slice(catalog.content());
+    relocated_catalog.content_mut()[offset - 4..offset].copy_from_slice(&data_root.to_le_bytes());
+    relocated_catalog.update_checksum();
+    let reference = reddb_file::page_proof::PageReference {
+        page_id: root,
+        digest: reddb_file::page_proof::page_digest(relocated_catalog.as_bytes()),
+    };
+    pager.write_page(root, relocated_catalog).unwrap();
+    pager.write_page(data_root, page.clone()).unwrap();
+    pager.sync().unwrap();
+    pager.publish_manifest_reference(reference).unwrap();
+    (data_root, page)
 }
 
 fn damage_page(path: &std::path::Path, page_id: u32) {

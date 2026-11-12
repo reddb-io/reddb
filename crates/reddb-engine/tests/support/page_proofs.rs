@@ -263,6 +263,10 @@ fn emptied_verified_tree_reclaims_proofs_and_can_be_recreated_after_reopen() {
             .expect("proof");
         let owned = tree.retired_pages().expect("complete tree ownership");
         assert!(owned.len() > 5, "fixture must own overflow and proof pages");
+        assert!(
+            BTree::with_verified_root(Arc::clone(&pager), 0, proof).is_err(),
+            "an empty root cannot hide allocated proof ownership"
+        );
         let bytes = durable(&pager);
         drop(tree);
         drop(pager);

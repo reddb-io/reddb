@@ -101,6 +101,12 @@ it, publishes and releases its complete ownership, then reopens empty and create
 Repeated cycles must reuse pages without growing the file. A zero data root cannot restore a
 nonempty proof descriptor.
 
+Native salvage of the existing multi-interior-level fixture exposed stack exhaustion while
+rebuilding rows through the recovery visitor. Interior split propagation now ascends iteratively
+with child addresses and the separator. It no longer retains a 16-KiB page frame for each recursive
+parent call, and the split helper returns an address instead of another complete page. The unchanged
+deep salvage journey must recover every readable row without increasing the worker's stack size.
+
 ```console
 cargo test --locked -p reddb-io-engine --test portable page_proofs_cover -- --test-threads=1
 ```
