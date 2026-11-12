@@ -595,6 +595,14 @@ mod tests {
         zone
     }
 
+    fn read_owned_zone(pager: &Pager) -> [u8; SUPERBLOCK_ZONE_SIZE] {
+        pager
+            .core
+            .with_file(reddb_engine::storage::pager_io::read_superblock_zone)
+            .expect("owned pager file")
+            .expect("superblock read")
+    }
+
     #[test]
     fn read_only_dwb_recovery_survives_cache_eviction_without_writing() {
         let directory = tempfile::tempdir().expect("fixture");
@@ -845,17 +853,15 @@ mod tests {
     fn an_update_writes_the_stale_copy_and_leaves_the_newest_one_intact() {
         let path = temp_db_path("ping-pong");
         let pager = Pager::open_default(&path).expect("open_default() should succeed");
-        let before = reddb_file::select_paged_superblock(
-            &pager.read_superblock_zone().expect("owned superblock read"),
-        )
-        .expect("operation should succeed");
+        let before = reddb_file::select_paged_superblock(&read_owned_zone(&pager))
+            .expect("operation should succeed");
 
         pager
             .allocate_page(PageType::BTreeLeaf)
             .expect("allocate_page() should succeed");
         pager.sync().expect("sync() should succeed");
 
-        let zone = pager.read_superblock_zone().expect("owned superblock read");
+        let zone = read_owned_zone(&pager);
         let after = reddb_file::select_paged_superblock(&zone)
             .expect("select_paged_superblock() should succeed");
         assert_ne!(
@@ -903,7 +909,7 @@ mod tests {
         pager.core.with_file(|file| file.0 = writable).unwrap();
         pager.allocate_page(PageType::BTreeLeaf).unwrap();
 
-        let zone = pager.read_superblock_zone().expect("owned superblock read");
+        let zone = read_owned_zone(&pager);
         for copy in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
             let start = copy * SUPERBLOCK_SLOT_SIZE;
             let header =
