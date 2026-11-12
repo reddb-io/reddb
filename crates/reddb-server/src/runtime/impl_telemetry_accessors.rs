@@ -36,6 +36,11 @@ impl RedDBRuntime {
     /// replica catch-up still works.
     pub fn check_write(&self, kind: crate::runtime::write_gate::WriteKind) -> RedDBResult<()> {
         self.inner.write_gate.check(kind)?;
+        self.inner
+            .db
+            .store()
+            .ensure_pager_writeback_available()
+            .map_err(|error| RedDBError::Internal(error.to_string()))?;
         self.validated_request_commit_policy(None).map(|_| ())
     }
 

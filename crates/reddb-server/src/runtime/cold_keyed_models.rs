@@ -841,6 +841,146 @@ fn disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry() {
 }
 
 #[test]
+fn disk_full_checkpoint_recovers_pages_catalog_and_indexes() {
+    const CHILD_PATH: &str = "REDDB_CHECKPOINT_FULL_PATH";
+    const CHILD_TARGET: &str = "REDDB_CHECKPOINT_FULL_TARGET";
+    const CHILD_PREFIX: &str = "REDDB_CHECKPOINT_FULL_PREFIX";
+    let open = |path: std::path::PathBuf| {
+        let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(
+                RedDBOptions::persistent(path)
+                    .with_memory_budget(64 * 1024 * 1024)
+                    .with_storage_profile(
+                        crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+                    )
+                    .expect("profile"),
+            )
+        })
+        .expect("open runtime");
+        runtime
+            .background_tasks
+            .as_ref()
+            .expect("workers")
+            .shutdown();
+        runtime
+    };
+    let assert_rows = |runtime: &RedDBRuntime| {
+        // Exercise both index methods before an authoritative scan can warm them.
+        let by_id = runtime
+            .execute_query("SELECT payload FROM checkpoint_full_rows WHERE id = 1")
+            .expect("HASH read");
+        assert_eq!(by_id.result.records.len(), 1);
+        assert_eq!(
+            by_id.result.records[0].get("payload"),
+            Some(&Value::text("committed"))
+        );
+        let by_org = runtime
+            .execute_query(
+                "SELECT id FROM checkpoint_full_rows WHERE org_id >= 'org-a' AND org_id < 'org-d'",
+            )
+            .expect("BTREE read");
+        assert_eq!(by_org.result.records.len(), 3);
+        let rejected = runtime
+            .execute_query("SELECT id FROM checkpoint_full_rows WHERE id = 4")
+            .expect("rejected row read");
+        assert!(rejected.result.records.is_empty());
+        let scan = runtime
+            .execute_query("SELECT id FROM checkpoint_full_rows")
+            .expect("authoritative scan");
+        assert_eq!(scan.result.records.len(), 3);
+    };
+
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        let runtime = open(path.into());
+        for sql in [
+            "BEGIN",
+            "UPDATE checkpoint_full_rows SET payload = 'committed' WHERE id = 1",
+            "INSERT INTO checkpoint_full_rows (id,org_id,payload) VALUES (3,'org-c','new')",
+            "COMMIT",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        let offset = match std::env::var(CHILD_TARGET).expect("target").as_str() {
+            "catalog" => Some(crate::storage::engine::PAGE_SIZE as u64),
+            "page" => None,
+            target => panic!("unknown checkpoint target {target}"),
+        };
+        let prefix_bytes = std::env::var(CHILD_PREFIX)
+            .expect("prefix")
+            .parse()
+            .expect("prefix bytes");
+        crate::storage::engine::pager::test_fail_next_pager_write(offset, prefix_bytes);
+        let error = runtime
+            .checkpoint()
+            .expect_err("disk full must fail checkpoint");
+        assert!(
+            error.to_string().contains("injected pager disk full"),
+            "{error}"
+        );
+        let fenced = runtime
+            .checkpoint()
+            .expect_err("failed writeback requires reopen");
+        assert!(fenced.to_string().contains("reopen"), "{fenced}");
+        let rejected = runtime
+            .execute_query(
+                "INSERT INTO checkpoint_full_rows (id,org_id,payload) VALUES (4,'org-d','rejected')",
+            )
+            .expect_err("writes must remain fenced after failed checkpoint");
+        assert!(rejected.to_string().contains("reopen"), "{rejected}");
+        assert_rows(&runtime);
+        drop(runtime);
+        std::process::exit(198);
+    }
+
+    for target in ["page", "catalog"] {
+        for prefix_bytes in [0, 17] {
+            let directory = tempfile::tempdir().expect("checkpoint full fixture");
+            let path = directory.path().join("checkpoint-full.rdb");
+            {
+                let runtime = open(path.clone());
+                for sql in [
+                    "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+                    "CREATE TABLE checkpoint_full_rows (id INT, org_id TEXT, payload TEXT)",
+                    "CREATE UNIQUE INDEX checkpoint_full_id ON checkpoint_full_rows (id) USING HASH",
+                    "CREATE INDEX checkpoint_full_org ON checkpoint_full_rows (org_id) USING BTREE",
+                    "INSERT INTO checkpoint_full_rows (id,org_id,payload) VALUES (1,'org-a','original'),(2,'org-b','keep')",
+                ] {
+                    runtime.execute_query(sql).expect(sql);
+                }
+                runtime.checkpoint().expect("baseline checkpoint");
+            }
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", "runtime::cold_keyed_models::disk_full_checkpoint_recovers_pages_catalog_and_indexes", "--nocapture"])
+                .env(CHILD_PATH, &path)
+                .env(CHILD_TARGET, target)
+                .env(CHILD_PREFIX, prefix_bytes.to_string())
+                .output()
+                .expect("checkpoint full child");
+            assert_eq!(
+                output.status.code(),
+                Some(198),
+                "target={target} prefix={prefix_bytes}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            {
+                let runtime = open(path.clone());
+                assert_rows(&runtime);
+                runtime
+                    .checkpoint()
+                    .expect("checkpoint after space returns");
+                assert!(runtime
+                    .verify_persisted_indexes("checkpoint_full_rows")
+                    .expect("index integrity")
+                    .is_empty());
+            }
+            let runtime = open(path.clone());
+            assert_rows(&runtime);
+        }
+    }
+}
+
+#[test]
 fn repeated_cold_boot_reuses_published_index_pages() {
     let directory = tempfile::tempdir().expect("cold growth fixture");
     let path = directory.path().join("cold-growth.rdb");

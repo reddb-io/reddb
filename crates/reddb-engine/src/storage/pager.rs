@@ -766,6 +766,15 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         Ok(())
     }
 
+    /// Reject new logical writes after a physical page writeback failed.
+    ///
+    /// The failed write may have reached disk partially. Reopening lets the
+    /// double-write buffer and WAL establish the durable generation before
+    /// the database accepts another mutation.
+    pub fn check_writeback_available(&self) -> Result<(), PagerError> {
+        self.ensure_writeback_available()
+    }
+
     fn record_ownership(
         &self,
         operation: impl FnOnce(&W) -> std::io::Result<()>,
