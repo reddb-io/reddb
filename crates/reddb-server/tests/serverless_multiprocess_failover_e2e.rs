@@ -12,7 +12,11 @@ use std::time::{Duration, Instant};
 
 use reddb_server::replication::lease::LeaseStore;
 use reddb_server::runtime::lease_lifecycle::LeaseLifecycle;
-use reddb_server::storage::backend::{BackendError, LocalBackend, RemoteBackend};
+use reddb_server::runtime::serverless_snapshot_publication::SnapshotPublicationStore;
+use reddb_server::storage::backend::{
+    AtomicRemoteBackend, BackendError, BackendObjectVersion, ConditionalDelete, ConditionalPut,
+    LocalBackend, RemoteBackend,
+};
 use reddb_server::{RedDBOptions, RedDBRuntime};
 
 const CHILD_MODE_ENV: &str = "REDDB_SERVERLESS_MULTIPROCESS_CHILD";
@@ -65,6 +69,50 @@ fn attach_lease(
         "one lease lifecycle per runtime"
     );
     lifecycle
+}
+
+fn open_fenced_runtime(
+    local_path: &Path,
+    root: &Path,
+    holder: &str,
+    ttl_ms: u64,
+    remote_backend: Arc<dyn RemoteBackend>,
+    atomic_backend: Arc<dyn AtomicRemoteBackend>,
+) -> (RedDBRuntime, Arc<LeaseLifecycle>) {
+    let remote_key = root.join("remote").join("main.rdb");
+    let remote_key_string = remote_key.to_string_lossy().to_string();
+    let publication = Arc::new(SnapshotPublicationStore::new(
+        atomic_backend.clone(),
+        remote_key_string.clone(),
+    ));
+    let bootstrap_key = publication
+        .observe_for_boot()
+        .expect("observe serverless snapshot head");
+    let mut options = RedDBOptions::persistent(local_path)
+        .with_remote_backend(remote_backend, remote_key_string)
+        .with_atomic_remote_backend(atomic_backend.clone());
+    options.remote_bootstrap_key = bootstrap_key;
+    let runtime = RedDBRuntime::with_options(options).expect("fenced serverless runtime boots");
+    let prefix = format!(
+        "{}{}",
+        root.join("leases").display(),
+        std::path::MAIN_SEPARATOR
+    );
+    let lifecycle = Arc::new(
+        LeaseLifecycle::new(
+            Arc::new(LeaseStore::new(atomic_backend).with_prefix(prefix)),
+            runtime.write_gate_arc(),
+            runtime.audit_log_arc(),
+            Arc::new(|| {}),
+            Arc::new(|| 1),
+            holder.to_string(),
+            DATABASE_KEY.to_string(),
+            ttl_ms,
+        )
+        .with_snapshot_publication(publication, local_path),
+    );
+    assert!(runtime.set_lease_lifecycle(lifecycle.clone()).is_ok());
+    (runtime, lifecycle)
 }
 
 fn wait_for(path: &Path, timeout: Duration) {
@@ -274,6 +322,360 @@ impl RemoteBackend for BlockingUploadBackend {
     fn list(&self, prefix: &str) -> Result<Vec<String>, BackendError> {
         LocalBackend.list(prefix)
     }
+}
+
+struct PausedGenerationUploadBackend {
+    marker: PathBuf,
+    resume: PathBuf,
+}
+
+impl RemoteBackend for PausedGenerationUploadBackend {
+    fn name(&self) -> &str {
+        "paused-generation-local"
+    }
+
+    fn download(&self, remote_key: &str, local_path: &Path) -> Result<bool, BackendError> {
+        LocalBackend.download(remote_key, local_path)
+    }
+
+    fn upload(&self, local_path: &Path, remote_key: &str) -> Result<(), BackendError> {
+        LocalBackend.upload(local_path, remote_key)
+    }
+
+    fn exists(&self, remote_key: &str) -> Result<bool, BackendError> {
+        LocalBackend.exists(remote_key)
+    }
+
+    fn delete(&self, remote_key: &str) -> Result<(), BackendError> {
+        LocalBackend.delete(remote_key)
+    }
+
+    fn list(&self, prefix: &str) -> Result<Vec<String>, BackendError> {
+        LocalBackend.list(prefix)
+    }
+}
+
+impl AtomicRemoteBackend for PausedGenerationUploadBackend {
+    fn object_version(
+        &self,
+        remote_key: &str,
+    ) -> Result<Option<BackendObjectVersion>, BackendError> {
+        LocalBackend.object_version(remote_key)
+    }
+
+    fn upload_conditional(
+        &self,
+        local_path: &Path,
+        remote_key: &str,
+        condition: ConditionalPut,
+    ) -> Result<BackendObjectVersion, BackendError> {
+        if remote_key.ends_with(".serverless/snapshots/1/2.rdb") {
+            fs::write(&self.marker, b"paused")
+                .map_err(|err| BackendError::Transport(format!("write pause marker: {err}")))?;
+            wait_for(&self.resume, Duration::from_secs(20));
+        }
+        LocalBackend.upload_conditional(local_path, remote_key, condition)
+    }
+
+    fn delete_conditional(
+        &self,
+        remote_key: &str,
+        condition: ConditionalDelete,
+    ) -> Result<(), BackendError> {
+        LocalBackend.delete_conditional(remote_key, condition)
+    }
+}
+
+#[test]
+fn successor_epoch_fences_an_old_upload_that_resumes_after_takeover() {
+    if std::env::var(CHILD_MODE_ENV).ok().as_deref() == Some("1") {
+        return;
+    }
+    let root = tempfile::tempdir().expect("private delayed-publication directory");
+    let mut stale = spawn_child("serverless_delayed_stale_publication_child", root.path())
+        .spawn()
+        .expect("spawn stale publication child");
+    wait_for(
+        &root.path().join("stale-upload-paused"),
+        Duration::from_secs(20),
+    );
+
+    let successor_path = root.path().join("successor-fenced").join("data.rdb");
+    let (successor, successor_lease) = open_fenced_runtime(
+        &successor_path,
+        root.path(),
+        "writer-successor",
+        SUCCESSOR_TTL_MS,
+        Arc::new(LocalBackend),
+        Arc::new(LocalBackend),
+    );
+    let acquire_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if successor_lease.try_acquire().is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < acquire_deadline,
+            "successor did not acquire after stale writer lease expiry"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    fs::write(root.path().join("resume-stale-upload"), b"resume").expect("resume stale upload");
+    wait_for(
+        &root.path().join("stale-upload-result"),
+        Duration::from_secs(20),
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("stale-upload-result"))
+            .expect("read stale upload result"),
+        "fenced"
+    );
+    assert!(
+        stale.wait().expect("reap stale writer").success(),
+        "stale child handles fencing without crashing"
+    );
+
+    successor
+        .execute_query("INSERT INTO serverless_process_writes (id, holder) VALUES (2, 'successor')")
+        .expect("successor writes after claiming the head");
+    successor
+        .checkpoint()
+        .expect("successor advances the canonical head");
+    successor_lease.release().expect("successor releases lease");
+    drop(successor);
+
+    let observer_path = root.path().join("fenced-observer").join("data.rdb");
+    let remote_key = root.path().join("remote").join("main.rdb");
+    let publication = SnapshotPublicationStore::new(
+        Arc::new(LocalBackend),
+        remote_key.to_string_lossy().to_string(),
+    );
+    let mut observer_options = RedDBOptions::persistent(&observer_path)
+        .with_remote_backend(Arc::new(LocalBackend), remote_key.to_string_lossy())
+        .with_atomic_remote_backend(Arc::new(LocalBackend));
+    observer_options.remote_bootstrap_key = publication
+        .observe_for_boot()
+        .expect("observe final snapshot head");
+    let observer = RedDBRuntime::with_options(observer_options)
+        .expect("cold observer hydrates canonical head");
+    assert!(row_exists(&observer, 2));
+    assert!(!row_exists(&observer, 1));
+}
+
+#[test]
+fn operational_serverless_boot_recovers_canonical_snapshots() {
+    let root = tempfile::tempdir().expect("operational boot directory");
+    let status = spawn_child("operational_serverless_boot_child", root.path())
+        .env("RED_LEASE_REQUIRED", "true")
+        .env("RED_LEASE_TTL_SECS", "6")
+        .env("RED_LEASE_PREFIX", "leases/")
+        .env("REDDB_LOCAL_BACKEND_ROOT", root.path())
+        .status()
+        .expect("run production boot child");
+    assert!(
+        status.success(),
+        "production serverless boot failed: {status}"
+    );
+}
+
+#[test]
+fn operational_serverless_boot_child() -> ExitCode {
+    if std::env::var(CHILD_MODE_ENV).ok().as_deref() != Some("1") {
+        return ExitCode::SUCCESS;
+    }
+    use reddb_server::runtime::lease_loop::{
+        prepare_lease_loop_if_required, start_prepared_lease_loop,
+    };
+    use reddb_server::storage::profile::StorageDeployPreset;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("reddb::lifecycle=debug,reddb::serverless=debug")
+        .try_init();
+    let root = PathBuf::from(std::env::var(ROOT_ENV).expect("root env"));
+    let base_path = root.join("writer").join("data.rdb");
+    let remote_key = "remote/main.rdb";
+    for id in 1..=4 {
+        let mut options = RedDBOptions::persistent(&base_path)
+            .with_storage_profile(StorageDeployPreset::Serverless.selection())
+            .expect("serverless preset")
+            .with_remote_backend(Arc::new(LocalBackend), remote_key)
+            .with_atomic_remote_backend(Arc::new(LocalBackend));
+        let boot = prepare_lease_loop_if_required(&mut options).expect("prepare production boot");
+        if id > 1 {
+            assert_ne!(
+                options.data_path.as_ref(),
+                Some(&base_path),
+                "old operational WAL must be isolated"
+            );
+        }
+        let runtime = RedDBRuntime::with_options(options).expect("open native serverless cache");
+        assert!(runtime.db().is_paged());
+        eprintln!("operational boot {id}, path {:?}", runtime.db().path());
+        start_prepared_lease_loop(&runtime, boot).expect("claim observed head before serving");
+        for previous in 1..id {
+            assert!(row_exists(&runtime, previous));
+        }
+        if id == 4 {
+            runtime.graceful_shutdown(false).expect("close observer");
+            break;
+        }
+        runtime
+            .execute_query(&format!(
+                "INSERT INTO serverless_process_writes (id, holder) VALUES ({id}, 'operational')"
+            ))
+            .expect("native writer commits");
+        assert!(row_exists(&runtime, id));
+        runtime.lifecycle().mark_draining();
+        // The renewal thread must retain ownership while requests drain.
+        // Crossing its ttl/3 refresh boundary used to release the lease here.
+        std::thread::sleep(Duration::from_secs(3));
+        runtime
+            .graceful_shutdown(false)
+            .expect("publish final native snapshot");
+        let head = reddb_file::decode_serverless_snapshot_head_json(
+            &fs::read(root.join(reddb_file::serverless_snapshot_head_key(remote_key)))
+                .expect("head after shutdown"),
+        )
+        .expect("decode shutdown head");
+        eprintln!("operational shutdown {id}, head {head:?}");
+        assert!(
+            head.publication_sequence >= id * 2,
+            "shutdown must advance the canonical snapshot"
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+#[test]
+fn clean_restarts_preserve_snapshots_and_shutdown_publication() {
+    let root = tempfile::tempdir().expect("restart directory");
+    let local = root.path().join("writer").join("data.rdb");
+    let remote_key = root.path().join("remote").join("main.rdb");
+    let head_key = reddb_file::serverless_snapshot_head_key(&remote_key.to_string_lossy());
+    let mut published = Vec::new();
+    for id in 1..=3 {
+        let (runtime, lease) = open_fenced_runtime(
+            &local,
+            root.path(),
+            "same-holder",
+            SUCCESSOR_TTL_MS,
+            Arc::new(LocalBackend),
+            Arc::new(LocalBackend),
+        );
+        lease.try_acquire().expect("claim after clean release");
+        assert_eq!(lease.current_lease().expect("held lease").generation, 1);
+        for previous in 1..id {
+            assert!(row_exists(&runtime, previous));
+        }
+        runtime
+            .execute_query(&format!(
+                "INSERT INTO serverless_process_writes (id, holder) VALUES ({id}, 'restart')"
+            ))
+            .expect("write in each boot");
+        match id {
+            1 => runtime.flush().expect("flush publishes"),
+            2 => runtime.checkpoint().expect("checkpoint publishes"),
+            _ => {
+                runtime
+                    .graceful_shutdown(false)
+                    .expect("shutdown publishes");
+            }
+        }
+        let head = reddb_file::decode_serverless_snapshot_head_json(
+            &fs::read(&head_key).expect("read head"),
+        )
+        .expect("decode head");
+        published.push((
+            head.snapshot_key.clone(),
+            fs::read(&head.snapshot_key).expect("payload"),
+        ));
+        lease.release().expect("release deletes lease object");
+        drop(lease);
+        drop(runtime);
+    }
+    let (observer, _) = open_fenced_runtime(
+        &root.path().join("observer.rdb"),
+        root.path(),
+        "observer",
+        SUCCESSOR_TTL_MS,
+        Arc::new(LocalBackend),
+        Arc::new(LocalBackend),
+    );
+    for id in 1..=3 {
+        assert!(row_exists(&observer, id));
+    }
+    for (key, original) in published {
+        assert_eq!(fs::read(key).expect("old payload remains"), original);
+    }
+}
+
+#[test]
+fn hydration_cannot_overwrite_a_live_local_writer() {
+    let root = tempfile::tempdir().expect("local fence directory");
+    let local = root.path().join("writer.rdb");
+    let (runtime, lease) = open_fenced_runtime(
+        &local,
+        root.path(),
+        "writer",
+        SUCCESSOR_TTL_MS,
+        Arc::new(LocalBackend),
+        Arc::new(LocalBackend),
+    );
+    lease.try_acquire().expect("first writer acquires");
+    runtime
+        .execute_query("INSERT INTO serverless_process_writes (id, holder) VALUES (1, 'local')")
+        .expect("local write newer than remote snapshot");
+    let before = fs::read(&local).expect("local artifact before hydration attempt");
+    let remote_key = root.path().join("remote").join("main.rdb");
+    let publication =
+        SnapshotPublicationStore::new(Arc::new(LocalBackend), remote_key.to_string_lossy());
+    let mut options = RedDBOptions::persistent(&local)
+        .with_remote_backend(Arc::new(LocalBackend), remote_key.to_string_lossy());
+    options.remote_bootstrap_key = publication
+        .observe_for_boot()
+        .expect("observe old snapshot");
+    assert!(RedDBRuntime::with_options(options).is_err());
+    assert_eq!(
+        fs::read(&local).expect("local artifact after rejection"),
+        before
+    );
+    assert!(row_exists(&runtime, 1));
+    lease.release().expect("release writer");
+}
+
+#[test]
+fn serverless_delayed_stale_publication_child() -> ExitCode {
+    if std::env::var(CHILD_MODE_ENV).ok().as_deref() != Some("1") {
+        return ExitCode::SUCCESS;
+    }
+    let root = PathBuf::from(std::env::var(ROOT_ENV).expect("root env"));
+    let backend = Arc::new(PausedGenerationUploadBackend {
+        marker: root.join("stale-upload-paused"),
+        resume: root.join("resume-stale-upload"),
+    });
+    let local_path = root.join("stale-writer").join("data.rdb");
+    let (runtime, lease) = open_fenced_runtime(
+        &local_path,
+        &root,
+        "writer-stale",
+        CRASHED_WRITER_TTL_MS,
+        backend.clone(),
+        backend,
+    );
+    lease
+        .try_acquire()
+        .expect("stale writer acquires first epoch");
+    runtime
+        .execute_query("INSERT INTO serverless_process_writes (id, holder) VALUES (1, 'stale')")
+        .expect("stale writer mutates locally");
+    let result = runtime.checkpoint();
+    let outcome = match result {
+        Err(err) if err.to_string().contains("publication") => "fenced",
+        Err(err) => panic!("unexpected stale publication error: {err}"),
+        Ok(()) => "published",
+    };
+    fs::write(root.join("stale-upload-result"), outcome).expect("publish stale upload result");
+    ExitCode::SUCCESS
 }
 
 #[test]
