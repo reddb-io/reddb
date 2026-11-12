@@ -43,6 +43,10 @@ pub const FILE_CAPABILITY_RECOVERY_READ_ONLY: u64 = 1 << 3;
 pub const FILE_CAPABILITY_TREE_PROOFS: u64 = 1 << 4;
 /// Double-write frames require independent superblock publication authority.
 pub const FILE_CAPABILITY_DWB_PUBLICATION: u64 = 1 << 5;
+// Freeze the old entry point's reader contract. An older engine may link a
+// newer compatible codec crate without implementing its new recovery rules.
+const FILE_CAPABILITIES_LEGACY_HEADER: u64 =
+    FILE_CAPABILITY_TEMPERATURE | FILE_CAPABILITY_DISK_RESIDENCY;
 /// Capabilities understood by this reader. Unknown mandatory bits are fatal.
 pub const FILE_CAPABILITIES_SUPPORTED: u64 = FILE_CAPABILITY_TEMPERATURE
     | FILE_CAPABILITY_DISK_RESIDENCY
@@ -833,7 +837,7 @@ pub fn set_database_header_manifest_reference(
 pub fn database_header_manifest_reference(
     page: &[u8],
 ) -> Result<crate::page_proof::PageReference, HeaderPublicationError> {
-    let header = decode_database_header(page)?;
+    let header = decode_database_header_fields(page, FILE_CAPABILITIES_SUPPORTED)?;
     if header.required_capabilities & FILE_CAPABILITY_CATALOG_ROOT == 0 {
         return Ok(crate::page_proof::PageReference::default());
     }
@@ -848,7 +852,29 @@ pub fn database_header_page_size(page: &[u8]) -> Result<u32, DatabaseHeaderError
     read_u32(page, DB_PAGE_SIZE_OFFSET)
 }
 
+/// Decode the legacy header contract. Engines implementing publication-aware
+/// recovery must explicitly opt into [`decode_published_database_header`].
 pub fn decode_database_header(page: &[u8]) -> Result<DatabaseHeader, DatabaseHeaderError> {
+    decode_database_header_fields(page, FILE_CAPABILITIES_LEGACY_HEADER)
+}
+
+/// Validate the ordinary header and its required catalog/recovery publications.
+/// Only storage owners that implement those protocols should use this entry point.
+pub fn decode_published_database_header(
+    page: &[u8],
+) -> Result<DatabaseHeader, HeaderPublicationError> {
+    let header = decode_database_header_fields(page, FILE_CAPABILITIES_SUPPORTED)?;
+    database_header_manifest_reference(page)?;
+    if header.required_capabilities & FILE_CAPABILITY_DWB_PUBLICATION != 0 {
+        database_header_dwb_publication(page)?;
+    }
+    Ok(header)
+}
+
+fn decode_database_header_fields(
+    page: &[u8],
+    supported_capabilities: u64,
+) -> Result<DatabaseHeader, DatabaseHeaderError> {
     ensure_len(page, DB_HEADER_MIN_LEN)?;
     if !database_header_magic_matches(page) {
         return Err(DatabaseHeaderError::InvalidMagic);
@@ -870,7 +896,7 @@ pub fn decode_database_header(page: &[u8]) -> Result<DatabaseHeader, DatabaseHea
     } else {
         0
     };
-    let unsupported_capabilities = required_capabilities & !FILE_CAPABILITIES_SUPPORTED;
+    let unsupported_capabilities = required_capabilities & !supported_capabilities;
     if unsupported_capabilities != 0 {
         return Err(DatabaseHeaderError::UnsupportedRequiredCapabilities(
             unsupported_capabilities,
@@ -1575,7 +1601,7 @@ mod tests {
             checkpoint_lsn: 99,
             checkpoint_in_progress: true,
             checkpoint_target_lsn: 123,
-            required_capabilities: FILE_CAPABILITY_TEMPERATURE | FILE_CAPABILITY_CATALOG_ROOT,
+            required_capabilities: FILE_CAPABILITY_TEMPERATURE,
             physical: PhysicalFileHeader {
                 format_version: 11,
                 sequence: 12,

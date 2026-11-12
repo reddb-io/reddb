@@ -65,8 +65,9 @@ impl Source {
         )?;
         let selected = f::select_paged_superblock(&zero).ok_or("no valid native superblock")?;
         let start = selected.copy_index * f::PAGED_SUPERBLOCK_SLOT_SIZE;
-        let header =
-            f::decode_database_header(&zero[start..start + f::PAGED_SUPERBLOCK_SLOT_SIZE])?;
+        let header = f::decode_published_database_header(
+            &zero[start..start + f::PAGED_SUPERBLOCK_SLOT_SIZE],
+        )?;
         let manifest_reference = f::file_format::database_header_manifest_reference(
             &zero[start..start + f::PAGED_SUPERBLOCK_SLOT_SIZE],
         )?;
@@ -262,11 +263,7 @@ impl Source {
                 f::paged_superblock_slot_generation(slot, copy).is_some(),
                 "superblock damage requires separate recovery",
             )?;
-            let header = f::decode_database_header(slot)?;
-            f::file_format::database_header_manifest_reference(slot)?;
-            if header.required_capabilities & f::file_format::FILE_CAPABILITY_DWB_PUBLICATION != 0 {
-                f::file_format::database_header_dwb_publication(slot)?;
-            }
+            f::decode_published_database_header(slot)?;
         }
         Ok(())
     }

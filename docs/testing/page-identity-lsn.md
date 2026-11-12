@@ -245,6 +245,15 @@ catalog and both header copies. Both native and offline readers must reject that
 generation without altering the source. The minor release entry lives in
 `.changeset/native-generation-authority.md`; no version number or release tag is edited manually.
 
+The Rust codec keeps the existing `DatabaseHeader` field list and exhaustive
+`DatabaseHeaderError` variants. The existing `decode_database_header` entry point remains limited
+to its legacy capabilities, so an older engine linking a newer codec cannot silently accept
+publication rules it does not implement. Participating owners opt into
+`decode_published_database_header`, which validates both catalog and recovery extensions before
+page access. The external-client regression preserves the old struct literal and error match,
+checks rejection of every new publication capability, and verifies that ordinary field updates
+preserve independently published authority.
+
 The complete native page-integrity round passed all ten cases in 291.11 seconds, including this
 malformed-publication rejection. All 56 portable engine cases passed in 199.54 seconds, and all 56
 offline cases passed in 212.00 seconds. The native repeated-recovery I/O matrix passed again in

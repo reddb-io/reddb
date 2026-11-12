@@ -466,16 +466,8 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     fn ensure_phase3_dwb_zone_layout(&self) -> Result<(), PagerError> {
         let (_, image) = self.newest_superblock()?;
-        let header = reddb_file::decode_database_header(&image)
+        let header = reddb_file::decode_published_database_header(&image)
             .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
-        reddb_file::file_format::database_header_manifest_reference(&image)
-            .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
-        if header.required_capabilities & reddb_file::file_format::FILE_CAPABILITY_DWB_PUBLICATION
-            != 0
-        {
-            reddb_file::file_format::database_header_dwb_publication(&image)
-                .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
-        }
         if header.is_recovery_read_only() && !self.config.read_only {
             return Err(PagerError::InvalidDatabase(
                 "recovered database is read-only; export verified data into a new store".into(),
@@ -731,7 +723,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     fn load_header(&self) -> Result<(), PagerError> {
         let (_, image) = self.newest_superblock()?;
 
-        let mut decoded_header = reddb_file::decode_database_header(&image)
+        let mut decoded_header = reddb_file::decode_published_database_header(&image)
             .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
         // Cache eviction (or DWB recovery) can persist pages before the next
         // superblock publication. After a crash the allocation counter may

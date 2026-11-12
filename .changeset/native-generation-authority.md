@@ -11,3 +11,5 @@ Preserve streaming MCU recovery for legacy files, and reject prepared batches or
 Keep initial tree insertion separate from the existing-tree buffers so cold multimodel checkpoints can allocate generation proofs on ordinary worker stacks.
 
 Upgrade notes: legacy files remain readable and keep their existing addresses during preparation. Once a store enables the new catalog, tree-proof or double-write publication capabilities, older readers reject it at open. Retain a verified pre-upgrade backup; downgrading requires restoring that backup or exporting verified data into a compatible store. Reverting the application binary does not downgrade the file. Existing Rust `DatabaseHeader` struct literals and exhaustive `DatabaseHeaderError` matches remain source compatible; publication extensions use additive accessors and a separate error type.
+
+The existing header decoder keeps rejecting publication-specific capabilities even when an older engine links this newer file codec. Participating engines use the explicit publication-aware decoder, which validates catalog and recovery extensions before page access.

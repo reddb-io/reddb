@@ -1538,7 +1538,7 @@ fn engine_and_server_do_not_redeclare_core_file_format_constants() {
             && pager_io.contains("reddb_file::encode_paged_dwb_frame")
             && pager_io_staging.contains("reddb_file::decode_paged_dwb_header")
             && pager_io.contains("reddb_file::seal_paged_superblock_slot")
-            && shared_pager.contains("reddb_file::decode_database_header")
+            && shared_pager.contains("reddb_file::decode_published_database_header")
             && shared_pager.contains("reddb_file::encode_database_header")
             && pager_impl.contains("reddb_file::paged_encryption_marker_present")
             && pager_impl.contains("reddb_file::write_paged_encryption_marker_and_header")

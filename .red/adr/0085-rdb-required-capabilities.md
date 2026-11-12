@@ -1,4 +1,4 @@
-# ADR 0083 — Required capabilities in paged `.rdb` superblocks
+# ADR 0085 — Required capabilities in paged `.rdb` superblocks
 
 Status: accepted
 Date: 2026-11-10

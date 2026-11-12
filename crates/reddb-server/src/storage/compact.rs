@@ -1032,7 +1032,7 @@ fn compact_paged_inner(
     // Preserve source schema/LSN, but retain the newly allocated page boundary.
     for _ in 0..2 {
         target.commit_superblock(|slot| {
-            let mut header = f::decode_database_header(slot).map_err(|error| {
+            let mut header = f::decode_published_database_header(slot).map_err(|error| {
                 reddb_engine::storage::pager::PagerError::InvalidDatabase(error.to_string())
             })?;
             header.schema_version = source.header.schema_version;

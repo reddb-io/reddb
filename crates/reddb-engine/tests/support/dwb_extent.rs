@@ -139,7 +139,8 @@ fn malformed_publication_extensions_are_rejected_before_ready_recovery_writes() 
             let start = copy * reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
             let slot = &mut evidence[start..start + reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE];
             if manifest {
-                let mut header = f::decode_database_header(slot).expect("ordinary header");
+                let mut header =
+                    f::decode_published_database_header(slot).expect("ordinary header");
                 header.required_capabilities |= f::FILE_CAPABILITY_CATALOG_ROOT;
                 f::encode_database_header(slot, &header).expect("enable catalog capability");
                 slot[256..292].fill(0);
