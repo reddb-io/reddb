@@ -23,6 +23,8 @@ fn contract() -> CollectionContract {
         contract.declared_columns.push(
             declared_column_contract_from_persisted(PhysicalDeclaredColumnContract {
                 name: name.into(),
+                description: None,
+                description_generated: false,
                 data_type: data_type.into(),
                 ..Default::default()
             })

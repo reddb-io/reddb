@@ -2065,6 +2065,8 @@ pub struct CreateTableQuery {
     pub collection_model: CollectionModel,
     /// Table name
     pub name: String,
+    /// Human-authored collection description.
+    pub description: Option<String>,
     /// Column definitions
     pub columns: Vec<CreateColumnDef>,
     /// Table-level UNIQUE constraints, including composite keys.
@@ -2191,6 +2193,7 @@ pub struct CreateSloQuery {
 #[derive(Debug, Clone)]
 pub struct CreateCollectionQuery {
     pub name: String,
+    pub description: Option<String>,
     pub kind: String,
     pub if_not_exists: bool,
     pub vector_dimension: Option<usize>,
@@ -2233,6 +2236,8 @@ pub enum PartitionKind {
 pub struct CreateColumnDef {
     /// Column name
     pub name: String,
+    /// Human-authored column description.
+    pub description: Option<String>,
     /// Legacy declared type string preserved for the runtime/storage pipeline.
     pub data_type: String,
     /// Structured SQL type used by the semantic layer.
@@ -2372,6 +2377,11 @@ pub enum AlterOperation {
     DropColumn(String),
     /// RENAME COLUMN from TO to
     RenameColumn { from: String, to: String },
+    /// Replace a collection or column description with human-authored text.
+    SetDescription {
+        column: Option<String>,
+        description: String,
+    },
     /// `ATTACH PARTITION child FOR VALUES ...` (Phase 2.2 PG parity).
     ///
     /// Binds an existing child table to the parent partitioned table.

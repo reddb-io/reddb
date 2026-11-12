@@ -24,6 +24,8 @@ pub fn collection_contract_to_persisted(
 ) -> reddb_file::PhysicalCollectionContract {
     reddb_file::PhysicalCollectionContract {
         name: crate::storage::system_collection_names::canonical_or_self(&contract.name).to_owned(),
+        description: contract.description.clone(),
+        description_generated: contract.description_generated,
         declared_model: collection_model_as_str(contract.declared_model).to_string(),
         schema_mode: schema_mode_as_str(contract.schema_mode).to_string(),
         origin: contract.origin.as_str().to_string(),
@@ -93,6 +95,8 @@ pub fn collection_contract_from_persisted(
 
     let decoded = CollectionContract {
         name: contract.name,
+        description: contract.description,
+        description_generated: contract.description_generated,
         declared_model: collection_model_from_str(&contract.declared_model)?,
         schema_mode: schema_mode_from_str(&contract.schema_mode)?,
         origin: contract_origin_from_str(&contract.origin)?,
@@ -390,6 +394,8 @@ pub fn declared_column_contract_to_persisted(
 ) -> reddb_file::PhysicalDeclaredColumnContract {
     reddb_file::PhysicalDeclaredColumnContract {
         name: column.name.clone(),
+        description: column.description.clone(),
+        description_generated: column.description_generated,
         data_type: column.data_type.clone(),
         sql_type: column.sql_type.as_ref().map(sql_type_name_to_persisted),
         not_null: column.not_null,
@@ -420,6 +426,8 @@ pub fn declared_column_contract_from_persisted(
         .or_else(|| Some(reddb_types::SqlTypeName::parse_declared(&column.data_type)));
     Ok(DeclaredColumnContract {
         name: column.name,
+        description: column.description,
+        description_generated: column.description_generated,
         data_type: column.data_type,
         sql_type,
         not_null: column.not_null,

@@ -16,6 +16,7 @@ fn to_create_column_def(
     let sql_type = SqlTypeName::parse_declared(&column.data_type);
     CreateColumnDef {
         name: column.name,
+        description: None,
         data_type: column.data_type,
         sql_type,
         not_null: column.not_null,
@@ -63,6 +64,7 @@ impl RuntimeSchemaPort for RedDBRuntime {
         let query = CreateTableQuery {
             collection_model: crate::catalog::CollectionModel::Table,
             name,
+            description: None,
             columns: columns.into_iter().map(to_create_column_def).collect(),
             unique_constraints: Vec::new(),
             if_not_exists,

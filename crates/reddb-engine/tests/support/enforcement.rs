@@ -266,6 +266,8 @@ fn unique_keys_and_targets() {
         reddb_engine::catalog::codec::declared_column_contract_from_persisted(
             PhysicalDeclaredColumnContract {
                 name: "id".into(),
+                description: None,
+                description_generated: false,
                 data_type: "integer".into(),
                 not_null: true,
                 primary_key: true,
@@ -276,6 +278,8 @@ fn unique_keys_and_targets() {
     ];
     let email = PhysicalDeclaredColumnContract {
         name: "email".into(),
+        description: None,
+        description_generated: false,
         data_type: "text".into(),
         unique: true,
         ..Default::default()

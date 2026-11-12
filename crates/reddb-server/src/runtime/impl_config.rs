@@ -910,6 +910,8 @@ impl RedDBRuntime {
             .db
             .save_collection_contract(CollectionContract {
                 name: collection.to_string(),
+                description: None,
+                description_generated: false,
                 declared_model: CollectionModel::Config,
                 schema_mode: SchemaMode::Dynamic,
                 origin: ContractOrigin::Explicit,

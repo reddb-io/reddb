@@ -108,6 +108,8 @@ mod tests {
     fn base_contract() -> CollectionContract {
         CollectionContract {
             name: "events".to_string(),
+            description: None,
+            description_generated: false,
             declared_model: CollectionModel::Table,
             schema_mode: SchemaMode::SemiStructured,
             origin: ContractOrigin::Explicit,
@@ -173,6 +175,8 @@ mod tests {
         contract.timestamps_enabled = false;
         contract.declared_columns.push(DeclaredColumnContract {
             name: "ts".to_string(),
+            description: None,
+            description_generated: false,
             data_type: "TIMESTAMP".to_string(),
             sql_type: None,
             not_null: false,
@@ -198,6 +202,8 @@ mod tests {
         contract.timestamps_enabled = false;
         contract.declared_columns.push(DeclaredColumnContract {
             name: "ts".to_string(),
+            description: None,
+            description_generated: false,
             data_type: "TIMESTAMPMS".to_string(),
             sql_type: None,
             not_null: false,

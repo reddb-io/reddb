@@ -1195,6 +1195,8 @@ fn hypertable_collection_contract(
         .unwrap_or("timestamp");
     crate::physical::CollectionContract {
         name: query.name.clone(),
+        description: None,
+        description_generated: false,
         // Table model — rows go through the normal INSERT path,
         // which now calls HypertableRegistry::route after each row
         // lands. Hypertable-specific behaviour (chunk bounds, TTL
@@ -1238,6 +1240,8 @@ fn timeseries_collection_contract(
     let now = current_unix_ms();
     crate::physical::CollectionContract {
         name: query.name.clone(),
+        description: None,
+        description_generated: false,
         declared_model: crate::catalog::CollectionModel::TimeSeries,
         schema_mode: crate::catalog::SchemaMode::SemiStructured,
         origin: crate::physical::ContractOrigin::Explicit,

@@ -171,6 +171,7 @@ mod tests {
     fn column(name: &str, declared: &str) -> CreateColumnDef {
         CreateColumnDef {
             name: name.to_string(),
+            description: None,
             data_type: declared.to_string(),
             sql_type: SqlTypeName::parse_declared(declared),
             not_null: false,
@@ -190,6 +191,7 @@ mod tests {
         CreateTableQuery {
             collection_model: CollectionModel::Table,
             name: "orders".to_string(),
+            description: None,
             columns,
             unique_constraints: Vec::new(),
             if_not_exists: true,

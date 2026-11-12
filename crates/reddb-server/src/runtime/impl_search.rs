@@ -4574,6 +4574,8 @@ fn ask_audit_collection_contract() -> crate::physical::CollectionContract {
     let now = crate::utils::now_unix_millis() as u128;
     crate::physical::CollectionContract {
         name: ASK_AUDIT_COLLECTION.to_string(),
+        description: None,
+        description_generated: false,
         declared_model: crate::catalog::CollectionModel::Table,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
         origin: crate::physical::ContractOrigin::Implicit,
@@ -4756,7 +4758,7 @@ fn call_ask_chat(
     }
 }
 
-fn call_ask_llm(
+pub(super) fn call_ask_llm(
     provider: &crate::ai::AiProvider,
     transport: crate::runtime::ai::transport::AiTransport,
     api_key: String,

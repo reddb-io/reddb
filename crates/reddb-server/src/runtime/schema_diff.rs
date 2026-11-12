@@ -408,6 +408,8 @@ fn score_rename_pair(
 fn declared_column_contract_from_create(column: &CreateColumnDef) -> DeclaredColumnContract {
     DeclaredColumnContract {
         name: column.name.clone(),
+        description: None,
+        description_generated: false,
         data_type: column.data_type.clone(),
         sql_type: Some(column.sql_type.clone()),
         not_null: column.not_null,
@@ -679,6 +681,8 @@ mod tests {
     fn declared(name: &str, sql_type: &str, not_null: bool) -> DeclaredColumnContract {
         DeclaredColumnContract {
             name: name.to_string(),
+            description: None,
+            description_generated: false,
             data_type: sql_type.to_string(),
             sql_type: Some(SqlTypeName::new(sql_type)),
             not_null,
@@ -697,6 +701,7 @@ mod tests {
     fn target(name: &str, sql_type: &str, not_null: bool) -> CreateColumnDef {
         CreateColumnDef {
             name: name.to_string(),
+            description: None,
             data_type: sql_type.to_string(),
             sql_type: SqlTypeName::new(sql_type),
             not_null,
