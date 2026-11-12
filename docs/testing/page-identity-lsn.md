@@ -250,3 +250,21 @@ malformed-publication rejection. All 56 portable engine cases passed in 199.54 s
 offline cases passed in 212.00 seconds. The native repeated-recovery I/O matrix passed again in
 59.52 seconds. These results qualify the native generation changes; the remaining promotion,
 cross-pod retry, concurrent UNIQUE rebuild, backup and multimodel fault scenarios remain separate work.
+
+## Truncated recovery extent
+
+Review found that a short file returned before consulting the independently sealed DWB authority.
+Two new integration regressions reproduced the problem in 0.06 seconds: with durable `Ready` headers,
+cold open accepted a file cut at the start of the reserved zone and served the surviving old vault
+page. A required recovery frame was silently treated as absent staging.
+
+Both recovery entry points now reject a short reserved extent when the guarded capability is present.
+Tests cut before the frame, inside its header and payload, and one byte before the zone's end. Raw
+recovery and cold pager open, in both reader and writer modes, must fail without writes. A complete
+authorized extent still restores the newer image; an unguarded short bootstrap retains its previous
+behavior. All seven selected DWB integration cases passed after the fix in 11.63 seconds.
+
+The full portable engine round then passed all 59 cases in 209.03 seconds. The short-extent guard
+changes only the previously accepted short-file branch; complete reserved zones enter the same
+phase-validation and replay sequence as before.
+`cargo check --locked -p reddb-io-engine -j1`, formatting and `git diff --check` also passed.

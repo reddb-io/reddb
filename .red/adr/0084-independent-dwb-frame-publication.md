@@ -40,6 +40,10 @@ Recovery itself must establish the same phase fences before touching homes.
   Offline recovery uses the same validation, copies the source first and
   completes mutation on that copy. Neither path authorizes a frame by its
   own checksum or by the caller's willingness to repair the database.
+- The complete reserved DWB extent must survive once the capability is
+  fenced. Both recovery modes reject a shorter file before serving even
+  surviving low-address homes. Missing bytes cannot bypass phase validation
+  through the legacy short-bootstrap return; no source bytes are repaired.
 - The native pager serializes phase publication with ordinary superblock
   publication, including eviction writes. Ordinary header encoding preserves
   the extension from the newest slot instead of a cached publication value.

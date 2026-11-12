@@ -233,11 +233,25 @@ pub fn write_pages<F: VfsFile>(
     Ok(())
 }
 
+fn has_complete_dwb_zone<F: VfsFile>(file: &mut F) -> Result<bool, PagerIoError> {
+    if file.file_len()? >= dwb_zone_offset() + DWB_ZONE_BYTES as u64 {
+        return Ok(true);
+    }
+    // The complete reserved zone precedes the guarded capability fence. A
+    // shorter file lost durable bytes; it is not an interrupted stage/clear.
+    if dwb_publication::enabled(file)? {
+        return Err(PagerIoError::InvalidDatabase(
+            "DWB generation authority: reserved zone is truncated".into(),
+        ));
+    }
+    Ok(false)
+}
+
 /// Replay a complete staged DWB frame before allowing page access. Incomplete
 /// staging is discarded as on the native path: home writes start only after
 /// the complete frame crossed its barrier. No database root is recreated.
 pub fn recover_from_dwb<F: VfsFile>(file: &mut F) -> Result<(), PagerIoError> {
-    if file.file_len()? < dwb_zone_offset() + DWB_ZONE_BYTES as u64 {
+    if !has_complete_dwb_zone(file)? {
         return Ok(());
     }
     let mut buffer = vec![0u8; DWB_ZONE_BYTES];
@@ -287,7 +301,7 @@ pub fn recover_from_dwb<F: VfsFile>(file: &mut F) -> Result<(), PagerIoError> {
 /// Incomplete staging cannot have reached home pages and is ignored, just as
 /// in writer recovery. The frame decoder bounds the number of pages.
 pub fn read_dwb_pages<F: VfsFile>(file: &mut F) -> Result<Vec<(u32, Page)>, PagerIoError> {
-    if file.file_len()? < dwb_zone_offset() + DWB_ZONE_BYTES as u64 {
+    if !has_complete_dwb_zone(file)? {
         return Ok(Vec::new());
     }
     let mut buffer = vec![0u8; DWB_ZONE_BYTES];
