@@ -711,7 +711,7 @@ jobs:
       - platforms
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.shard == 'unit' && 30 || 20 }}
     strategy:
       fail-fast: false
       matrix:
