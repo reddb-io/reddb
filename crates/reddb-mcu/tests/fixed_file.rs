@@ -53,7 +53,9 @@ fn preallocated_file_recovers_and_opens_through_the_canonical_vfs() {
         .expect("reopen preallocated database");
     let file = FixedCapacityFile::open(reopened, CAPACITY, FixedFileState::Existing)
         .expect("open existing fixed-capacity file");
-    let database = Database::open(file).expect("recover fixed-capacity database");
+    let logical_len = file.file_len().expect("recover canonical logical length");
+    assert!(logical_len < CAPACITY);
+    let mut database = Database::open(file).expect("recover fixed-capacity database");
     let mut rows = Vec::new();
     database
         .query_stream(
@@ -67,6 +69,9 @@ fn preallocated_file_recovers_and_opens_through_the_canonical_vfs() {
         .expect("stream recovered measurements");
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[2][0], Value::BigInt(2));
+    database
+        .query("INSERT INTO measurements VALUES (3, 20.0)", 3)
+        .expect("append after fixed-capacity recovery");
     drop(database);
 
     let canonical = StdVfs
@@ -78,5 +83,5 @@ fn preallocated_file_recovers_and_opens_through_the_canonical_vfs() {
             Ok(true)
         })
         .expect("query through canonical VFS");
-    assert_eq!(result.rows, 3);
+    assert_eq!(result.rows, 4);
 }

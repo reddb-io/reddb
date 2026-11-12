@@ -11,6 +11,12 @@ measurements through the shared SQL executor, and streams the full history
 through SQL. It prints `REDB_MCU_OK rows=43200 capacity_bytes=12378112` only
 after checking every timestamp and temperature. No gateway is used.
 
+On fresh flash it also arms a one-shot fault after 16,384 acknowledged rows and
+calls `esp_restart()` during the third file write of the next SQL transaction.
+The marker lives in the separate NVS partition. The next boot must recover
+exactly 16,384 rows (never a partial 64-row SQL batch), continue ingesting, and
+reach the same final receipt.
+
 ## Build
 
 Install the esp-rs `esp` toolchain, `ldproxy` and `espflash`, then build from
@@ -25,6 +31,9 @@ length failures. For example in PowerShell:
 
 ```powershell
 $env:ESP_IDF_TOOLS_INSTALL_DIR = "custom:C:/.embuild/espressif"
+$clang = "$env:USERPROFILE\.rustup\toolchains\esp\xtensa-esp32-elf-clang\esp-clang\bin"
+$env:LIBCLANG_PATH = $clang
+$env:PATH = "$clang;$env:PATH"
 cargo +esp build --release --target-dir C:\rdbt
 
 $elf = "C:\rdbt\xtensa-esp32s3-espidf\release\reddb-mcu-nano-esp32"
@@ -33,10 +42,16 @@ espflash save-image --chip esp32s3 --partition-table partitions.csv `
 Copy-Item $elf build\reddb-mcu-nano-esp32.elf
 ```
 
-The app occupies 3,806,592 of the 4,194,304-byte app partition (90.76%). The
+The app occupies 3,826,960 of the 4,194,304-byte app partition (91.24%). The
 remaining flash partition yields a 12,378,112-byte contiguous database file.
 The main task has a 256 KiB stack; the board exposes roughly 390 KiB of other
 internal RAM plus 8 MiB octal PSRAM to the allocator.
+
+General heap allocations prefer PSRAM
+(`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0`), leaving capability-constrained
+allocations in internal memory. The firmware fails if ESP-IDF reports less than
+32 KiB of minimum internal heap or 512 KiB of minimum PSRAM. The qualified run
+observed minima of 79,824 internal bytes and 8,224,908 PSRAM bytes.
 
 ## Emulate
 
@@ -58,6 +73,12 @@ esp-emu \
 Run the same command again without `--save-state` to validate recovery. The
 second boot must report `state=Existing`, must not print ingestion progress,
 and must finish with the same `REDB_MCU_OK` receipt.
+
+The qualified first run reports `REDB_MCU_FAULT reset=during_write`, reboots
+with reset reason `RTC_SW_CPU_RST`, recovers 16,384 rows, and then completes all
+43,200 rows. This is stronger than closing and reopening the database, but it
+is still a software reset after persisting the one-shot NVS marker, not an
+electrical power cut.
 
 The older Espressif QEMU 9.2.2 model was not qualified for this sustained
 FAT/WL workload: its SMP flash-cache model and write-back MTD backend aborted

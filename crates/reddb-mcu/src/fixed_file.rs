@@ -8,10 +8,7 @@ use crate::VfsFile;
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex, MutexGuard,
-    },
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +22,7 @@ pub enum FixedFileState {
 struct Shared {
     file: Mutex<File>,
     capacity: u64,
-    initialized: AtomicBool,
+    logical_len: Mutex<u64>,
 }
 
 /// A logical RedDB file backed by a physically preallocated fixed-size file.
@@ -33,24 +30,31 @@ struct Shared {
 /// The provisioner must guarantee that all `capacity` bytes have backing
 /// storage. A merely sparse host file does not satisfy this durability
 /// contract. The ESP-IDF firmware uses FatFS `f_expand(..., alloc_now=true)`.
+/// Existing files recover their logical length from the newest canonical
+/// RedDB superblock; physical preallocation must never be reported as used
+/// logical extent to the pager.
 pub struct FixedCapacityFile {
     shared: Arc<Shared>,
     position: u64,
 }
 
 impl FixedCapacityFile {
-    pub fn open(file: File, capacity: u64, state: FixedFileState) -> io::Result<Self> {
+    pub fn open(mut file: File, capacity: u64, state: FixedFileState) -> io::Result<Self> {
         if capacity == 0 || file.metadata()?.len() != capacity {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "fixed-capacity file must already have its exact physical length",
             ));
         }
+        let logical_len = match state {
+            FixedFileState::Empty => 0,
+            FixedFileState::Existing => canonical_logical_len(&mut file, capacity)?,
+        };
         Ok(Self {
             shared: Arc::new(Shared {
                 file: Mutex::new(file),
                 capacity,
-                initialized: AtomicBool::new(state == FixedFileState::Existing),
+                logical_len: Mutex::new(logical_len),
             }),
             position: 0,
         })
@@ -71,7 +75,7 @@ impl FixedCapacityFile {
         self.position
             .checked_add(bytes)
             .filter(|end| *end <= self.shared.capacity)
-            .ok_or_else(storage_full)
+            .ok_or_else(|| capacity_error("write", self.position, bytes, self.shared.capacity))
     }
 }
 
@@ -92,26 +96,29 @@ impl VfsFile for FixedCapacityFile {
     }
 
     fn file_len(&self) -> io::Result<u64> {
-        Ok(if self.shared.initialized.load(Ordering::Acquire) {
-            self.shared.capacity
-        } else {
-            0
-        })
+        self.shared
+            .logical_len
+            .lock()
+            .map(|len| *len)
+            .map_err(|_| io::Error::other("fixed-capacity length lock poisoned"))
     }
 
     fn set_len(&self, len: u64) -> io::Result<()> {
         if len > self.shared.capacity {
-            return Err(storage_full());
+            return Err(capacity_error("set length", 0, len, self.shared.capacity));
         }
-        if len == 0 && self.shared.initialized.load(Ordering::Acquire) {
+        let mut logical_len = self
+            .shared
+            .logical_len
+            .lock()
+            .map_err(|_| io::Error::other("fixed-capacity length lock poisoned"))?;
+        if len == 0 && *logical_len != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "fixed-capacity database cannot be truncated",
             ));
         }
-        if len != 0 {
-            self.shared.initialized.store(true, Ordering::Release);
-        }
+        *logical_len = len;
         Ok(())
     }
 
@@ -120,22 +127,27 @@ impl VfsFile for FixedCapacityFile {
             .checked_add(len)
             .filter(|end| *end <= self.shared.capacity)
             .map(|_| ())
-            .ok_or_else(storage_full)
+            .ok_or_else(|| capacity_error("reserve", offset, len, self.shared.capacity))
     }
 
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         let end = self.checked_end(bytes.len() as u64)?;
-        self.shared.initialized.store(true, Ordering::Release);
         let mut file = self.lock()?;
         file.seek(SeekFrom::Start(self.position))?;
         file.write_all(bytes)?;
         drop(file);
+        let mut logical_len = self
+            .shared
+            .logical_len
+            .lock()
+            .map_err(|_| io::Error::other("fixed-capacity length lock poisoned"))?;
+        *logical_len = (*logical_len).max(end);
         self.position = end;
         Ok(())
     }
 
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        let remaining = self.shared.capacity.saturating_sub(self.position);
+        let remaining = self.file_len()?.saturating_sub(self.position);
         let admitted = usize::try_from(remaining)
             .unwrap_or(usize::MAX)
             .min(bytes.len());
@@ -168,6 +180,37 @@ impl VfsFile for FixedCapacityFile {
     }
 }
 
-fn storage_full() -> io::Error {
-    io::Error::new(io::ErrorKind::WriteZero, "fixed-capacity database is full")
+fn canonical_logical_len(file: &mut File, capacity: u64) -> io::Result<u64> {
+    let mut zone = [0; crate::file::PAGED_SUPERBLOCK_ZONE_SIZE];
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut zone)?;
+    let selection = crate::file::select_paged_superblock(&zone).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "fixed-capacity database has no valid canonical superblock",
+        )
+    })?;
+    let start = selection.copy_index * crate::file::PAGED_SUPERBLOCK_SLOT_SIZE;
+    let end = start + crate::file::PAGED_SUPERBLOCK_SLOT_SIZE;
+    let header = crate::file::decode_database_header(&zone[start..end])
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let logical_len = u64::from(header.page_count)
+        .checked_mul(crate::engine::storage::page::PAGE_SIZE as u64)
+        .filter(|len| *len <= capacity)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "canonical database extent exceeds fixed physical capacity",
+            )
+        })?;
+    Ok(logical_len)
+}
+
+fn capacity_error(operation: &str, offset: u64, len: u64, capacity: u64) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WriteZero,
+        format!(
+            "fixed-capacity {operation} at offset {offset} for {len} bytes exceeds {capacity} bytes"
+        ),
+    )
 }

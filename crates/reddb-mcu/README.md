@@ -39,10 +39,15 @@ levelling, preallocates a 12,378,112-byte file, and wraps it in
 `FixedCapacityFile`. The adapter changes physical allocation semantics only;
 the shared pager, catalog, SQL executor and `.rdb` bytes remain unchanged.
 
-The dual-core emulator receipt ingests and queries 43,200 measurements, saves
-the 16 MiB flash image, reboots it, opens `state=Existing`, and queries the same
-43,200 rows without reinsertion or gateway. Physical Nano ESP32 execution is
-still required before making a hardware-qualified claim.
+The dual-core emulator receipt ingests 16,384 measurements, injects a one-shot
+CPU reset during the third file write of the next SQL transaction, recovers
+exactly 16,384 rows, continues to 43,200, and streams the complete history. A
+second process boot opens `state=Existing` and queries the same 43,200 rows
+without reinsertion or gateway. The ESP-IDF allocator prefers PSRAM for general
+heap allocations; every measured phase enforces at least 32 KiB of internal
+heap and 512 KiB of PSRAM headroom. The observed minima were 79,824 internal
+bytes and 8,224,908 PSRAM bytes. Physical Nano ESP32 execution and electrical
+power-cut testing remain separate qualification boundaries.
 
 ## Host flash-model qualification
 

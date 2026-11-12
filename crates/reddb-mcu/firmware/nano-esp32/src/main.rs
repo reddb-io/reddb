@@ -1,4 +1,7 @@
+mod fault_file;
+
 use esp_idf_sys as sys;
+use fault_file::{FaultControl, ResetOnceFile};
 use reddb_mcu::{
     file::database_header_magic_matches,
     fixed_file::{FixedCapacityFile, FixedFileState},
@@ -19,6 +22,10 @@ const DATABASE_PATH: &str = "/reddb/data.rdb";
 const MEASUREMENTS: u64 = 43_200;
 const INSERT_BATCH: u64 = 64;
 const ALLOCATION_UNIT: u64 = 4096;
+const FAULT_ARM_ROW: u64 = 16_384;
+const FAULT_AFTER_WRITES: usize = 3;
+const MIN_INTERNAL_HEADROOM_BYTES: usize = 32 * 1024;
+const MIN_SPIRAM_HEADROOM_BYTES: usize = 512 * 1024;
 
 fn main() {
     sys::link_patches();
@@ -28,8 +35,11 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
+    report_heap("startup")?;
     let _mount = mount_fatfs()?;
     let (file, state) = provision_database_file()?;
+    let fault = FaultControl::open()?;
+    let file = ResetOnceFile::new(file, fault.clone());
     let mut database = match state {
         FixedFileState::Empty => Database::create(file)?,
         FixedFileState::Existing => Database::open(file)?,
@@ -42,8 +52,16 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     let mut rows = count_and_verify(&database)?;
+    if rows != MEASUREMENTS && !rows.is_multiple_of(INSERT_BATCH) {
+        return Err(format!("recovery exposed a partial SQL batch at row {rows}").into());
+    }
+    println!("REDB_MCU_RECOVERY state={state:?} rows={rows}");
+    report_heap("recovered")?;
     while rows < MEASUREMENTS {
         let count = INSERT_BATCH.min(MEASUREMENTS - rows);
+        if rows == FAULT_ARM_ROW && fault.arm_after_writes(FAULT_AFTER_WRITES) {
+            println!("REDB_MCU_FAULT_ARM rows={rows} writes_until_reset={FAULT_AFTER_WRITES}");
+        }
         database.query(
             &format!(
                 "INSERT INTO measurements VALUES {}",
@@ -54,6 +72,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         rows += count;
         if rows.is_multiple_of(4096) || rows == MEASUREMENTS {
             println!("REDB_MCU_PROGRESS rows={rows}");
+            report_heap("ingest")?;
         }
     }
 
@@ -61,6 +80,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     if recovered != MEASUREMENTS {
         return Err(format!("expected {MEASUREMENTS} rows, recovered {recovered}").into());
     }
+    report_heap("verified")?;
     println!(
         "REDB_MCU_OK rows={recovered} capacity_bytes={}",
         database.into_inner().capacity()
@@ -68,7 +88,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn count_and_verify(database: &Database<FixedCapacityFile>) -> Result<u64, Box<dyn Error>> {
+fn count_and_verify(database: &Database<ResetOnceFile>) -> Result<u64, Box<dyn Error>> {
     let mut seen = vec![false; MEASUREMENTS as usize];
     let mut count = 0u64;
     database.query_stream(
@@ -112,6 +132,55 @@ fn count_and_verify(database: &Database<FixedCapacityFile>) -> Result<u64, Box<d
         return Err("measurements do not form a contiguous prefix".into());
     }
     Ok(count)
+}
+
+fn report_heap(stage: &str) -> Result<(), Box<dyn Error>> {
+    let internal = heap_stats(sys::MALLOC_CAP_INTERNAL);
+    let spiram = heap_stats(sys::MALLOC_CAP_SPIRAM);
+    println!(
+        "REDB_MCU_HEAP stage={stage} internal_total={} internal_free={} internal_min={} internal_largest={} spiram_total={} spiram_free={} spiram_min={} spiram_largest={}",
+        internal.total,
+        internal.free,
+        internal.minimum_free,
+        internal.largest_free,
+        spiram.total,
+        spiram.free,
+        spiram.minimum_free,
+        spiram.largest_free
+    );
+    if internal.minimum_free < MIN_INTERNAL_HEADROOM_BYTES {
+        return Err(format!(
+            "internal heap headroom {} fell below {} bytes",
+            internal.minimum_free, MIN_INTERNAL_HEADROOM_BYTES
+        )
+        .into());
+    }
+    if spiram.minimum_free < MIN_SPIRAM_HEADROOM_BYTES {
+        return Err(format!(
+            "PSRAM heap headroom {} fell below {} bytes",
+            spiram.minimum_free, MIN_SPIRAM_HEADROOM_BYTES
+        )
+        .into());
+    }
+    Ok(())
+}
+
+struct HeapStats {
+    total: usize,
+    free: usize,
+    minimum_free: usize,
+    largest_free: usize,
+}
+
+fn heap_stats(capability: u32) -> HeapStats {
+    unsafe {
+        HeapStats {
+            total: sys::heap_caps_get_total_size(capability),
+            free: sys::heap_caps_get_free_size(capability),
+            minimum_free: sys::heap_caps_get_minimum_free_size(capability),
+            largest_free: sys::heap_caps_get_largest_free_block(capability),
+        }
+    }
 }
 
 fn measurement_values(first: u64, count: u64) -> String {

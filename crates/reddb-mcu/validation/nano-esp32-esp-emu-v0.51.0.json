@@ -12,10 +12,15 @@
   },
   "firmware": {
     "app_partition_bytes": 4194304,
-    "app_image_bytes": 3806592,
+    "app_image_bytes": 3826960,
     "main_task_stack_bytes": 262144,
     "database_capacity_bytes": 12378112,
-    "gateway_used": false
+    "gateway_used": false,
+    "allocator_policy": "general allocations prefer PSRAM",
+    "minimum_internal_heap_bytes": 79824,
+    "minimum_psram_heap_bytes": 8224908,
+    "required_internal_heap_headroom_bytes": 32768,
+    "required_psram_heap_headroom_bytes": 524288
   },
   "workload": {
     "table": "measurements",
@@ -28,6 +33,15 @@
     {
       "boot": "fresh flash",
       "storage_state": "Empty",
+      "rows_before_injected_reset": 16384,
+      "fault": "CPU reset during the third VfsFile write of the next SQL transaction",
+      "reset_reason": "RTC_SW_CPU_RST"
+    },
+    {
+      "boot": "automatic boot after injected reset",
+      "storage_state": "Existing",
+      "recovered_rows": 16384,
+      "partial_sql_batch_visible": false,
       "result": "REDB_MCU_OK rows=43200 capacity_bytes=12378112"
     },
     {
@@ -45,7 +59,7 @@
   },
   "limitations": [
     "This is instruction-set emulator evidence, not a physical-board receipt.",
-    "Power loss was represented by a clean persisted emulator restart, not an electrically interrupted flash operation.",
+    "The injected failure is an ESP32 software reset during a file write after committing a one-shot marker to the separate NVS partition, not an electrical power cut.",
     "The Pico 2 still requires the no_std + alloc engine slice."
   ]
 }
