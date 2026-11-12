@@ -81,6 +81,21 @@ pub(crate) fn test_fail_next_pager_write(offset: Option<u64>, prefix_bytes: usiz
     });
 }
 
+#[cfg(test)]
+fn pager_sync_fault() -> &'static Mutex<Option<usize>> {
+    static FAULT: std::sync::OnceLock<Mutex<Option<usize>>> = std::sync::OnceLock::new();
+    FAULT.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) fn test_fail_pager_sync_after(successful_syncs: usize) {
+    let mut fault = pager_sync_fault()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(fault.is_none(), "pager sync fault is already armed");
+    *fault = Some(successful_syncs);
+}
+
 /// Pager configuration
 #[derive(Debug, Clone)]
 pub struct PagerConfig {
@@ -219,6 +234,19 @@ impl reddb_file::VfsFile for NativePagerFile {
         std::io::Seek::seek(&mut self.0, pos)
     }
     fn sync_all(&self) -> std::io::Result<()> {
+        #[cfg(test)]
+        {
+            let mut fault = pager_sync_fault()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(remaining) = fault.as_mut() {
+                if *remaining == 0 {
+                    *fault = None;
+                    return Err(std::io::Error::other("injected pager fsync failure"));
+                }
+                *remaining -= 1;
+            }
+        }
         self.0.sync_all()
     }
 }

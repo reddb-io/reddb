@@ -184,6 +184,21 @@ mod tests {
     fn overflow_checkpoint_undo_survives_interrupted_recovery_and_publication() {
         let config = || UnifiedStoreConfig::default().with_page_cache_slots(4);
         if let Some(path) = std::env::var_os(CHILD) {
+            if let Ok(fault) = std::env::var("REDDB_TEST_PAGE_UNDO_IO") {
+                use crate::storage::engine::pager;
+                match fault.as_str() {
+                    "empty" => pager::test_fail_next_pager_write(None, 0),
+                    "partial" => pager::test_fail_next_pager_write(None, 17),
+                    "sync" => pager::test_fail_pager_sync_after(0),
+                    _ => panic!("unknown undo recovery I/O fault {fault}"),
+                }
+                let error = match UnifiedStore::open_with_config(path, config()) {
+                    Ok(_) => panic!("undo recovery must propagate its I/O failure"),
+                    Err(error) => error,
+                };
+                assert!(error.to_string().contains("injected pager"), "{error}");
+                std::process::exit(196);
+            }
             let store = UnifiedStore::open_with_config(path, config()).expect("child open");
             if std::env::var_os("REDDB_TEST_EXIT_DURING_PAGE_UNDO").is_some() {
                 panic!("recovery interruption was not reached");
@@ -383,6 +398,27 @@ mod tests {
                     baseline_pages
                 );
                 std::fs::write(&wal_path, baseline_wal).expect("restore valid WAL");
+                for fault in ["empty", "partial", "sync"] {
+                    let wal = std::fs::read(&wal_path).expect("undo WAL before I/O failure");
+                    let output =
+                        std::process::Command::new(std::env::current_exe().expect("test binary"))
+                            .args(["--exact", TEST, "--nocapture"])
+                            .env(CHILD, &path)
+                            .env("REDDB_TEST_PAGE_UNDO_IO", fault)
+                            .output()
+                            .expect("undo recovery I/O child");
+                    assert_eq!(
+                        output.status.code(),
+                        Some(196),
+                        "{fault}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    assert_eq!(
+                        std::fs::read(&wal_path).expect("retained undo WAL"),
+                        wal,
+                        "failed undo must not consume its before-images"
+                    );
+                }
                 for _ in 0..2 {
                     let result = run(true);
                     assert_eq!(
