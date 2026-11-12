@@ -626,6 +626,13 @@ impl RuntimeBtreeIndex {
                     limit_bytes: read_bytes_max,
                 });
             }
+            // WAL recovery may retire a row referenced by the last published
+            // tree before its replacement is present in the runtime overlay.
+            // Ignoring that posting would make an incomplete range authoritative.
+            if matches!(entity.kind, EntityKind::TableRow { .. }) && entity.xmax != 0 {
+                needs_scan.set(true);
+                return Ok(());
+            }
             let Some(length) = self.projection.project(entity, &mut key)? else {
                 return Ok(());
             };
