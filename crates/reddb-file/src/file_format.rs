@@ -41,12 +41,15 @@ pub const FILE_CAPABILITY_CATALOG_ROOT: u64 = 1 << 2;
 pub const FILE_CAPABILITY_RECOVERY_READ_ONLY: u64 = 1 << 3;
 /// Published catalog roots carry independently sealed tree-image maps.
 pub const FILE_CAPABILITY_TREE_PROOFS: u64 = 1 << 4;
+/// Double-write frames require independent superblock publication authority.
+pub const FILE_CAPABILITY_DWB_PUBLICATION: u64 = 1 << 5;
 /// Capabilities understood by this reader. Unknown mandatory bits are fatal.
 pub const FILE_CAPABILITIES_SUPPORTED: u64 = FILE_CAPABILITY_TEMPERATURE
     | FILE_CAPABILITY_DISK_RESIDENCY
     | FILE_CAPABILITY_CATALOG_ROOT
     | FILE_CAPABILITY_RECOVERY_READ_ONLY
-    | FILE_CAPABILITY_TREE_PROOFS;
+    | FILE_CAPABILITY_TREE_PROOFS
+    | FILE_CAPABILITY_DWB_PUBLICATION;
 
 /// Whether a pre-capability format version implies disk residency.
 /// Capability-aware callers must use [`DatabaseHeader::requires_disk_residency`].
@@ -381,6 +384,82 @@ const DB_HEADER_MIN_LEN: usize = DB_REQUIRED_CAPABILITIES_OFFSET + 8;
 const DB_MANIFEST_REFERENCE_OFFSET: usize = 256;
 const DB_MANIFEST_REFERENCE_END: usize = DB_MANIFEST_REFERENCE_OFFSET + 36;
 const _: () = assert!(DB_MANIFEST_REFERENCE_END < PAGED_SUPERBLOCK_TRAILER_OFFSET);
+// Maintained by protected page I/O, under the superblock publication lock.
+// Ordinary DatabaseHeader encoding preserves this extension from the newest
+// slot instead of copying stale publication state from the header cache.
+const DB_DWB_PUBLICATION_OFFSET: usize = 296;
+const DB_DWB_PUBLICATION_END: usize = DB_DWB_PUBLICATION_OFFSET + 40;
+const _: () = assert!(DB_MANIFEST_REFERENCE_END <= DB_DWB_PUBLICATION_OFFSET);
+const _: () = assert!(DB_DWB_PUBLICATION_END < PAGED_SUPERBLOCK_TRAILER_OFFSET);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DwbPhase {
+    Preparing = 1,
+    Ready = 2,
+    Consumed = 3,
+}
+
+/// Authority over the complete raw frame, including encrypted page images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DwbPublication {
+    pub phase: DwbPhase,
+    pub frame_bytes: u32,
+    pub digest: [u8; 32],
+}
+
+pub fn dwb_frame_digest(bytes: &[u8]) -> [u8; 32] {
+    *blake3::hash(bytes).as_bytes()
+}
+
+pub fn database_header_dwb_publication(
+    page: &[u8],
+) -> Result<Option<DwbPublication>, DatabaseHeaderError> {
+    ensure_len(page, DB_DWB_PUBLICATION_END)?;
+    let field = &page[DB_DWB_PUBLICATION_OFFSET..DB_DWB_PUBLICATION_END];
+    if field == [0; 40] {
+        return Ok(None);
+    }
+    let phase = match read_u32(field, 0)? {
+        1 => DwbPhase::Preparing,
+        2 => DwbPhase::Ready,
+        3 => DwbPhase::Consumed,
+        _ => return Err(DatabaseHeaderError::InvalidDwbPublication),
+    };
+    let frame_bytes = read_u32(field, 4)?;
+    let digest = field[8..40].try_into().expect("fixed digest field");
+    let count = (frame_bytes as usize).checked_sub(PAGED_DWB_HEADER_SIZE);
+    if digest == [0; 32]
+        || !count.is_some_and(|bytes| {
+            bytes >= PAGED_DWB_ENTRY_SIZE
+                && bytes.is_multiple_of(PAGED_DWB_ENTRY_SIZE)
+                && frame_bytes as usize <= 64 * PAGED_PAGE_SIZE
+        })
+    {
+        return Err(DatabaseHeaderError::InvalidDwbPublication);
+    }
+    Ok(Some(DwbPublication {
+        phase,
+        frame_bytes,
+        digest,
+    }))
+}
+
+pub fn set_database_header_dwb_publication(
+    page: &mut [u8],
+    publication: Option<DwbPublication>,
+) -> Result<(), DatabaseHeaderError> {
+    ensure_len(page, DB_DWB_PUBLICATION_END)?;
+    let field = &mut page[DB_DWB_PUBLICATION_OFFSET..DB_DWB_PUBLICATION_END];
+    field.fill(0);
+    if let Some(publication) = publication {
+        write_u32(field, 0, publication.phase as u32)?;
+        write_u32(field, 4, publication.frame_bytes)?;
+        field[8..40].copy_from_slice(&publication.digest);
+        database_header_dwb_publication(page)?;
+    }
+    Ok(())
+}
 
 /// Double-write-buffer file magic: `RDDW`.
 pub const DWB_MAGIC: [u8; 4] = [0x52, 0x44, 0x44, 0x57];
@@ -613,6 +692,7 @@ pub enum DatabaseHeaderError {
     ShortPage { need: usize, got: usize },
     InvalidMagic,
     InvalidManifestReference,
+    InvalidDwbPublication,
     UnsupportedPageSize(u32),
     UnsupportedDatabaseVersion { file_version: u32, supported: u32 },
     UnsupportedRequiredCapabilities(u64),
@@ -626,6 +706,7 @@ impl fmt::Display for DatabaseHeaderError {
             }
             Self::InvalidMagic => write!(f, "invalid database header magic"),
             Self::InvalidManifestReference => write!(f, "invalid catalog generation reference"),
+            Self::InvalidDwbPublication => write!(f, "invalid DWB generation publication"),
             Self::UnsupportedPageSize(size) => write!(f, "Unsupported page size: {size}"),
             Self::UnsupportedDatabaseVersion {
                 file_version,
@@ -743,6 +824,9 @@ pub fn decode_database_header(page: &[u8]) -> Result<DatabaseHeader, DatabaseHea
         return Err(DatabaseHeaderError::UnsupportedRequiredCapabilities(
             unsupported_capabilities,
         ));
+    }
+    if required_capabilities & FILE_CAPABILITY_DWB_PUBLICATION != 0 {
+        database_header_dwb_publication(page)?;
     }
 
     Ok(DatabaseHeader {

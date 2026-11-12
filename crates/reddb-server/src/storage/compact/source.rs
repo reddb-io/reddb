@@ -120,30 +120,37 @@ impl Source {
         file.read_exact(&mut double_write)?;
         let pending_double_write =
             !reddb_engine::storage::pager_io::dwb_zone_is_clear(&double_write);
-        if pending_double_write {
+        let guarded_dwb =
+            header.required_capabilities & f::file_format::FILE_CAPABILITY_DWB_PUBLICATION != 0;
+        if pending_double_write || guarded_dwb {
             ensure(
-                allow_unified_wal,
+                allow_unified_wal || !pending_double_write,
                 "source has pending double-write recovery",
             )?;
-            let entries = f::decode_paged_dwb_frame(&double_write)?;
-            ensure(!entries.is_empty(), "empty double-write frame")?;
+            let entries = if guarded_dwb {
+                // Preparing/Consumed can safely discard an interrupted stage or
+                // clear. Ready requires the exact independently sealed image.
+                reddb_engine::storage::pager_io::read_dwb_pages(&mut f::BorrowedStdFile(&mut file))?
+            } else {
+                let entries = f::decode_paged_dwb_frame(&double_write)?;
+                ensure(!entries.is_empty(), "empty double-write frame")?;
+                entries
+                    .into_iter()
+                    .map(|entry| (entry.page_id, Page::from_bytes(entry.page)))
+                    .collect()
+            };
             let mut seen = std::collections::HashSet::new();
-            for entry in entries {
+            for (id, page) in entries {
                 ensure(
-                    entry.page_id > 0
-                        && (entry.page_id < DWB_ZONE_START_PAGE
-                            || entry.page_id >= FIRST_ALLOCATABLE_PAGE)
-                        && u64::from(entry.page_id) < bytes.div_ceil(PAGE_SIZE as u64)
-                        && seen.insert(entry.page_id),
+                    id > 0
+                        && (id < DWB_ZONE_START_PAGE || id >= FIRST_ALLOCATABLE_PAGE)
+                        && u64::from(id) < bytes.div_ceil(PAGE_SIZE as u64)
+                        && seen.insert(id),
                     "invalid double-write page ownership",
                 )?;
-                let page = Page::from_bytes(entry.page);
-                ensure(
-                    page.page_id() == entry.page_id,
-                    "double-write page identity mismatch",
-                )?;
+                ensure(page.page_id() == id, "double-write page identity mismatch")?;
                 page.page_type()?;
-                if entry.page_id != 2 {
+                if id != 2 {
                     page.verify_checksum()?;
                 }
             }

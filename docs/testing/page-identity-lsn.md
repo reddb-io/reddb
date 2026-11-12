@@ -185,8 +185,34 @@ After these ownership changes, all 51 portable engine integration cases passed i
 `cargo check --locked -p reddb-io-server -j1` also passed. The four existing atomic-API deprecation
 warnings remain outside this change.
 
-This remains a draft qualification. A complete old DWB frame still needs an end-to-end rejection
-regression and recovery-source authority before merge; a frame's own CRC is not proof of freshness.
-Legacy preparation and retirement also need their full migration/reuse journey. None of these local
+This remains a draft qualification. The DWB follow-up below supplies independent frame authority;
+a frame's own CRC is not proof of freshness. Legacy preparation and retirement still need their full
+migration/reuse journey. None of these local
 results closes the other promotion, cross-pod retry, concurrent UNIQUE rebuild, backup or multimodel
 resilience scenarios.
+
+## Independent DWB authority
+
+The new SQL counterexample stages a complete old frame for a reused MVCC page. Before the fix,
+the generation check rejected the read only after DWB replay had overwritten the home and cleared
+the evidence. The regression failed its unchanged-source assertion in 13.85 seconds.
+
+Required-capability bit 5 now binds the complete raw frame to both superblock copies through a
+length, digest and explicit phase. `Preparing` precedes staging; `Ready` precedes home writes;
+`Consumed` precedes clearing. Recovery repeats both phase fences before its own home writes or
+clearing. A valid-CRC old frame with a different independent digest fails before mutation, including
+read-only recovery. Interrupted staging and clearing are discarded only in phases where the home
+barrier permits it. See [ADR 0084](../../.red/adr/0084-independent-dwb-frame-publication.md).
+
+All 55 portable cases passed in 230.18 seconds, including four new DWB journeys: every write/fsync
+and either-superblock fallback, complete stale-frame rejection, another crash during recovery,
+and final-frame recovery without rolling back previous frames. All nine native page-integrity
+cases passed in 226.43 seconds. The interrupted recovery I/O matrix passed in 59.30 seconds with
+its injected fsync failures updated to target the actual home and clearing barriers after the new
+metadata fences. These are functional recovery tests; no benchmark lane was added.
+
+All 56 offline-compaction/recovery cases passed together in 213.32 seconds, including preserved-copy
+recovery after interrupted staging/clearing. The stale-frame native regression also passed separately
+with its explicit read-only rejection check in 12.33 seconds. The four portable DWB journeys were
+repeated with short staging-header prefixes (0, 1, 4, 5, 8, 9, 12 and 17 bytes); all passed in 9.80
+seconds. All 365 existing file-codec tests passed in 7.66 seconds.

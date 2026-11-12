@@ -829,7 +829,10 @@ fn compact_paged_inner(
     )?);
     let mut roots = BTreeMap::new();
     if source.header.required_capabilities & f::file_format::FILE_CAPABILITY_TREE_PROOFS != 0 {
-        target.fence_required_capabilities(f::file_format::FILE_CAPABILITY_TREE_PROOFS)?;
+        target.fence_required_capabilities(
+            f::file_format::FILE_CAPABILITY_TREE_PROOFS
+                | f::file_format::FILE_CAPABILITY_DWB_PUBLICATION,
+        )?;
     }
     let mut tree_proofs = f::page_proof::CatalogProofs::new();
     let mut recovered_trees = BTreeMap::new();

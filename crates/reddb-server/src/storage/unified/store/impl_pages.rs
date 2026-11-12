@@ -86,7 +86,10 @@ struct CheckpointTreeBuilder {
 impl CheckpointTreeBuilder {
     fn new(pager: &Arc<Pager>) -> Result<Self, StoreError> {
         pager
-            .fence_required_capabilities(reddb_file::file_format::FILE_CAPABILITY_TREE_PROOFS)
+            .fence_required_capabilities(
+                reddb_file::file_format::FILE_CAPABILITY_TREE_PROOFS
+                    | reddb_file::file_format::FILE_CAPABILITY_DWB_PUBLICATION,
+            )
             .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
         Ok(Self {
             tree: UnifiedStore::new_derived_btree(pager)?,

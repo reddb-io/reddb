@@ -682,6 +682,19 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                         )
                         .map_err(|error| PagerError::InvalidDatabase(error.to_string()))?;
                     }
+                    if required & reddb_file::file_format::FILE_CAPABILITY_DWB_PUBLICATION != 0
+                        && current.required_capabilities
+                            & reddb_file::file_format::FILE_CAPABILITY_DWB_PUBLICATION
+                            == 0
+                    {
+                        if !self.dwb_enabled {
+                            return Err(PagerError::InvalidDatabase(
+                                "DWB generation authority requires protected page writes".into(),
+                            ));
+                        }
+                        reddb_file::file_format::set_database_header_dwb_publication(image, None)
+                            .map_err(|error| PagerError::InvalidDatabase(error.to_string()))?;
+                    }
                     Ok(())
                 })?;
             }
@@ -1799,6 +1812,10 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         }
         // Keep the file locked through staging, home writes and clearing so
         // another page writer cannot interleave with a protected batch.
+        let _publication = self
+            .superblock_publication
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?;
         let mut file = self.file_lock()?;
         self.ensure_writeback_available()?;
         let result = pager_io::write_pages(&mut *file, pages, self.dwb_enabled);
@@ -1817,6 +1834,14 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// interrupted writing to their home locations. Re-apply them.
     fn recover_from_dwb(&self) -> Result<(), PagerError> {
         let mut file = self.file_lock()?;
+        if !self.config.read_only
+            && !self.dwb_enabled
+            && pager_io::requires_dwb_publication(&mut *file)?
+        {
+            return Err(PagerError::InvalidDatabase(
+                "DWB generation authority requires protected page writes".into(),
+            ));
+        }
         if self.config.read_only {
             for (id, page) in pager_io::read_dwb_pages(&mut *file)? {
                 // The DWB checksum seals raw bytes, which may be ciphertext.

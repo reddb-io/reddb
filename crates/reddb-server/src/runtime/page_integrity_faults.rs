@@ -93,6 +93,37 @@ fn replace_page(path: &Path, destination: u32, image: &Page) {
     file.sync_all().expect("persist fault");
 }
 
+fn authorize_current_dwb(path: &Path, frame: &[u8]) {
+    use reddb_file::{file_format as f, PAGED_SUPERBLOCK_SLOT_SIZE};
+    let bytes = std::fs::read(path).expect("fixture headers");
+    let selected = reddb_file::select_paged_superblock(&bytes).expect("valid fixture superblock");
+    let start = selected.copy_index * PAGED_SUPERBLOCK_SLOT_SIZE;
+    let mut image = [0; PAGED_SUPERBLOCK_SLOT_SIZE];
+    image.copy_from_slice(&bytes[start..start + PAGED_SUPERBLOCK_SLOT_SIZE]);
+    let authority = f::DwbPublication {
+        phase: f::DwbPhase::Ready,
+        frame_bytes: u32::try_from(frame.len()).expect("bounded fixture frame"),
+        digest: f::dwb_frame_digest(frame),
+    };
+    f::set_database_header_dwb_publication(&mut image, Some(authority))
+        .expect("known-current authority");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("fixture header writer");
+    for step in 1..=reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+        let copy = (selected.copy_index + step) % reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT;
+        reddb_file::seal_paged_superblock_slot(&mut image, copy, selected.generation + step as u64)
+            .expect("fixture header seal");
+        file.seek(SeekFrom::Start(reddb_file::paged_superblock_slot_offset(
+            copy,
+        )))
+        .expect("header offset");
+        file.write_all(&image).expect("persist fixture authority");
+        file.sync_all().expect("durable fixture authority");
+    }
+}
+
 fn assert_authoritative_read_rejected(path: &Path, reason: &str) {
     let before = std::fs::read(path).expect("preserve source evidence");
     let wal_path = reddb_file::layout::unified_wal_path(path);
@@ -108,9 +139,9 @@ fn assert_authoritative_read_rejected(path: &Path, reason: &str) {
         },
     };
     assert!(error.to_string().contains(reason), "{reason}: {error}");
-    assert_eq!(
-        std::fs::read(path).expect("unchanged corrupt source"),
-        before
+    assert!(
+        std::fs::read(path).expect("unchanged corrupt source") == before,
+        "rejected {reason} recovery changed the source evidence"
     );
     assert_eq!(std::fs::read(wal_path).expect("unchanged WAL"), wal_before);
 }
@@ -170,6 +201,7 @@ fn complete_dwb_repairs_misdirected_and_future_lsn_home_pages() {
             file.write_all(&frame).expect("stage trusted current image");
             file.sync_all().expect("durable DWB frame");
         }
+        authorize_current_dwb(&path, &frame);
         let bad = if fault == "identity" {
             collection_root(&path, "unrelated").1
         } else {
@@ -312,11 +344,57 @@ fn checksum_valid_catalog_continuation_change_is_rejected() {
 fn checksum_valid_old_image_of_reused_collection_page_is_rejected() {
     let directory = tempfile::tempdir().expect("isolated database");
     let path = directory.path().join("stale.rdb");
-    seed(&path);
-    let (old_root, old_image) = collection_root(&path, "records");
+    let (root, old_image) = reused_collection_page(&path);
+    replace_page(&path, root, &old_image);
+    assert_authoritative_read_rejected(&path, "generation");
+}
+
+#[test]
+fn complete_old_dwb_frame_is_rejected_before_changing_the_source() {
+    let directory = tempfile::tempdir().expect("isolated database");
+    let path = directory.path().join("stale-dwb.rdb");
+    let (root, old_image) = reused_collection_page(&path);
+    let frame = reddb_file::encode_paged_dwb_frame([(root, old_image.as_bytes())]);
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("DWB target");
+        file.seek(SeekFrom::Start(
+            reddb_engine::storage::pager_io::dwb_zone_offset(),
+        ))
+        .expect("DWB offset");
+        file.write_all(&frame)
+            .expect("inject complete old DWB frame");
+        file.sync_all().expect("persist old recovery image");
+    }
+    let evidence = std::fs::read(&path).expect("stale DWB evidence");
+    let error = match Pager::open(
+        &path,
+        PagerConfig {
+            read_only: true,
+            create: false,
+            disk_residency: true,
+            ..PagerConfig::default()
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("read-only recovery accepted an old frame"),
+    };
+    assert!(
+        error.to_string().contains("DWB generation authority"),
+        "{error}"
+    );
+    assert!(std::fs::read(&path).expect("read-only source") == evidence);
+    assert_authoritative_read_rejected(&path, "generation");
+}
+
+fn reused_collection_page(path: &Path) -> (u32, Page) {
+    seed(path);
+    let (old_root, old_image) = collection_root(path, "records");
     let mut previous = BTreeMap::from([(old_root, old_image)]);
     for generation in 1..=16 {
-        let runtime = open(&path).expect("healthy writer");
+        let runtime = open(path).expect("healthy writer");
         let payload = format!("committed-{generation}");
         runtime
             .execute_query(&format!(
@@ -335,7 +413,7 @@ fn checksum_valid_old_image_of_reused_collection_page_is_rejected() {
             .graceful_shutdown(false)
             .expect("publish newer generation");
         drop(runtime);
-        let (root, current) = collection_root(&path, "records");
+        let (root, current) = collection_root(path, "records");
         if let Some(old_image) = previous.insert(root, current.clone()) {
             assert_eq!(old_image.page_id(), root);
             assert_ne!(
@@ -343,9 +421,7 @@ fn checksum_valid_old_image_of_reused_collection_page_is_rejected() {
                 old_image.as_bytes(),
                 "fixture must change the page"
             );
-            replace_page(&path, root, &old_image);
-            assert_authoritative_read_rejected(&path, "generation");
-            return;
+            return (root, old_image);
         }
     }
     panic!("fixture must reuse a collection page within sixteen checkpoints");

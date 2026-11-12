@@ -65,6 +65,42 @@ fn damage_page(path: &std::path::Path, page_id: u32) {
     file.sync_all().unwrap();
 }
 
+fn authorize_fixture_dwb(
+    path: &std::path::Path,
+    frame: &[u8],
+    phase: reddb_file::file_format::DwbPhase,
+) {
+    use reddb_file::{file_format as f, PAGED_SUPERBLOCK_SLOT_SIZE};
+    use std::io::{Seek, SeekFrom, Write};
+    let bytes = std::fs::read(path).expect("fixture headers");
+    let selected = reddb_file::select_paged_superblock(&bytes).expect("valid fixture superblock");
+    let start = selected.copy_index * PAGED_SUPERBLOCK_SLOT_SIZE;
+    let mut image = [0; PAGED_SUPERBLOCK_SLOT_SIZE];
+    image.copy_from_slice(&bytes[start..start + PAGED_SUPERBLOCK_SLOT_SIZE]);
+    let authority = f::DwbPublication {
+        phase,
+        frame_bytes: u32::try_from(frame.len()).expect("bounded fixture frame"),
+        digest: f::dwb_frame_digest(frame),
+    };
+    f::set_database_header_dwb_publication(&mut image, Some(authority))
+        .expect("known-current authority");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("fixture header writer");
+    for step in 1..=reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+        let copy = (selected.copy_index + step) % reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT;
+        reddb_file::seal_paged_superblock_slot(&mut image, copy, selected.generation + step as u64)
+            .expect("fixture header seal");
+        file.seek(SeekFrom::Start(reddb_file::paged_superblock_slot_offset(
+            copy,
+        )))
+        .expect("header offset");
+        file.write_all(&image).expect("persist fixture authority");
+        file.sync_all().expect("durable fixture authority");
+    }
+}
+
 fn assert_recovered_fixture(path: &std::path::Path) {
     use reddb_server::storage::{EntityId, UnifiedStore};
     use reddb_types::Value;
@@ -110,12 +146,42 @@ fn recover_pending_double_write_repairs_only_the_staged_copy() {
         file.write_all(&frame).unwrap();
         file.sync_all().unwrap();
     }
+    authorize_fixture_dwb(&source, &frame, reddb_file::file_format::DwbPhase::Ready);
     damage_page(&source, root);
     let before = std::fs::read(&source).unwrap();
     let output = directory.path().join("recovered");
     recover_paged_wal(&source, &output).unwrap();
     assert_eq!(std::fs::read(&source).unwrap(), before);
     assert_recovered_fixture(&output.join("source.rdb"));
+    for phase in [
+        reddb_file::file_format::DwbPhase::Preparing,
+        reddb_file::file_format::DwbPhase::Consumed,
+    ] {
+        // A crash can interrupt staging before homes are eligible, or clearing
+        // after both Consumed headers. Neither phase may replay partial bytes.
+        let mut interrupted = before.clone();
+        let offset = root as usize * 16384;
+        interrupted[offset..offset + 16384].copy_from_slice(page.as_bytes());
+        let start = reddb_engine::storage::pager_io::dwb_zone_offset() as usize;
+        if phase == reddb_file::file_format::DwbPhase::Preparing {
+            interrupted[start + 17..start + frame.len()].fill(0);
+        } else {
+            let mut clear = Page::new(
+                PageType::Header,
+                reddb_engine::storage::pager_io::DWB_ZONE_START_PAGE,
+            );
+            clear.update_checksum();
+            interrupted[start..start + 17].copy_from_slice(&clear.as_bytes()[..17]);
+        }
+        let input = directory.path().join(format!("interrupted-{phase:?}.rdb"));
+        std::fs::write(&input, interrupted).expect("interrupted frame fixture");
+        authorize_fixture_dwb(&input, &frame, phase);
+        let evidence = std::fs::read(&input).expect("interrupted source evidence");
+        let output = directory.path().join(format!("recovered-{phase:?}"));
+        recover_paged_wal(&input, &output).expect("discard safely interrupted staging/clearing");
+        assert!(std::fs::read(&input).expect("source retained") == evidence);
+        assert_recovered_fixture(&output.join(input.file_name().expect("source name")));
+    }
     assert_eq!(
         u64::from(tail.page_id()) + 1,
         before.len() as u64 / 16384,
@@ -554,6 +620,12 @@ fn recover_interrupted_engine_checkpoint_from_committed_wal() {
     let combined_source = directory.path().join("combined.rdb");
     let combined_wal = reddb_file::engine_wal_path(&combined_source);
     std::fs::write(&combined_source, &combined).unwrap();
+    authorize_fixture_dwb(
+        &combined_source,
+        &frame,
+        reddb_file::file_format::DwbPhase::Ready,
+    );
+    let combined = std::fs::read(&combined_source).expect("authorized recovery fixture");
     std::fs::write(&combined_wal, &wal_before).unwrap();
     let combined_output = directory.path().join("combined-recovery");
     recover_paged_wal(&combined_source, &combined_output).unwrap();

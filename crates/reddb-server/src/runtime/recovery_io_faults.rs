@@ -125,10 +125,16 @@ fn child(path: &Path, stage: &str, fault: &str) {
             match fault {
                 "home-empty" => pager::test_fail_next_pager_write(home, 0),
                 "home-partial" => pager::test_fail_next_pager_write(home, 17),
-                "home-sync" => pager::test_fail_pager_sync_after(0),
+                // Recovery fences Ready in both superblocks before homes.
+                "home-sync" => {
+                    pager::test_fail_pager_sync_after(reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT)
+                }
                 "clear-empty" => pager::test_fail_next_pager_write(clear, 0),
                 "clear-partial" => pager::test_fail_next_pager_write(clear, 17),
-                "clear-sync" => pager::test_fail_pager_sync_after(1),
+                // Ready headers, home barrier, then Consumed headers precede clear.
+                "clear-sync" => pager::test_fail_pager_sync_after(
+                    2 * reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT + 1,
+                ),
                 _ => panic!("unknown recovery fault {fault}"),
             }
             let error = match open(path) {
