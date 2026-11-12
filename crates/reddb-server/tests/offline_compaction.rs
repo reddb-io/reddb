@@ -34,7 +34,7 @@ fn recovery_page_fixture(path: &std::path::Path) -> (u32, Page) {
         store.persist().unwrap();
     }
     let pager = Pager::open_default(path).unwrap();
-    let catalog = pager.read_page(1).unwrap();
+let catalog = pager.read_manifest_page().unwrap();
     let header = reddb_file::decode_native_paged_metadata_header(catalog.content())
         .unwrap()
         .unwrap();
@@ -178,7 +178,7 @@ fn recovery_refuses_stale_legacy_pager_wal_without_losing_newer_data() {
     let (root, old_page) = recovery_page_fixture(&source);
     {
         let pager = Arc::new(Pager::open_default(&source).unwrap());
-        let catalog = pager.read_page(1).unwrap();
+        let catalog = pager.read_manifest_page().unwrap();
         let format = reddb_file::decode_native_paged_metadata_header(catalog.content())
             .unwrap()
             .unwrap()
@@ -617,7 +617,7 @@ fn physical_wal_recovery_advances_xid_floor_for_changed_existing_root() {
         )
         .unwrap(),
     );
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
         .unwrap()
         .unwrap();
@@ -671,7 +671,7 @@ fn physical_wal_recovery_advances_xid_floor_for_changed_existing_root() {
         },
     )
     .unwrap();
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
         .unwrap()
         .unwrap();
@@ -724,7 +724,7 @@ fn physical_wal_recovery_keeps_secondary_index_consistent_with_changed_data() {
         )
         .unwrap(),
     );
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
         .unwrap()
         .unwrap();
@@ -1727,7 +1727,7 @@ fn compact_rewrites_live_records_and_preserves_source() {
         )
         .expect("reopen"),
     );
-    let page = pager.read_page(1).expect("catalog");
+    let page = pager.read_manifest_page().expect("catalog");
     let mut offset = reddb_file::METADATA_HEADER_BYTES;
     let root =
         reddb_file::decode_native_paged_collection_root(page.content(), &mut offset).expect("root");
@@ -1820,7 +1820,7 @@ fn scrub_paged_trees_reports_corruption_without_changing_source() {
     fixture(&source);
     {
         let pager = Arc::new(Pager::open_default(&source).expect("open source"));
-        let catalog = pager.read_page(1).expect("catalog");
+        let catalog = pager.read_manifest_page().expect("catalog");
         let mut offset = reddb_file::METADATA_HEADER_BYTES;
         let first = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
             .expect("first root");
@@ -1858,7 +1858,7 @@ fn scrub_paged_trees_reports_corruption_without_changing_source() {
     assert_eq!(std::fs::read(&source).expect("preserved image"), before);
 
     let pager = Pager::open_default(&source).expect("open source");
-    let catalog = pager.read_page(1).expect("catalog");
+    let catalog = pager.read_manifest_page().expect("catalog");
     let mut offset = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
         .expect("root")
@@ -2116,7 +2116,7 @@ fn salvage_authenticates_vault_before_and_after_relocation() {
         .kv
         .insert("red.secret.large".into(), "private-secret".repeat(9000));
     vault.save(&pager, &state).unwrap();
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
         .unwrap()
         .unwrap();
@@ -2280,7 +2280,7 @@ fn salvage_preserves_healthy_collection_and_reports_lost_data_page() {
         },
     )
     .unwrap();
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let header = reddb_file::decode_native_paged_metadata_header(catalog.content())
         .unwrap()
         .unwrap();
@@ -2343,15 +2343,12 @@ fn salvage_preserves_healthy_collection_and_reports_lost_data_page() {
         )
         .expect("open fenced result read-only"),
     );
-    assert_eq!(
-        pager.header().unwrap().version,
-        reddb_file::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION
-    );
+    assert!(pager.header().unwrap().is_recovery_read_only());
     assert!(
         reddb_file::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION
             > reddb_file::file_format::PAGE_SECONDARY_INDEX_FILE_VERSION
     );
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let header = reddb_file::decode_native_paged_metadata_header(catalog.content())
         .unwrap()
         .unwrap();
@@ -2436,7 +2433,7 @@ fn collection_salvage_refuses_a_damaged_interior_root() {
     let source = directory.path().join("source.rdb");
     fixture(&source);
     let pager = Pager::open_default(&source).unwrap();
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let mut pos = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut pos)
         .unwrap()
@@ -2478,7 +2475,7 @@ fn salvage_recovers_readable_leaves_of_a_multi_page_collection() {
     compact_paged(&initial, &compacted).unwrap();
     let source = compacted.join("source.rdb");
     let pager = Arc::new(Pager::open_default(&source).unwrap());
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let mut offset = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
         .unwrap()
@@ -2554,7 +2551,7 @@ fn salvage_recovers_readable_leaves_of_a_multi_page_collection() {
         )
         .unwrap(),
     );
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let mut offset = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
         .unwrap()
@@ -2618,7 +2615,7 @@ fn salvage_recovers_tree_with_multiple_interior_levels() {
     compact_paged(&source, &compacted).unwrap();
     let source = compacted.join("deep.rdb");
     let pager = Arc::new(Pager::open_default(&source).unwrap());
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let mut offset = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
         .unwrap()
@@ -2675,7 +2672,7 @@ fn salvage_recovers_tree_with_multiple_interior_levels() {
         )
         .unwrap(),
     );
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let mut offset = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
         .unwrap()
@@ -2699,7 +2696,7 @@ fn collection_salvage_refuses_catalog_cross_references() {
     let source = directory.path().join("source.rdb");
     fixture(&source);
     let pager = Pager::open_default(&source).unwrap();
-    let page = pager.read_page(1).unwrap();
+    let page = pager.read_manifest_page().unwrap();
     let mut pos = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(page.content(), &mut pos).unwrap();
     let mut metadata = Vec::new();
@@ -2734,7 +2731,7 @@ fn collection_salvage_never_discards_damaged_system_collections() {
     let source = directory.path().join("source.rdb");
     fixture(&source);
     let pager = Pager::open_default(&source).unwrap();
-    let page = pager.read_page(1).unwrap();
+    let page = pager.read_manifest_page().unwrap();
     let mut pos = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(page.content(), &mut pos)
         .unwrap()
@@ -2999,7 +2996,7 @@ fn salvage_rebuilds_corrupt_secondary_index_from_verified_rows() {
     let healthy = scrub_paged(&source).expect("physical scrub");
     assert!(healthy.assets_verified);
     assert!(healthy.trees.findings.is_empty());
-    let catalog = pager.read_page(1).expect("catalog");
+    let catalog = pager.read_manifest_page().expect("catalog");
     let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
         .expect("decode catalog")
         .expect("resume");
@@ -3098,7 +3095,7 @@ fn salvage_rebuilds_corrupt_secondary_index_from_verified_rows() {
                 },
             )
             .expect("read recovered catalog");
-            let page = pager.read_page(1).expect("catalog");
+            let page = pager.read_manifest_page().expect("catalog");
             let resume = reddb_file::native_resume::decode_catalog_resume(page.content())
                 .unwrap()
                 .expect("resume");
@@ -3251,7 +3248,7 @@ fn salvage_rebuilds_a_multi_page_secondary_index_after_leaf_damage() {
         )
         .unwrap(),
     );
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
         .unwrap()
         .unwrap();
@@ -3392,7 +3389,7 @@ fn compact_rejects_unknown_catalog_extension_and_preserves_bytes() {
     fixture(&source);
     {
         let pager = Pager::open_default(&source).expect("pager");
-        let mut page = pager.read_page(1).expect("catalog");
+        let mut page = pager.read_manifest_page().expect("catalog");
         page.content_mut()[28..32].copy_from_slice(b"FUTR");
         pager.write_page(1, page).expect("future catalog extension");
         pager.sync().expect("sync");
@@ -3537,7 +3534,7 @@ fn compact_repairs_historical_backlinks_but_refuses_forward_omissions() {
         fixture(&source);
         {
             let pager = Arc::new(Pager::open_default(&source).expect("pager"));
-            let page = pager.read_page(1).expect("catalog");
+            let page = pager.read_manifest_page().expect("catalog");
             let mut offset = reddb_file::METADATA_HEADER_BYTES;
             let root = reddb_file::decode_native_paged_collection_root(page.content(), &mut offset)
                 .expect("root");
@@ -3571,7 +3568,7 @@ fn compact_repairs_historical_backlinks_but_refuses_forward_omissions() {
                 .contains("\"repaired_leaf_backlinks\":1"));
             let pager =
                 Arc::new(Pager::open_default(destination.join("source.rdb")).expect("reopen"));
-            let page = pager.read_page(1).expect("catalog");
+            let page = pager.read_manifest_page().expect("catalog");
             let mut offset = reddb_file::METADATA_HEADER_BYTES;
             let root = reddb_file::decode_native_paged_collection_root(page.content(), &mut offset)
                 .expect("root");

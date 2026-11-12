@@ -985,10 +985,13 @@ fn compact_paged_inner(
     }
     catalog::write_catalog(&target, &catalog.encode(&roots)?)?;
     target.update_physical_header(physical)?;
-    if source.header.required_capabilities != 0 {
-        target.fence_required_capabilities(source.header.required_capabilities)?;
+    let capabilities = (source.header.required_capabilities
+        & !f::file_format::FILE_CAPABILITY_RECOVERY_READ_ONLY)
+        | if source.header.requires_disk_residency() { f::FILE_CAPABILITY_DISK_RESIDENCY } else { 0 };
+    if capabilities != 0 {
+        target.fence_required_capabilities(capabilities)?;
     }
-    target.fence_file_format_version(source.header.version)?;
+    target.fence_file_format_version(source.header.version.max(target.header()?.version))?;
     target.sync()?;
     // Preserve source schema/LSN, but retain the newly allocated page boundary.
     for _ in 0..2 {
@@ -1003,20 +1006,10 @@ fn compact_paged_inner(
             })
         })?;
     }
-    if lost_collections.is_some() {
+    if lost_collections.is_some() || source.header.is_recovery_read_only() {
         // Both copies must be fenced before the recovered filename is published.
         // Old engines reject this newer version; this engine admits it read-only.
-        for _ in 0..2 {
-            target.commit_superblock(|slot| {
-                f::set_database_header_version(
-                    slot,
-                    f::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION,
-                )
-                .map_err(|error| {
-                    reddb_engine::storage::pager::PagerError::InvalidDatabase(error.to_string())
-                })
-            })?;
-        }
+        target.fence_required_capabilities(f::file_format::FILE_CAPABILITY_RECOVERY_READ_ONLY)?;
     }
     let assets_verification = assets.into_verification();
     drop(target);

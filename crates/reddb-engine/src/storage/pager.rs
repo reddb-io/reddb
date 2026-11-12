@@ -464,8 +464,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let (_, image) = self.newest_superblock()?;
         let header = reddb_file::decode_database_header(&image)
             .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
-        if header.version == reddb_file::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION
-            && !self.config.read_only
+        if header.is_recovery_read_only() && !self.config.read_only
         {
             return Err(PagerError::InvalidDatabase(
                 "recovered database is read-only; export verified data into a new store".into(),
@@ -635,7 +634,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         }
 
         let current = self.header_read()?.clone();
-        if current.version == reddb_file::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION {
+        if current.is_recovery_read_only() {
             return Err(PagerError::InvalidDatabase(
                 "recovery read-only format cannot enable capabilities".into(),
             ));
