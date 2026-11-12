@@ -827,10 +827,12 @@ fn disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry() {
                     .expect("space restored and WAL recovered");
                 assert_rows(&runtime, true);
                 runtime.checkpoint().expect("checkpoint recovered state");
-                assert!(runtime
-                    .verify_persisted_indexes("disk_full_rows")
-                    .expect("index integrity")
-                    .is_empty());
+                if bounded {
+                    assert!(runtime
+                        .verify_persisted_indexes("disk_full_rows")
+                        .expect("index integrity")
+                        .is_empty());
+                }
             }
             let runtime = open(path.clone(), mode, bounded);
             assert_rows(&runtime, true);

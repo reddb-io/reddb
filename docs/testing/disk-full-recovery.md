@@ -24,8 +24,9 @@ single-row and multi-row INSERTs after zero or 17 bytes. It checks reads and rej
 another write and checkpoint in the failed process. After dropping the runtime
 and exiting the child process, cold recovery
 must retain the confirmed update and exclude the incomplete INSERT. Retrying on
-the reopened database, checkpointing, checking persisted index completeness and
-reopening again must preserve the exact rows.
+the reopened database, checkpointing and reopening again must preserve the exact
+rows. The disk-backed cases also run the persisted index completeness verifier;
+both factories exercise cold HASH and BTREE queries before an unindexed scan.
 Failed insert publication also removes the staged resident rows: a live scan
 must not see an INSERT which returned a WAL error.
 
