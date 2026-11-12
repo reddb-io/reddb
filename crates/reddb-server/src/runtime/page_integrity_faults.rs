@@ -1,6 +1,7 @@
 //! A valid CRC must not authorize a misdirected page or an unproven WAL LSN.
 use super::*;
 use crate::storage::engine::{Page, PageType, Pager, PagerConfig, PAGE_SIZE};
+use std::collections::BTreeMap;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -196,4 +197,47 @@ fn checksum_valid_future_page_lsn_is_rejected() {
     image.update_checksum();
     replace_page(&path, root, &image);
     assert_authoritative_read_rejected(&path, "LSN");
+}
+
+#[test]
+fn checksum_valid_old_image_of_reused_collection_page_is_rejected() {
+    let directory = tempfile::tempdir().expect("isolated database");
+    let path = directory.path().join("stale.rdb");
+    seed(&path);
+    let (old_root, old_image) = collection_root(&path, "records");
+    let mut previous = BTreeMap::from([(old_root, old_image)]);
+    for generation in 1..=16 {
+        let runtime = open(&path).expect("healthy writer");
+        let payload = format!("committed-{generation}");
+        runtime
+            .execute_query(&format!(
+                "UPDATE records SET payload = '{payload}' WHERE id = 1"
+            ))
+            .expect("committed MVCC update");
+        let updated = runtime
+            .execute_query("SELECT payload FROM records WHERE id = 1")
+            .expect("updated HASH lookup");
+        assert_eq!(updated.result.records.len(), 1);
+        assert_eq!(
+            updated.result.records[0].get("payload"),
+            Some(&Value::text(&payload))
+        );
+        runtime
+            .graceful_shutdown(false)
+            .expect("publish newer generation");
+        drop(runtime);
+        let (root, current) = collection_root(&path, "records");
+        if let Some(old_image) = previous.insert(root, current.clone()) {
+            assert_eq!(old_image.page_id(), root);
+            assert_ne!(
+                current.as_bytes(),
+                old_image.as_bytes(),
+                "fixture must change the page"
+            );
+            replace_page(&path, root, &old_image);
+            assert_authoritative_read_rejected(&path, "generation");
+            return;
+        }
+    }
+    panic!("fixture must reuse a collection page within sixteen checkpoints");
 }
