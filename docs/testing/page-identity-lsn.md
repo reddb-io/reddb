@@ -50,3 +50,50 @@ misdirected/lost-write fault model in [ADR 0074](../../.red/adr/0074-storage-fau
 
 Resource sketch: identity adds one integer comparison after a disk read; nonzero LSNs additionally
 consult a durable boundary. Neither path scans the database or allocates a page inventory.
+
+## Generation proof implementation in progress
+
+The follow-up adds an authenticated page map to the shared B-tree. Its persisted byte contract is
+owned by `reddb-file::page_proof`; `BTree::new_verified` and `with_verified_root` route point reads,
+cursors and overflow through the same membership and full-image digest check. The independent
+`PageProofRoot` must be published with the data root. A page's own CRC or local generation stamp
+does not supply that authority.
+
+The map has four fixed radix levels over the physical page ID. An update retains four compact
+references, then writes bottom-up. The first change after a seal copies the affected proof path;
+later changes use that generation's private nodes. A host must enable deferred reclamation so the
+previous published paths cannot be reused before publication. A failed mutation or rejected read
+fences that tree against further access and sealing; it cannot bless the suspect image.
+
+The engine journey creates an interior tree, changes an existing row, appends across leaves and
+stores an incompressible overflow value. It cold-opens the sealed pair, checks exact values through
+point reads before a complete ordered cursor, then substitutes valid-CRC old leaf/interior images
+and modified overflow/proof-node images. Every case must reject the read and preserve the source.
+A complete known-current DWB image must restore the expected page and survive another cold reopen.
+The test also checks that an unchanged page remains readable through the prior proof path after a
+copy-on-first-mutation update. This is a proof-path preservation check, not MVCC over mutable pages.
+
+```console
+cargo test --locked -p reddb-io-engine --test portable page_proofs_cover -- --test-threads=1
+```
+
+The SQL runtime still constructs legacy trees. The reproduced SQL counterexample therefore remains
+unfixed until integration completes. Required publication work remains:
+
+- Persist and restore the exact proof descriptor for every live data, key and secondary tree,
+  together with retained retired trees; empty trees must not orphan their proof nodes.
+- Bind the catalog's own image to independent durable authority. Storing expected hashes inside
+  an old but self-consistent catalog does not establish the current generation.
+- Fence the new required reader capability in both superblocks before dependent bytes, while
+  preserving legacy compatibility and bounded startup/preparation.
+- Resolve interrupted proof/catalog publication through the existing WAL ownership and before-image
+  protocol. Validate the recovery source before consuming evidence; an old complete DWB frame must
+  not acquire authority from its own CRC.
+- Make the existing SQL rejection test pass, retain positive HASH/BTREE/scan and UNIQUE behavior,
+  and qualify crash, I/O-failure, retirement and reopen boundaries before merge.
+
+Resource sketch for the new map: at most four proof-page reads plus the requested data page, all
+using the existing bounded pager cache; no resident page-to-hash inventory. The four compact path
+references are under 200 bytes. A populated tree initially needs four 16-KiB proof nodes. Dense leaf
+nodes store 32 bytes per protected page, before sparse-node and copy-on-write overhead. Full-image
+hashing covers up to 80 KiB per verified read; cold start does not scan data to rebuild proofs.
