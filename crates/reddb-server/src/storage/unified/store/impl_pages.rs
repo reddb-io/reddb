@@ -1059,6 +1059,14 @@ impl UnifiedStore {
         self.pager.as_ref()
     }
 
+    pub(crate) fn ensure_pager_writeback_available(&self) -> Result<(), StoreError> {
+        self.pager.as_ref().map_or(Ok(()), |pager| {
+            pager
+                .check_writeback_available()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))
+        })
+    }
+
     pub(crate) fn is_read_only(&self) -> bool {
         self.pager
             .as_ref()
@@ -2398,6 +2406,7 @@ impl UnifiedStore {
         if self.is_read_only() {
             return Ok(());
         }
+        self.ensure_pager_writeback_available()?;
         let _vault_guard = self.vault_publication_lock.lock();
         let pending_vault_versions = self.pending_vault_versions.read();
         let pager = match &self.pager {
