@@ -223,11 +223,16 @@ intact until resolved data can be applied. Forced checkout clears the workset's
 pending pointer; it does not remove the recorded merge state or conflicts.
 For versioned graphs, fast-forward merges with differing visible graph versions
 and clean divergent merges with source-side graph changes are rejected until
-graph data application exists. Some graph inserts lack an MVCC creation stamp
-and appear in all snapshots. When such entities exist, merges between different
+graph data application exists. Graph entities written before versioning was
+enabled or by older builds can lack an MVCC creation stamp and appear in all
+snapshots. When such entities exist, merges between different
 commits are conservatively rejected even when the graph did not change. An
 update followed by a revert may also be rejected. This guard does not provide
 branch isolation or implement graph merges.
+
+Versioned graph inserts publish their creation xid with the entity and make it
+visible to MVCC-aware readers after the captured WAL batch. Native entity and
+collection reads do not yet apply graph MVCC visibility.
 
 ### materialize_merge_conflicts
 

@@ -138,6 +138,10 @@ impl NodeBuilder {
 
     /// Save the node and return its ID
     pub fn save(self) -> Result<EntityId, DevXError> {
+        self.save_with_xmin(None)
+    }
+
+    pub(crate) fn save_with_xmin(self, xmin: Option<u64>) -> Result<EntityId, DevXError> {
         // Create the node entity
         let kind = EntityKind::GraphNode(Box::new(GraphNodeKind {
             label: self.label,
@@ -149,6 +153,9 @@ impl NodeBuilder {
         let id = self.store.next_entity_id();
 
         let mut entity = UnifiedEntity::new(id, kind, data);
+        if let Some(xmin) = xmin {
+            entity.set_xmin(xmin);
+        }
 
         // Add embeddings
         for (name, vector, model) in self.embeddings {
@@ -186,6 +193,9 @@ impl NodeBuilder {
             let edge_data = EntityData::Edge(EdgeData::new(weight));
             let edge_id = self.store.next_entity_id();
             let mut edge_entity = UnifiedEntity::new(edge_id, edge_kind, edge_data);
+            if let Some(xmin) = xmin {
+                edge_entity.set_xmin(xmin);
+            }
 
             // Add cross-refs for fast traversal
             edge_entity.add_cross_ref(CrossRef::new(
@@ -288,6 +298,10 @@ impl EdgeBuilder {
 
     /// Save the edge
     pub fn save(self) -> Result<EntityId, DevXError> {
+        self.save_with_xmin(None)
+    }
+
+    pub(crate) fn save_with_xmin(self, xmin: Option<u64>) -> Result<EntityId, DevXError> {
         let from = self
             .from_node
             .ok_or_else(|| DevXError::Validation("Edge requires 'from' node".into()))?;
@@ -308,6 +322,9 @@ impl EdgeBuilder {
         let id = self.store.next_entity_id();
 
         let mut entity = UnifiedEntity::new(id, kind, EntityData::Edge(edge_data));
+        if let Some(xmin) = xmin {
+            entity.set_xmin(xmin);
+        }
 
         // Add cross-refs for bidirectional traversal
         entity.add_cross_ref(CrossRef::new(

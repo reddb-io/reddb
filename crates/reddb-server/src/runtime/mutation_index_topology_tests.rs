@@ -15,6 +15,273 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const BLOCKING_PROBE: Duration = Duration::from_millis(100);
 
 #[test]
+fn graph_autocommit_snapshot_excludes_insert_before_wal_publication() {
+    use crate::application::vcs::{Author, CreateCommitInput};
+    use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+
+    let runtime = RedDBRuntime::in_memory().unwrap();
+    set_current_connection_id(89001);
+    runtime
+        .execute_query("CREATE GRAPH graph_publication")
+        .unwrap();
+    runtime
+        .vcs_set_versioned("graph_publication", true)
+        .unwrap();
+    let (published_send, published_receive) = mpsc::channel();
+    let (release_send, release_receive) = mpsc::channel();
+    let release_receive = Mutex::new(release_receive);
+    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
+        if collection == "graph_publication" && phase == MutationTestPhase::StoragePublished {
+            published_send.send(()).unwrap();
+            release_receive
+                .lock()
+                .unwrap()
+                .recv_timeout(TIMEOUT)
+                .unwrap();
+        }
+    }));
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            set_current_connection_id(89002);
+            let result = runtime.execute_query(
+                "INSERT INTO graph_publication NODE (label, node_type, score) VALUES ('later', 'person', 2)",
+            );
+            clear_current_connection_id();
+            result
+        });
+        published_receive.recv_timeout(TIMEOUT).unwrap();
+        let snapshot = runtime
+            .vcs_commit(CreateCommitInput {
+                connection_id: 89001,
+                message: "during insert".into(),
+                author: Author {
+                    name: "test".into(),
+                    email: "test@reddb.io".into(),
+                },
+                committer: None,
+                amend: false,
+                allow_empty: true,
+            })
+            .unwrap();
+        release_send.send(()).unwrap();
+        writer.join().unwrap().unwrap();
+        let result = runtime
+            .execute_query(&format!(
+                "SELECT score FROM graph_publication AS OF COMMIT '{}' WHERE label = 'later'",
+                snapshot.hash
+            ))
+            .unwrap();
+        assert!(result.result.records.is_empty());
+        assert_eq!(
+            runtime
+                .execute_query("SELECT score FROM graph_publication WHERE label = 'later'")
+                .unwrap()
+                .result
+                .records
+                .len(),
+            1
+        );
+    });
+    *runtime.index_store_ref().mutation_hook.lock() = None;
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_autocommit_wal_failure_hides_insert_after_recovery() {
+    use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+    use crate::RedDBOptions;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph-failed-insert.rdb");
+    {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).unwrap();
+        set_current_connection_id(89003);
+        runtime
+            .execute_query("CREATE GRAPH graph_failed_insert")
+            .unwrap();
+        runtime
+            .vcs_set_versioned("graph_failed_insert", true)
+            .unwrap();
+        runtime
+            .db()
+            .store()
+            .test_fail_deferred_wal_append
+            .store(true, Ordering::SeqCst);
+        let error = runtime.execute_query(
+            "INSERT INTO graph_failed_insert NODE (label, node_type) VALUES ('failed', 'person')",
+        ).expect_err("WAL failure must fail the insertion");
+        assert!(error
+            .to_string()
+            .contains("injected deferred WAL append failure"));
+        assert!(runtime
+            .execute_query("SELECT * FROM graph_failed_insert WHERE label = 'failed'")
+            .unwrap()
+            .result
+            .records
+            .is_empty());
+        assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
+        runtime.checkpoint().unwrap();
+        clear_current_connection_id();
+    }
+    let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).unwrap();
+    set_current_connection_id(89003);
+    assert!(runtime
+        .execute_query("SELECT * FROM graph_failed_insert WHERE label = 'failed'")
+        .unwrap()
+        .result
+        .records
+        .is_empty());
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_autocommit_joins_existing_wal_capture() {
+    let runtime = RedDBRuntime::in_memory().unwrap();
+    runtime
+        .execute_query("CREATE GRAPH graph_nested_capture")
+        .unwrap();
+    runtime
+        .vcs_set_versioned("graph_nested_capture", true)
+        .unwrap();
+    runtime.execute_query("SET CONFIG runtime.result_cache.enabled = true").unwrap();
+    let query = "SELECT * FROM graph_nested_capture WHERE label = 'nested'";
+    assert!(runtime.execute_query(query).unwrap().result.records.is_empty());
+    assert!(runtime.execute_query(query).unwrap().result.records.is_empty());
+    runtime
+        .with_deferred_store_wal_for_dml(true, || {
+            let result = runtime.execute_query(
+                "INSERT INTO graph_nested_capture NODE (label, node_type) VALUES ('nested', 'person')",
+            );
+            let xid = runtime.graph_insert_xid().expect("graph writer joins the outer capture");
+            assert!(runtime.snapshot_manager().is_active(xid));
+            assert_eq!(
+                runtime.execute_query(query)
+                    .unwrap().result.records.len(),
+                1,
+                "the owning statement can read its graph insertion before publication"
+            );
+            result
+        })
+        .unwrap();
+    assert!(runtime.graph_insert_xid().is_none());
+    assert_eq!(
+        runtime
+            .execute_query(query)
+            .unwrap()
+            .result
+            .records
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn graph_autocommit_outer_wal_failure_rolls_back_graph_writer() {
+    let runtime = RedDBRuntime::in_memory().unwrap();
+    runtime
+        .execute_query("CREATE GRAPH graph_outer_failure")
+        .unwrap();
+    runtime
+        .vcs_set_versioned("graph_outer_failure", true)
+        .unwrap();
+    runtime
+        .db()
+        .store()
+        .test_fail_deferred_wal_append
+        .store(true, Ordering::SeqCst);
+    let error = runtime
+        .with_deferred_store_wal_for_dml(true, || {
+            runtime.execute_query(
+            "INSERT INTO graph_outer_failure NODE (label, node_type) VALUES ('failed', 'person')",
+        )
+        })
+        .expect_err("outer WAL failure must roll back the graph writer");
+    assert!(error
+        .to_string()
+        .contains("injected deferred WAL append failure"));
+    assert!(runtime.graph_insert_xid().is_none());
+    assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
+    assert!(runtime
+        .execute_query("SELECT * FROM graph_outer_failure WHERE label = 'failed'")
+        .unwrap()
+        .result
+        .records
+        .is_empty());
+    runtime
+        .execute_query(
+            "INSERT INTO graph_outer_failure NODE (label, node_type) VALUES ('retry', 'person')",
+        )
+        .unwrap();
+    assert_eq!(
+        runtime
+            .execute_query("SELECT * FROM graph_outer_failure WHERE label = 'retry'")
+            .unwrap()
+            .result
+            .records
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn graph_autocommit_rejects_another_connections_wal_capture() {
+    use crate::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
+    let runtime = RedDBRuntime::in_memory().unwrap();
+    set_current_connection_id(89004);
+    runtime
+        .execute_query("CREATE GRAPH graph_other_connection")
+        .unwrap();
+    runtime
+        .vcs_set_versioned("graph_other_connection", true)
+        .unwrap();
+    let error = runtime
+        .with_deferred_store_wal_for_dml(true, || {
+            set_current_connection_id(89005);
+            let result = runtime.execute_query(
+            "INSERT INTO graph_other_connection NODE (label, node_type) VALUES ('other', 'person')",
+        );
+            set_current_connection_id(89004);
+            result
+        })
+        .expect_err("a connection must not use another connection's WAL capture");
+    assert!(error.to_string().contains("unrelated WAL capture"));
+    assert!(runtime
+        .execute_query("SELECT * FROM graph_other_connection WHERE label = 'other'")
+        .unwrap()
+        .result
+        .records
+        .is_empty());
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_transaction_can_join_existing_wal_capture() {
+    let runtime = RedDBRuntime::in_memory().unwrap();
+    runtime
+        .execute_query("CREATE GRAPH graph_nested_transaction")
+        .unwrap();
+    runtime
+        .vcs_set_versioned("graph_nested_transaction", true)
+        .unwrap();
+    runtime.execute_query("BEGIN").unwrap();
+    runtime.with_deferred_store_wal_for_dml(true, || {
+        runtime.execute_query(
+            "INSERT INTO graph_nested_transaction NODE (label, node_type) VALUES ('nested', 'person')",
+        )
+    }).unwrap();
+    runtime.execute_query("COMMIT").unwrap();
+    assert_eq!(
+        runtime
+            .execute_query("SELECT * FROM graph_nested_transaction WHERE label = 'nested'")
+            .unwrap()
+            .result
+            .records
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn native_insert_keeps_indexed_reads_visible_during_publication() {
     let runtime = RedDBRuntime::in_memory().expect("runtime");
     seed(&runtime, "table");

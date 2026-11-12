@@ -1758,6 +1758,17 @@ fn ensure_non_tree_structural_edge_label(label: &str) -> RedDBResult<()> {
 impl RedDBRuntime {
     pub(crate) fn create_node_unchecked(
         &self,
+        input: CreateNodeInput,
+    ) -> RedDBResult<CreateEntityOutput> {
+        if self.vcs_is_versioned(&input.collection)? {
+            self.with_versioned_graph_insert(|| self.create_node_unchecked_inner(input))
+        } else {
+            self.create_node_unchecked_inner(input)
+        }
+    }
+
+    fn create_node_unchecked_inner(
+        &self,
         mut input: CreateNodeInput,
     ) -> RedDBResult<CreateEntityOutput> {
         self.check_collection_privilege(reddb_rql::ast::PolicyAction::Insert, &input.collection)?;
@@ -1818,10 +1829,7 @@ impl RedDBRuntime {
             builder = builder.link_to_weighted(link.target, link.edge_label, link.weight);
         }
 
-        let id = builder.save()?;
-        // Phase 1.1 MVCC universal: stamp xmin so concurrent snapshots
-        // don't see this node until the transaction commits.
-        self.stamp_xmin_if_in_txn(&input.collection, id);
+        let id = builder.save_with_xmin(self.current_xid().or_else(|| self.graph_insert_xid()))?;
         refresh_context_index(&db, &input.collection, id)?;
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
@@ -1836,6 +1844,17 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn create_edge_unchecked(
+        &self,
+        input: CreateEdgeInput,
+    ) -> RedDBResult<CreateEntityOutput> {
+        if self.vcs_is_versioned(&input.collection)? {
+            self.with_versioned_graph_insert(|| self.create_edge_unchecked_inner(input))
+        } else {
+            self.create_edge_unchecked_inner(input)
+        }
+    }
+
+    fn create_edge_unchecked_inner(
         &self,
         mut input: CreateEdgeInput,
     ) -> RedDBResult<CreateEntityOutput> {
@@ -1884,10 +1903,7 @@ impl RedDBRuntime {
             builder = builder.metadata(key, value);
         }
 
-        let id = builder.save()?;
-        // Phase 1.1 MVCC universal: stamp xmin on the edge so other
-        // sessions don't follow it until COMMIT.
-        self.stamp_xmin_if_in_txn(&input.collection, id);
+        let id = builder.save_with_xmin(self.current_xid().or_else(|| self.graph_insert_xid()))?;
         refresh_context_index(&db, &input.collection, id)?;
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,

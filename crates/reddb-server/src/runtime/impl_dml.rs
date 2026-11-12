@@ -443,6 +443,14 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &InsertQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.with_graph_insert_for_dml(query, || self.execute_insert_inner(raw_query, query))
+    }
+
+    fn execute_insert_inner(
+        &self,
+        raw_query: &str,
+        query: &InsertQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
@@ -1343,6 +1351,7 @@ impl RedDBRuntime {
                     }
                 }
                 let batch_result = batch
+                    .with_graph_xmin(self.current_xid().or_else(|| self.graph_insert_xid()))
                     .execute()
                     .map_err(|err| RedDBError::Internal(format!("{err:?}")))?;
                 let (ids, entity_kind) = match query.entity_type {
@@ -1350,9 +1359,11 @@ impl RedDBRuntime {
                     InsertEntityType::Edge => (batch_result.edges, "graph_edge"),
                     _ => unreachable!("prepared graph insert only handles NODE and EDGE"),
                 };
-                for id in &ids {
-                    self.stamp_xmin_if_in_txn(&query.table, *id);
-                }
+                #[cfg(test)]
+                self.index_store_ref().mutation_test_hook(
+                    &query.table,
+                    super::index_store::MutationTestPhase::StoragePublished,
+                );
                 if !graph_index_fields.is_empty() {
                     let index_rows: Vec<_> = ids
                         .iter()

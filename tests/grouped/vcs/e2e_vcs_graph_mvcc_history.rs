@@ -17,11 +17,12 @@
 use std::sync::Arc;
 
 use reddb::application::{
-    Author, CheckoutInput, CheckoutTarget, CreateBranchInput, CreateCommitInput, CreateTagInput,
-    DiffChange, DiffInput, MergeInput, MergeOpts, StatusInput, VcsUseCases,
+    Author, CheckoutInput, CheckoutTarget, CreateBranchInput, CreateCommitInput, CreateEdgeInput,
+    CreateNodeInput, CreateTagInput, DiffChange, DiffInput, MergeInput, MergeOpts, StatusInput,
+    VcsUseCases,
 };
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
-use reddb::{RedDBOptions, RedDBRuntime};
+use reddb::{EntityUseCases, RedDBOptions, RedDBRuntime};
 use reddb_types::Value;
 
 fn rt() -> Arc<RedDBRuntime> {
@@ -186,6 +187,39 @@ fn graph_branch_checkout_isolates_writes_from_main() {
         live_score(&rt, "graph_branch_isolation", "agent-node"),
         None
     );
+    clear_current_connection_id();
+}
+
+#[test]
+#[ignore = "native entity and collection reads do not yet apply graph MVCC visibility"]
+fn graph_native_entity_reads_hide_pending_writes() {
+    let rt = rt();
+    set_current_connection_id(70028);
+    rt.execute_query("CREATE GRAPH graph_native_visibility")
+        .unwrap();
+    vcs(&rt)
+        .set_versioned("graph_native_visibility", true)
+        .unwrap();
+    rt.execute_query("BEGIN").unwrap();
+    let pending = insert_node(&rt, "graph_native_visibility", "pending", 2);
+
+    set_current_connection_id(70029);
+    let entity = rt
+        .get_collection_entity(
+            "graph_native_visibility",
+            reddb::storage::EntityId::new(pending),
+        )
+        .unwrap();
+    let page = rt
+        .scan_collection("graph_native_visibility", None, 10)
+        .unwrap();
+    assert!(entity.is_none(), "point read exposed an uncommitted node");
+    assert!(
+        page.items.is_empty(),
+        "collection scan exposed an uncommitted node"
+    );
+    set_current_connection_id(70028);
+    rt.execute_query("ROLLBACK").unwrap();
     clear_current_connection_id();
 }
 
@@ -374,7 +408,6 @@ fn graph_commit_excludes_transactions_still_open_at_checkpoint() {
 }
 
 #[test]
-#[ignore = "autocommit graph inserts lack a creation xid and appear in older snapshots"]
 fn graph_autocommit_insert_is_absent_from_earlier_checkpoint() {
     let rt = rt();
     let conn = 70020;
@@ -391,6 +424,374 @@ fn graph_autocommit_insert_is_absent_from_earlier_checkpoint() {
         as_of_score(&rt, "graph_insert_history", "later", &before),
         None
     );
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_autocommit_insert_invalidates_cached_reads() {
+    let rt = rt();
+    set_current_connection_id(70030);
+    rt.execute_query("SET CONFIG runtime.result_cache.enabled = true").unwrap();
+    rt.execute_query("CREATE GRAPH graph_insert_cache").unwrap();
+    vcs(&rt).set_versioned("graph_insert_cache", true).unwrap();
+    assert_eq!(live_score(&rt, "graph_insert_cache", "later"), None);
+    assert_eq!(live_score(&rt, "graph_insert_cache", "later"), None);
+    insert_node(&rt, "graph_insert_cache", "later", 2);
+    assert_eq!(live_score(&rt, "graph_insert_cache", "later"), Some(2));
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_autocommit_node_and_edge_history_survives_reopen() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("graph-insert.rdb");
+    let conn = 70021;
+    let before;
+    let after;
+    {
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime");
+        set_current_connection_id(conn);
+        rt.execute_query("CREATE GRAPH graph_insert_reopen")
+            .unwrap();
+        vcs(&rt).set_versioned("graph_insert_reopen", true).unwrap();
+        let first = insert_node(&rt, "graph_insert_reopen", "first", 1);
+        before = commit(&rt, conn, "before insert");
+        let second = insert_node(&rt, "graph_insert_reopen", "second", 2);
+        insert_edge(&rt, "graph_insert_reopen", first, second);
+        after = commit(&rt, conn, "after insert");
+        clear_current_connection_id();
+    }
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
+    set_current_connection_id(conn);
+    assert_eq!(
+        as_of_score(&rt, "graph_insert_reopen", "second", &before),
+        None
+    );
+    assert_eq!(
+        as_of_score(&rt, "graph_insert_reopen", "second", &after),
+        Some(2)
+    );
+    let edge_at = |commit: &str| {
+        rt.execute_query(&format!(
+            "SELECT weight FROM graph_insert_reopen AS OF COMMIT '{commit}' WHERE label = 'knows'"
+        ))
+        .expect("edge history")
+        .result
+        .records
+        .len()
+    };
+    assert_eq!(edge_at(&before), 0);
+    assert_eq!(edge_at(&after), 1);
+    let diff = vcs(&rt)
+        .diff(DiffInput {
+            from: before,
+            to: after,
+            collection: Some("graph_insert_reopen".into()),
+            summary_only: true,
+        })
+        .unwrap();
+    assert_eq!((diff.added, diff.removed, diff.modified), (2, 0, 0));
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_native_node_and_edge_history_survives_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph-native.rdb");
+    let conn = 70024;
+    let before;
+    let after;
+    let after_transaction;
+    {
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).unwrap();
+        set_current_connection_id(conn);
+        rt.execute_query("CREATE GRAPH graph_native_history")
+            .unwrap();
+        vcs(&rt)
+            .set_versioned("graph_native_history", true)
+            .unwrap();
+        let entities = EntityUseCases::new(&rt);
+        let node = |label: &str, score: i64| {
+            entities
+                .create_node(CreateNodeInput {
+                    collection: "graph_native_history".into(),
+                    label: label.into(),
+                    node_type: Some("person".into()),
+                    properties: vec![("score".into(), Value::Integer(score))],
+                    metadata: vec![],
+                    embeddings: vec![],
+                    table_links: vec![],
+                    node_links: vec![],
+                })
+                .unwrap()
+                .id
+        };
+        let first = node("first", 1);
+        before = commit(&rt, conn, "before native insert");
+        let second = node("second", 2);
+        entities
+            .create_edge(CreateEdgeInput {
+                collection: "graph_native_history".into(),
+                label: "knows".into(),
+                from: first,
+                to: second,
+                weight: Some(1.0),
+                properties: vec![],
+                metadata: vec![],
+            })
+            .unwrap();
+        after = commit(&rt, conn, "after native insert");
+        rt.execute_query("BEGIN").unwrap();
+        node("third", 3);
+        rt.execute_query("COMMIT").unwrap();
+        after_transaction = commit(&rt, conn, "after native transaction");
+        clear_current_connection_id();
+    }
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).unwrap();
+    set_current_connection_id(conn);
+    assert_eq!(
+        as_of_score(&rt, "graph_native_history", "second", &before),
+        None
+    );
+    assert_eq!(
+        as_of_score(&rt, "graph_native_history", "second", &after),
+        Some(2)
+    );
+    assert_eq!(
+        as_of_score(&rt, "graph_native_history", "third", &after),
+        None
+    );
+    assert_eq!(
+        as_of_score(&rt, "graph_native_history", "third", &after_transaction),
+        Some(3)
+    );
+    let diff = vcs(&rt)
+        .diff(DiffInput {
+            from: before,
+            to: after,
+            collection: Some("graph_native_history".into()),
+            summary_only: true,
+        })
+        .unwrap();
+    assert_eq!((diff.added, diff.removed, diff.modified), (2, 0, 0));
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_transaction_inserts_keep_history_after_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph-transaction.rdb");
+    let before;
+    let after;
+    let conn = 70025;
+    {
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).unwrap();
+        set_current_connection_id(conn);
+        rt.execute_query("CREATE GRAPH graph_transaction_history")
+            .unwrap();
+        vcs(&rt)
+            .set_versioned("graph_transaction_history", true)
+            .unwrap();
+        let first = insert_node(&rt, "graph_transaction_history", "first", 1);
+        before = commit(&rt, conn, "before transaction");
+        rt.execute_query("BEGIN").unwrap();
+        let second = insert_node(&rt, "graph_transaction_history", "second", 2);
+        insert_edge(&rt, "graph_transaction_history", first, second);
+        rt.execute_query("COMMIT").unwrap();
+        after = commit(&rt, conn, "after transaction");
+        clear_current_connection_id();
+    }
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).unwrap();
+    set_current_connection_id(conn);
+    assert_eq!(
+        as_of_score(&rt, "graph_transaction_history", "second", &before),
+        None
+    );
+    assert_eq!(
+        as_of_score(&rt, "graph_transaction_history", "second", &after),
+        Some(2)
+    );
+    let diff = vcs(&rt)
+        .diff(DiffInput {
+            from: before,
+            to: after,
+            collection: Some("graph_transaction_history".into()),
+            summary_only: true,
+        })
+        .unwrap();
+    assert_eq!((diff.added, diff.removed, diff.modified), (2, 0, 0));
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_checkpoint_excludes_uncommitted_insert_and_update_after_recovery() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("graph-live.rdb");
+    let copy = directory.path().join("graph-copy.rdb");
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime");
+    set_current_connection_id(70022);
+    rt.execute_query("CREATE GRAPH graph_checkpoint_pending")
+        .unwrap();
+    vcs(&rt)
+        .set_versioned("graph_checkpoint_pending", true)
+        .unwrap();
+    let existing = insert_node(&rt, "graph_checkpoint_pending", "existing", 1);
+    let other = insert_node(&rt, "graph_checkpoint_pending", "other", 1);
+    let existing_edge = insert_edge(&rt, "graph_checkpoint_pending", existing, other);
+    rt.execute_query("BEGIN").unwrap();
+    let pending = insert_node(&rt, "graph_checkpoint_pending", "pending", 2);
+    let edge = insert_edge(&rt, "graph_checkpoint_pending", existing, pending);
+    update_score(&rt, "graph_checkpoint_pending", "existing", 3);
+    rt.execute_query("UPDATE graph_checkpoint_pending EDGES SET weight = 3 WHERE label = 'knows'")
+        .unwrap();
+    let changed = rt
+        .execute_query("SELECT weight FROM graph_checkpoint_pending WHERE label = 'knows'")
+        .unwrap();
+    assert_eq!(changed.result.records.len(), 2);
+    assert!(changed
+        .result
+        .records
+        .iter()
+        .all(|record| record.get("weight") == Some(&Value::Float(3.0))));
+    rt.checkpoint().expect("checkpoint with active writer");
+    std::fs::copy(&path, &copy).expect("copy checkpoint");
+    let wal = reddb_file::unified_wal_path(&path);
+    if wal.exists() {
+        std::fs::copy(wal, reddb_file::unified_wal_path(&copy)).expect("copy WAL");
+    }
+    let recovered =
+        RedDBRuntime::with_options(RedDBOptions::persistent(&copy)).expect("recover copy");
+    set_current_connection_id(70023);
+    assert_eq!(
+        live_score(&recovered, "graph_checkpoint_pending", "existing"),
+        Some(1)
+    );
+    assert_eq!(
+        live_score(&recovered, "graph_checkpoint_pending", "pending"),
+        None
+    );
+    let store = recovered.db().store();
+    let manager = store.get_collection("graph_checkpoint_pending").unwrap();
+    assert!(manager.get(reddb::storage::EntityId::new(edge)).is_none());
+    assert_eq!(
+        manager
+            .get(reddb::storage::EntityId::new(existing_edge))
+            .unwrap()
+            .xmax,
+        0
+    );
+    let result = recovered
+        .execute_query("SELECT weight FROM graph_checkpoint_pending WHERE label = 'knows'")
+        .expect("read recovered existing edge");
+    assert_eq!(result.result.records.len(), 1);
+    assert_eq!(
+        result.result.records[0].get("weight"),
+        Some(&Value::Float(1.0))
+    );
+    set_current_connection_id(70022);
+    rt.execute_query("ROLLBACK").unwrap();
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_checkpoint_does_not_recover_references_to_uncommitted_native_edge() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph-refs-live.rdb");
+    let copy = directory.path().join("graph-refs-copy.rdb");
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).unwrap();
+    set_current_connection_id(70026);
+    rt.execute_query("CREATE GRAPH graph_pending_refs").unwrap();
+    vcs(&rt).set_versioned("graph_pending_refs", true).unwrap();
+    let first = insert_node(&rt, "graph_pending_refs", "first", 1);
+    let second = insert_node(&rt, "graph_pending_refs", "second", 2);
+    rt.execute_query("BEGIN").unwrap();
+    let edge = EntityUseCases::new(&rt)
+        .create_edge(CreateEdgeInput {
+            collection: "graph_pending_refs".into(),
+            label: "knows".into(),
+            from: reddb::storage::EntityId::new(first),
+            to: reddb::storage::EntityId::new(second),
+            weight: Some(1.0),
+            properties: vec![],
+            metadata: vec![],
+        })
+        .unwrap()
+        .id;
+    let source = reddb::storage::EntityId::new(first);
+    assert!(rt
+        .db()
+        .store()
+        .get("graph_pending_refs", source)
+        .unwrap()
+        .cross_refs()
+        .iter()
+        .any(|reference| reference.target == edge));
+    rt.checkpoint().unwrap();
+    std::fs::copy(&path, &copy).unwrap();
+    let wal = reddb_file::unified_wal_path(&path);
+    if wal.exists() {
+        std::fs::copy(wal, reddb_file::unified_wal_path(&copy)).unwrap();
+    }
+    let recovered = RedDBRuntime::with_options(RedDBOptions::persistent(&copy)).unwrap();
+    let store = recovered.db().store();
+    assert!(store.get("graph_pending_refs", edge).is_none());
+    assert!(!store
+        .get("graph_pending_refs", source)
+        .unwrap()
+        .cross_refs()
+        .iter()
+        .any(|reference| reference.target == edge));
+    assert!(!store
+        .get_refs_from(source)
+        .iter()
+        .any(|(target, _, _)| *target == edge));
+    rt.execute_query("ROLLBACK").unwrap();
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_native_autocommit_edge_recovers_from_wal_before_checkpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph-wal-live.rdb");
+    let copy = directory.path().join("graph-wal-copy.rdb");
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).unwrap();
+    set_current_connection_id(70027);
+    rt.execute_query("CREATE GRAPH graph_wal_edge").unwrap();
+    vcs(&rt).set_versioned("graph_wal_edge", true).unwrap();
+    let first = insert_node(&rt, "graph_wal_edge", "first", 1);
+    let second = insert_node(&rt, "graph_wal_edge", "second", 2);
+    rt.checkpoint().unwrap();
+    let edge = EntityUseCases::new(&rt)
+        .create_edge(CreateEdgeInput {
+            collection: "graph_wal_edge".into(),
+            label: "knows".into(),
+            from: reddb::storage::EntityId::new(first),
+            to: reddb::storage::EntityId::new(second),
+            weight: Some(1.0),
+            properties: vec![],
+            metadata: vec![],
+        })
+        .unwrap()
+        .id;
+    std::fs::copy(&path, &copy).unwrap();
+    let wal = reddb_file::unified_wal_path(&path);
+    if wal.exists() {
+        std::fs::copy(wal, reddb_file::unified_wal_path(&copy)).unwrap();
+    }
+    let recovered = RedDBRuntime::with_options(RedDBOptions::persistent(&copy)).unwrap();
+    let store = recovered.db().store();
+    let source = reddb::storage::EntityId::new(first);
+    assert!(store.get("graph_wal_edge", edge).is_some());
+    assert!(store
+        .get("graph_wal_edge", source)
+        .unwrap()
+        .cross_refs()
+        .iter()
+        .any(|reference| reference.target == edge));
+    assert!(store
+        .get_refs_from(source)
+        .iter()
+        .any(|(target, _, _)| *target == edge));
     clear_current_connection_id();
 }
 

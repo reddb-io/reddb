@@ -407,6 +407,10 @@ impl StatementExecutionFrame {
         let tx_local_tenant = runtime.inner.transaction_state.local_tenant(conn_id);
         let tx_context = runtime.inner.transaction_state.context(conn_id);
         let mut own_xids = own_transaction_xids(tx_context.as_ref());
+        let graph_insert_xid = runtime.graph_insert_xid();
+        if let Some(xid) = graph_insert_xid {
+            own_xids.insert(xid);
+        }
         let serializable_reader = tx_context
             .as_ref()
             .filter(|ctx| {
@@ -418,7 +422,8 @@ impl StatementExecutionFrame {
         if as_of_floor.is_some() {
             own_xids.clear();
         }
-        let requires_index_fallback = as_of_floor.is_some() || tx_context.is_some();
+        let requires_index_fallback =
+            as_of_floor.is_some() || tx_context.is_some() || graph_insert_xid.is_some();
         let (cache_key, is_volatile_query) = match identity_source {
             StatementIdentity::Text(_) => (
                 result_cache_key(query),
@@ -432,7 +437,9 @@ impl StatementExecutionFrame {
         };
         // Branch and tag references can move without changing the query text.
         // The result cache key does not include the resolved snapshot.
-        let cache_safe = as_of_floor.is_none() && runtime.result_cache_safe(conn_id);
+        let cache_safe = as_of_floor.is_none()
+            && graph_insert_xid.is_none()
+            && runtime.result_cache_safe(conn_id);
         // Capture identity + effective scope under the same
         // thread-local view that the cache key was built from, so
         // the Interface and the cache key agree on what "this

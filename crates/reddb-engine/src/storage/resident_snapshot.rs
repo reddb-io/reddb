@@ -14,6 +14,31 @@ use super::snapshot::{visit_snapshot, SnapshotVisitor};
 use std::collections::{HashMap, HashSet};
 
 impl ResidentStore {
+    /// Graph records hidden by a checkpoint projection cannot be referenced
+    /// by another persisted entity or by the persisted cross-reference index.
+    pub fn snapshot_excluded_graph_ids(
+        &self,
+        pending_versions: &HashSet<EntityId>,
+        excluded_xids: &HashSet<u64>,
+    ) -> HashSet<EntityId> {
+        let mut hidden = HashSet::new();
+        if pending_versions.is_empty() && excluded_xids.is_empty() {
+            return hidden;
+        }
+        for manager in self.collections.read().values() {
+            manager.for_each_entity(|entity| {
+                if matches!(entity.data, EntityData::Node(_) | EntityData::Edge(_))
+                    && (pending_versions.contains(&entity.id)
+                        || excluded_xids.contains(&entity.xmin))
+                {
+                    hidden.insert(entity.id);
+                }
+                true
+            });
+        }
+        hidden
+    }
+
     /// Return a complete recovery target only after decoding succeeds. Hosts
     /// retain format upgrades, writer fencing and durable publication policy.
     pub fn from_snapshot(
@@ -186,6 +211,7 @@ impl ResidentStore {
         before_footer: impl FnOnce(),
     ) -> Vec<u8> {
         let mut buf = Vec::new();
+        let hidden_graph_ids = self.snapshot_excluded_graph_ids(pending_versions, excluded_xids);
 
         // Version 9 includes explicit table-row logical identity plus MVCC
         // xmin/xmax alongside the V7 metadata envelope.
@@ -207,7 +233,11 @@ impl ResidentStore {
                 }
                 !matches!(
                     entity.data,
-                    EntityData::Row(_) | EntityData::Vector(_) | EntityData::QueueMessage(_)
+                    EntityData::Row(_)
+                        | EntityData::Vector(_)
+                        | EntityData::Node(_)
+                        | EntityData::Edge(_)
+                        | EntityData::QueueMessage(_)
                 ) || !excluded_xids.contains(&entity.xmin)
             });
             reddb_file::encode_native_dump_collection_header(&mut buf, name, entities.len() as u32);
@@ -219,10 +249,22 @@ impl ResidentStore {
                 // tombstones when recovery reconstructs the xid floor.
                 if matches!(
                     entity.data,
-                    EntityData::Row(_) | EntityData::QueueMessage(_)
+                    EntityData::Row(_)
+                        | EntityData::Node(_)
+                        | EntityData::Edge(_)
+                        | EntityData::QueueMessage(_)
                 ) && excluded_xids.contains(&entity.xmax)
                 {
                     entity.xmax = 0;
+                }
+                if entity.cross_refs().iter().any(|reference| {
+                    hidden_graph_ids.contains(&reference.source)
+                        || hidden_graph_ids.contains(&reference.target)
+                }) {
+                    entity.cross_refs_mut().retain(|reference| {
+                        !hidden_graph_ids.contains(&reference.source)
+                            && !hidden_graph_ids.contains(&reference.target)
+                    });
                 }
                 let metadata = manager.get_metadata(entity.id);
                 let record =
@@ -233,11 +275,28 @@ impl ResidentStore {
 
         // Write cross-references
         let cross_refs = self.cross_refs.read();
-        let total_refs: usize = cross_refs.values().map(|v| v.len()).sum();
+        let total_refs: usize = cross_refs
+            .iter()
+            .map(|(source, refs)| {
+                if hidden_graph_ids.contains(source) {
+                    0
+                } else {
+                    refs.iter()
+                        .filter(|(target, _, _)| !hidden_graph_ids.contains(target))
+                        .count()
+                }
+            })
+            .sum();
         reddb_file::encode_native_dump_count(&mut buf, total_refs as u32);
 
         for (source_id, refs) in cross_refs.iter() {
+            if hidden_graph_ids.contains(source_id) {
+                continue;
+            }
             for (target_id, ref_type, collection) in refs {
+                if hidden_graph_ids.contains(target_id) {
+                    continue;
+                }
                 reddb_file::encode_native_dump_cross_ref(
                     &mut buf,
                     source_id.raw(),

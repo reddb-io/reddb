@@ -5,8 +5,9 @@
 > conflicts, but does not apply merged data. Conflict resolution returns an
 > error and retains the conflict until data application is implemented.
 > Merges that detect graph changes requiring application return an error.
-> Some autocommit graph inserts have no MVCC creation xid and can appear in
-> earlier `AS OF` snapshots.
+> Graph entities inserted before versioning was enabled, or by older builds
+> without an MVCC creation xid, can appear in earlier `AS OF` snapshots.
+> Native entity and collection reads do not yet apply graph MVCC visibility.
 > Do not rely on these operations for isolated
 > agent changes or reviewed publication of graph data.
 

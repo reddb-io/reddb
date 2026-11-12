@@ -1036,10 +1036,7 @@ impl RedDBRuntime {
                     super::red_schema::READ_ONLY_ERROR.to_string(),
                 ))
             }
-            QueryExpr::Insert(ref insert) => self
-                .with_deferred_store_wal_for_dml(self.insert_may_emit_events(insert), || {
-                    self.execute_insert(query, insert)
-                }),
+            QueryExpr::Insert(ref insert) => self.execute_insert(query, insert),
             QueryExpr::Update(ref update) => self
                 .with_deferred_store_wal_for_dml(self.update_may_emit_events(update), || {
                     self.execute_update(query, update)
@@ -3161,10 +3158,7 @@ impl RedDBRuntime {
                     super::red_schema::READ_ONLY_ERROR.to_string(),
                 ))
             }
-            QueryExpr::Insert(ref insert) => self
-                .with_deferred_store_wal_for_dml(self.insert_may_emit_events(insert), || {
-                    self.execute_insert(query_str, insert)
-                }),
+            QueryExpr::Insert(ref insert) => self.execute_insert(query_str, insert),
             QueryExpr::Update(ref update) => self
                 .with_deferred_store_wal_for_dml(self.update_may_emit_events(update), || {
                     self.execute_update(query_str, update)

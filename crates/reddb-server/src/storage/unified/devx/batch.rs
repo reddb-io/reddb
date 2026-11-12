@@ -185,6 +185,16 @@ impl BatchBuilder {
         self
     }
 
+    /// Stamp graph entities before their first storage and WAL publication.
+    pub(crate) fn with_graph_xmin(mut self, xmin: Option<u64>) -> Self {
+        if let Some(xmin) = xmin {
+            for (_, entity, _) in self.nodes.iter_mut().chain(self.edges.iter_mut()) {
+                entity.set_xmin(xmin);
+            }
+        }
+        self
+    }
+
     /// Execute the batch
     pub fn execute(self) -> Result<BatchResult, DevXError> {
         let mut inserted_nodes = Vec::new();

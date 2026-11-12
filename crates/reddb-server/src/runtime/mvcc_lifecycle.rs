@@ -21,34 +21,185 @@
 use super::execution_context::current_connection_id;
 use super::*;
 
+thread_local! {
+    static GRAPH_INSERT_WRITER: std::cell::Cell<Option<(usize, u64, u64)>> = const { std::cell::Cell::new(None) };
+    static DML_CAPTURE_OWNER: std::cell::Cell<Option<(usize, u64, bool)>> = const { std::cell::Cell::new(None) };
+    static DML_CAPTURE_GRAPH_WRITER: std::cell::RefCell<Option<GraphInsertWriter>> = const { std::cell::RefCell::new(None) };
+}
+
+struct GraphInsertWriter {
+    manager: std::sync::Arc<crate::storage::transaction::snapshot::SnapshotManager>,
+    xid: u64,
+    finished: bool,
+}
+
+impl GraphInsertWriter {
+    fn begin(runtime: &RedDBRuntime) -> Self {
+        let manager = runtime.snapshot_manager();
+        let xid = manager.begin();
+        let identity = std::sync::Arc::as_ptr(&runtime.inner) as usize;
+        GRAPH_INSERT_WRITER.with(|slot| {
+            assert!(slot
+                .replace(Some((identity, current_connection_id(), xid)))
+                .is_none());
+        });
+        Self {
+            manager,
+            xid,
+            finished: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.manager.commit(self.xid);
+        self.finished = true;
+    }
+}
+
+impl Drop for GraphInsertWriter {
+    fn drop(&mut self) {
+        GRAPH_INSERT_WRITER.with(|slot| slot.set(None));
+        if !self.finished {
+            self.manager.rollback(self.xid);
+        }
+    }
+}
+
 /// An unwinding DML callback must not leave a thread-local capture installed.
 struct DmlWalCapture(bool);
 
+struct CapturedDmlWal {
+    actions: crate::storage::unified::DeferredStoreWalActions,
+    graph_writer: Option<GraphInsertWriter>,
+}
+
 impl DmlWalCapture {
-    fn begin() -> Self {
+    fn begin(runtime: &RedDBRuntime, transactional: bool) -> Self {
         assert!(
             !UnifiedStore::deferred_store_wal_capture_active(),
             "DML WAL captures cannot nest"
         );
+        let identity = std::sync::Arc::as_ptr(&runtime.inner) as usize;
+        DML_CAPTURE_OWNER.with(|slot| {
+            assert!(slot
+                .replace(Some((identity, current_connection_id(), transactional)))
+                .is_none());
+        });
         UnifiedStore::begin_deferred_store_wal_capture();
         Self(true)
     }
 
-    fn finish(mut self) -> crate::storage::unified::DeferredStoreWalActions {
+    fn finish(mut self) -> CapturedDmlWal {
         self.0 = false;
-        UnifiedStore::take_deferred_store_wal_capture()
+        DML_CAPTURE_OWNER.with(|slot| slot.set(None));
+        CapturedDmlWal {
+            actions: UnifiedStore::take_deferred_store_wal_capture(),
+            graph_writer: DML_CAPTURE_GRAPH_WRITER.with(|slot| slot.borrow_mut().take()),
+        }
     }
 }
 
 impl Drop for DmlWalCapture {
     fn drop(&mut self) {
         if self.0 {
+            DML_CAPTURE_OWNER.with(|slot| slot.set(None));
             let _ = UnifiedStore::take_deferred_store_wal_capture();
+            DML_CAPTURE_GRAPH_WRITER.with(|slot| drop(slot.borrow_mut().take()));
         }
     }
 }
 
 impl RedDBRuntime {
+    pub(crate) fn graph_insert_xid(&self) -> Option<u64> {
+        let identity = std::sync::Arc::as_ptr(&self.inner) as usize;
+        GRAPH_INSERT_WRITER.with(|slot| {
+            slot.get().and_then(|(owner, conn, xid)| {
+                (owner == identity && conn == current_connection_id()).then_some(xid)
+            })
+        })
+    }
+
+    /// Publish a versioned autocommit graph insert after its WAL batch.
+    pub(crate) fn with_versioned_graph_insert<T>(
+        &self,
+        f: impl FnOnce() -> RedDBResult<T>,
+    ) -> RedDBResult<T> {
+        let identity = std::sync::Arc::as_ptr(&self.inner) as usize;
+        let connection_id = current_connection_id();
+        if self.current_xid().is_some() {
+            if UnifiedStore::deferred_store_wal_capture_active() {
+                if DML_CAPTURE_OWNER.with(|slot| slot.get())
+                    == Some((identity, connection_id, true))
+                {
+                    return f();
+                }
+                return Err(RedDBError::InvalidOperation(
+                    "versioned graph insertion cannot join an unrelated WAL capture".to_string(),
+                ));
+            }
+            return self.with_deferred_store_wal_if_transaction(f);
+        }
+        if self.graph_insert_xid().is_some() {
+            return f();
+        }
+        if UnifiedStore::deferred_store_wal_capture_active() {
+            if DML_CAPTURE_OWNER.with(|slot| slot.get()) != Some((identity, connection_id, false))
+                || GRAPH_INSERT_WRITER.with(|slot| slot.get().is_some())
+            {
+                return Err(RedDBError::InvalidOperation(
+                    "versioned graph insertion cannot join an unrelated WAL capture".to_string(),
+                ));
+            }
+            let writer = GraphInsertWriter::begin(self);
+            let result = f();
+            DML_CAPTURE_GRAPH_WRITER.with(|slot| {
+                assert!(slot.borrow_mut().replace(writer).is_none());
+            });
+            return result;
+        }
+        self.drain_committed_writes_under_pressure(0)?;
+        let deletions = super::delete_publication::DeletePublicationScope::begin();
+        let mut writer = GraphInsertWriter::begin(self);
+        let capture = DmlWalCapture::begin(self, false);
+        let result = f();
+        let CapturedDmlWal {
+            actions,
+            mut graph_writer,
+        } = capture.finish();
+        if result.is_err() && deletions.has_pending() {
+            return result;
+        }
+        deletions.publish(self, || {
+            self.inner
+                .db
+                .store()
+                .append_deferred_store_wal_actions(actions)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            if let Some(writer) = &mut graph_writer {
+                writer.commit();
+            }
+            writer.commit();
+            Ok(())
+        })?;
+        result
+    }
+
+    pub(crate) fn with_graph_insert_for_dml<T>(
+        &self,
+        query: &InsertQuery,
+        f: impl FnOnce() -> RedDBResult<T>,
+    ) -> RedDBResult<T> {
+        if matches!(
+            query.entity_type,
+            InsertEntityType::Node | InsertEntityType::Edge
+        ) && self.vcs_is_versioned(&query.table)?
+        {
+            self.with_versioned_graph_insert(f)
+        } else {
+            self.with_deferred_store_wal_for_dml(self.insert_may_emit_events(query), f)
+        }
+    }
+
     pub(crate) fn rollback_connection(
         &self,
         connection_id: u64,
@@ -137,12 +288,20 @@ impl RedDBRuntime {
             return f();
         }
 
-        let capture = DmlWalCapture::begin();
+        let capture = DmlWalCapture::begin(self, true);
         let result = f();
-        let captured = capture.finish();
+        let CapturedDmlWal {
+            actions,
+            graph_writer,
+        } = capture.finish();
+        if graph_writer.is_some() {
+            return Err(RedDBError::InvalidOperation(
+                "autocommit graph writer cannot join a transaction WAL capture".to_string(),
+            ));
+        }
         match result {
             Ok(value) => {
-                self.record_pending_store_wal_actions(conn_id, captured);
+                self.record_pending_store_wal_actions(conn_id, actions);
                 Ok(value)
             }
             Err(err) => Err(err),
@@ -164,9 +323,12 @@ impl RedDBRuntime {
         }
 
         let deletions = super::delete_publication::DeletePublicationScope::begin();
-        let capture = DmlWalCapture::begin();
+        let capture = DmlWalCapture::begin(self, false);
         let result = f();
-        let captured = capture.finish();
+        let CapturedDmlWal {
+            actions,
+            mut graph_writer,
+        } = capture.finish();
         if result.is_err() && deletions.has_pending() {
             return result;
         }
@@ -174,8 +336,12 @@ impl RedDBRuntime {
             self.inner
                 .db
                 .store()
-                .append_deferred_store_wal_actions(captured)
-                .map_err(|err| RedDBError::Internal(err.to_string()))
+                .append_deferred_store_wal_actions(actions)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            if let Some(writer) = &mut graph_writer {
+                writer.commit();
+            }
+            Ok(())
         })?;
         result
     }
@@ -803,9 +969,14 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn own_transaction_xids(&self) -> std::collections::HashSet<u64> {
-        self.inner
+        let mut xids = self
+            .inner
             .transaction_state
-            .own_xids(current_connection_id())
+            .own_xids(current_connection_id());
+        if let Some(xid) = self.graph_insert_xid() {
+            xids.insert(xid);
+        }
+        xids
     }
 
     /// `true` when the given connection id has an open `BEGIN`. Issue

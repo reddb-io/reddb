@@ -212,7 +212,11 @@ impl UnifiedStore {
                 if current.pending_vault.contains(&id)
                     || (matches!(
                         entity.data,
-                        EntityData::Row(_) | EntityData::Vector(_) | EntityData::QueueMessage(_)
+                        EntityData::Row(_)
+                            | EntityData::Vector(_)
+                            | EntityData::Node(_)
+                            | EntityData::Edge(_)
+                            | EntityData::QueueMessage(_)
                     ) && current.excluded_xids.contains(&entity.xmin))
                 {
                     defer = true;
@@ -222,7 +226,10 @@ impl UnifiedStore {
                     Self::serialize_entity_record(entity, metadata.as_ref(), self.format_version());
                 let projected = if matches!(
                     entity.data,
-                    EntityData::Row(_) | EntityData::QueueMessage(_)
+                    EntityData::Row(_)
+                        | EntityData::Node(_)
+                        | EntityData::Edge(_)
+                        | EntityData::QueueMessage(_)
                 ) && current.excluded_xids.contains(&entity.xmax)
                 {
                     defer = true;
