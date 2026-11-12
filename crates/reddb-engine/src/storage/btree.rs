@@ -188,7 +188,7 @@ pub struct BTreeCursor<P: PageStore> {
     /// Current position within leaf
     position: usize,
     /// Pager reference
-    pager: Arc<P>,
+    pager: Arc<page_proofs::TreePageStore<P>>,
     /// A6 — true once we've issued a prefetch hint for the next leaf on
     /// this leaf. Reset to false every time we move to a new leaf so the
     /// hint fires once per leaf, at the halfway point.
@@ -491,7 +491,7 @@ impl<P: PageStore> BTreeCursor<P> {
 pub struct BTree<P: PageStore> {
     retirement_pin: Arc<()>,
     /// Pager for page I/O
-    pager: Arc<P>,
+    pager: Arc<page_proofs::TreePageStore<P>>,
     /// Root page ID (0 = empty tree)
     root_page_id: RwLock<u32>,
     /// D2 fastpath: cached rightmost leaf (page_id, high_key).
@@ -518,6 +518,8 @@ mod btree_impl;
 
 #[path = "btree/reclaim.rs"]
 mod reclaim;
+
+mod page_proofs;
 
 #[cfg(test)]
 #[path = "btree/read_budget_tests.rs"]

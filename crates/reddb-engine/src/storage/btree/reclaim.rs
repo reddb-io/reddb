@@ -55,6 +55,14 @@ impl<P: PageStore> BTree<P> {
             }
             pages.push(id);
         }
+        for id in self.pager.proof_pages()? {
+            if !seen.insert(id) {
+                return Err(BTreeError::Corrupted(
+                    "generation proof aliases tree ownership".into(),
+                ));
+            }
+            pages.push(id);
+        }
         Ok(pages)
     }
 

@@ -25,7 +25,7 @@ impl<P: PageStore> BTree<P> {
     pub fn new(pager: Arc<P>) -> Self {
         Self {
             retirement_pin: Arc::new(()),
-            pager,
+            pager: Arc::new(super::page_proofs::TreePageStore::legacy(pager)),
             root_page_id: RwLock::new(0),
             rightmost_leaf: RwLock::new(None),
             writer: parking_lot::ReentrantMutex::new(()),
@@ -36,7 +36,7 @@ impl<P: PageStore> BTree<P> {
     pub fn with_root(pager: Arc<P>, root_page_id: u32) -> Self {
         Self {
             retirement_pin: Arc::new(()),
-            pager,
+            pager: Arc::new(super::page_proofs::TreePageStore::legacy(pager)),
             root_page_id: RwLock::new(root_page_id),
             rightmost_leaf: RwLock::new(None),
             writer: parking_lot::ReentrantMutex::new(()),
@@ -49,6 +49,40 @@ impl<P: PageStore> BTree<P> {
             .root_page_id
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Start an authenticated tree. Retired proof paths remain owned until
+    /// the host publishes its replacement catalog through the pager fence.
+    pub fn new_verified(pager: Arc<P>) -> BTreeResult<Self> {
+        Self::with_verified_root(pager, 0, reddb_file::page_proof::PageProofRoot::default())
+    }
+
+    /// Restore independently sealed page-image authority without scanning data.
+    pub fn with_verified_root(
+        pager: Arc<P>,
+        root_page_id: u32,
+        proof: reddb_file::page_proof::PageProofRoot,
+    ) -> BTreeResult<Self> {
+        if root_page_id != 0 && proof.reference.page_id == 0 {
+            return Err(BTreeError::Corrupted(
+                "missing published page generation proof".into(),
+            ));
+        }
+        Ok(Self {
+            retirement_pin: Arc::new(()),
+            pager: Arc::new(super::page_proofs::TreePageStore::verified(pager, proof)?),
+            root_page_id: RwLock::new(root_page_id),
+            rightmost_leaf: RwLock::new(None),
+            writer: parking_lot::ReentrantMutex::new(()),
+        })
+    }
+
+    /// The host must sync before publishing this pair in its catalog.
+    pub fn seal_page_proofs(
+        &self,
+    ) -> BTreeResult<Option<(u32, reddb_file::page_proof::PageProofRoot)>> {
+        let _writer = self.writer.lock();
+        Ok(self.pager.seal()?.map(|proof| (self.root_page_id(), proof)))
     }
 
     /// Check if tree is empty
