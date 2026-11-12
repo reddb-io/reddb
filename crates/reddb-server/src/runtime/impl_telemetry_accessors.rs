@@ -349,7 +349,7 @@ impl RedDBRuntime {
                 error = %lease_err,
                 "graceful_shutdown: remote upload skipped — lease not held"
             );
-        } else if let Err(err) = self.inner.db.upload_to_remote_backend() {
+        } else if let Err(err) = self.publish_remote_snapshot() {
             tracing::error!(
                 target: "reddb::lifecycle",
                 error = %err,
@@ -381,6 +381,9 @@ impl RedDBRuntime {
             }
         }
 
+        if let Some(lease) = self.lease_lifecycle() {
+            let _ = lease.release();
+        }
         let completed_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)

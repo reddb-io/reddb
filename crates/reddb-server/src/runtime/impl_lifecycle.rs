@@ -149,10 +149,7 @@ impl RedDBRuntime {
             );
             return Ok(());
         }
-        self.inner
-            .db
-            .upload_to_remote_backend()
-            .map_err(|err| RedDBError::Internal(err.to_string()))
+        self.publish_remote_snapshot()
     }
 
     /// Handle to the intent-lock manager for tests + introspection.

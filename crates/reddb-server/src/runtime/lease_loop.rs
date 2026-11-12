@@ -30,7 +30,82 @@ use crate::api::{RedDBError, RedDBResult};
 use crate::replication::lease::LeaseStore;
 use crate::runtime::lease_lifecycle::{LeaseLifecycle, MarkDraining};
 use crate::runtime::lease_timer_wheel::LeaseTimerWheel;
+use crate::runtime::serverless_snapshot_publication::SnapshotPublicationStore;
 use crate::runtime::RedDBRuntime;
+
+pub struct LeaseBootPlan {
+    store: Arc<LeaseStore>,
+    snapshot_publication: Arc<SnapshotPublicationStore>,
+    holder_id: String,
+    database_key: String,
+    ttl_ms: u64,
+    initial_snapshot_required: bool,
+}
+
+/// Observe the exact snapshot head before runtime hydration. The later lease
+/// claim CASes that observed version; publication racing with boot therefore
+/// aborts this boot instead of letting it serve a stale local snapshot.
+pub fn prepare_lease_loop_if_required(
+    options: &mut crate::api::RedDBOptions,
+) -> RedDBResult<Option<LeaseBootPlan>> {
+    if !lease_required() {
+        return Ok(None);
+    }
+    if options.read_only {
+        return Err(RedDBError::InvalidOperation(
+            "serverless writer leases require a writable local cache".into(),
+        ));
+    }
+    let backend = options.remote_backend_atomic.clone().ok_or_else(|| {
+        RedDBError::Internal(
+            "RED_LEASE_REQUIRED=true but the configured backend does not support atomic CAS — \
+             use s3, fs, or http with RED_HTTP_CONDITIONAL_WRITES=true"
+                .to_string(),
+        )
+    })?;
+    let database_key = options
+        .remote_key
+        .clone()
+        .filter(|key| !key.is_empty())
+        .filter(|_| options.remote_backend.is_some())
+        .ok_or_else(|| {
+            RedDBError::InvalidOperation(
+                "serverless writer leases require a remote backend and database key".into(),
+            )
+        })?;
+    let prefix = std::env::var("RED_LEASE_PREFIX")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "leases/".to_string());
+    let snapshot_publication = Arc::new(SnapshotPublicationStore::new(
+        backend.clone(),
+        database_key.clone(),
+    ));
+    options.remote_bootstrap_key = snapshot_publication
+        .observe_for_boot()
+        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+    if options.remote_bootstrap_key.is_some()
+        && options.storage_profile.deploy_profile != crate::storage::DeployProfile::Embedded
+    {
+        // Operational caches have WAL and metadata siblings. Hydrate into an
+        // isolated boot directory so an old local WAL cannot replay over the
+        // authoritative snapshot. Reuse the existing ephemeral cleanup owner.
+        let cache = crate::api::RedDBOptions::in_memory();
+        options.data_path = cache.data_path;
+        options.metadata.insert(
+            crate::api::EPHEMERAL_RUNTIME_METADATA_KEY.into(),
+            "true".into(),
+        );
+    }
+    Ok(Some(LeaseBootPlan {
+        store: Arc::new(LeaseStore::new(backend).with_prefix(prefix)),
+        snapshot_publication,
+        holder_id: lease_holder_id(),
+        database_key,
+        ttl_ms: lease_ttl_secs() * 1000,
+        initial_snapshot_required: options.remote_bootstrap_key.is_none(),
+    }))
+}
 
 /// Try to start the writer-lease lifecycle if the operator opted in.
 /// Returns `Ok(())` when:
@@ -40,53 +115,60 @@ use crate::runtime::RedDBRuntime;
 /// Returns `Err` when the operator asked for a lease and we couldn't
 /// get one — the caller should refuse to serve in that case.
 pub fn start_lease_loop_if_required(runtime: &RedDBRuntime) -> RedDBResult<()> {
-    if !lease_required() {
-        return Ok(());
+    let mut options = runtime.db().options().clone();
+    let plan = prepare_lease_loop_if_required(&mut options)?;
+    if options.remote_bootstrap_key.is_some() {
+        return Err(RedDBError::InvalidOperation(
+            "serverless snapshot head must be observed before runtime hydration; use the prepared lease boot path"
+                .to_string(),
+        ));
     }
+    start_prepared_lease_loop(runtime, plan)
+}
 
-    let backend = runtime
-        .db()
-        .options()
-        .remote_backend_atomic
-        .clone()
+pub fn start_prepared_lease_loop(
+    runtime: &RedDBRuntime,
+    plan: Option<LeaseBootPlan>,
+) -> RedDBResult<()> {
+    let Some(plan) = plan else {
+        return Ok(());
+    };
+    // Existing heads are claimed without re-uploading or re-checkpointing the
+    // hydrated database. Only migration to the first head needs a payload.
+    let local_snapshot = if plan.initial_snapshot_required {
+        Some(runtime.capture_serverless_snapshot()?)
+    } else {
+        None
+    };
+    let database = runtime.db();
+    let snapshot_path = local_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.path())
+        .or_else(|| database.path())
         .ok_or_else(|| {
-            RedDBError::Internal(
-                "RED_LEASE_REQUIRED=true but the configured backend does not support atomic \
-                 CAS — use s3, fs, or http with RED_HTTP_CONDITIONAL_WRITES=true"
-                    .to_string(),
-            )
+            RedDBError::InvalidOperation("serverless boot requires a persistent local cache".into())
         })?;
-
-    let database_key = runtime
-        .db()
-        .options()
-        .remote_key
-        .clone()
-        .unwrap_or_else(|| "main".to_string());
-    let ttl_ms = lease_ttl_secs() * 1000;
-    let holder_id = lease_holder_id();
-    let prefix = std::env::var("RED_LEASE_PREFIX")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "leases/".to_string());
-
-    let store = Arc::new(LeaseStore::new(backend).with_prefix(prefix));
-    let runtime_for_drain = runtime.clone();
+    let runtime_for_drain = Arc::downgrade(&runtime.inner);
     let mark_draining: MarkDraining = Arc::new(move || {
-        runtime_for_drain.lifecycle().mark_draining();
+        if let Some(inner) = runtime_for_drain.upgrade() {
+            inner.lifecycle.mark_draining();
+        }
     });
-    let runtime_for_term = runtime.clone();
-    let current_term = Arc::new(move || runtime_for_term.current_replication_term());
-    let lifecycle = Arc::new(LeaseLifecycle::new(
-        store,
-        runtime.write_gate_arc(),
-        runtime.audit_log_arc(),
-        mark_draining,
-        current_term,
-        holder_id,
-        database_key,
-        ttl_ms,
-    ));
+    let term = runtime.current_replication_term();
+    let current_term = Arc::new(move || term);
+    let lifecycle = Arc::new(
+        LeaseLifecycle::new(
+            plan.store,
+            runtime.write_gate_arc(),
+            runtime.audit_log_arc(),
+            mark_draining,
+            current_term,
+            plan.holder_id,
+            plan.database_key,
+            plan.ttl_ms,
+        )
+        .with_snapshot_publication(plan.snapshot_publication, snapshot_path),
+    );
     lifecycle.try_acquire()?;
 
     // Stash the lifecycle on the runtime so admin handlers and the
@@ -114,16 +196,11 @@ fn spawn_refresh_thread(runtime: RedDBRuntime, lifecycle: Arc<LeaseLifecycle>) {
         .name("reddb-lease-refresh".into())
         .spawn(move || {
             wheel.run_until_shutdown(move |_id| {
-                // Bail out cleanly on shutdown so the holder thread does not
-                // refresh past the runtime's lifetime and confuse the next
-                // writer's acquire attempt.
+                // Keep the lease through drain and final publication. Shutdown
+                // releases it only after the last snapshot; a lease-loss path
+                // terminates below when refresh fails.
                 let phase = runtime.lifecycle().phase();
-                if matches!(
-                    phase,
-                    crate::runtime::lifecycle::Phase::Draining
-                        | crate::runtime::lifecycle::Phase::ShuttingDown
-                        | crate::runtime::lifecycle::Phase::Stopped
-                ) {
+                if phase == crate::runtime::lifecycle::Phase::Stopped {
                     let _ = lifecycle.release();
                     return false;
                 }

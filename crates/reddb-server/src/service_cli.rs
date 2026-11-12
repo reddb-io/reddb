@@ -1780,6 +1780,17 @@ fn build_runtime_with_bootstrap(
     ),
     String,
 > {
+    let mut db_options = db_options;
+    let lease_boot = crate::runtime::lease_loop::prepare_lease_loop_if_required(&mut db_options)
+        .map_err(|err| {
+            let msg = err.to_string();
+            crate::telemetry::operator_event::OperatorEvent::StartupFailed {
+                phase: "lease_prepare".to_string(),
+                error: msg.clone(),
+            }
+            .emit_global();
+            msg
+        })?;
     let runtime = RedDBRuntime::with_options(db_options.clone()).map_err(|err| {
         // Issue #205 — runtime construction failure is the canonical
         // StartupFailed phase. The audit sink isn't installed yet
@@ -1799,7 +1810,7 @@ fn build_runtime_with_bootstrap(
     // when `RED_LEASE_REQUIRED=true`. Failure here aborts boot: the
     // operator asked for a fence; running unfenced would silently
     // expose split-brain risk.
-    crate::runtime::lease_loop::start_lease_loop_if_required(&runtime).map_err(|err| {
+    crate::runtime::lease_loop::start_prepared_lease_loop(&runtime, lease_boot).map_err(|err| {
         let msg = err.to_string();
         crate::telemetry::operator_event::OperatorEvent::StartupFailed {
             phase: "lease_loop".to_string(),
