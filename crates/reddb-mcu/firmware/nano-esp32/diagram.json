@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "author": "RedDB",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "board-esp32-s3-devkitc-1",
+      "id": "nano-s3",
+      "top": 0,
+      "left": 0,
+      "attrs": {
+        "flashSize": "16",
+        "psramSize": "8",
+        "psramType": "octal"
+      }
+    }
+  ],
+  "connections": [],
+  "dependencies": {}
+}

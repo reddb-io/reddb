@@ -3973,21 +3973,34 @@ mod tests {
             .unwrap(),
         );
         // Pause the writer after enqueue, before it can register/wait for its
-        // acknowledgement. The flusher also needs this state lock to drain.
-        let state = coordinator.state.0.lock();
+        // acknowledgement. The write-error preflight now takes the state lock,
+        // so the fixture must let that preflight finish before holding it.
         let (written_tx, written_rx) = std::sync::mpsc::channel();
+        let (enqueued_tx, enqueued_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
         let writer_coordinator = Arc::clone(&coordinator);
         let writer = std::thread::spawn(move || {
-            let result = writer_coordinator.append_actions(&[StoreWalAction::CreateCollection {
+            writer_coordinator.check_write_error().unwrap();
+            let _epoch = writer_coordinator.queue.epoch.read();
+            let action = StoreWalAction::CreateCollection {
                 name: "acknowledged".into(),
-            }]);
+            }
+            .encode();
+            let wal_bytes = action.len() as u64;
+            let blob = WalRecord::TxCommitBatch {
+                tx_id: 1,
+                actions: vec![action],
+            }
+            .encode();
+            let target_lsn = writer_coordinator.queue.enqueue(blob);
+            enqueued_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+            let result = writer_coordinator.wait_until_durable_batch(target_lsn, wal_bytes, false);
             written_tx.send(result).unwrap();
         });
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !coordinator.queue.has_pending() {
-            assert!(Instant::now() < deadline, "writer never enqueued");
-            std::thread::yield_now();
-        }
+        enqueued_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let state = coordinator.state.0.lock();
+        resume_tx.send(()).unwrap();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (reset_tx, reset_rx) = std::sync::mpsc::channel();
         let reset_coordinator = Arc::clone(&coordinator);

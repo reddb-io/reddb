@@ -14,6 +14,8 @@ pub use reddb_file::{DatabaseHeader, PhysicalFileHeader};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 
+mod batch;
+
 /// Pager error types
 #[derive(Debug)]
 pub enum PagerError {
@@ -243,6 +245,7 @@ pub struct Pager<F: VfsFile, W: WalBarrier> {
     file: Mutex<F>,
     /// Whether mutable pages are protected by the in-file DWB zone.
     dwb_enabled: bool,
+    staged_pages: Mutex<Option<pager_io::StagedPageBatch>>,
     /// A failed writeback may leave the only complete image in the DWB.
     /// Refuse further writes until reopen has recovered that image.
     writeback_failed: std::sync::atomic::AtomicBool,
@@ -322,6 +325,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             path,
             file: Mutex::new(file),
             dwb_enabled: config.double_write && !config.read_only,
+            staged_pages: Mutex::new(None),
             writeback_failed: std::sync::atomic::AtomicBool::new(false),
             cache: PageCache::new(config.cache_size),
             read_only_recovery: RwLock::new(std::collections::HashMap::new()),
@@ -759,7 +763,18 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// Read a page from disk (bypassing cache)
     fn read_page_raw(&self, page_id: u32) -> Result<Page, PagerError> {
         let mut file = self.file_lock()?;
-        let page = pager_io::read_page(&mut *file, page_id, self.config.verify_checksums)?;
+        let page = match self
+            .staged_pages
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?
+            .as_ref()
+        {
+            Some(batch) => match batch.read(&mut *file, page_id)? {
+                Some(page) => page,
+                None => pager_io::read_page(&mut *file, page_id, self.config.verify_checksums)?,
+            },
+            None => pager_io::read_page(&mut *file, page_id, self.config.verify_checksums)?,
+        };
         drop(file);
         if self.config.verify_checksums && page_id != 0 && page.lsn() != 0 {
             self.wal
@@ -814,6 +829,9 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         page: Page,
         pending_page: Option<u32>,
     ) -> Result<(), PagerError> {
+        if self.bounded_writeback()? {
+            return self.write_dirty_page_batch(&[(page.page_id(), page)]);
+        }
         let mut ids = self.cache.dirty_page_ids(pager_io::DWB_MAX_PAGES_PER_FRAME);
         // The admitting write must not join its predecessor's eviction batch.
         // Its image is dirty for readers, but publication still belongs to the
@@ -837,6 +855,14 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         }
         let mut file = self.file_lock()?;
         self.ensure_writeback_available()?;
+        if let Some(batch) = self
+            .staged_pages
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?
+            .as_mut()
+        {
+            return Ok(batch.stage(&mut *file, page_id, page)?);
+        }
         Ok(pager_io::write_page(&mut *file, page_id, page)?)
     }
 
@@ -988,7 +1014,17 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         }
 
         // Try to get from freelist first
-        let page_id = {
+        let page_id = if self.batch_active()? {
+            // Prepared frames may extend the file but cannot reuse allocator
+            // state whose published roots still name the old ownership.
+            let mut header = self.header_write()?;
+            let id = header.page_count;
+            header.page_count = id
+                .checked_add(1)
+                .ok_or_else(|| PagerError::InvalidDatabase("page count overflow".into()))?;
+            *self.header_dirty_lock()? = true;
+            id
+        } else {
             let mut freelist = self.freelist_write()?;
             // A previous fence can fail after loading the trunk into memory.
             // Retry it before the fast path can consume any of those pages.
@@ -1182,6 +1218,11 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Free a page (return to freelist)
     pub fn free_page(&self, page_id: u32) -> Result<(), PagerError> {
+        if self.batch_active()? {
+            return Err(PagerError::InvalidDatabase(
+                "prepared DWB batches cannot retire published pages".into(),
+            ));
+        }
         let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if self.config.read_only {
@@ -1579,13 +1620,21 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // Physical order also avoids arbitrary seeks among each batch's homes.
         let mut page_ids = self.cache.dirty_page_ids(usize::MAX);
         page_ids.sort_unstable();
-        for ids in page_ids.chunks(FLUSH_BATCH_PAGES) {
-            let pages = self.cache.flush_dirty_pages(ids);
-            self.write_dirty_page_batch(&pages)?;
+        if self.bounded_writeback()? {
+            for id in page_ids {
+                if let Some(page) = self.cache.flush_dirty_page(id) {
+                    self.write_dirty_page_batch(&[(id, page)])?;
+                }
+            }
+        } else {
+            for ids in page_ids.chunks(FLUSH_BATCH_PAGES) {
+                let pages = self.cache.flush_dirty_pages(ids);
+                self.write_dirty_page_batch(&pages)?;
+            }
         }
 
         // Write header if dirty
-        if *self.header_dirty_lock()? {
+        if !self.batch_active()? && *self.header_dirty_lock()? {
             self.write_header()?;
         }
 
@@ -1714,6 +1763,14 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         &self.path
     }
 
+    /// Return the exclusively owned handle. Callers must complete their
+    /// publication boundary before consuming the pager.
+    pub fn into_inner(self) -> F {
+        self.file
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Check if database is read-only
     pub fn is_read_only(&self) -> bool {
         self.config.read_only
@@ -1754,14 +1811,27 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // another page writer cannot interleave with a protected batch.
         let mut file = self.file_lock()?;
         self.ensure_writeback_available()?;
-        let result = pager_io::write_pages(&mut *file, pages, self.dwb_enabled);
+        let result: Result<(), PagerError> = (|| {
+            let mut staged = self
+                .staged_pages
+                .lock()
+                .map_err(|_| PagerError::LockPoisoned)?;
+            if let Some(batch) = staged.as_mut() {
+                for (id, page) in pages {
+                    batch.stage(&mut *file, *id, page)?;
+                }
+                Ok(())
+            } else {
+                Ok(pager_io::write_pages(&mut *file, pages, self.dwb_enabled)?)
+            }
+        })();
         if result.is_err() {
             // Set this while holding the file lock: a waiting writer must not
             // replace the recovery frame after an interrupted home write.
             self.writeback_failed
                 .store(true, std::sync::atomic::Ordering::Release);
         }
-        Ok(result?)
+        result
     }
 
     /// Recover from double-write buffer after a crash.

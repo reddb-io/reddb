@@ -472,6 +472,8 @@ fn select_from_red_collections_materializes_catalog_rows() {
             // Timeseries session columns (#576); red.* is additive-only (ADR 0011).
             "session_key",
             "session_gap_ms",
+            "description",
+            "description_generated",
         ]
     );
     assert_eq!(result.result.records.len(), 1);
@@ -561,6 +563,8 @@ fn red_schema_introspection_is_stable_across_virtual_tables() {
                 // Timeseries session columns (#576); red.* is additive-only (ADR 0011).
                 "session_key",
                 "session_gap_ms",
+                "description",
+                "description_generated",
             ],
         ),
         (
@@ -573,6 +577,8 @@ fn red_schema_introspection_is_stable_across_virtual_tables() {
                 "default_value",
                 "is_primary_key",
                 "is_unique",
+                "description",
+                "description_generated",
             ],
         ),
         (
@@ -1370,6 +1376,8 @@ fn select_from_red_columns_materializes_table_schema() {
             "default_value",
             "is_primary_key",
             "is_unique",
+            "description",
+            "description_generated",
         ]
     );
     assert_eq!(result.result.records.len(), 4);
@@ -2310,7 +2318,9 @@ fn show_schema_desugars_to_red_columns_collection_filter() {
             "nullable",
             "default_value",
             "is_primary_key",
-            "is_unique"
+            "is_unique",
+            "description",
+            "description_generated",
         ]
     );
     let show_pairs: Vec<_> = via_show

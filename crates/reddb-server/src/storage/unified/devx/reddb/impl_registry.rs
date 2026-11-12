@@ -294,20 +294,8 @@ impl RedDB {
         &self,
         contract: crate::physical::CollectionContract,
     ) -> Result<crate::physical::CollectionContract, Box<dyn std::error::Error>> {
-        let required_capabilities = contract
-            .declared_columns
-            .iter()
-            .fold(0, |required, column| {
-                required
-                    | reddb_types::DataType::from_sql_name(&column.data_type).map_or(
-                        0,
-                        |data_type| {
-                            reddb_file::native_value::required_file_capabilities_for_data_type(
-                                data_type,
-                            )
-                        },
-                    )
-            });
+        let required_capabilities =
+            reddb_engine::storage::entity_codec::required_file_capabilities_for_contract(&contract);
         self.store()
             .fence_required_capabilities(required_capabilities)?;
         let _publication = self.store.vault_publication_lock.lock();

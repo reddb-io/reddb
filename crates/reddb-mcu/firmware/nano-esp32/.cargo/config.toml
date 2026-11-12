@@ -1,0 +1,14 @@
+[build]
+target = "xtensa-esp32s3-espidf"
+
+[target.xtensa-esp32s3-espidf]
+linker = "ldproxy"
+rustflags = ["--cfg", "espidf_time64"]
+
+[env]
+CARGO_WORKSPACE_DIR = { value = "", relative = true }
+CC_xtensa_esp32s3_espidf = "xtensa-esp32s3-elf-gcc"
+AR_xtensa_esp32s3_espidf = "xtensa-esp32s3-elf-ar"
+
+[unstable]
+build-std = ["std", "panic_abort"]

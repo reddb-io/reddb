@@ -99,7 +99,7 @@ fn payload_entries(payload: &str) -> Result<HashMap<String, Zeroizing<String>>> 
     Ok(entries)
 }
 
-impl<F: VfsFile> LocalDatabase<F> {
+impl<S: StorageStrategy> Database<S> {
     fn vault_blob(&self) -> Result<Option<Vec<u8>>> {
         self.check_healthy()?;
         if self
@@ -109,12 +109,12 @@ impl<F: VfsFile> LocalDatabase<F> {
         {
             return Err(query_error("transaction is aborted; ROLLBACK is required"));
         }
-        let (resident, _) = self.visible()?;
-        let Some(manager) = resident.get_collection(COLLECTION) else {
+        let (store, _) = self.visible()?;
+        if !store.contains_collection(COLLECTION)? {
             return Ok(None);
-        };
-        let entity = manager
-            .get(EntityId::new(1))
+        }
+        let entity = store
+            .get_entity(COLLECTION, EntityId::new(1))?
             .ok_or_else(|| failure("VAULT_CORRUPT"))?;
         match entity
             .data
@@ -157,15 +157,7 @@ impl<F: VfsFile> LocalDatabase<F> {
         if let Some(bytes) = blob {
             payload_entries(&key.unseal(&bytes)?)?;
         } else {
-            let (resident, contracts) = self.visible()?;
-            let staged = copy_resident(resident)?;
-            let mut contracts = contracts.clone();
-            apply(
-                &staged,
-                &[StoreWalAction::CreateCollection {
-                    name: COLLECTION.into(),
-                }],
-            )?;
+            let mut contracts = self.contracts.clone();
             let QueryExpr::CreateTable(query) =
                 reddb_rql::parse_frontend("CREATE TABLE local_vault (value TEXT)")
                     .map_err(LocalReadError::Parse)?
@@ -181,9 +173,14 @@ impl<F: VfsFile> LocalDatabase<F> {
             contract.table_def = None;
             contract.declared_columns.clear();
             contracts.insert(COLLECTION.into(), contract);
-            set_contracts(&staged, &contracts);
-            apply(&staged, &[vault_action(key.seal(b"SEALED:false\n")?)])?;
-            self.store.publish_snapshot(&snapshot(&staged))?;
+            let actions = [
+                StoreWalAction::CreateCollection {
+                    name: COLLECTION.into(),
+                },
+                vault_action(key.seal(b"SEALED:false\n")?),
+            ];
+            self.storage
+                .publish_catalog_actions(&actions, catalog_bytes(&contracts))?;
             self.contracts = contracts;
         }
         Ok(key)
@@ -267,12 +264,46 @@ impl<F: VfsFile> LocalDatabase<F> {
             if transaction.actions.len() >= super::super::local_read::LOCAL_READ_ROWS_MAX {
                 return Err(LocalReadError::ResourceLimit);
             }
-            apply(&transaction.resident, std::slice::from_ref(&action))?;
+            self.storage
+                .apply_transaction(&transaction.store, std::slice::from_ref(&action))?;
             transaction.actions.push(action);
         } else {
-            self.store.publish_actions(&[action])?;
+            self.storage.publish_actions(&[action])?;
         }
         Ok(())
+    }
+}
+
+impl<F: VfsFile> LocalDatabase<F> {
+    /// Metadata only; no key derivation and no credential material returned.
+    pub fn vault_initialized(&self) -> Result<bool> {
+        self.database.vault_initialized()
+    }
+
+    /// Creation is explicit and only admitted outside a transaction. Existing
+    /// files are authenticated first; wrong passwords never replace saved state.
+    pub fn vault_unlock(&mut self, password: &str, create: bool) -> Result<LocalVaultKey> {
+        self.database.vault_unlock(password, create)
+    }
+
+    pub fn vault_keys(&self, key: &LocalVaultKey) -> Result<Vec<String>> {
+        self.database.vault_keys(key)
+    }
+
+    /// Plaintext is returned only through this explicit reveal operation.
+    pub fn vault_reveal(&self, key: &LocalVaultKey, name: &str) -> Result<Option<String>> {
+        self.database.vault_reveal(key, name)
+    }
+
+    /// Mutations stage an encrypted native action alongside ordinary SQL.
+    /// Errors abort an active transaction, just like failed SQL statements.
+    pub fn vault_put(
+        &mut self,
+        key: &LocalVaultKey,
+        name: &str,
+        value: Option<&str>,
+    ) -> Result<()> {
+        self.database.vault_put(key, name, value)
     }
 }
 

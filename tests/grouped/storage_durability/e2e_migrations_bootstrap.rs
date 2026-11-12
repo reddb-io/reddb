@@ -265,12 +265,30 @@ fn rollback_migration_keeps_status_when_vcs_revert_fails() {
     .expect("revert_target migration");
     rt.execute_query("APPLY MIGRATION revert_target")
         .expect("apply migration");
-    rt.execute_query(
-        "UPDATE red.migration.definitions \
-         SET vcs_commit_hash = 'not-a-real-commit' \
-         WHERE name = 'revert_target'",
-    )
-    .expect("replace commit hash");
+    let manager = rt
+        .db()
+        .store()
+        .get_collection("red.migration.definitions")
+        .expect("migration definitions");
+    let mut migration = manager
+        .query_all(|entity| {
+            entity
+                .data
+                .as_row()
+                .and_then(|row| row.get_field("name"))
+                .is_some_and(|value| text(Some(value)) == "revert_target")
+        })
+        .into_iter()
+        .next()
+        .expect("revert_target migration row");
+    let reddb::storage::EntityData::Row(row) = &mut migration.data else {
+        panic!("migration entity must be a row");
+    };
+    row.named.as_mut().expect("named migration fields").insert(
+        "vcs_commit_hash".to_string(),
+        Value::text("not-a-real-commit"),
+    );
+    manager.update(migration).expect("replace commit hash");
 
     let err = rt
         .execute_query("ROLLBACK MIGRATION revert_target")

@@ -203,10 +203,8 @@ fn indexed_table_records(
                 }
                 if let Some(entity) = entity {
                     let logical_id = entity.logical_id();
-                    if seen_logical_ids.insert(logical_id) {
-                        if !consume_visible(position, &entity)? {
-                            break;
-                        }
+                    if seen_logical_ids.insert(logical_id) && !consume_visible(position, &entity)? {
+                        break;
                     }
                 }
             }

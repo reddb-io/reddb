@@ -351,7 +351,7 @@ impl Checkpointer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::engine::PageType;
+    use crate::storage::engine::{PageType, HEADER_SIZE};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -369,6 +369,12 @@ mod tests {
 
     fn temp_wal_path(dir: &Path, name: &str) -> std::path::PathBuf {
         reddb_file::layout::wal_component_temp_path(dir, "checkpoint", name, std::process::id())
+    }
+
+    fn page_image(page_id: u32, marker: u8) -> Vec<u8> {
+        let mut page = Page::new(PageType::BTreeLeaf, page_id);
+        page.as_bytes_mut()[HEADER_SIZE] = marker;
+        page.as_bytes().to_vec()
     }
 
     #[test]
@@ -413,13 +419,11 @@ mod tests {
             wal_writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
 
             // Write a page
-            let mut page_data = [0u8; PAGE_SIZE];
-            page_data[0] = 0x42; // Mark with test byte
             wal_writer
                 .append(&WalRecord::PageWrite {
                     tx_id: 1,
                     page_id,
-                    data: page_data.to_vec(),
+                    data: page_image(page_id, 0x42),
                 })
                 .unwrap();
 
@@ -439,7 +443,7 @@ mod tests {
 
         // Verify page was written
         let read_page = pager.read_page(page_id).unwrap();
-        assert_eq!(read_page.as_bytes()[0], 0x42);
+        assert_eq!(read_page.as_bytes()[HEADER_SIZE], 0x42);
 
         cleanup(&dir);
     }
@@ -466,13 +470,11 @@ mod tests {
             wal_writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
 
             // Write a page
-            let mut page_data = [0u8; PAGE_SIZE];
-            page_data[0] = 0x42;
             wal_writer
                 .append(&WalRecord::PageWrite {
                     tx_id: 1,
                     page_id,
-                    data: page_data.to_vec(),
+                    data: page_image(page_id, 0x42),
                 })
                 .unwrap();
 
@@ -494,7 +496,7 @@ mod tests {
 
         // Verify page was NOT written (should still be zeros)
         let read_page = pager.read_page(page_id).unwrap();
-        assert_ne!(read_page.as_bytes()[0], 0x42);
+        assert_ne!(read_page.as_bytes()[HEADER_SIZE], 0x42);
 
         cleanup(&dir);
     }
@@ -521,26 +523,22 @@ mod tests {
 
             // Transaction 1: Committed
             wal_writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
-            let mut page_data1 = [0u8; PAGE_SIZE];
-            page_data1[0] = 0x11;
             wal_writer
                 .append(&WalRecord::PageWrite {
                     tx_id: 1,
                     page_id: page1_id,
-                    data: page_data1.to_vec(),
+                    data: page_image(page1_id, 0x11),
                 })
                 .unwrap();
             wal_writer.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
 
             // Transaction 2: Aborted
             wal_writer.append(&WalRecord::Begin { tx_id: 2 }).unwrap();
-            let mut page_data2 = [0u8; PAGE_SIZE];
-            page_data2[0] = 0x22;
             wal_writer
                 .append(&WalRecord::PageWrite {
                     tx_id: 2,
                     page_id: page2_id,
-                    data: page_data2.to_vec(),
+                    data: page_image(page2_id, 0x22),
                 })
                 .unwrap();
             wal_writer
@@ -549,13 +547,11 @@ mod tests {
 
             // Transaction 3: Committed
             wal_writer.append(&WalRecord::Begin { tx_id: 3 }).unwrap();
-            let mut page_data3 = [0u8; PAGE_SIZE];
-            page_data3[0] = 0x33;
             wal_writer
                 .append(&WalRecord::PageWrite {
                     tx_id: 3,
                     page_id: page2_id,
-                    data: page_data3.to_vec(),
+                    data: page_image(page2_id, 0x33),
                 })
                 .unwrap();
             wal_writer.append(&WalRecord::Commit { tx_id: 3 }).unwrap();
@@ -574,10 +570,10 @@ mod tests {
 
         // Verify pages
         let read_page1 = pager.read_page(page1_id).unwrap();
-        assert_eq!(read_page1.as_bytes()[0], 0x11);
+        assert_eq!(read_page1.as_bytes()[HEADER_SIZE], 0x11);
 
         let read_page2 = pager.read_page(page2_id).unwrap();
-        assert_eq!(read_page2.as_bytes()[0], 0x33); // From tx 3, not tx 2
+        assert_eq!(read_page2.as_bytes()[HEADER_SIZE], 0x33); // From tx 3, not tx 2
 
         cleanup(&dir);
     }

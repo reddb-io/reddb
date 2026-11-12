@@ -2974,7 +2974,13 @@ mod tests {
     fn redwire_query_with_params_rejects_request_policy_below_floor() {
         let _env_lock = env_lock().lock().expect("env lock");
         let _env = EnvGuard::set(&[("RED_PRIMARY_COMMIT_POLICY", "quorum")]);
-        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let runtime = RedDBRuntime::with_options(
+            crate::api::RedDBOptions::in_memory().with_replication(
+                crate::replication::ReplicationConfig::primary()
+                    .with_quorum(crate::replication::QuorumConfig::sync(1)),
+            ),
+        )
+        .expect("runtime");
         let prepared = PreparedRegistry::new();
         runtime
             .execute_query("CREATE TABLE redwire_request_floor (id INTEGER, name TEXT)")
@@ -3018,7 +3024,13 @@ mod tests {
     fn redwire_query_with_params_read_ignores_request_policy_below_floor() {
         let _env_lock = env_lock().lock().expect("env lock");
         let _env = EnvGuard::set(&[("RED_PRIMARY_COMMIT_POLICY", "quorum")]);
-        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let runtime = RedDBRuntime::with_options(
+            crate::api::RedDBOptions::in_memory().with_replication(
+                crate::replication::ReplicationConfig::primary()
+                    .with_quorum(crate::replication::QuorumConfig::sync(1)),
+            ),
+        )
+        .expect("runtime");
         let prepared = PreparedRegistry::new();
         runtime
             .execute_query("CREATE TABLE redwire_request_read (id INTEGER)")

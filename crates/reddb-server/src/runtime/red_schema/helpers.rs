@@ -181,7 +181,7 @@ pub(super) fn replace_case_insensitive_outside_quotes(
     let mut rest = haystack;
     let mut changed = false;
 
-    while let Some(idx) = find_case_insensitive_outside_quotes(rest, needle) {
+    while let Some(idx) = find_identifier_case_insensitive_outside_quotes(rest, needle) {
         out.push_str(&rest[..idx]);
         out.push_str(replacement);
         rest = &rest[idx + needle.len()..];
@@ -194,6 +194,25 @@ pub(super) fn replace_case_insensitive_outside_quotes(
     } else {
         None
     }
+}
+
+fn find_identifier_case_insensitive_outside_quotes(haystack: &str, needle: &str) -> Option<usize> {
+    let mut offset = 0;
+    while offset <= haystack.len() {
+        let relative = find_case_insensitive_outside_quotes(&haystack[offset..], needle)?;
+        let start = offset + relative;
+        let end = start + needle.len();
+        let bytes = haystack.as_bytes();
+        let continues_identifier =
+            |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'.';
+        let bounded_before = start == 0 || !continues_identifier(bytes[start - 1]);
+        let bounded_after = end == bytes.len() || !continues_identifier(bytes[end]);
+        if bounded_before && bounded_after {
+            return Some(start);
+        }
+        offset = end;
+    }
+    None
 }
 
 pub(super) fn find_case_insensitive_outside_quotes(haystack: &str, needle: &str) -> Option<usize> {

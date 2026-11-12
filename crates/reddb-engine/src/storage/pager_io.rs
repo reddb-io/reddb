@@ -10,6 +10,9 @@
     clippy::cast_possible_truncation
 )]
 
+mod staging;
+pub(crate) use staging::StagedPageBatch;
+
 use super::page::{Page, PageError, PageType, PAGE_SIZE};
 use reddb_file::{VfsFile, PAGED_SUPERBLOCK_SLOT_SIZE, PAGED_SUPERBLOCK_ZONE_SIZE};
 use std::io::{self, SeekFrom};
@@ -206,42 +209,12 @@ pub fn write_pages<F: VfsFile>(
 /// staging is discarded as on the native path: home writes start only after
 /// the complete frame crossed its barrier. No database root is recreated.
 pub fn recover_from_dwb<F: VfsFile>(file: &mut F) -> Result<(), PagerIoError> {
-    if file.file_len()? < dwb_zone_offset() + DWB_ZONE_BYTES as u64 {
-        return Ok(());
-    }
-    let mut buffer = vec![0u8; DWB_ZONE_BYTES];
-    file.seek(SeekFrom::Start(dwb_zone_offset()))?;
-    file.read_exact(&mut buffer)?;
-    if buffer.get(..4) != Some(reddb_file::DWB_MAGIC.as_slice()) {
-        if dwb_zone_is_clear(&buffer) {
-            return Ok(());
-        }
-        return clear_dwb_zone(file);
-    }
-    let entries = match reddb_file::decode_paged_dwb_frame(&buffer) {
-        Ok(entries) => entries,
-        Err(_) => return clear_dwb_zone(file),
-    };
-    for entry in entries {
-        write_page(file, entry.page_id, &Page::from_bytes(entry.page))?;
-    }
-    file.sync_all()?;
-    clear_dwb_zone(file)
+    staging::recover(file)
 }
 
 /// Read a complete staged frame without consuming or repairing the source.
 /// Incomplete staging cannot have reached home pages and is ignored, just as
 /// in writer recovery. The frame decoder bounds the number of pages.
 pub fn read_dwb_pages<F: VfsFile>(file: &mut F) -> Result<Vec<(u32, Page)>, PagerIoError> {
-    if file.file_len()? < dwb_zone_offset() + DWB_ZONE_BYTES as u64 {
-        return Ok(Vec::new());
-    }
-    let mut buffer = vec![0u8; DWB_ZONE_BYTES];
-    file.seek(SeekFrom::Start(dwb_zone_offset()))?;
-    file.read_exact(&mut buffer)?;
-    Ok(reddb_file::decode_paged_dwb_frame(&buffer)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|entry| (entry.page_id, Page::from_bytes(entry.page)))
-        .collect())
+    staging::read_pages(file)
 }

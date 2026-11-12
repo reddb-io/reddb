@@ -1,13 +1,18 @@
 use super::{query_error, Result};
 use crate::{
     catalog::{
-        enforcement::{CollectionContractEnforcer, ContractError, INTERNAL_TTL_METADATA_KEYS},
+        enforcement::{
+            resolved_uniqueness_rules, CollectionContractEnforcer, ContractError, ContractRow,
+            INTERNAL_TTL_METADATA_KEYS,
+        },
         schema::resolved_contract_columns,
         CollectionContract, CollectionModel,
     },
     query::{
         evaluator,
-        local_read::{self, host::ReadHost, LocalReadError, LOCAL_READ_ROWS_MAX},
+        local_read::{
+            self, host::ReadHost, source::StoreView, LocalReadError, LOCAL_READ_ROWS_MAX,
+        },
         planning::aggregation::validate_expression_depth,
         records::runtime_table_record_from_entity_ref_with_schema,
     },
@@ -16,7 +21,6 @@ use crate::{
             compute_entity_field_bloom, EntityData, EntityId, RowData, UnifiedEntity,
             FIRST_USER_ENTITY_ID,
         },
-        resident_store::ResidentStore,
         store_wal::StoreWalAction,
     },
 };
@@ -27,7 +31,7 @@ use reddb_rql::ast::{
 use reddb_types::{DataType, Value};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    sync::{atomic::Ordering, Arc},
+    sync::Arc,
 };
 
 fn unsupported() -> LocalReadError {
@@ -109,7 +113,7 @@ fn admit_contract(contract: &CollectionContract) -> Result<()> {
 
 pub(super) fn plan(
     statement: &QueryExpr,
-    resident: &ResidentStore,
+    resident: &dyn StoreView,
     contracts: &HashMap<String, CollectionContract>,
     now_ms: u64,
 ) -> Result<Vec<StoreWalAction>> {
@@ -181,30 +185,29 @@ pub(super) fn plan(
         });
     }
     local_read::admission::expressions(&query, &columns)?;
-    let manager = resident
-        .get_collection(table)
-        .ok_or_else(|| LocalReadError::Catalog(format!("collection {table} is missing")))?;
+    if let QueryExpr::Insert(insert) = statement {
+        return plan_insert(insert, resident, contract, &columns, table, now_ms);
+    }
     let mut entities = Vec::new();
     let mut exceeded = false;
-    manager.scan_for_each(None, |entity| {
+    resident.scan_collection(table, &mut |entity, metadata| {
         if entities.len() == LOCAL_READ_ROWS_MAX {
             exceeded = true;
             return false;
         }
-        entities.push(entity.clone());
+        let has_ttl = metadata.is_some_and(|metadata| {
+            INTERNAL_TTL_METADATA_KEYS
+                .iter()
+                .any(|key| metadata.has(key))
+        });
+        entities.push((entity.clone(), has_ttl));
         true
-    });
+    })?;
     if exceeded {
         return Err(LocalReadError::ResourceLimit);
     }
-    for entity in &entities {
-        if !matches!(entity.data, EntityData::Row(_))
-            || manager.get_metadata(entity.id).is_some_and(|metadata| {
-                INTERNAL_TTL_METADATA_KEYS
-                    .iter()
-                    .any(|key| metadata.has(key))
-            })
-        {
+    for (entity, has_ttl) in &entities {
+        if !matches!(entity.data, EntityData::Row(_)) || *has_ttl {
             return Err(unsupported());
         }
     }
@@ -220,70 +223,9 @@ pub(super) fn plan(
     let mut actions = Vec::new();
     let mut final_fields: Vec<_> = entities
         .iter()
-        .map(|entity| fields(entity, &context.schema))
+        .map(|(entity, _)| fields(entity, &context.schema))
         .collect();
     match statement {
-        QueryExpr::Insert(insert) => {
-            let names = if insert.columns.is_empty() {
-                contract
-                    .declared_columns
-                    .iter()
-                    .filter(|column| {
-                        column.generated.is_none()
-                            && !(contract.timestamps_enabled
-                                && matches!(column.name.as_str(), "created_at" | "updated_at"))
-                    })
-                    .map(|column| column.name.clone())
-                    .collect::<Vec<_>>()
-            } else {
-                insert.columns.clone()
-            };
-            check_columns(contract, &names)?;
-            if insert.value_exprs.is_empty()
-                || entities
-                    .len()
-                    .checked_add(insert.value_exprs.len())
-                    .is_none_or(|count| count > LOCAL_READ_ROWS_MAX)
-            {
-                return Err(LocalReadError::ResourceLimit);
-            }
-            let first_id = resident
-                .next_entity_id
-                .load(Ordering::SeqCst)
-                .max(FIRST_USER_ENTITY_ID);
-            for (index, row) in insert.value_exprs.iter().enumerate() {
-                if row.len() != names.len() {
-                    return Err(query_error("INSERT column/value counts differ"));
-                }
-                let values = row
-                    .iter()
-                    .map(|expression| {
-                        evaluator::evaluate(expression, &|_: &FieldRef| None)
-                            .map_err(LocalReadError::from)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let fields = enforcer
-                    .normalize_insert_at(names.iter().cloned().zip(values).collect(), now_ms)
-                    .map_err(contract_error)?;
-                let id = first_id
-                    .checked_add(u64::try_from(index).expect("bounded row index"))
-                    .filter(|id| *id < u64::MAX)
-                    .ok_or_else(|| query_error("entity ID space exhausted"))?;
-                let mut entity = UnifiedEntity::table_row(EntityId::new(id), table, id, Vec::new());
-                entity.created_at = now_ms / 1000;
-                entity.updated_at = now_ms / 1000;
-                entity.sequence_id = id;
-                entity.ensure_table_logical_id();
-                set_fields(&mut entity, &fields);
-                actions.push(StoreWalAction::upsert_entity(
-                    table,
-                    &entity,
-                    None,
-                    reddb_file::STORE_VERSION_CURRENT,
-                ));
-                final_fields.push(fields);
-            }
-        }
         QueryExpr::Update(update) => {
             if contract.append_only {
                 return Err(query_error("append-only tables cannot be updated"));
@@ -299,7 +241,7 @@ pub(super) fn plan(
             if update.assignment_exprs.is_empty() {
                 return Err(query_error("UPDATE requires assignments"));
             }
-            for (index, original) in entities.iter().enumerate() {
+            for (index, (original, _)) in entities.iter().enumerate() {
                 if !context.matches(update.where_expr.as_ref(), original)? {
                     continue;
                 }
@@ -317,7 +259,7 @@ pub(super) fn plan(
                 actions.push(StoreWalAction::upsert_entity(
                     table,
                     &entity,
-                    manager.get_metadata(original.id).as_ref(),
+                    resident.get_metadata(table, original.id)?.as_ref(),
                     reddb_file::STORE_VERSION_CURRENT,
                 ));
                 final_fields[index] = fields;
@@ -327,7 +269,7 @@ pub(super) fn plan(
             if contract.append_only {
                 return Err(query_error("append-only tables cannot be deleted"));
             }
-            for entity in &entities {
+            for (entity, _) in &entities {
                 if context.matches(delete.where_expr.as_ref(), entity)? {
                     actions.push(StoreWalAction::DeleteEntityRecord {
                         collection: table.into(),
@@ -338,12 +280,122 @@ pub(super) fn plan(
             // Deletion cannot introduce a uniqueness conflict.
             return Ok(actions);
         }
+        QueryExpr::Insert(_) => unreachable!("INSERT returns through its bounded planner"),
         _ => unreachable!("mutation variant was validated"),
     }
     enforcer
         .enforce_batch_uniqueness(&final_fields)
         .map_err(contract_error)?;
     Ok(actions)
+}
+
+fn plan_insert(
+    insert: &reddb_rql::ast::InsertQuery,
+    resident: &dyn StoreView,
+    contract: &CollectionContract,
+    columns: &[crate::catalog::schema::ResolvedColumnRule],
+    table: &str,
+    now_ms: u64,
+) -> Result<Vec<StoreWalAction>> {
+    let names = if insert.columns.is_empty() {
+        contract
+            .declared_columns
+            .iter()
+            .filter(|column| {
+                column.generated.is_none()
+                    && !(contract.timestamps_enabled
+                        && matches!(column.name.as_str(), "created_at" | "updated_at"))
+            })
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>()
+    } else {
+        insert.columns.clone()
+    };
+    check_columns(contract, &names)?;
+    if insert.value_exprs.is_empty() || insert.value_exprs.len() > LOCAL_READ_ROWS_MAX {
+        return Err(LocalReadError::ResourceLimit);
+    }
+    let enforcer = CollectionContractEnforcer::new(contract);
+    let mut inserted_fields = Vec::with_capacity(insert.value_exprs.len());
+    for row in &insert.value_exprs {
+        if row.len() != names.len() {
+            return Err(query_error("INSERT column/value counts differ"));
+        }
+        let values = row
+            .iter()
+            .map(|expression| {
+                evaluator::evaluate(expression, &|_: &FieldRef| None).map_err(LocalReadError::from)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        inserted_fields.push(
+            enforcer
+                .normalize_insert_at(names.iter().cloned().zip(values).collect(), now_ms)
+                .map_err(contract_error)?,
+        );
+    }
+    enforcer
+        .enforce_batch_uniqueness(&inserted_fields)
+        .map_err(contract_error)?;
+
+    if !resolved_uniqueness_rules(contract).is_empty() {
+        let schema = columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        let mut conflict = None;
+        resident.scan_collection(table, &mut |entity, metadata| {
+            if !matches!(entity.data, EntityData::Row(_))
+                || metadata.is_some_and(|metadata| {
+                    INTERNAL_TTL_METADATA_KEYS
+                        .iter()
+                        .any(|key| metadata.has(key))
+                })
+            {
+                conflict = Some(unsupported());
+                return false;
+            }
+            let existing = ContractRow {
+                id: entity.id,
+                fields: fields(entity, &schema).into_iter().collect(),
+            };
+            for fields in &inserted_fields {
+                if let Err(error) =
+                    enforcer.enforce_uniqueness(fields, std::slice::from_ref(&existing), None)
+                {
+                    conflict = Some(contract_error(error));
+                    return false;
+                }
+            }
+            true
+        })?;
+        if let Some(error) = conflict {
+            return Err(error);
+        }
+    }
+
+    let first_id = resident.next_entity_id()?.max(FIRST_USER_ENTITY_ID);
+    inserted_fields
+        .into_iter()
+        .enumerate()
+        .map(|(index, fields)| {
+            let id = first_id
+                .checked_add(u64::try_from(index).expect("bounded row index"))
+                .filter(|id| *id < u64::MAX)
+                .ok_or_else(|| query_error("entity ID space exhausted"))?;
+            let mut entity = UnifiedEntity::table_row(EntityId::new(id), table, id, Vec::new());
+            entity.created_at = now_ms / 1000;
+            entity.updated_at = now_ms / 1000;
+            entity.sequence_id = id;
+            entity.ensure_table_logical_id();
+            set_fields(&mut entity, &fields);
+            Ok(StoreWalAction::upsert_entity(
+                table,
+                &entity,
+                None,
+                reddb_file::STORE_VERSION_CURRENT,
+            ))
+        })
+        .collect()
 }
 
 fn check_columns(contract: &CollectionContract, names: &[String]) -> Result<()> {

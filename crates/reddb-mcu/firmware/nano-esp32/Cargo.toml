@@ -1,0 +1,15 @@
+[package]
+name = "reddb-mcu-nano-esp32"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+esp-idf-sys = { version = "0.38.1", features = ["binstart"] }
+reddb-io-mcu = { path = "../.." }
+
+[build-dependencies]
+embuild = "0.33.7"
+
+# Keep the target firmware isolated from the canonical workspace build.
+[workspace]

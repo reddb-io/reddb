@@ -267,6 +267,7 @@ impl<P: PageStore> BTreeCursor<P> {
     }
 
     /// Inspect the next key without materializing its value or advancing.
+    #[cfg(feature = "full")]
     pub(crate) fn peek_key_with<T>(
         &mut self,
         visit: impl FnOnce(&[u8]) -> T,
