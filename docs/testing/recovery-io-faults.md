@@ -3,6 +3,12 @@
 Run the functional recovery journeys locally:
 
 ```console
+make test-recovery-io
+```
+
+Or invoke the two focused tests directly:
+
+```console
 cargo test -p reddb-io-server --lib interrupted_dwb_recovery -j 1
 cargo test -p reddb-io-server --lib overflow_checkpoint_undo_survives -j 1
 ```
