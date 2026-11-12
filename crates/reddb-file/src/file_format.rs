@@ -685,6 +685,21 @@ pub fn set_database_header_required_capabilities(
     write_u64(page, DB_REQUIRED_CAPABILITIES_OFFSET, capabilities)
 }
 
+pub fn set_database_header_manifest_reference(
+    page: &mut [u8],
+    reference: crate::page_proof::PageReference,
+) -> Result<(), DatabaseHeaderError> {
+    ensure_len(page, DB_MANIFEST_REFERENCE_END)?;
+    if (reference.page_id == 0) != (reference.digest == [0; 32]) {
+        return Err(DatabaseHeaderError::InvalidManifestReference);
+    }
+    crate::page_proof::encode_reference(
+        &mut page[DB_MANIFEST_REFERENCE_OFFSET..DB_MANIFEST_REFERENCE_END],
+        reference,
+    );
+    Ok(())
+}
+
 pub fn database_header_page_size(page: &[u8]) -> Result<u32, DatabaseHeaderError> {
     read_u32(page, DB_PAGE_SIZE_OFFSET)
 }
@@ -898,12 +913,7 @@ pub fn encode_database_header(
         DB_REQUIRED_CAPABILITIES_OFFSET,
         header.required_capabilities,
     )?;
-    ensure_len(page, DB_MANIFEST_REFERENCE_END)?;
-    crate::page_proof::encode_reference(
-        &mut page[DB_MANIFEST_REFERENCE_OFFSET..DB_MANIFEST_REFERENCE_END],
-        header.manifest_reference,
-    );
-    Ok(())
+    set_database_header_manifest_reference(page, header.manifest_reference)
 }
 
 // ── Paged superblock zone (ADR 0038 §2 phase 1) ─────────────────────────

@@ -476,6 +476,12 @@ fn read_meta_payload(pager: &Pager) -> Result<Option<Vec<u8>>, StoreError> {
 }
 
 impl UnifiedStore {
+    /// Offline reconstruction uses the same catalog-chain proof and publication
+    /// ordering as the live store, with an exclusively owned destination pager.
+    pub(crate) fn publish_native_catalog(pager: &Pager, metadata: &[u8]) -> Result<(), PagerError> {
+        publish_paged_metadata(pager, metadata)
+    }
+
     pub(crate) fn fence_required_capabilities(&self, capabilities: u64) -> Result<(), StoreError> {
         if capabilities == 0 {
             return Ok(());

@@ -673,7 +673,18 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                         .and_then(|()| {
                             reddb_file::set_database_header_required_capabilities(image, required)
                         })
-                        .map_err(|error| PagerError::InvalidDatabase(error.to_string()))
+                        .map_err(|error| PagerError::InvalidDatabase(error.to_string()))?;
+                    if required & reddb_file::FILE_CAPABILITY_CATALOG_ROOT != 0
+                        && current.required_capabilities & reddb_file::FILE_CAPABILITY_CATALOG_ROOT
+                            == 0
+                    {
+                        reddb_file::file_format::set_database_header_manifest_reference(
+                            image,
+                            current.manifest_reference,
+                        )
+                        .map_err(|error| PagerError::InvalidDatabase(error.to_string()))?;
+                    }
+                    Ok(())
                 })?;
             }
             let mut header = self.header_write()?;
@@ -1736,6 +1747,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// ADR 0074 §2: manifest corruption fails the open didactically, naming the
     /// zone — it never falls back to a sidecar and never returns garbage.
     pub fn read_manifest_page(&self) -> Result<Page, PagerError> {
+        let _ownership = self.lock_ownership_mutations();
         let root = self.header_read()?.manifest_page_id();
         self.read_page(root)
             .map_err(|_| PagerError::ManifestZoneCorrupt(self.path.clone()))
@@ -1765,7 +1777,8 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         self.header_write()?.manifest_reference = reference;
         let result = (|| {
             for _ in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
-                self.write_header_and_sync()?;
+                // write_header already syncs its sealed slot before returning.
+                self.write_header()?;
             }
             Ok(())
         })();

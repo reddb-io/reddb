@@ -234,38 +234,7 @@ impl Catalog {
 }
 
 pub(super) fn write_catalog(target: &Pager, data: &[u8]) -> Result<()> {
-    let mut root = Page::new(PageType::Header, 1);
-    if data.len() <= PAGE_SIZE - HEADER_SIZE {
-        root.content_mut()[..data.len()].copy_from_slice(data);
-    } else {
-        let first = PAGE_SIZE - HEADER_SIZE - 16;
-        let chunks: Vec<_> = data[first..].chunks(PAGE_SIZE - HEADER_SIZE - 8).collect();
-        let mut next = 0;
-        for chunk in chunks.into_iter().rev() {
-            let mut page = target.allocate_page(PageType::Overflow)?;
-            f::encode_native_metadata_overflow_continuation_header(
-                page.content_mut(),
-                f::NativeMetadataOverflowContinuationHeader {
-                    next_overflow_page_id: next,
-                    chunk_bytes: u32::try_from(chunk.len())?,
-                },
-            )?;
-            page.content_mut()[8..8 + chunk.len()].copy_from_slice(chunk);
-            next = page.page_id();
-            target.write_page(next, page)?;
-        }
-        f::encode_native_metadata_overflow_header(
-            root.content_mut(),
-            f::NativeMetadataOverflowHeader {
-                format_version: number(data, 4)?,
-                total_payload_bytes: u32::try_from(data.len())?,
-                next_overflow_page_id: next,
-            },
-        )?;
-        root.content_mut()[16..16 + first].copy_from_slice(&data[..first]);
-    }
-    target.sync()?;
-    target.write_page(1, root)?;
+    crate::storage::unified::UnifiedStore::publish_native_catalog(target, data)?;
     Ok(())
 }
 
