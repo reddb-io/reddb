@@ -16,7 +16,7 @@ use reddb::storage::StorageDeployPreset;
 use reddb::{RedDBOptions, RedDBRuntime};
 use reddb_types::Value;
 
-const COLLECTION_COLUMNS: [&str; 15] = [
+const COLLECTION_COLUMNS: [&str; 17] = [
     "name",
     "model",
     "schema_mode",
@@ -35,6 +35,8 @@ const COLLECTION_COLUMNS: [&str; 15] = [
     // replacing it.
     "session_key",
     "session_gap_ms",
+    "description",
+    "description_generated",
 ];
 
 fn open_runtime() -> RedDBRuntime {
