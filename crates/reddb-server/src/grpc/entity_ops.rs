@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub(crate) fn analytics_job_json(job: &crate::PhysicalAnalyticsJob) -> JsonValue {
@@ -17,6 +18,48 @@ pub(crate) fn create_row_reply(
     runtime
         .entity_use_cases()
         .create_row(input)
+        .map(entity_reply_from_output)
+        .map_err(entity_error_to_status)
+}
+
+pub(crate) fn create_row_typed_reply(
+    runtime: &GrpcRuntime,
+    request: TypedCreateRowRequest,
+) -> Result<EntityReply, Status> {
+    if request.collection.trim().is_empty() {
+        return Err(Status::invalid_argument("collection cannot be empty"));
+    }
+
+    let mut names = BTreeSet::new();
+    let mut fields = Vec::with_capacity(request.fields.len());
+    for field in request.fields {
+        if field.name.trim().is_empty() {
+            return Err(Status::invalid_argument("field name cannot be empty"));
+        }
+        if !names.insert(field.name.clone()) {
+            return Err(Status::invalid_argument(format!(
+                "duplicate field '{}'",
+                field.name
+            )));
+        }
+        let value = field.value.ok_or_else(|| {
+            Status::invalid_argument(format!("field '{}' is missing a value", field.name))
+        })?;
+        fields.push((
+            field.name,
+            Value::from(grpc_query_value_to_param_value(value)?),
+        ));
+    }
+
+    runtime
+        .entity_use_cases()
+        .create_row(CreateRowInput {
+            collection: request.collection,
+            fields,
+            metadata: Vec::new(),
+            node_links: Vec::new(),
+            vector_links: Vec::new(),
+        })
         .map(entity_reply_from_output)
         .map_err(entity_error_to_status)
 }

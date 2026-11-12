@@ -137,6 +137,8 @@ impl RedDb for SlowMock {
         }))
     }
 
+    stub_rpc!(create_row_typed, TypedCreateRowRequest, EntityReply);
+
     async fn batch_insert(
         &self,
         _request: Request<tonic::Streaming<BatchInsertChunk>>,
