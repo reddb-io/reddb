@@ -141,6 +141,14 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         self.index_store_ref().clear_paged_btree_overlays();
         drop(publication);
+        if let Err(err) = self.assert_remote_write_allowed("flush") {
+            tracing::warn!(
+                target: "reddb::serverless::lease",
+                error = %err,
+                "flush: skipping remote upload — lease not held"
+            );
+            return Ok(());
+        }
         self.inner
             .db
             .upload_to_remote_backend()
