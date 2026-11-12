@@ -25,6 +25,7 @@ struct RecordingVfs {
 struct State {
     bytes: Vec<u8>,
     events: Vec<Event>,
+    write_budget: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -66,12 +67,19 @@ impl VfsFile for RecordingFile {
             .lock()
             .expect("recording VFS lock should not be poisoned");
         let position = usize::try_from(self.position).expect("test position should fit usize");
-        let end = position + bytes.len();
+        let count = state.write_budget.unwrap_or(bytes.len()).min(bytes.len());
+        if let Some(budget) = &mut state.write_budget {
+            *budget -= count;
+        }
+        let end = position + count;
         let new_len = state.bytes.len().max(end);
         state.bytes.resize(new_len, 0);
-        state.bytes[position..end].copy_from_slice(bytes);
-        state.events.push(Event::Write(bytes.to_vec()));
+        state.bytes[position..end].copy_from_slice(&bytes[..count]);
+        state.events.push(Event::Write(bytes[..count].to_vec()));
         self.position = end as u64;
+        if count != bytes.len() {
+            return Err(io::Error::new(io::ErrorKind::StorageFull, "disk full"));
+        }
         Ok(())
     }
 
@@ -206,4 +214,42 @@ fn wal_append_and_sync_use_the_injected_vfs_in_order() {
             Event::Sync,
         ]
     );
+}
+
+#[test]
+fn disk_full_wal_never_retries_a_partial_batch_or_flushes_it_on_drop() {
+    for (length, budget) in [(128, 0), (128, 17), (128 * 1024, 17)] {
+        let vfs = RecordingVfs::default();
+        let mut writer = WalWriter::open_with_vfs(vfs.clone(), Path::new("wal")).expect("open WAL");
+        let committed = WalRecord::Commit { tx_id: 1 }.encode();
+        writer.append_bytes(&committed).expect("baseline append");
+        writer.sync().expect("baseline durable");
+        let durable = writer.durable_lsn();
+        let batch = WalRecord::TxCommitBatch {
+            tx_id: 2,
+            actions: vec![vec![7; length]],
+        }
+        .encode();
+        vfs.state.lock().expect("VFS state").write_budget = Some(budget);
+        let error = writer
+            .append_bytes(&batch)
+            .and_then(|_| writer.sync())
+            .expect_err("partial write must report disk full");
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        assert_eq!(writer.durable_lsn(), durable, "no false durability ACK");
+        let partial = vfs.state.lock().expect("VFS state").bytes.clone();
+        assert_eq!(&partial[8..durable as usize], committed);
+
+        // Space returning does not make the unknown write offset safe to reuse.
+        vfs.state.lock().expect("VFS state").write_budget = None;
+        assert!(writer.append(&WalRecord::Commit { tx_id: 3 }).is_err());
+        assert!(writer.sync().is_err());
+        assert!(writer.truncate().is_err());
+        drop(writer);
+        assert_eq!(
+            vfs.state.lock().expect("VFS state").bytes,
+            partial,
+            "drop must not retry an unacknowledged partial batch"
+        );
+    }
 }

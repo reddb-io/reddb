@@ -41,6 +41,9 @@ impl<F: VfsFile> WalGroupSync<F> {
 struct VfsBufWriter<F: VfsFile> {
     file: F,
     buffer: Vec<u8>,
+    write_error: Option<io::Error>,
+    #[cfg(test)]
+    test_fail_flush_after: Option<usize>,
 }
 
 impl<F: VfsFile> VfsBufWriter<F> {
@@ -48,15 +51,20 @@ impl<F: VfsFile> VfsBufWriter<F> {
         Self {
             file,
             buffer: Vec::with_capacity(capacity),
+            write_error: None,
+            #[cfg(test)]
+            test_fail_flush_after: None,
         }
     }
 
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.check_write_error()?;
         if self.buffer.len() + bytes.len() > self.buffer.capacity() {
             self.flush()?;
         }
         if bytes.len() >= self.buffer.capacity() {
-            self.file.write_all(bytes)
+            let result = self.file.write_all(bytes);
+            self.record_write_result(result)
         } else {
             self.buffer.extend_from_slice(bytes);
             Ok(())
@@ -64,11 +72,46 @@ impl<F: VfsFile> VfsBufWriter<F> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        self.check_write_error()?;
         if !self.buffer.is_empty() {
-            self.file.write_all(&self.buffer)?;
+            #[cfg(test)]
+            let result = if let Some(limit) = self.test_fail_flush_after.take() {
+                let prefix = limit.min(self.buffer.len().saturating_sub(1));
+                self.file.write_all(&self.buffer[..prefix]).and_then(|_| {
+                    Err(io::Error::new(
+                        io::ErrorKind::StorageFull,
+                        "injected disk full",
+                    ))
+                })
+            } else {
+                self.file.write_all(&self.buffer)
+            };
+            #[cfg(not(test))]
+            let result = self.file.write_all(&self.buffer);
+            self.record_write_result(result)?;
             self.buffer.clear();
         }
         Ok(())
+    }
+
+    fn check_write_error(&self) -> io::Result<()> {
+        match &self.write_error {
+            Some(error) => Err(io::Error::new(
+                error.kind(),
+                format!("WAL write failed; reopen required: {error}"),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    fn record_write_result(&mut self, result: io::Result<()>) -> io::Result<()> {
+        if let Err(error) = &result {
+            // write_all may have advanced the file by an unknown prefix. Never
+            // append after that tail or retry this buffer, including on Drop:
+            // doing so can corrupt framing or publish a rejected transaction.
+            self.write_error = Some(io::Error::new(error.kind(), error.to_string()));
+        }
+        result
     }
 
     fn get_ref(&self) -> &F {
@@ -176,6 +219,11 @@ impl WalWriter<StdVfs> {
 }
 
 impl<V: Vfs> WalWriter<V> {
+    #[cfg(test)]
+    pub(crate) fn test_fail_flush_after(&mut self, bytes: usize) {
+        self.file.test_fail_flush_after = Some(bytes);
+    }
+
     /// Open a WAL file through `vfs`. Creates it if it doesn't exist.
     pub fn open_with_vfs<P: AsRef<Path>>(vfs: V, path: P) -> io::Result<Self> {
         // We do all initial bookkeeping (write header, seek to EOF) on

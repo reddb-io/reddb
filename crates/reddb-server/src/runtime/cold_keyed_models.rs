@@ -668,6 +668,148 @@ fn committed_mvcc_index_reads_survive_crash_during_checkpoint_publication() {
 }
 
 #[test]
+fn disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry() {
+    use crate::api::DurabilityMode;
+    const CHILD_PATH: &str = "REDDB_DISK_FULL_PATH";
+    const CHILD_MODE: &str = "REDDB_DISK_FULL_MODE";
+    const CHILD_BYTES: &str = "REDDB_DISK_FULL_BYTES";
+    let open = |path: std::path::PathBuf, mode| {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(path)
+                .with_memory_budget(64 * 1024 * 1024)
+                .with_bounded_disk_residency(true)
+                .with_storage_profile(
+                    crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+                )
+                .expect("profile")
+                .with_durability_mode(mode),
+        )
+        .expect("open runtime");
+        runtime
+            .background_tasks
+            .as_ref()
+            .expect("workers")
+            .shutdown();
+        runtime
+    };
+    let assert_rows = |runtime: &RedDBRuntime, retried: bool| {
+        // Probe each index before an unindexed scan can warm stale postings.
+        for predicate in [
+            "id = 1",
+            "org_id >= 'org-a' AND org_id < 'org-b'",
+            "payload = 'committed'",
+        ] {
+            let result = runtime
+                .execute_query(&format!(
+                    "SELECT id,payload FROM disk_full_rows WHERE {predicate}"
+                ))
+                .expect("read confirmed row");
+            assert_eq!(result.result.records.len(), 1, "{predicate}");
+            assert_eq!(
+                result.result.records[0].get("payload"),
+                Some(&Value::text("committed"))
+            );
+        }
+        let result = runtime
+            .execute_query("SELECT id FROM disk_full_rows")
+            .expect("scan rows");
+        assert_eq!(result.result.records.len(), if retried { 2 } else { 1 });
+        let result = runtime
+            .execute_query("SELECT id FROM disk_full_rows WHERE id = 2")
+            .expect("new row by HASH");
+        assert_eq!(result.result.records.len(), usize::from(retried));
+    };
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        let mode = if std::env::var(CHILD_MODE).expect("mode") == "strict" {
+            DurabilityMode::Strict
+        } else {
+            DurabilityMode::WalDurableGrouped
+        };
+        let runtime = open(path.into(), mode);
+        for sql in [
+            "BEGIN",
+            "UPDATE disk_full_rows SET payload = 'committed' WHERE id = 1",
+            "COMMIT",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        // The confirmed update above has no checkpoint; it must survive WAL replay.
+        let bytes = std::env::var(CHILD_BYTES)
+            .expect("prefix")
+            .parse()
+            .expect("byte count");
+        runtime.db().store().test_fail_wal_flush_after(bytes);
+        let sql = "INSERT INTO disk_full_rows (id,org_id,payload) VALUES (2,'org-b','retry')";
+        let error = runtime
+            .execute_query(sql)
+            .err()
+            .expect("disk full must reject INSERT");
+        assert!(error.to_string().contains("disk full"), "{error}");
+        assert_rows(&runtime, false);
+        // The one-shot fault is gone, but this writer cannot safely continue.
+        assert!(runtime.execute_query(sql).is_err());
+        assert!(runtime.checkpoint().is_err());
+        // Exercise Drop as well: it must not flush the rejected batch. Exiting
+        // then ensures the parent validates a genuinely cold recovery.
+        drop(runtime);
+        std::process::exit(197);
+    }
+
+    for (mode_name, mode) in [
+        ("strict", DurabilityMode::Strict),
+        ("grouped", DurabilityMode::WalDurableGrouped),
+    ] {
+        for bytes in [0, 17] {
+            let directory = tempfile::tempdir().expect("disk full fixture");
+            let path = directory.path().join("disk-full.rdb");
+            {
+                let runtime = open(path.clone(), mode);
+                for sql in [
+                    "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+                    "CREATE TABLE disk_full_rows (id INT, org_id TEXT, payload TEXT)",
+                    "CREATE UNIQUE INDEX disk_full_id ON disk_full_rows (id) USING HASH",
+                    "CREATE INDEX disk_full_org ON disk_full_rows (org_id) USING BTREE",
+                    "INSERT INTO disk_full_rows (id,org_id,payload) VALUES (1,'org-a','original')",
+                ] {
+                    runtime.execute_query(sql).expect(sql);
+                }
+                runtime.checkpoint().expect("baseline checkpoint");
+            }
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", "runtime::cold_keyed_models::disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry", "--nocapture"])
+                .env(CHILD_PATH, &path)
+                .env(CHILD_MODE, mode_name)
+                .env(CHILD_BYTES, bytes.to_string())
+                .output().expect("disk full child");
+            assert_eq!(
+                output.status.code(),
+                Some(197),
+                "{mode_name}/{bytes}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            {
+                let runtime = open(path.clone(), mode);
+                assert_rows(&runtime, false);
+                runtime
+                    .execute_query(
+                        "INSERT INTO disk_full_rows (id,org_id,payload) VALUES (2,'org-b','retry')",
+                    )
+                    .expect("space restored and WAL recovered");
+                assert_rows(&runtime, true);
+                runtime.checkpoint().expect("checkpoint recovered state");
+                assert!(runtime
+                    .verify_persisted_indexes("disk_full_rows")
+                    .expect("index integrity")
+                    .is_empty());
+            }
+            let runtime = open(path.clone(), mode);
+            assert_rows(&runtime, true);
+        }
+    }
+}
+
+#[test]
 fn repeated_cold_boot_reuses_published_index_pages() {
     let directory = tempfile::tempdir().expect("cold growth fixture");
     let path = directory.path().join("cold-growth.rdb");

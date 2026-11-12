@@ -591,6 +591,7 @@ impl StoreCommitCoordinator {
         ready: bool,
     ) -> io::Result<super::checkpoint_wal::CheckpointWalBatch> {
         use super::checkpoint_wal::CheckpointWalBatch;
+        self.check_write_error()?;
         if actions.is_empty() {
             return Ok(CheckpointWalBatch::default());
         }
@@ -719,6 +720,7 @@ impl StoreCommitCoordinator {
     /// [`Self::append_actions`] so durability semantics are uniform
     /// across record kinds.
     pub(crate) fn append_single_record(&self, record: WalRecord) -> io::Result<()> {
+        self.check_write_error()?;
         if matches!(record, WalRecord::PageOwnership { .. }) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -780,6 +782,7 @@ impl StoreCommitCoordinator {
     }
 
     fn append_durable_ownership_bytes(&self, bytes: Vec<u8>) -> io::Result<()> {
+        self.check_write_error()?;
         let _epoch = self.queue.epoch.read();
         // Set before writing: a failed or uncertain append must never allow
         // checkpoint truncation to discard the ownership journal.
@@ -810,6 +813,7 @@ impl StoreCommitCoordinator {
     }
 
     pub(crate) fn force_sync(&self) -> io::Result<()> {
+        self.check_write_error()?;
         // Strict append already owns a read lease. Do not wait behind a
         // checkpoint that needs that append to finish before resetting.
         let _epoch = self.queue.epoch.read_recursive();
@@ -892,6 +896,7 @@ impl StoreCommitCoordinator {
     }
 
     fn truncate_inner(&self, runtime_snapshots_durable: bool) -> io::Result<()> {
+        self.check_write_error()?;
         let _epoch = self.queue.epoch.write();
         // Async appenders may have returned while their entries remain queued.
         // Drain them before deciding what the checkpoint may discard.
@@ -1484,6 +1489,13 @@ impl StoreCommitCoordinator {
         self.wait_until_durable_batch(target_lsn, wal_bytes, false)
     }
 
+    fn check_write_error(&self) -> io::Result<()> {
+        if let Some(error) = &self.state.0.lock().last_error {
+            return Err(io::Error::other(error.clone()));
+        }
+        Ok(())
+    }
+
     fn wait_until_durable_batch(
         &self,
         target_lsn: u64,
@@ -1499,6 +1511,9 @@ impl StoreCommitCoordinator {
             DurabilityMode::Async => {
                 let (state_lock, cond) = &*self.state;
                 let mut state = state_lock.lock();
+                if let Some(error) = &state.last_error {
+                    return Err(io::Error::other(error.clone()));
+                }
                 state.pending_target_lsn = state.pending_target_lsn.max(target_lsn);
                 state.pending_statements = state.pending_statements.saturating_add(1);
                 state.pending_wal_bytes = state.pending_wal_bytes.saturating_add(wal_bytes);
@@ -1643,6 +1658,10 @@ impl StoreCommitCoordinator {
                 }
                 Err(err) => {
                     guard.last_error = Some(err.to_string());
+                    // A failed write may have left a partial batch. Do not
+                    // retry it in a busy loop or later acknowledge its LSN.
+                    cond.notify_all();
+                    return;
                 }
             }
             cond.notify_all();
@@ -1666,6 +1685,16 @@ pub(super) struct PendingResultCacheAppend {
 }
 
 impl UnifiedStore {
+    #[cfg(test)]
+    pub(crate) fn test_fail_wal_flush_after(&self, bytes: usize) {
+        self.commit
+            .as_ref()
+            .expect("fixture requires an external WAL")
+            .wal
+            .lock()
+            .test_fail_flush_after(bytes);
+    }
+
     pub(crate) fn sync_control_metadata(&self) -> Result<(), StoreError> {
         if let Some(commit) = &self.commit {
             commit.sync_pending().map_err(StoreError::Io)?;
