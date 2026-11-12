@@ -43,32 +43,26 @@ the [overview](./overview.md) first if you haven't.
 
 ## Commit lifecycle
 
-```
-     begin()          commit()        pin(xid)         save_commit()
-xid ──────▶ active ──────▶ committed ──────▶ pinned ──────▶ durable
-            │                │                │                │
-            │                │                │                └─ row in red_commits
-            │                │                └─ SnapshotManager.pinned[xid]++
-            │                └─ visible to every future snapshot
-            └─ snapshot_manager tracks in-progress set
-
-                    │
-                    ▼  vcs_commit(...) returns
-```
-
 1. `snapshot_manager.begin()` — allocate a fresh monotonic `Xid`.
-2. `snapshot_manager.commit(xid)` — immediately mark committed so
-   every future snapshot can see rows stamped with this xid.
-3. `snapshot_manager.pin(xid)` — ref-count the xid so
-   `prune_aborted` skips it. Until *all* references drop (branch
-   delete, commit unreachable), the versions survive.
+2. Capture the snapshot, including transactions still in progress whose
+   xids precede it. Pin the oldest excluded xid, or the snapshot xid when
+   there are no exclusions, before releasing the temporary transaction.
+   This horizon prevents reclamation of versions the snapshot can see.
+3. Mark the temporary xid committed.
 4. `save_commit(...)` — write the canonical `red_commits` row with
-   `id = sha256(...)`, `root_xid = xid`, `parents`, `height`,
-   `author`, `committer`, `message`, `timestamp_ms`.
+   `id = sha256(...)`, `root_xid = xid`, the snapshot's in-progress xids,
+   `parents`, `height`, `author`, `committer`, `message`, `timestamp_ms`.
 5. `save_ref(branch, hash)` — advance the current branch ref to
    the new commit hash (upsert semantics).
 6. `upsert_workset(conn, branch, base = hash, working_xid = xid)`
    — update per-connection working set.
+
+On reopen, RedDB restores the pinned horizons from the stored commits.
+Commits created before snapshot exclusions were recorded contain only the
+root xid; the earlier exclusion set cannot be reconstructed. Raw
+`AS OF SNAPSHOT` likewise supplies only an xid, not a stored commit view.
+Older binaries that do not read `snapshot_in_progress` cannot reproduce the
+full visibility of newer commits.
 
 ### Commit hash
 
@@ -163,7 +157,7 @@ SELECT ... AS OF COMMIT '<hash>' WHERE ...
       ├─ runtime.vcs_resolve_as_of(spec) -> Xid
       │     load red_commits row, return commit.root_xid
       │
-      ├─ Snapshot { xid, in_progress: {} }  installed via
+      ├─ stored snapshot { xid, in_progress } installed via
       │   CurrentSnapshotGuard::install(...)
       │
       └─ scans honour visibility:
@@ -202,13 +196,15 @@ vcs_merge(input):
   if strategy == FastForwardOnly:
     return Err("not a fast-forward")
 
-  merge_commit = new commit with parents = [ours, theirs]
-  save_commit(merge_commit)
-  save_ref(branch, merge_commit)
-
   conflicts = materialize_merge_conflicts(lca, ours, theirs, merge_state_id)
   save_merge_state(merge_state_id, kind = merge, base = lca,
                    ours, theirs, conflicts_count = conflicts.len())
+  if conflicts are present:
+    return MergeOutcome { merge_commit: None, conflicts, merge_state_id }
+
+  merge_commit = new commit with parents = [ours, theirs]
+  save_commit(merge_commit)
+  save_ref(branch, merge_commit)
   return MergeOutcome { merge_commit, conflicts, merge_state_id, ... }
 ```
 

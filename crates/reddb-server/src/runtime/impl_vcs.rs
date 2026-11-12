@@ -25,7 +25,7 @@ use crate::application::vcs::{
 use crate::application::vcs_collections as vc;
 use crate::json::{Map, Value as JsonValue};
 use crate::runtime::RedDBRuntime;
-use crate::storage::transaction::snapshot::{Xid, XID_NONE};
+use crate::storage::transaction::snapshot::{Snapshot, SnapshotManager, Xid, XID_NONE};
 use crate::storage::unified::entity::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use crate::storage::unified::UnifiedStore;
 use crate::{RedDBError, RedDBResult};
@@ -210,12 +210,78 @@ fn load_commit(store: &UnifiedStore, hash: &str) -> Option<Commit> {
     commit_from_row(row)
 }
 
-fn save_commit(store: &UnifiedStore, commit: &Commit) -> RedDBResult<()> {
+fn capture_commit_snapshot(manager: &SnapshotManager) -> Snapshot {
+    let xid = manager.begin();
+    let mut snapshot = manager.snapshot(xid);
+    snapshot.in_progress.retain(|pending| *pending < xid);
+    // An excluded writer may later delete a version visible to this commit.
+    // Pin its horizon before committing the temporary xid releases protection.
+    let horizon = snapshot.in_progress.iter().copied().fold(xid, Xid::min);
+    manager.pin(horizon);
+    manager.commit(xid);
+    snapshot
+}
+
+fn commit_snapshot_from_row(row: &RowData) -> RedDBResult<Snapshot> {
+    let xid = row_u64(row, "root_xid")
+        .ok_or_else(|| RedDBError::Internal("vcs: commit has no root snapshot".to_string()))?;
+    let mut in_progress = HashSet::new();
+    // Legacy commits recorded only the root xid; their exclusions are unknown.
+    if let Some(value) = row.get_field("snapshot_in_progress") {
+        let Value::Array(values) = value else {
+            return Err(RedDBError::Internal(
+                "vcs: invalid commit snapshot exclusions".to_string(),
+            ));
+        };
+        for value in values {
+            let pending = match value {
+                Value::UnsignedInteger(value) => *value,
+                Value::Integer(value) if *value > 0 => *value as u64,
+                _ => {
+                    return Err(RedDBError::Internal(
+                        "vcs: invalid commit snapshot exclusion".to_string(),
+                    ));
+                }
+            };
+            if pending == XID_NONE || pending >= xid {
+                return Err(RedDBError::Internal(
+                    "vcs: commit snapshot exclusion outside its horizon".to_string(),
+                ));
+            }
+            in_progress.insert(pending);
+        }
+    }
+    Ok(Snapshot { xid, in_progress })
+}
+
+fn snapshot_sees_entity(
+    snapshot: &Snapshot,
+    manager: &SnapshotManager,
+    entity: &UnifiedEntity,
+) -> bool {
+    if entity.xmin != XID_NONE && manager.is_aborted(entity.xmin) {
+        return false;
+    }
+    let xmax = if entity.xmax != XID_NONE && manager.is_aborted(entity.xmax) {
+        XID_NONE
+    } else {
+        entity.xmax
+    };
+    snapshot.sees(entity.xmin, xmax)
+}
+
+fn save_commit(store: &UnifiedStore, commit: &Commit, snapshot: &Snapshot) -> RedDBResult<()> {
     let mut fields: HashMap<String, Value> = HashMap::new();
     fields.insert("id".to_string(), Value::text(commit.hash.as_str()));
     fields.insert(
         "root_xid".to_string(),
         Value::UnsignedInteger(commit.root_xid),
+    );
+    let mut pending: Vec<Xid> = snapshot.in_progress.iter().copied().collect();
+    pending.sort_unstable();
+    fields.insert(
+        "snapshot_in_progress".to_string(),
+        Value::Array(pending.into_iter().map(Value::UnsignedInteger).collect()),
     );
     fields.insert(
         "parents".to_string(),
@@ -642,6 +708,43 @@ fn load_workset(store: &UnifiedStore, connection_id: u64) -> Option<(RefName, Op
 // ---------------------------------------------------------------------------
 
 impl RedDBRuntime {
+    pub(super) fn rehydrate_vcs_snapshot_pins(&self) -> RedDBResult<()> {
+        let store = self.inner.db.store();
+        let Some(commits) = store.get_collection(vc::COMMITS) else {
+            return Ok(());
+        };
+        let manager = self.inner.transaction_state.snapshot_manager();
+        let mut failure = None;
+        commits.try_for_each_entity(usize::MAX, |entity| {
+            let Some(row) = entity.data.as_row() else {
+                failure = Some(RedDBError::Internal(
+                    "vcs: invalid commit record".to_string(),
+                ));
+                return false;
+            };
+            match commit_snapshot_from_row(row) {
+                Ok(snapshot) => {
+                    manager.observe_committed_xid(snapshot.xid);
+                    let horizon = snapshot
+                        .in_progress
+                        .iter()
+                        .copied()
+                        .fold(snapshot.xid, Xid::min);
+                    manager.pin(horizon);
+                    true
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    false
+                }
+            }
+        })?;
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     pub fn vcs_commit(&self, input: CreateCommitInput) -> RedDBResult<Commit> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
@@ -682,8 +785,8 @@ impl RedDBRuntime {
         // prerequisite for `AS OF BRANCH` to map to distinct
         // snapshots across divergent branches.
         let snapshot_manager = self.inner.transaction_state.snapshot_manager();
-        let root_xid = snapshot_manager.begin();
-        snapshot_manager.commit(root_xid);
+        let snapshot = capture_commit_snapshot(&snapshot_manager);
+        let root_xid = snapshot.xid;
         let timestamp_ms = now_ms();
         let committer = input.committer.unwrap_or_else(|| input.author.clone());
 
@@ -713,13 +816,7 @@ impl RedDBRuntime {
             signature: None,
         };
 
-        save_commit(store, &commit)?;
-
-        // Pin the root xid so VACUUM cannot reclaim history while the
-        // commit is reachable.
-        if root_xid != XID_NONE {
-            snapshot_manager.pin(root_xid);
-        }
+        save_commit(store, &commit, &snapshot)?;
 
         // Advance (or create) the branch ref.
         let branch_name = if branch_ref.is_empty() {
@@ -976,13 +1073,8 @@ impl RedDBRuntime {
             });
         }
 
-        // Non-fast-forward: compute LCA, create a merge commit.
-        // Data-level 3-way merge (with conflict materialisation into
-        // red_conflicts) is deferred to Phase 4 — for now we produce
-        // the merge commit only when both sides have no content
-        // overlap to resolve, i.e. when LCA == head_hash (reverse FF)
-        // we already handled above. Otherwise surface a merge_state
-        // placeholder so callers know data reconciliation is required.
+        // Detect conflicts before advancing HEAD. Data-level application
+        // and completion of a paused merge are not implemented yet.
         let lca = RedDBRuntime::vcs_lca(self, &head_hash, &from_hash)?;
 
         let message = input
@@ -999,8 +1091,8 @@ impl RedDBRuntime {
             .unwrap_or(0);
         let height = parent_height + 1;
         let snapshot_manager = self.inner.transaction_state.snapshot_manager();
-        let root_xid = snapshot_manager.begin();
-        snapshot_manager.commit(root_xid);
+        let snapshot = capture_commit_snapshot(&snapshot_manager);
+        let root_xid = snapshot.xid;
 
         let hash = compute_commit_hash(root_xid, &parents, &author, &message, timestamp_ms);
 
@@ -1015,33 +1107,6 @@ impl RedDBRuntime {
             timestamp_ms,
             signature: None,
         };
-
-        // Create a merge_state row so Phase 4 can pick up where we
-        // stopped and actually reconcile data. We still open the
-        // commit / ref so log() shows the history; worksets gets the
-        // merge_state_id so status() surfaces the in-progress state.
-        save_commit(store, &merge_commit)?;
-        if root_xid != XID_NONE {
-            snapshot_manager.pin(root_xid);
-        }
-        if !head_branch.is_empty() {
-            save_ref(
-                store,
-                &Ref {
-                    name: head_branch.clone(),
-                    kind: RefKind::Branch,
-                    target: hash.clone(),
-                    protected: false,
-                },
-            )?;
-        }
-        upsert_workset(
-            store,
-            input.connection_id,
-            &head_branch,
-            Some(&hash),
-            root_xid,
-        )?;
 
         let merge_state_id = format!("ms:{}", &hash[..16]);
 
@@ -1076,6 +1141,41 @@ impl RedDBRuntime {
             Value::UnsignedInteger(conflicts.len() as u64),
         );
         insert_meta_row(store, vc::MERGE_STATE, ms_fields)?;
+
+        if !conflicts.is_empty() {
+            let horizon = snapshot
+                .in_progress
+                .iter()
+                .copied()
+                .fold(snapshot.xid, Xid::min);
+            snapshot_manager.unpin(horizon);
+            return Ok(MergeOutcome {
+                merge_commit: None,
+                fast_forward: false,
+                conflicts,
+                merge_state_id: Some(merge_state_id),
+            });
+        }
+
+        save_commit(store, &merge_commit, &snapshot)?;
+        if !head_branch.is_empty() {
+            save_ref(
+                store,
+                &Ref {
+                    name: head_branch.clone(),
+                    kind: RefKind::Branch,
+                    target: hash.clone(),
+                    protected: false,
+                },
+            )?;
+        }
+        upsert_workset(
+            store,
+            input.connection_id,
+            &head_branch,
+            Some(&hash),
+            root_xid,
+        )?;
 
         Ok(MergeOutcome {
             merge_commit: Some(merge_commit),
@@ -1145,8 +1245,8 @@ impl RedDBRuntime {
             .unwrap_or(0);
         let height = parent_height + 1;
         let snapshot_manager = self.inner.transaction_state.snapshot_manager();
-        let root_xid = snapshot_manager.begin();
-        snapshot_manager.commit(root_xid);
+        let snapshot = capture_commit_snapshot(&snapshot_manager);
+        let root_xid = snapshot.xid;
         let timestamp_ms = now_ms();
 
         let hash = compute_commit_hash(root_xid, &parents, &author, &message, timestamp_ms);
@@ -1161,10 +1261,7 @@ impl RedDBRuntime {
             timestamp_ms,
             signature: None,
         };
-        save_commit(store, &pick_commit)?;
-        if root_xid != XID_NONE {
-            snapshot_manager.pin(root_xid);
-        }
+        save_commit(store, &pick_commit, &snapshot)?;
         if !head_branch.is_empty() {
             save_ref(
                 store,
@@ -1261,8 +1358,8 @@ impl RedDBRuntime {
             .unwrap_or(0);
         let height = parent_height + 1;
         let snapshot_manager = self.inner.transaction_state.snapshot_manager();
-        let root_xid = snapshot_manager.begin();
-        snapshot_manager.commit(root_xid);
+        let snapshot = capture_commit_snapshot(&snapshot_manager);
+        let root_xid = snapshot.xid;
         let timestamp_ms = now_ms();
 
         let hash = compute_commit_hash(root_xid, &parents, &author, &message, timestamp_ms);
@@ -1277,10 +1374,7 @@ impl RedDBRuntime {
             timestamp_ms,
             signature: None,
         };
-        save_commit(store, &rv_commit)?;
-        if root_xid != XID_NONE {
-            snapshot_manager.pin(root_xid);
-        }
+        save_commit(store, &rv_commit, &snapshot)?;
         if !head_branch.is_empty() {
             save_ref(
                 store,
@@ -1379,12 +1473,9 @@ impl RedDBRuntime {
         let store: &UnifiedStore = &store_arc;
         let from_hash = RedDBRuntime::vcs_resolve_commitish(self, &input.from)?;
         let to_hash = RedDBRuntime::vcs_resolve_commitish(self, &input.to)?;
-        let from_xid = RedDBRuntime::vcs_resolve_as_of(self, AsOfSpec::Commit(from_hash.clone()))?;
-        let to_xid = RedDBRuntime::vcs_resolve_as_of(self, AsOfSpec::Commit(to_hash.clone()))?;
-
         let sm = self.inner.transaction_state.snapshot_manager();
-        let from_snap = sm.snapshot(from_xid);
-        let to_snap = sm.snapshot(to_xid);
+        let from_snap = self.vcs_resolve_snapshot(AsOfSpec::Commit(from_hash.clone()))?;
+        let to_snap = self.vcs_resolve_snapshot(AsOfSpec::Commit(to_hash.clone()))?;
 
         // Iterate every *user* collection (skip internal red_*).
         let mut entries: Vec<DiffEntry> = Vec::new();
@@ -1408,16 +1499,16 @@ impl RedDBRuntime {
                 continue;
             };
             let entities = manager.query_all(|_| true);
-            // Group by entity id so we can compare before/after state.
+            // Compare physical versions under the stable logical identity.
             for entity in &entities {
                 let xmin = entity.xmin;
                 let xmax = entity.xmax;
-                let in_from = from_snap.sees(xmin, xmax) && !sm.is_aborted(xmin);
-                let in_to = to_snap.sees(xmin, xmax) && !sm.is_aborted(xmin);
+                let in_from = snapshot_sees_entity(&from_snap, &sm, entity);
+                let in_to = snapshot_sees_entity(&to_snap, &sm, entity);
                 if in_from == in_to {
                     continue;
                 }
-                let entity_id = entity.id.raw().to_string();
+                let entity_id = entity.logical_id().raw().to_string();
                 let payload = if input.summary_only {
                     JsonValue::Null
                 } else {
@@ -1588,55 +1679,75 @@ impl RedDBRuntime {
     }
 
     pub fn vcs_resolve_as_of(&self, spec: AsOfSpec) -> RedDBResult<Xid> {
+        Ok(self.vcs_resolve_snapshot(spec)?.xid)
+    }
+
+    pub(super) fn vcs_resolve_snapshot(&self, spec: AsOfSpec) -> RedDBResult<Snapshot> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
         match spec {
-            AsOfSpec::Snapshot(x) => Ok(x),
+            AsOfSpec::Snapshot(xid) => Ok(Snapshot {
+                xid,
+                in_progress: HashSet::new(),
+            }),
             AsOfSpec::Commit(h) => {
-                let c = load_commit(store, &h)
+                let entity = load_commit_entity(store, &h)
                     .ok_or_else(|| RedDBError::NotFound(format!("commit `{h}` not found")))?;
-                Ok(c.root_xid)
+                let row = entity.data.as_row().ok_or_else(|| {
+                    RedDBError::Internal("vcs: invalid commit record".to_string())
+                })?;
+                commit_snapshot_from_row(row)
             }
             AsOfSpec::Branch(name) => {
                 let full = normalize_branch_name(&name);
                 let r = load_ref(store, &full).ok_or_else(|| {
                     RedDBError::NotFound(format!("branch `{full}` does not exist"))
                 })?;
-                let c = load_commit(store, &r.target).ok_or_else(|| {
+                let entity = load_commit_entity(store, &r.target).ok_or_else(|| {
                     RedDBError::NotFound(format!("branch `{full}` points to missing commit"))
                 })?;
-                Ok(c.root_xid)
+                let row = entity.data.as_row().ok_or_else(|| {
+                    RedDBError::Internal("vcs: invalid commit record".to_string())
+                })?;
+                commit_snapshot_from_row(row)
             }
             AsOfSpec::Tag(name) => {
                 let full = normalize_tag_name(&name);
                 let r = load_ref(store, &full)
                     .ok_or_else(|| RedDBError::NotFound(format!("tag `{full}` does not exist")))?;
-                let c = load_commit(store, &r.target).ok_or_else(|| {
+                let entity = load_commit_entity(store, &r.target).ok_or_else(|| {
                     RedDBError::NotFound(format!("tag `{full}` points to missing commit"))
                 })?;
-                Ok(c.root_xid)
+                let row = entity.data.as_row().ok_or_else(|| {
+                    RedDBError::Internal("vcs: invalid commit record".to_string())
+                })?;
+                commit_snapshot_from_row(row)
             }
             AsOfSpec::TimestampMs(ts) => {
                 let manager = store
                     .get_collection(vc::COMMITS)
                     .ok_or_else(|| RedDBError::NotFound("no commits exist yet".to_string()))?;
                 // Find the commit with the greatest timestamp_ms <= ts.
-                let mut best: Option<(i64, Xid)> = None;
+                let mut best: Option<(i64, UnifiedEntity)> = None;
                 let entities = manager.query_all(|_| true);
                 for entity in entities {
                     if let Some(row) = entity.data.as_row() {
                         let t = row_i64(row, "timestamp_ms").unwrap_or(0);
                         if t <= ts {
-                            let xid = row_u64(row, "root_xid").unwrap_or(0);
                             match &best {
                                 Some((bt, _)) if *bt >= t => {}
-                                _ => best = Some((t, xid)),
+                                _ => best = Some((t, entity)),
                             }
                         }
                     }
                 }
-                best.map(|(_, x)| x)
-                    .ok_or_else(|| RedDBError::NotFound(format!("no commit at or before ts={ts}")))
+                let (_, entity) = best.ok_or_else(|| {
+                    RedDBError::NotFound(format!("no commit at or before ts={ts}"))
+                })?;
+                let row = entity.data.as_row().ok_or_else(|| {
+                    RedDBError::Internal("vcs: invalid commit record".to_string())
+                })?;
+                commit_snapshot_from_row(row)
             }
         }
     }
@@ -1723,14 +1834,10 @@ fn materialize_merge_conflicts(
     use crate::application::merge_json::three_way_merge;
     use crate::application::vcs::AsOfSpec;
 
-    let base_xid = rt.vcs_resolve_as_of(AsOfSpec::Commit(base_hash.to_string()))?;
-    let ours_xid = rt.vcs_resolve_as_of(AsOfSpec::Commit(ours_hash.to_string()))?;
-    let theirs_xid = rt.vcs_resolve_as_of(AsOfSpec::Commit(theirs_hash.to_string()))?;
-
     let sm = rt.inner.transaction_state.snapshot_manager();
-    let base_snap = sm.snapshot(base_xid);
-    let ours_snap = sm.snapshot(ours_xid);
-    let theirs_snap = sm.snapshot(theirs_xid);
+    let base_snap = rt.vcs_resolve_snapshot(AsOfSpec::Commit(base_hash.to_string()))?;
+    let ours_snap = rt.vcs_resolve_snapshot(AsOfSpec::Commit(ours_hash.to_string()))?;
+    let theirs_snap = rt.vcs_resolve_snapshot(AsOfSpec::Commit(theirs_hash.to_string()))?;
 
     // Walk every VCS-opted-in user collection, materialising
     // per-(entity_id) visible JSON bodies at each of the three
@@ -1752,20 +1859,18 @@ fn materialize_merge_conflicts(
         let mut at_ours: HashMap<u64, JsonValue> = HashMap::new();
         let mut at_theirs: HashMap<u64, JsonValue> = HashMap::new();
         for entity in manager.query_all(|_| true) {
-            let xmin = entity.xmin;
-            let xmax = entity.xmax;
-            if sm.is_aborted(xmin) {
-                continue;
+            let eid = entity.logical_id().raw();
+            let mut body = crate::entity_render::compact_entity_json(&entity);
+            if let JsonValue::Object(ref mut fields) = body {
+                fields.insert("id".to_string(), JsonValue::Number(eid as f64));
             }
-            let eid = entity.id.raw();
-            let body = crate::entity_render::compact_entity_json(&entity);
-            if base_snap.sees(xmin, xmax) {
+            if snapshot_sees_entity(&base_snap, &sm, &entity) {
                 at_base.insert(eid, body.clone());
             }
-            if ours_snap.sees(xmin, xmax) {
+            if snapshot_sees_entity(&ours_snap, &sm, &entity) {
                 at_ours.insert(eid, body.clone());
             }
-            if theirs_snap.sees(xmin, xmax) {
+            if snapshot_sees_entity(&theirs_snap, &sm, &entity) {
                 at_theirs.insert(eid, body);
             }
         }

@@ -607,6 +607,7 @@ impl RedDBRuntime {
             .max(runtime.config_u64("red.config.timeline.last_archived_lsn", 0));
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
         runtime.rehydrate_snapshot_xid_floor()?;
+        runtime.rehydrate_vcs_snapshot_pins()?;
         assert!(runtime
             .inner
             .db

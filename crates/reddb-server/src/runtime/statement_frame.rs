@@ -406,7 +406,7 @@ impl StatementExecutionFrame {
         let conn_id = current_connection_id();
         let tx_local_tenant = runtime.inner.transaction_state.local_tenant(conn_id);
         let tx_context = runtime.inner.transaction_state.context(conn_id);
-        let own_xids = own_transaction_xids(tx_context.as_ref());
+        let mut own_xids = own_transaction_xids(tx_context.as_ref());
         let serializable_reader = tx_context
             .as_ref()
             .filter(|ctx| {
@@ -415,6 +415,9 @@ impl StatementExecutionFrame {
             .map(|ctx| ctx.xid);
         let (snapshot, as_of_floor, snapshot_retention) =
             runtime.statement_snapshot(query, identity_source)?;
+        if as_of_floor.is_some() {
+            own_xids.clear();
+        }
         let requires_index_fallback = as_of_floor.is_some() || tx_context.is_some();
         let (cache_key, is_volatile_query) = match identity_source {
             StatementIdentity::Text(_) => (
@@ -1161,19 +1164,15 @@ impl RedDBRuntime {
                          Call vcs.set_versioned(\"{table}\", true) first."
                     )));
                 }
-                let xid = self.vcs_resolve_as_of(spec)?;
-                let (snapshot, retention) = self.snapshot_manager().retain_snapshot(Snapshot {
-                    xid,
-                    in_progress: HashSet::new(),
-                });
+                let snapshot = self.vcs_resolve_snapshot(spec)?;
+                let xid = snapshot.xid;
+                let (snapshot, retention) = self.snapshot_manager().retain_snapshot(snapshot);
                 Ok((snapshot, Some(xid), retention))
             }
             Some((spec, None)) => {
-                let xid = self.vcs_resolve_as_of(spec)?;
-                let (snapshot, retention) = self.snapshot_manager().retain_snapshot(Snapshot {
-                    xid,
-                    in_progress: HashSet::new(),
-                });
+                let snapshot = self.vcs_resolve_snapshot(spec)?;
+                let xid = snapshot.xid;
+                let (snapshot, retention) = self.snapshot_manager().retain_snapshot(snapshot);
                 Ok((snapshot, Some(xid), retention))
             }
             None => match (identity, capture_current_snapshot()) {

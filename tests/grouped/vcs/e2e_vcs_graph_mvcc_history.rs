@@ -16,7 +16,10 @@
 
 use std::sync::Arc;
 
-use reddb::application::{Author, CreateCommitInput, VcsUseCases};
+use reddb::application::{
+    Author, CheckoutInput, CheckoutTarget, CreateBranchInput, CreateCommitInput, CreateTagInput,
+    DiffChange, DiffInput, MergeInput, MergeOpts, StatusInput, VcsUseCases,
+};
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
 use reddb::{RedDBOptions, RedDBRuntime};
 use reddb_types::Value;
@@ -64,6 +67,20 @@ fn insert_node(rt: &RedDBRuntime, collection: &str, label: &str, score: i64) -> 
         Some(Value::UnsignedInteger(rid)) => *rid,
         Some(Value::Integer(rid)) => *rid as u64,
         Some(Value::Text(rid)) => rid.parse().expect("rid text -> u64"),
+        other => panic!("expected rid, got {other:?}"),
+    }
+}
+
+fn insert_edge(rt: &RedDBRuntime, collection: &str, from: u64, to: u64) -> u64 {
+    let result = rt
+        .execute_query(&format!(
+            "INSERT INTO {collection} EDGE (label, from_rid, to_rid, weight) \
+             VALUES ('knows', {from}, {to}, 1.0) RETURNING rid"
+        ))
+        .expect("insert edge");
+    match result.result.records[0].get("rid") {
+        Some(Value::UnsignedInteger(rid)) => *rid,
+        Some(Value::Integer(rid)) => *rid as u64,
         other => panic!("expected rid, got {other:?}"),
     }
 }
@@ -116,6 +133,313 @@ fn assert_conflict(err: &reddb::RedDBError) {
         msg.contains("serialization conflict"),
         "expected serialization conflict, got: {msg}"
     );
+}
+
+#[test]
+#[ignore = "VCS checkout does not yet isolate graph reads and writes by branch"]
+fn graph_branch_checkout_isolates_writes_from_main() {
+    let rt = rt();
+    let conn = 70008;
+    set_current_connection_id(conn);
+    rt.execute_query("CREATE GRAPH graph_branch_isolation")
+        .expect("create graph");
+    vcs(&rt)
+        .set_versioned("graph_branch_isolation", true)
+        .unwrap();
+    insert_node(&rt, "graph_branch_isolation", "alice", 1);
+    commit(&rt, conn, "base");
+    vcs(&rt)
+        .branch_create(CreateBranchInput {
+            name: "agent".to_string(),
+            from: None,
+            connection_id: conn,
+        })
+        .unwrap();
+    vcs(&rt)
+        .checkout(CheckoutInput {
+            connection_id: conn,
+            target: CheckoutTarget::Branch("agent".to_string()),
+            force: false,
+        })
+        .unwrap();
+    insert_node(&rt, "graph_branch_isolation", "agent-node", 2);
+    commit(&rt, conn, "agent write");
+    vcs(&rt)
+        .checkout(CheckoutInput {
+            connection_id: conn,
+            target: CheckoutTarget::Branch("main".to_string()),
+            force: false,
+        })
+        .unwrap();
+
+    assert_eq!(live_score(&rt, "graph_branch_isolation", "alice"), Some(1));
+    assert_eq!(
+        live_score(&rt, "graph_branch_isolation", "agent-node"),
+        None
+    );
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_commit_excludes_transactions_still_open_at_checkpoint() {
+    let rt = rt();
+    let checkpoint_conn = 70011;
+    let writer_conn = 70012;
+    set_current_connection_id(checkpoint_conn);
+    rt.execute_query("CREATE GRAPH graph_checkpoint_snapshot")
+        .expect("create graph");
+    vcs(&rt)
+        .set_versioned("graph_checkpoint_snapshot", true)
+        .unwrap();
+    insert_node(&rt, "graph_checkpoint_snapshot", "existing", 1);
+    commit(&rt, checkpoint_conn, "base");
+
+    set_current_connection_id(writer_conn);
+    rt.execute_query("BEGIN").expect("begin writer");
+    insert_node(&rt, "graph_checkpoint_snapshot", "pending", 1);
+    update_score(&rt, "graph_checkpoint_snapshot", "existing", 2);
+    set_current_connection_id(checkpoint_conn);
+    let checkpoint = commit(&rt, checkpoint_conn, "checkpoint");
+    vcs(&rt)
+        .tag(CreateTagInput {
+            name: "checkpoint".to_string(),
+            target: checkpoint.clone(),
+            annotation: None,
+        })
+        .expect("tag checkpoint");
+    set_current_connection_id(writer_conn);
+    rt.execute_query("COMMIT").expect("commit writer");
+    set_current_connection_id(checkpoint_conn);
+
+    assert_eq!(
+        as_of_score(&rt, "graph_checkpoint_snapshot", "pending", &checkpoint),
+        None
+    );
+    assert_eq!(
+        as_of_score(&rt, "graph_checkpoint_snapshot", "existing", &checkpoint),
+        Some(1)
+    );
+    for spec in ["BRANCH 'main'", "TAG 'checkpoint'"] {
+        assert_eq!(
+            read_single_score(
+                &rt,
+                &format!(
+                    "SELECT score FROM graph_checkpoint_snapshot AS OF {spec} WHERE label = 'existing'"
+                )
+            ),
+            Some(1)
+        );
+    }
+    assert_eq!(
+        live_score(&rt, "graph_checkpoint_snapshot", "pending"),
+        Some(1)
+    );
+    let after = commit(&rt, checkpoint_conn, "writer committed");
+    let diff = vcs(&rt)
+        .diff(DiffInput {
+            from: checkpoint.clone(),
+            to: after,
+            collection: Some("graph_checkpoint_snapshot".to_string()),
+            summary_only: true,
+        })
+        .expect("diff after writer commit");
+    assert_eq!((diff.added, diff.removed, diff.modified), (1, 0, 1));
+    set_current_connection_id(writer_conn);
+    rt.execute_query("BEGIN").expect("begin second writer");
+    update_score(&rt, "graph_checkpoint_snapshot", "existing", 3);
+    assert_eq!(
+        as_of_score(&rt, "graph_checkpoint_snapshot", "existing", &checkpoint),
+        Some(1)
+    );
+    rt.execute_query("ROLLBACK")
+        .expect("rollback second writer");
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_checkpoint_snapshot_survives_reopen() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("graph-vcs.rdb");
+    let checkpoint;
+    let writer_xid;
+    {
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime");
+        set_current_connection_id(70014);
+        rt.execute_query("CREATE GRAPH graph_reopen_snapshot")
+            .expect("create graph");
+        vcs(&rt)
+            .set_versioned("graph_reopen_snapshot", true)
+            .unwrap();
+        insert_node(&rt, "graph_reopen_snapshot", "existing", 1);
+        commit(&rt, 70014, "base");
+        set_current_connection_id(70015);
+        rt.execute_query("BEGIN").expect("begin writer");
+        writer_xid = rt
+            .snapshot_manager()
+            .oldest_active_xid()
+            .expect("writer xid");
+        update_score(&rt, "graph_reopen_snapshot", "existing", 2);
+        set_current_connection_id(70014);
+        checkpoint = commit(&rt, 70014, "checkpoint");
+        set_current_connection_id(70015);
+        rt.execute_query("COMMIT").expect("commit writer");
+        clear_current_connection_id();
+    }
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
+    set_current_connection_id(70014);
+    assert!(rt.snapshot_manager().is_pinned(writer_xid));
+    assert_eq!(
+        as_of_score(&rt, "graph_reopen_snapshot", "existing", &checkpoint),
+        Some(1)
+    );
+    assert_eq!(
+        live_score(&rt, "graph_reopen_snapshot", "existing"),
+        Some(2)
+    );
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_diff_reports_node_update_as_one_modified_item() {
+    let rt = rt();
+    let conn = 70009;
+    set_current_connection_id(conn);
+    rt.execute_query("CREATE GRAPH graph_diff_update")
+        .expect("create graph");
+    vcs(&rt).set_versioned("graph_diff_update", true).unwrap();
+    let rid = insert_node(&rt, "graph_diff_update", "alice", 1);
+    let before = commit(&rt, conn, "before");
+    update_score(&rt, "graph_diff_update", "alice", 2);
+    let after = commit(&rt, conn, "after");
+
+    let diff = vcs(&rt)
+        .diff(DiffInput {
+            from: before,
+            to: after,
+            collection: Some("graph_diff_update".to_string()),
+            summary_only: false,
+        })
+        .expect("diff");
+    assert_eq!((diff.added, diff.removed, diff.modified), (0, 0, 1));
+    assert_eq!(diff.entries.len(), 1);
+    assert_eq!(diff.entries[0].entity_id, rid.to_string());
+    assert!(matches!(
+        diff.entries[0].change,
+        DiffChange::Modified { .. }
+    ));
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_diff_reports_edge_update_as_one_modified_item() {
+    let rt = rt();
+    let conn = 70010;
+    set_current_connection_id(conn);
+    rt.execute_query("CREATE GRAPH graph_edge_diff")
+        .expect("create graph");
+    vcs(&rt).set_versioned("graph_edge_diff", true).unwrap();
+    let alice = insert_node(&rt, "graph_edge_diff", "alice", 1);
+    let bob = insert_node(&rt, "graph_edge_diff", "bob", 1);
+    let rid = insert_edge(&rt, "graph_edge_diff", alice, bob);
+    let before = commit(&rt, conn, "before");
+    rt.execute_query("UPDATE graph_edge_diff EDGES SET weight = 2.0 WHERE label = 'knows'")
+        .expect("update edge");
+    let after = commit(&rt, conn, "after");
+
+    let diff = vcs(&rt)
+        .diff(DiffInput {
+            from: before,
+            to: after,
+            collection: Some("graph_edge_diff".to_string()),
+            summary_only: false,
+        })
+        .expect("diff");
+    assert_eq!((diff.added, diff.removed, diff.modified), (0, 0, 1));
+    assert_eq!(diff.entries.len(), 1);
+    assert_eq!(diff.entries[0].entity_id, rid.to_string());
+    assert!(matches!(
+        diff.entries[0].change,
+        DiffChange::Modified { .. }
+    ));
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_merge_detects_conflicting_updates_to_nodes_and_edges() {
+    let rt = rt();
+    let conn = 70013;
+    set_current_connection_id(conn);
+    rt.execute_query("CREATE GRAPH graph_merge_conflict")
+        .expect("create graph");
+    vcs(&rt)
+        .set_versioned("graph_merge_conflict", true)
+        .unwrap();
+    let rid = insert_node(&rt, "graph_merge_conflict", "alice", 1);
+    let bob = insert_node(&rt, "graph_merge_conflict", "bob", 1);
+    let edge_rid = insert_edge(&rt, "graph_merge_conflict", rid, bob);
+    commit(&rt, conn, "base");
+    vcs(&rt)
+        .branch_create(CreateBranchInput {
+            name: "agent".to_string(),
+            from: None,
+            connection_id: conn,
+        })
+        .unwrap();
+    vcs(&rt)
+        .checkout(CheckoutInput {
+            connection_id: conn,
+            target: CheckoutTarget::Branch("agent".to_string()),
+            force: false,
+        })
+        .unwrap();
+    update_score(&rt, "graph_merge_conflict", "alice", 2);
+    rt.execute_query("UPDATE graph_merge_conflict EDGES SET weight = 2.0 WHERE label = 'knows'")
+        .expect("agent updates edge");
+    commit(&rt, conn, "agent update");
+    vcs(&rt)
+        .checkout(CheckoutInput {
+            connection_id: conn,
+            target: CheckoutTarget::Branch("main".to_string()),
+            force: false,
+        })
+        .unwrap();
+    update_score(&rt, "graph_merge_conflict", "alice", 3);
+    rt.execute_query("UPDATE graph_merge_conflict EDGES SET weight = 3.0 WHERE label = 'knows'")
+        .expect("main updates edge");
+    let main_head = commit(&rt, conn, "main update");
+
+    let outcome = vcs(&rt)
+        .merge(MergeInput {
+            connection_id: conn,
+            from: "agent".to_string(),
+            opts: MergeOpts::default(),
+            author: author(),
+        })
+        .expect("merge");
+    assert_eq!(outcome.conflicts.len(), 2);
+    let node_conflict = outcome
+        .conflicts
+        .iter()
+        .find(|c| c.entity_id == rid.to_string())
+        .expect("node conflict");
+    assert_eq!(node_conflict.conflicting_paths, ["properties.score"]);
+    let edge_conflict = outcome
+        .conflicts
+        .iter()
+        .find(|c| c.entity_id == edge_rid.to_string())
+        .expect("edge conflict");
+    assert_eq!(edge_conflict.conflicting_paths, ["weight"]);
+    assert!(
+        outcome.merge_commit.is_none(),
+        "conflicts must pause the merge"
+    );
+    let status = vcs(&rt)
+        .status(StatusInput {
+            connection_id: conn,
+        })
+        .expect("status");
+    assert_eq!(status.head_commit.as_deref(), Some(main_head.as_str()));
+    clear_current_connection_id();
 }
 
 /// Time-travel: versioned graph node, insert score=1 @P1, UPDATE to 2,
