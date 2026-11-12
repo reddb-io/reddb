@@ -160,11 +160,8 @@ fn retention_replay_journey(directory: &Path) {
             .expect("cold indexed row");
         assert_eq!(result.result.records.len(), 1, "acknowledged row {id}");
         assert_eq!(
-            result.result.records[0]
-                .get("label")
-                .expect("label")
-                .display_string(),
-            format!("ack-{id}")
+            result.result.records[0].get("label"),
+            Some(&Value::text(format!("ack-{id}")))
         );
     }
     let rows = replica
@@ -175,11 +172,8 @@ fn retention_replay_journey(directory: &Path) {
     assert_eq!(rows.len(), 193);
     for (offset, row) in rows.iter().enumerate() {
         let id = offset + 1;
-        assert_eq!(row.get("id").expect("id").display_string(), id.to_string());
-        assert_eq!(
-            row.get("label").expect("label").display_string(),
-            format!("ack-{id}")
-        );
+        assert_eq!(row.get("id"), Some(&Value::Integer(id as i64)));
+        assert_eq!(row.get("label"), Some(&Value::text(format!("ack-{id}"))));
     }
 }
 
