@@ -1469,6 +1469,16 @@ impl StoreCommitCoordinator {
         if applied {
             // Opening is exclusive: no client can mutate published trees
             // while replay constructs replacement generations.
+            #[cfg(test)]
+            if let Ok(fault) = std::env::var("REDDB_TEST_PAGE_REPLAY_IO") {
+                use crate::storage::engine::pager;
+                match fault.as_str() {
+                    "empty" => pager::test_fail_next_pager_write(None, 0),
+                    "partial" => pager::test_fail_next_pager_write(None, 17),
+                    "sync" => pager::test_fail_pager_sync_after(0),
+                    _ => panic!("unknown replay publication I/O fault {fault}"),
+                }
+            }
             let epoch = latest_ownership_epoch
                 .max(store.ownership_catalog_epoch.load(Ordering::Acquire))
                 .checked_add(1)
