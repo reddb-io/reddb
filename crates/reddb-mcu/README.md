@@ -46,8 +46,9 @@ second process boot opens `state=Existing` and queries the same 43,200 rows
 without reinsertion or gateway. The ESP-IDF allocator prefers PSRAM for general
 heap allocations; every measured phase enforces at least 32 KiB of internal
 heap and 512 KiB of PSRAM headroom. The observed minima were 79,824 internal
-bytes and 8,224,908 PSRAM bytes. Physical Nano ESP32 execution and electrical
-power-cut testing remain separate qualification boundaries.
+bytes and 8,224,572 PSRAM bytes on upstream `main` commit `65863978d`.
+Physical Nano ESP32 execution and electrical power-cut testing remain separate
+qualification boundaries.
 
 ## Host flash-model qualification
 

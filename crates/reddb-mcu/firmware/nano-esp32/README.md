@@ -43,8 +43,9 @@ espflash save-image --chip esp32s3 --partition-table partitions.csv `
 Copy-Item $elf build\reddb-mcu-nano-esp32.elf
 ```
 
-The app occupies 3,826,928 of the 4,194,304-byte app partition (91.24%). The
-remaining flash partition yields a 12,378,112-byte contiguous database file.
+The app occupies 3,838,496 of the 4,194,304-byte app partition (91.52%) at
+upstream `main` commit `65863978d`. The remaining flash partition yields a
+12,378,112-byte contiguous database file.
 The main task has a 256 KiB stack; the board exposes roughly 390 KiB of other
 internal RAM plus 8 MiB octal PSRAM to the allocator.
 
@@ -52,7 +53,7 @@ General heap allocations prefer PSRAM
 (`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0`), leaving capability-constrained
 allocations in internal memory. The firmware fails if ESP-IDF reports less than
 32 KiB of minimum internal heap or 512 KiB of minimum PSRAM. The qualified run
-observed minima of 79,824 internal bytes and 8,224,908 PSRAM bytes.
+observed minima of 79,824 internal bytes and 8,224,572 PSRAM bytes.
 
 ## Emulate
 
