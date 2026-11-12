@@ -1,5 +1,82 @@
 # Changelog
 
+## 1.33.5
+
+### Patch Changes
+
+- [#2795](https://github.com/reddb-io/reddb/pull/2795) [`f82ac20`](https://github.com/reddb-io/reddb/commit/f82ac208f409779eb34bc6c3005e187cfab7a4f4) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Use canonical `red.*` names for runtime-owned collections and new CLI dumps while continuing to accept legacy collection names during migration, WAL recovery, authorization, and restore.
+
+- [#2794](https://github.com/reddb-io/reddb/pull/2794) [`437dd32`](https://github.com/reddb-io/reddb/commit/437dd3229903b9191612dcdc4f8835f7a43a8443) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Canonicalize legacy internal collection aliases before IAM policy matching and system-schema DDL protection, preventing `red_*` aliases from bypassing `red.*` prefix rules.
+
+- [#2793](https://github.com/reddb-io/reddb/pull/2793) [`802996c`](https://github.com/reddb-io/reddb/commit/802996c21f1569dc28cb7a37659e0879c10d7841) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Prevent stale or reclaimed secondary-index postings from hiding live MVCC rows after restart, and publish the runtime index registry under its canonical `red.index.registry` name.
+
+## 1.33.4
+
+### Patch Changes
+
+- [#2791](https://github.com/reddb-io/reddb/pull/2791) [`09aa50f`](https://github.com/reddb-io/reddb/commit/09aa50f299f6fff5d02d892262497de2909b3cad) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Rebuild paged HASH and BTREE artifacts as current-state indexes so MVCC updates and deletes remain discoverable after checkpoint and cold reopen, and store runtime index metadata under the canonical `red.index.registry` control collection.
+
+## 1.33.3
+
+### Patch Changes
+
+- [#2785](https://github.com/reddb-io/reddb/pull/2785) [`9fb0855`](https://github.com/reddb-io/reddb/commit/9fb0855b27ee3bee790ccc3f8b307744a620b12d) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve disk-resident queue and secondary-index roots across result-cache format upgrades,
+  defer embedded L2 result-cache publication off the request path, and strengthen checkpoint,
+  retention, indexed-query, aggregation, startup-I/O, and memory-stat regressions.
+
+## 1.33.2
+
+### Patch Changes
+
+- [#2778](https://github.com/reddb-io/reddb/pull/2778) [`19a02b3`](https://github.com/reddb-io/reddb/commit/19a02b33a2dd57e0ab703e3f56237a6c5a7d4a75) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Stabilize RedWire query-summary bytes, include the auditable ASK planner trace
+  and final-query fields in typed gRPC replies, and make primary-replica WAL
+  publication idempotent when replaying a committed transaction outbox.
+
+  Bound HASH and index-intersection candidate memory, recover torn WAL tails before
+  new appends, preserve the first user entity ID when the durable result-cache epoch
+  is created, and keep non-read statements from initializing the result-cache format.
+  Promote resident cache files to the disk-resident cache format before checkpoint
+  publication so cold reopens retain queue and secondary-index roots instead of
+  rebuilding and growing them on every boot. Harden embedded WAL replay and
+  transactional reservation regression coverage.
+
+## 1.33.1
+
+### Patch Changes
+
+- [#2782](https://github.com/reddb-io/reddb/pull/2782) [`0b0a6a0`](https://github.com/reddb-io/reddb/commit/0b0a6a0e56d73e806282f67ecdd6d4766202cd02) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Prevent durable Blob Cache publication, result-cache promotion, and database
+  write invalidation from deadlocking under concurrent traffic.
+
+## 1.33.0
+
+### Minor Changes
+
+- [#2768](https://github.com/reddb-io/reddb/pull/2768) [`14b9ccf`](https://github.com/reddb-io/reddb/commit/14b9ccf3c5a67eeca281679c9e24bc19e313cdde) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Unify the runtime SQL result cache on the native Blob Cache L1/L2 engine with
+  durable recovery, collection-scoped invalidation, protocol-independent query
+  routing, and downgrade fencing for persisted cache epochs.
+
+## 1.32.1
+
+### Patch Changes
+
+- [#2779](https://github.com/reddb-io/reddb/pull/2779) [`db363d4`](https://github.com/reddb-io/reddb/commit/db363d448d82191509085c690fc8a7ce01ffc5f3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow offline compaction to discard page-aligned physical allocation beyond the
+  committed database high-water mark while still rejecting truncated or partial
+  pages.
+
+## 1.32.0
+
+### Minor Changes
+
+- [#2776](https://github.com/reddb-io/reddb/pull/2776) [`27db3a4`](https://github.com/reddb-io/reddb/commit/27db3a47d38737add018f33be10bf9d0373f5b95) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add transactional replication, byte-bounded binary WAL streaming, serverless
+  lease-expiry enforcement, and embedded writer identity fencing, with automated
+  crash/restart recovery coverage.
+
+## 1.31.0
+
+### Minor Changes
+
+- [#2762](https://github.com/reddb-io/reddb/pull/2762) [`11f9a0c`](https://github.com/reddb-io/reddb/commit/11f9a0c63e3085c8276135aa1c1d9ac3b0fa37d6) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add production L1/L2 cache APIs with single-file persistence and bounded automatic TTL reclamation.
+
 ## 1.30.1
 
 ### Patch Changes

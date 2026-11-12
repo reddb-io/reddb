@@ -86,7 +86,7 @@ pub struct ValidationWarning {
 }
 
 /// Compact audit summary attached to the terminal `validation`
-/// frame. The full audit row goes to `red_ask_audit` (#402); this is
+/// frame. The full audit row goes to `red.ask.audit` (#402); this is
 /// the subset clients are allowed to see.
 #[derive(Debug, Clone)]
 pub struct AuditSummary {

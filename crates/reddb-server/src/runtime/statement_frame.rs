@@ -243,8 +243,16 @@ fn statement_kind(query: &str) -> &'static str {
         b"BEGIN" | b"START" | b"COMMIT" | b"ROLLBACK" | b"SAVEPOINT" | b"RELEASE" | b"END"
         | b"SET" | b"RESET" | b"PREPARE" | b"EXECUTE" | b"DEALLOCATE" | b"USE" => "control",
         b"PUT" | b"INCR" | b"DECR" | b"ADD" | b"ROTATE" | b"PURGE" | b"INVALIDATE" => "write",
+        b"SCRUB" => "uncached",
         _ => "unknown",
     }
+}
+
+fn statement_uses_result_cache(query: &str) -> bool {
+    !matches!(
+        statement_kind(query),
+        "write" | "ddl" | "admin" | "control" | "uncached"
+    ) && !super::red_schema::is_computed_stats_query(query)
 }
 
 /// Refuse a pre-parsed expression that carries a top-level `AS OF`.
@@ -303,6 +311,8 @@ pub(super) struct StatementExecutionFrame {
     own_xids: HashSet<Xid>,
     serializable_reader: Option<Xid>,
     cache_key: String,
+    cache_data_epoch: Option<u64>,
+    cache_revision: u64,
     is_volatile_query: bool,
     cache_safe: bool,
     /// Effective tenant captured at frame-build time after WITHIN /
@@ -368,6 +378,9 @@ pub(super) struct PreparedStatement {
 pub(super) enum StatementIdentity<'a> {
     /// The statement's SQL text. All five derivations are exact.
     Text(&'a str),
+    /// A direct runtime read that needs the text-derived snapshot, scope and
+    /// privilege context but does not traverse result-cache read/write paths.
+    UncachedText(&'a str),
     /// A pre-parsed expression with no accompanying text — the nested
     /// in-statement callers (CTE prelude, materialized-view refresh,
     /// inline graph TVF) hold an expression the outer statement already
@@ -388,7 +401,7 @@ impl<'a> StatementIdentity<'a> {
     /// deliberately inert `unknown` / `None` classes on the expr path.
     fn text(&self) -> &'a str {
         match self {
-            Self::Text(query) => query,
+            Self::Text(query) | Self::UncachedText(query) => query,
             Self::Expr(_) => "",
         }
     }
@@ -400,6 +413,13 @@ impl StatementExecutionFrame {
         identity_source: StatementIdentity<'_>,
     ) -> RedDBResult<Self> {
         let query = identity_source.text();
+        let uses_result_cache = matches!(identity_source, StatementIdentity::Text(query) if statement_uses_result_cache(query));
+        let (cache_data_epoch, cache_revision) = match identity_source {
+            StatementIdentity::Text(_) if uses_result_cache => runtime.result_cache_snapshot(),
+            StatementIdentity::Text(_)
+            | StatementIdentity::UncachedText(_)
+            | StatementIdentity::Expr(_) => (None, 0),
+        };
         if let StatementIdentity::Expr(expr) = identity_source {
             reject_unresolvable_as_of(expr)?;
         }
@@ -415,9 +435,10 @@ impl StatementExecutionFrame {
             .map(|ctx| ctx.xid);
         let (snapshot, as_of_floor, snapshot_retention) =
             runtime.statement_snapshot(query, identity_source)?;
-        let requires_index_fallback = as_of_floor.is_some() || tx_context.is_some();
+        let requires_index_fallback =
+            as_of_floor.is_some() || tx_context.is_some() || !snapshot.in_progress.is_empty();
         let (cache_key, is_volatile_query) = match identity_source {
-            StatementIdentity::Text(_) => (
+            StatementIdentity::Text(_) if uses_result_cache => (
                 result_cache_key(query),
                 query_has_volatile_builtin(query) || query_is_ask_statement(query),
             ),
@@ -425,7 +446,9 @@ impl StatementExecutionFrame {
             // result cache on both sides: an empty key is never read from
             // or written to, and `is_volatile_query` is set so
             // `should_cache_result` refuses regardless of the key.
-            StatementIdentity::Expr(_) => (String::new(), true),
+            StatementIdentity::Text(_)
+            | StatementIdentity::UncachedText(_)
+            | StatementIdentity::Expr(_) => (String::new(), true),
         };
         let cache_safe = runtime.result_cache_safe(conn_id);
         // Capture identity + effective scope under the same
@@ -471,6 +494,8 @@ impl StatementExecutionFrame {
             own_xids,
             serializable_reader,
             cache_key,
+            cache_data_epoch,
+            cache_revision,
             is_volatile_query,
             cache_safe,
             effective_scope,
@@ -553,7 +578,7 @@ impl StatementExecutionFrame {
         }
         if self.can_read_result_cache() {
             runtime
-                .get_result_cache_entry(self.cache_key())
+                .get_result_cache_entry(self.cache_key(), self.cache_data_epoch)
                 .map(|mut result| {
                     if let Some(vector) = result.result.stats.vector.as_mut() {
                         vector.cache_hit = true;
@@ -578,7 +603,10 @@ impl StatementExecutionFrame {
                     result: result.clone(),
                     cached_at: std::time::Instant::now(),
                     scopes,
+                    data_epoch: self.cache_data_epoch.unwrap_or(0),
                 },
+                self.cache_data_epoch,
+                self.cache_revision,
             );
         }
     }
@@ -1194,14 +1222,13 @@ impl RedDBRuntime {
     }
 
     fn result_cache_safe(&self, conn_id: u64) -> bool {
-        let has_active_xids = self
+        let has_unsafe_xids = self
             .inner
             .transaction_state
             .snapshot_manager()
-            .oldest_active_xid()
-            .is_some();
+            .has_cache_unsafe_active_xids();
         let in_own_tx = self.inner.transaction_state.in_transaction(conn_id);
-        !has_active_xids && !in_own_tx
+        !has_unsafe_xids && !in_own_tx
     }
 }
 
@@ -1545,7 +1572,7 @@ mod tests {
     }
 
     #[test]
-    fn dml_index_lookup_retries_when_publication_races_target_selection() {
+    fn dml_target_selection_preserves_snapshot_when_publication_races() {
         use std::sync::{mpsc, Arc, Mutex};
         use std::time::Duration;
         reset_thread_locals();
@@ -1574,7 +1601,7 @@ mod tests {
         let first = std::sync::atomic::AtomicBool::new(true);
         *rt.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
             if collection == "dml_lookup_race"
-                && phase == super::super::index_store::MutationTestPhase::DmlIndexLookupStarted
+                && phase == super::super::index_store::MutationTestPhase::DmlTargetSelectionStarted
                 && first.swap(false, std::sync::atomic::Ordering::SeqCst)
             {
                 started_tx.send(()).expect("notify writer");
@@ -1857,7 +1884,7 @@ mod tests {
         // tenant + identity in via `result_cache_key`, so finding "acme"
         // and "alice" inside any cached key proves the frame was the
         // seam used.
-        let cache = rt.inner.result_cache.read();
+        let cache = rt.inner.result_blob_entries.read();
         let any_keyed_with_scope = cache
             .0
             .keys()
@@ -1909,7 +1936,7 @@ mod tests {
         let _ = rt
             .execute_query("SELECT pg_advisory_unlock(1)")
             .expect("volatile SELECT executes");
-        let cache = rt.inner.result_cache.read();
+        let cache = rt.inner.result_blob_entries.read();
         let key = result_cache_key("SELECT pg_advisory_unlock(1)");
         assert!(
             !cache.0.contains_key(&key),
@@ -1921,14 +1948,9 @@ mod tests {
     }
 
     #[test]
-    fn blob_cache_backend_populates_blob_path_without_legacy_write() {
+    fn result_cache_populates_blob_path() {
         reset_thread_locals();
         let rt = fresh_runtime();
-        rt.inner
-            .db
-            .store()
-            .set_config_tree("runtime.result_cache.backend", &crate::json!("blob_cache"));
-
         let result = rt.execute_query("SELECT 1").expect("SELECT 1 executes");
         assert_eq!(result.statement_type, "select");
 
@@ -1941,21 +1963,12 @@ mod tests {
             "blob backend should stamp the Blob Cache path"
         );
         assert!(rt.inner.result_blob_entries.read().0.contains_key(&key));
-        assert!(
-            !rt.inner.result_cache.read().0.contains_key(&key),
-            "blob backend should not write the legacy map"
-        );
     }
 
     #[test]
     fn blob_cache_backend_keeps_volatile_select_out_of_blob_path() {
         reset_thread_locals();
         let rt = fresh_runtime();
-        rt.inner
-            .db
-            .store()
-            .set_config_tree("runtime.result_cache.backend", &crate::json!("blob_cache"));
-
         let _ = rt
             .execute_query("SELECT pg_advisory_unlock(1)")
             .expect("volatile SELECT executes");
@@ -1971,29 +1984,6 @@ mod tests {
     }
 
     #[test]
-    fn shadow_backend_dual_writes_and_reports_no_divergence_on_equal_results() {
-        reset_thread_locals();
-        let rt = fresh_runtime();
-        rt.inner
-            .db
-            .store()
-            .set_config_tree("runtime.result_cache.backend", &crate::json!("shadow"));
-
-        let first = rt.execute_query("SELECT 1").expect("first SELECT");
-        let second = rt.execute_query("SELECT 1").expect("cached SELECT");
-        assert_eq!(first.result.len(), second.result.len());
-
-        let key = result_cache_key("SELECT 1");
-        assert!(rt.inner.result_cache.read().0.contains_key(&key));
-        assert!(rt.inner.result_blob_entries.read().0.contains_key(&key));
-        assert_eq!(rt.result_cache_shadow_divergences(), 0);
-        assert_eq!(
-            crate::runtime::METRIC_CACHE_SHADOW_DIVERGENCE_TOTAL,
-            "cache_shadow_divergence_total"
-        );
-    }
-
-    #[test]
     fn as_of_on_red_collection_records_floor() {
         reset_thread_locals();
         let rt = fresh_runtime();
@@ -2002,9 +1992,9 @@ mod tests {
         // resolve to a concrete xid and surface it via the Interface.
         let frame = StatementExecutionFrame::build(
             &rt,
-            StatementIdentity::Text("SELECT * FROM red_commits AS OF SNAPSHOT 1"),
+            StatementIdentity::Text("SELECT * FROM red.vcs.commits AS OF SNAPSHOT 1"),
         )
-        .expect("AS OF SNAPSHOT 1 on red_commits resolves");
+        .expect("AS OF SNAPSHOT 1 on red.vcs.commits resolves");
 
         let f: &dyn ReadFrame = &frame;
         assert_eq!(
@@ -2367,7 +2357,7 @@ mod tests {
         reset_thread_locals();
         let rt = fresh_runtime();
 
-        let mut table = reddb_rql::ast::TableQuery::new("red_commits");
+        let mut table = reddb_rql::ast::TableQuery::new("red.vcs.commits");
         table.as_of = Some(reddb_rql::ast::AsOfClause::Snapshot(1));
         let expr = QueryExpr::Table(table);
 

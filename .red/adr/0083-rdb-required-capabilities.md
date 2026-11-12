@@ -18,7 +18,7 @@ logical `.rdb` must remain readable by the canonical engine.
 
 ## Decision
 
-- Paged format 1.0.7 adds a `required_capabilities` bitmap to the existing
+- Paged format 1.0.9 adds a `required_capabilities` bitmap to the existing
   database header in each superblock copy. The page size and format version
   remain explicit header fields. Capability bits are monotonic for a file.
 - Bit 0 is the native temperature codec. Bit 1 is bounded disk residency.
@@ -28,9 +28,10 @@ logical `.rdb` must remain readable by the canonical engine.
   superblock copies before it publishes a schema or value that depends on the
   capability. If either fence write fails, further writes remain fenced until
   reopen and recovery.
-- Versions before 1.0.7 retain their original interpretation: version 1.0.4 or
-  newer implicitly requires disk residency. When such a file crosses the 1.0.7
-  boundary, the writer translates that implicit requirement into bit 1.
+- Versions before 1.0.9 retain their original interpretation. Versions 1.0.4
+  through 1.0.6 and 1.0.8 require disk residency; 1.0.7 is the resident
+  result-cache format. When such a file crosses the 1.0.9 boundary, the writer
+  translates that requirement into bit 1.
 - `TEMPERATURE` is canonical RedDB code, not an MCU-only codec. Its portable
   datatype tag is 56 and native-store value tag is 53. Exact comparison and
   hashing use rational Kelvin while storage preserves the input unit and scale.

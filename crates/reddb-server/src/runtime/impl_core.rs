@@ -62,6 +62,21 @@ pub(super) use super::impl_core_result_cache_scopes::query_expr_result_cache_sco
 // (`table_row_index_fields`) are re-exported so those call sites need no edit.
 pub(crate) use super::impl_lifecycle::{table_row_index_fields, view_records_to_entities};
 
+#[cfg(test)]
+thread_local! {
+    static RESULT_CACHE_MISS_EXECUTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_result_cache_miss_executions() {
+    RESULT_CACHE_MISS_EXECUTIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn result_cache_miss_executions() -> u64 {
+    RESULT_CACHE_MISS_EXECUTIONS.with(std::cell::Cell::get)
+}
+
 pub use super::execution_context::{
     capture_current_snapshot, clear_current_auth_identity, clear_current_connection_id,
     clear_current_snapshot, clear_current_tenant, current_auth_identity_for_audit,
@@ -309,8 +324,9 @@ impl RedDBRuntime {
     pub fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
         let started = std::time::Instant::now();
         self.inner.node_load_telemetry.query_start();
+        let receipt = super::transactional_replication::CommitReceiptScope::begin(self);
         let result = self.execute_query_inner(query);
-        self.finish_query_lifecycle(query, started, result)
+        self.finish_query_lifecycle(query, started, result, receipt.lsn())
     }
 
     /// Execute a SQL statement with already-decoded positional bind
@@ -330,8 +346,9 @@ impl RedDBRuntime {
         }
         let started = std::time::Instant::now();
         self.inner.node_load_telemetry.query_start();
+        let receipt = super::transactional_replication::CommitReceiptScope::begin(self);
         let result = self.execute_query_with_params_inner(query, params);
-        self.finish_query_lifecycle(query, started, result)
+        self.finish_query_lifecycle(query, started, result, receipt.lsn())
     }
 
     /// Execute an already-bound prepared statement together with the SQL text
@@ -351,8 +368,9 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         let started = std::time::Instant::now();
         self.inner.node_load_telemetry.query_start();
+        let receipt = super::transactional_replication::CommitReceiptScope::begin(self);
         let result = self.execute_bound_query_expr_in_frame(query, expr);
-        self.finish_query_lifecycle(query, started, result)
+        self.finish_query_lifecycle(query, started, result, receipt.lsn())
     }
 
     fn finish_query_lifecycle(
@@ -360,6 +378,7 @@ impl RedDBRuntime {
         query: &str,
         started: std::time::Instant,
         mut result: RedDBResult<RuntimeQueryResult>,
+        commit_lsn: Option<u64>,
     ) -> RedDBResult<RuntimeQueryResult> {
         // Issue #765 / S6 — filter integrity-tombstoned rows out of SELECT
         // results before they reach any consumer. Fast no-op (one relaxed
@@ -372,6 +391,7 @@ impl RedDBRuntime {
             super::query_budget::check_result(self.resource_limits(), &value)?;
             Ok(value)
         });
+        self.finish_collection_description_transaction(&result);
         let elapsed_ms = started.elapsed().as_millis() as u64;
 
         // Build EffectiveScope from the same thread-locals frame-build
@@ -410,12 +430,21 @@ impl RedDBRuntime {
         self.inner.node_load_telemetry.query_finish();
 
         if let Ok(ref mut query_result) = result {
-            if matches!(query_result.statement_type, "insert" | "update" | "delete") {
-                let bookmark = crate::replication::CausalBookmark::new(
-                    self.current_replication_term(),
-                    self.cdc_current_lsn(),
-                );
-                query_result.bookmark = Some(bookmark.encode());
+            if matches!(
+                query_result.statement_type,
+                "insert" | "update" | "delete" | "commit"
+            ) {
+                let lsn = if self.inner.db.replication.is_some() {
+                    commit_lsn
+                } else if self.current_xid().is_none() {
+                    Some(self.cdc_current_lsn())
+                } else {
+                    None
+                };
+                query_result.bookmark = lsn.map(|lsn| {
+                    crate::replication::CausalBookmark::new(self.current_replication_term(), lsn)
+                        .encode()
+                });
             }
         }
 
@@ -544,7 +573,7 @@ impl RedDBRuntime {
             crate::replication::ReplicationRole::Replica { .. } => {
                 self.config_u64("red.replication.last_applied_lsn", 0)
             }
-            _ => self.cdc_current_lsn(),
+            _ => self.replication_commit_lsn(),
         }
     }
 
@@ -710,6 +739,9 @@ impl RedDBRuntime {
                 return Ok(result);
             }
         }
+
+        #[cfg(test)]
+        RESULT_CACHE_MISS_EXECUTIONS.with(|count| count.set(count.get() + 1));
 
         let prepared = frame.prepare_statement(self, execution_query)?;
         let mode = prepared.mode;
@@ -1522,6 +1554,11 @@ impl RedDBRuntime {
                                 undo?;
                                 return Err(err);
                             }
+                            #[cfg(test)]
+                            self.index_store_ref().mutation_test_hook(
+                                "",
+                                super::index_store::MutationTestPhase::TransactionWalCommitted,
+                            );
                             Ok(publication)
                         });
                         if context.is_err() {
@@ -1537,6 +1574,11 @@ impl RedDBRuntime {
                                 self.finalize_pending_kv_watch_events(conn_id);
                                 self.finalize_pending_queue_wakes(conn_id);
                                 self.release_pending_claim_locks(conn_id);
+                                self.recover_transactional_replication().map_err(|error| {
+                                    RedDBError::Internal(format!(
+                                        "commit is locally durable; replication publication is pending: {error}"
+                                    ))
+                                })?;
                                 ("commit", format!("COMMIT — xid={} committed", ctx.xid))
                             }
                             None => (
@@ -1623,12 +1665,12 @@ impl RedDBRuntime {
             // Schema + Sequence DDL (Phase 1.3 PG parity).
             //
             // Schemas are lightweight logical namespaces: a CREATE SCHEMA call
-            // just registers the name in `red_config` under `schema.{name}`.
+            // just registers the name in `red.config` under `schema.{name}`.
             // Table lookups still happen by collection name; clients using
             // `schema.table` qualified names collapse to collection `schema.table`.
             //
             // Sequences persist a 64-bit counter + metadata (start, increment)
-            // in `red_config` under `sequence.{name}.*`. Scalar callers
+            // in `red.config` under `sequence.{name}.*`. Scalar callers
             // `nextval('name')` / `currval('name')` arrive with the MVCC phase
             // once we have a proper mutating-function dispatch path; for now the
             // DDL just establishes the catalog entry so clients don't error.
@@ -1665,7 +1707,7 @@ impl RedDBRuntime {
                         q.name
                     )));
                 }
-                // Remove marker from red_config via set to null.
+                // Remove marker from red.config via set to null.
                 store.set_config_tree(&key, &crate::serde_json::Value::Null);
                 let suffix = if q.cascade {
                     " (CASCADE accepted — tables untouched)"
@@ -1937,7 +1979,7 @@ impl RedDBRuntime {
                         // replicas deterministically replay the same
                         // backing-collection contents via
                         // `LogicalChangeApplier::apply_record`.
-                        if let Some(ref primary) = self.inner.db.replication {
+                        if self.inner.db.replication.is_some() {
                             let lsn = self.inner.cdc.emit(
                                 crate::replication::cdc::ChangeOperation::Refresh,
                                 &q.name,
@@ -1956,8 +1998,7 @@ impl RedDBRuntime {
                                 serialized_records,
                             )
                             .with_term(self.current_replication_term());
-                            let encoded = record.encode();
-                            primary.append_logical_record(record.lsn, encoded);
+                            self.stage_or_publish_logical_record(record)?;
                         }
 
                         let duration_ms = started.elapsed().as_millis() as u64;
@@ -3939,6 +3980,101 @@ fn confine_copy_from_path(path: &str) -> RedDBResult<()> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod result_cache_execution_tests {
+    use super::*;
+
+    const QUERY: &str = "SELECT SUM(n) AS n FROM result_cache_probe";
+
+    fn runtime_with_rows(cache_enabled: bool) -> RedDBRuntime {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE result_cache_probe (id INT, n INT)")
+            .expect("create table");
+        runtime
+            .execute_query(
+                "INSERT INTO result_cache_probe (id, n) VALUES (1, 10), (2, 20), (3, 30)",
+            )
+            .expect("seed rows");
+        runtime
+            .execute_query(&format!(
+                "SET CONFIG runtime.result_cache.enabled = {cache_enabled}"
+            ))
+            .expect("configure result cache");
+        runtime
+    }
+
+    fn aggregate_value(runtime: &RedDBRuntime) -> i64 {
+        let result = runtime.execute_query(QUERY).expect("aggregate query");
+        match result.result.records[0].get("n") {
+            Some(reddb_types::Value::Integer(value)) => *value,
+            other => panic!("expected integer aggregate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hot_hit_bypasses_query_execution_pipeline() {
+        let runtime = runtime_with_rows(true);
+        reset_result_cache_miss_executions();
+        let before = runtime.result_cache_metrics();
+
+        assert_eq!(aggregate_value(&runtime), 60);
+        assert_eq!(result_cache_miss_executions(), 1);
+        assert_eq!(aggregate_value(&runtime), 60);
+
+        let after = runtime.result_cache_metrics();
+        assert_eq!(
+            result_cache_miss_executions(),
+            1,
+            "hit re-entered the executor"
+        );
+        assert_eq!(after.0 - before.0, 1, "second read must be a cache hit");
+        assert_eq!(after.1 - before.1, 1, "first read must populate the cache");
+    }
+
+    #[test]
+    fn disabled_cache_executes_every_read() {
+        let runtime = runtime_with_rows(false);
+        reset_result_cache_miss_executions();
+        let before = runtime.result_cache_metrics();
+
+        assert_eq!(aggregate_value(&runtime), 60);
+        assert_eq!(aggregate_value(&runtime), 60);
+
+        assert_eq!(result_cache_miss_executions(), 2);
+        assert_eq!(
+            runtime.result_cache_metrics(),
+            before,
+            "disabled cache must not report lookups"
+        );
+    }
+
+    #[test]
+    fn table_write_forces_one_reexecution_then_hits_again() {
+        let runtime = runtime_with_rows(true);
+        assert_eq!(aggregate_value(&runtime), 60);
+        assert_eq!(aggregate_value(&runtime), 60);
+        runtime
+            .execute_query("INSERT INTO result_cache_probe (id, n) VALUES (4, 40)")
+            .expect("mutate cached table");
+        reset_result_cache_miss_executions();
+        let before = runtime.result_cache_metrics();
+
+        assert_eq!(aggregate_value(&runtime), 100);
+        assert_eq!(result_cache_miss_executions(), 1);
+        assert_eq!(aggregate_value(&runtime), 100);
+
+        let after = runtime.result_cache_metrics();
+        assert_eq!(result_cache_miss_executions(), 1);
+        assert_eq!(after.0 - before.0, 1, "post-write result must become hot");
+        assert_eq!(
+            after.1 - before.1,
+            1,
+            "write must invalidate the old result"
+        );
+    }
 }
 
 #[cfg(test)]

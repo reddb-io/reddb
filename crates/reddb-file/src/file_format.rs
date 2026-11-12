@@ -23,8 +23,12 @@ pub const PAGE_SECONDARY_INDEX_FILE_VERSION: u32 = 0x0001_0005;
 /// Legacy recovery output: identity high-water marks are unknown and every
 /// writer must refuse this file. Older readers reject the version outright.
 pub const PAGE_RECOVERY_READ_ONLY_FILE_VERSION: u32 = 0x0001_0006;
+/// Result-cache epoch fencing for resident paged stores.
+pub const PAGE_RESULT_CACHE_FILE_VERSION: u32 = 0x0001_0007;
+/// Result-cache epoch fencing for disk-resident paged stores.
+pub const PAGE_RESULT_CACHE_DISK_FILE_VERSION: u32 = 0x0001_0008;
 /// The first version whose superblock declares mandatory reader capabilities.
-pub const PAGE_REQUIRED_CAPABILITIES_FILE_VERSION: u32 = 0x0001_0007;
+pub const PAGE_REQUIRED_CAPABILITIES_FILE_VERSION: u32 = 0x0001_0009;
 pub const PAGE_FILE_VERSION: u32 = PAGE_REQUIRED_CAPABILITIES_FILE_VERSION;
 
 /// Native measured-temperature values may appear in entity payloads.
@@ -34,6 +38,14 @@ pub const FILE_CAPABILITY_DISK_RESIDENCY: u64 = 1 << 1;
 /// Capabilities understood by this reader. Unknown mandatory bits are fatal.
 pub const FILE_CAPABILITIES_SUPPORTED: u64 =
     FILE_CAPABILITY_TEMPERATURE | FILE_CAPABILITY_DISK_RESIDENCY;
+
+/// Whether a pre-capability format version implies disk residency.
+/// Capability-aware callers must use [`DatabaseHeader::requires_disk_residency`].
+pub fn page_format_is_disk_resident(version: u32) -> bool {
+    version >= PAGE_DISK_RESIDENCY_FILE_VERSION
+        && version < PAGE_REQUIRED_CAPABILITIES_FILE_VERSION
+        && version != PAGE_RESULT_CACHE_FILE_VERSION
+}
 
 /// Paged database page size.
 pub const PAGED_PAGE_SIZE: usize = 16_384;
@@ -506,7 +518,7 @@ impl DatabaseHeader {
     /// independent capability so unrelated codecs can evolve the format.
     pub fn requires_disk_residency(&self) -> bool {
         if self.version < PAGE_REQUIRED_CAPABILITIES_FILE_VERSION {
-            self.version >= PAGE_DISK_RESIDENCY_FILE_VERSION
+            page_format_is_disk_resident(self.version)
         } else {
             self.required_capabilities & FILE_CAPABILITY_DISK_RESIDENCY != 0
         }
@@ -1293,6 +1305,18 @@ mod tests {
             ..DatabaseHeader::default()
         };
         assert!(legacy.requires_disk_residency());
+
+        let resident_result_cache = DatabaseHeader {
+            version: PAGE_RESULT_CACHE_FILE_VERSION,
+            ..DatabaseHeader::default()
+        };
+        assert!(!resident_result_cache.requires_disk_residency());
+
+        let disk_result_cache = DatabaseHeader {
+            version: PAGE_RESULT_CACHE_DISK_FILE_VERSION,
+            ..DatabaseHeader::default()
+        };
+        assert!(disk_result_cache.requires_disk_residency());
 
         let temperature_only = DatabaseHeader {
             version: PAGE_REQUIRED_CAPABILITIES_FILE_VERSION,

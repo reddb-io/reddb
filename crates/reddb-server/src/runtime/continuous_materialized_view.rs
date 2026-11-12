@@ -48,7 +48,7 @@ pub struct MaterializedViewDescriptor {
 impl MaterializedViewDescriptor {
     /// Build a row entity suitable for `insert_auto(CATALOG_COLLECTION, …)`.
     /// Each descriptor field maps to one named column on the row, in
-    /// the same shape `red_config` uses for its key/value entries —
+    /// the same shape `red.config` uses for its key/value entries —
     /// keeps the storage layout introspectable from SQL without a
     /// JSON parser.
     fn to_row_entity(&self) -> UnifiedEntity {

@@ -634,9 +634,6 @@ async fn password_bootstrap_restart_contract(bounded_disk_residency: bool) {
     let path = path.to_str().expect("database path");
     let login_file = directory.path().join("login.pw");
     std::fs::write(&login_file, "synthetic-login-password").expect("login password file");
-    let http = format!("127.0.0.1:{}", free_port());
-    let wire_port = free_port();
-    let wire = format!("127.0.0.1:{wire_port}");
     let password = "minha senha arbitrária ' com espaços";
     for (phase, credential, should_serve) in [
         (0, password, true),
@@ -644,6 +641,12 @@ async fn password_bootstrap_restart_contract(bounded_disk_residency: bool) {
         (2, "", false),
         (3, password, true),
     ] {
+        // Failed boots release their endpoints before the next phase. Reusing
+        // those ports leaves a long window for another parallel test to claim
+        // one, while endpoint identity is not part of this restart contract.
+        let http = format!("127.0.0.1:{}", free_port());
+        let wire_port = free_port();
+        let wire = format!("127.0.0.1:{wire_port}");
         let mut args = vec![
             "server",
             "--path",

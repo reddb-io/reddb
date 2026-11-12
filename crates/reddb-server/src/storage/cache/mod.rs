@@ -39,9 +39,9 @@ pub use aggregates::{AggCacheStats, AggValue, AggregationCache, CardinalityEstim
 pub use blob::{
     BlobCache, BlobCacheConfig, BlobCacheHit, BlobCachePolicy, BlobCachePut, BlobCacheStats,
     CacheError, L1Admission, L2Compression, DEFAULT_BLOB_L1_BYTES_MAX, DEFAULT_BLOB_L2_BYTES_MAX,
-    DEFAULT_BLOB_MAX_NAMESPACES, METRIC_CACHE_BLOB_L1_BYTES_IN_USE,
-    METRIC_CACHE_BLOB_L2_BYTES_IN_USE, METRIC_CACHE_BLOB_L2_FULL_REJECTIONS_TOTAL,
-    METRIC_CACHE_VERSION_MISMATCH_TOTAL,
+    DEFAULT_BLOB_MAX_NAMESPACES, DEFAULT_BLOB_NAMESPACE_BYTES_MAX,
+    METRIC_CACHE_BLOB_L1_BYTES_IN_USE, METRIC_CACHE_BLOB_L2_BYTES_IN_USE,
+    METRIC_CACHE_BLOB_L2_FULL_REJECTIONS_TOTAL, METRIC_CACHE_VERSION_MISMATCH_TOTAL,
 };
 pub use compressor::{CompressError, CompressOpts, Compressed, L2BlobCompressor};
 pub use extended_ttl::{EffectiveExpiry, ExpiryDecision, ExtendedTtlPolicy};
@@ -54,16 +54,19 @@ pub use result::{
     ResultCacheStats,
 };
 pub use spill::{SpillConfig, SpillError, SpillManager, SpillStats, SpillableGraph};
+pub use sweeper::{
+    BlobCacheSweeper, NamespaceFlushReport, NamespaceSweepStats, OrphanReport, SweepLimit,
+    SweepReport,
+};
 
 // ---------------------------------------------------------------------------
-// L2 Blob Cache backup helpers (issue #148 follow-up)
+// Legacy standalone L2 Blob Cache backup helpers (issue #148 follow-up)
 // ---------------------------------------------------------------------------
 //
-// `BlobCache` writes the L2 metadata B+ tree and blob chains into a
-// single pager file at `cache.blob.l2_path` plus the reddb-file control
-// sidecar. Both files are required for a usable restore — the pager file
-// holds the data, the control file holds the root-page pointer +
-// bytes-in-use.
+// The normal server L2 lives in `red.cache.blob_l2` inside the primary
+// `.rdb`, so ordinary database backup and restore already cover it. These
+// helpers remain for direct engine callers that explicitly use the legacy
+// `cache.blob.l2_path` pager plus its reddb-file control sidecar.
 //
 // When the operator opts into `include_blob_cache=true` on a backup
 // (`red.config.backup.include_blob_cache`), we upload both files to

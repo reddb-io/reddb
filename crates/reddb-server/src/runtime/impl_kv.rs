@@ -1030,7 +1030,7 @@ impl<'a> KvAtomicOps<'a> {
     /// Whether `collection` retains MVCC history (opted into versioning).
     ///
     /// Versioned KV reads must do MVCC version-selection; non-versioned
-    /// collections (config `red_config`, the secrets vault) keep the
+    /// collections (config `red.config`, the secrets vault) keep the
     /// last-writer-wins fast path. Internal `red_*` collections are
     /// never versioned, so this stays cheap for them.
     fn is_versioned_collection(
@@ -3864,6 +3864,8 @@ fn kv_collection_contract(name: &str) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
         name: name.to_string(),
+        description: None,
+        description_generated: false,
         declared_model: crate::catalog::CollectionModel::Kv,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
         origin: crate::physical::ContractOrigin::Implicit,

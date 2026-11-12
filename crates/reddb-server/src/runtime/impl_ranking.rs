@@ -333,7 +333,7 @@ impl RedDBRuntime {
     /// `None` if the target row is invisible to this snapshot / tenant.
     ///
     /// The sketch is rebuilt from the live column on each read and persisted
-    /// back to `red_config` keyed by `(table, column)` — so it is maintained
+    /// back to `red.config` keyed by `(table, column)` — so it is maintained
     /// per `(collection, score column)` and stays current as scores change
     /// (criterion 4). The scan runs through `execute_query_inner`, inheriting
     /// the same MVCC snapshot, RLS/tenant scope, and policy as ordinary

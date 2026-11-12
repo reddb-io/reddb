@@ -20,6 +20,7 @@ mod manifest;
 mod plan;
 mod pointer;
 mod secondary;
+mod snapshot_head;
 
 pub use boot::*;
 pub use cache::*;
@@ -30,6 +31,7 @@ pub use manifest::*;
 pub use plan::*;
 pub use pointer::*;
 pub use secondary::*;
+pub use snapshot_head::*;
 
 const SERVERLESS_MANIFEST_MAGIC: &[u8; 8] = b"RDPKMNF1";
 const SERVERLESS_BOOT_INDEX_MAGIC: &[u8; 8] = b"RDPKBIX1";

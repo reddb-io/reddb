@@ -481,49 +481,48 @@ impl RedDBServer {
             let acquire = self
                 .execution_admission
                 .acquire_classified(latency_sensitive);
-            let permit =
-                match tokio::time::timeout(remaining, acquire).await {
-                    Ok(Ok(execution_permit)) => {
-                        self.http_metrics
-                            .record_queue_wait(transport, execution_permit.wait().as_secs_f64());
-                        execution_permit
-                    }
-                    Ok(Err(ExecutionAdmissionError::QueueFull)) => {
-                        self.http_metrics
-                            .record_reject(transport, HttpRejectReason::ExecutionQueueFull);
-                        let limit = self
-                            .execution_admission
-                            .active_max()
-                            .saturating_add(self.execution_admission.queued_max());
-                        let current = self
-                            .execution_admission
-                            .active()
-                            .saturating_add(self.execution_admission.queued());
-                        return self.reject_capacity_response(
-                            OverloadReason::ExecutionQueueFull,
-                            limit,
-                            current,
-                        );
-                    }
-                    Ok(Err(ExecutionAdmissionError::Closed)) => return internal_error_response(),
-                    Err(_) => {
-                        self.http_metrics
-                            .record_reject(transport, HttpRejectReason::ExecutionQueueTimeout);
-                        let limit = self
-                            .execution_admission
-                            .active_max()
-                            .saturating_add(self.execution_admission.queued_max());
-                        let current = self
-                            .execution_admission
-                            .active()
-                            .saturating_add(self.execution_admission.queued());
-                        return self.reject_capacity_response(
-                            OverloadReason::ExecutionQueueTimeout,
-                            limit,
-                            current,
-                        );
-                    }
-                };
+            let permit = match tokio::time::timeout(remaining, acquire).await {
+                Ok(Ok(execution_permit)) => {
+                    self.http_metrics
+                        .record_queue_wait(transport, execution_permit.wait().as_secs_f64());
+                    execution_permit
+                }
+                Ok(Err(ExecutionAdmissionError::QueueFull)) => {
+                    self.http_metrics
+                        .record_reject(transport, HttpRejectReason::ExecutionQueueFull);
+                    let limit = self
+                        .execution_admission
+                        .active_max()
+                        .saturating_add(self.execution_admission.queued_max());
+                    let current = self
+                        .execution_admission
+                        .active()
+                        .saturating_add(self.execution_admission.queued());
+                    return self.reject_capacity_response(
+                        OverloadReason::ExecutionQueueFull,
+                        limit,
+                        current,
+                    );
+                }
+                Ok(Err(ExecutionAdmissionError::Closed)) => return internal_error_response(),
+                Err(_) => {
+                    self.http_metrics
+                        .record_reject(transport, HttpRejectReason::ExecutionQueueTimeout);
+                    let limit = self
+                        .execution_admission
+                        .active_max()
+                        .saturating_add(self.execution_admission.queued_max());
+                    let current = self
+                        .execution_admission
+                        .active()
+                        .saturating_add(self.execution_admission.queued());
+                    return self.reject_capacity_response(
+                        OverloadReason::ExecutionQueueTimeout,
+                        limit,
+                        current,
+                    );
+                }
+            };
             Some(permit)
         } else {
             None

@@ -126,9 +126,19 @@ fn system_config_and_vault_reject_public_create_drop_and_truncate() {
         "DROP COLLECTION red.vault",
         "TRUNCATE CONFIG red.config",
         "TRUNCATE VAULT red.vault",
+        "DROP CONFIG red_config",
+        "DROP COLLECTION red_config",
+        "TRUNCATE COLLECTION red_config",
     ] {
         assert_system_schema_denied(&rt, sql);
     }
+
+    rt.execute_query("CREATE TABLE red_config_user (id INTEGER)")
+        .expect("a user collection that merely shares the prefix remains valid");
+    rt.execute_query("TRUNCATE COLLECTION red_config_user")
+        .expect("user collection remains mutable");
+    rt.execute_query("DROP COLLECTION red_config_user")
+        .expect("user collection remains droppable");
 }
 
 #[test]

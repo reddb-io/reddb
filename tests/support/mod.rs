@@ -821,8 +821,8 @@ pub fn logical_snapshot(rt: &RedDBRuntime) -> LogicalSnapshot {
         vectors: normalized_vector_collection(rt, "embeddings"),
         metrics: normalized_timeseries_collection(rt, "metrics"),
         queue_messages: normalized_queue_collection(rt, "tasks"),
-        queue_meta: normalized_row_collection(rt, "red_queue_meta", &["created_at_ns"]),
-        timeseries_meta: normalized_row_collection(rt, "red_timeseries_meta", &[]),
+        queue_meta: normalized_row_collection(rt, "red.queue.meta", &["created_at_ns"]),
+        timeseries_meta: normalized_row_collection(rt, "red.timeseries.meta", &[]),
     }
 }
 
@@ -944,7 +944,7 @@ pub fn assert_shared_query_behavior(rt: &RedDBRuntime) {
 
     let meta = exec(
         &query,
-        "SELECT series, retention_ms, chunk_size FROM red_timeseries_meta WHERE series = 'metrics'",
+        "SELECT series, retention_ms, chunk_size FROM red.timeseries.meta WHERE series = 'metrics'",
     );
     assert_eq!(meta.result.records.len(), 1);
     assert_eq!(text(&meta.result.records[0], "series"), "metrics");

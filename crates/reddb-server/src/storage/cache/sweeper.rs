@@ -1,28 +1,25 @@
-//! Bounded Blob Cache sweeper — admin maintenance for L1 expirations and
-//! L2 orphan-chain reclamation.
+//! Bounded Blob Cache maintenance for L1 expiry and namespace flushing.
 //!
-//! # Issue #148 — Blob Cache admin maintenance
+//! `sweep_expired` consumes due records from per-shard L1 indexes and the
+//! store's persisted ordered L2 deadline projection, so ordinary TTL work
+//! depends on the number of deadlines due rather than the total cache size. A
+//! separate rotating scan runs only while a namespace generation flush needs
+//! physical reclamation.
+//! The runtime invokes it every 250 ms on a dedicated maintenance thread.
 //!
-//! This module provides the bounded sweeper primitives that admin endpoints,
-//! the runtime maintenance scheduler, and the backup hook will call into.
-//! The actual HTTP wiring, runtime schedule, and backup integration are
-//! tracked as follow-up orchestrator-batch edits (see "FLAGGED HOOKUPS"
-//! at the bottom of this file).
+//! # Operations
 //!
-//! # Public surface
-//!
-//! - [`BlobCacheSweeper::sweep_expired`] — bounded sweep of expired L1 entries.
+//! - [`BlobCacheSweeper::sweep_expired`] — bounded sweep of expired L1/L2 entries.
 //! - [`BlobCacheSweeper::reclaim_orphans`] — bounded reclamation of L2 blob
-//!   chains left behind by an interrupted write (process killed between blob
-//!   bytes flush and metadata commit — see `docs/perf/blob-cache-l2-spike.md`
-//!   §"crash-recovery").
+//!   chains. This operation remains scaffolding until the L2 allocation walk
+//!   is exposed; it reports zero work rather than claiming reclamation.
 //! - [`BlobCacheSweeper::flush_namespace`] — foreground-fast namespace flush.
 //!   O(1): bumps the per-namespace generation counter; physical reclamation
 //!   happens lazily on next access or via [`BlobCacheSweeper::sweep_expired`].
 //!
 //! # Bounding
 //!
-//! All three operations are bounded by [`SweepLimit`]:
+//! Sweep operations are bounded by [`SweepLimit`]:
 //!
 //! - `Entries(N)` — hard cap on the number of entries scanned.
 //! - `Millis(N)` — hard cap on wall-clock time. Checked at every iteration so
@@ -35,76 +32,17 @@
 //!
 //! # Concurrency contract
 //!
-//! All three operations are safe to call while concurrent readers
+//! Operations are safe to call while concurrent readers
 //! (`BlobCache::get`, `BlobCache::exists`) and writers
 //! (`BlobCache::put`) are in flight:
 //!
-//! - The sweeper only uses `BlobCache`'s public, `&self` API
-//!   (`invalidate_key`, `invalidate_namespace`, `stats`). Those methods take
-//!   shard-level locks for the briefest possible critical sections; readers
-//!   touching other shards are never blocked.
+//! - The expiry sweep takes one shard write lock at a time and releases it
+//!   before advancing. Readers touching other shards continue normally.
 //! - `flush_namespace` only bumps a generation counter under a brief
 //!   write-lock. Concurrent reads against the same namespace either see the
 //!   old generation (returning a hit if the entry is still alive) or the new
 //!   generation (treating any cached entry as stale). Either is correct.
-//! - `sweep_expired` and `reclaim_orphans` cooperate with normal traffic by
-//!   bounding their per-call work and yielding back to the caller. They never
-//!   hold a global lock across the entire sweep.
-//!
-//! The `concurrent_reads_never_block_during_sweep` property test below
-//! verifies the contract empirically: 8 reader threads + 1 sweeper thread,
-//! readers must complete within a tight time budget.
-//!
-//! # FLAGGED HOOKUPS (orchestrator-batch — not landed by this file)
-//!
-//! Marked `// FLAG:` throughout; collected here for the orchestrator:
-//!
-//! 1. **`mod.rs` registration** — `pub mod sweeper;` line in
-//!    `crates/reddb-server/src/storage/cache/mod.rs`, plus a `pub use
-//!    sweeper::{BlobCacheSweeper, SweepLimit, SweepReport, OrphanReport,
-//!    NamespaceFlushReport, NamespaceSweepStats};` re-export so callers can
-//!    reach the type without the long path.
-//!
-//! 2. **`BlobCache` accessor extensions** — to walk L1 entries and L2 records
-//!    the sweeper needs read-only iterators on `BlobCache`. Today neither
-//!    surface exists, so `sweep_expired` and `reclaim_orphans` are bounded
-//!    scaffolding that report zero work until those accessors land. Required
-//!    additions (in `cache/blob/cache.rs`):
-//!
-//!    ```ignore
-//!    pub fn for_each_l1_entry<F>(&self, visit: F)
-//!    where F: FnMut(&str /*namespace*/, &str /*key*/, L1EntryView<'_>);
-//!
-//!    pub fn for_each_l2_record<F>(&self, visit: F)
-//!    where F: FnMut(L2RecordView<'_>);
-//!
-//!    pub fn l2_orphan_chains(&self) -> impl Iterator<Item = u32 /*root_page*/>;
-//!    ```
-//!
-//!    The `L1EntryView` projection should expose `expires_at_unix_ms`,
-//!    `namespace_generation`, and `size`. The `L2RecordView` should expose
-//!    `namespace`, `key`, `root_page`, `byte_len`. With those, the bodies of
-//!    `sweep_expired` and `reclaim_orphans` become straightforward (sketches
-//!    inline below).
-//!
-//! 3. **Backup integration** — `runtime/backup.rs` (or the equivalent
-//!    backup-orchestrator module) needs an `include_blob_cache: bool` flag
-//!    and matching dump/restore round-trip for the L2 metadata B+ tree and
-//!    blob chains. The sweeper plays no part in backup itself, but the spec
-//!    in `.red/adr/0006-tiered-blob-cache.md` ties them together: a backup
-//!    triggered while a sweep is in flight must observe a consistent L2
-//!    snapshot.
-//!
-//! 4. **Admin HTTP handler** — `POST /admin/blob_cache/sweep` and
-//!    `POST /admin/blob_cache/flush_namespace` endpoints (likely under
-//!    `crates/reddb-server/src/http/admin/`), parsing a JSON body matching
-//!    [`SweepLimit`] / namespace name and returning the report struct as
-//!    JSON. Both stay flagged for follow-up per the issue.
-//!
-//! 5. **Runtime config knob** — default [`SweepLimit`] for
-//!    background-scheduled sweeps + a `sweep_on_startup: bool` option in the
-//!    server config struct. The runtime scheduler then calls
-//!    [`BlobCacheSweeper::sweep_expired`] periodically.
+//! - Each invocation has entry/time bounds and never holds a global lock.
 
 use std::time::Instant;
 
@@ -117,8 +55,7 @@ use super::blob::BlobCache;
 /// Bound for a single sweeper invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SweepLimit {
-    /// Hard cap on entries scanned. The sweep stops as soon as this many
-    /// entries have been visited (whether evicted or not).
+    /// Hard cap on deadline/generation records inspected.
     Entries(usize),
     /// Hard cap on wall-clock milliseconds. The sweep stops as soon as the
     /// elapsed time crosses this threshold.
@@ -200,57 +137,69 @@ pub struct NamespaceFlushReport {
 pub struct BlobCacheSweeper;
 
 impl BlobCacheSweeper {
-    /// Bounded sweep of expired L1 entries.
+    /// Bounded sweep of expired L1 and L2 entries.
     ///
-    /// Walks the L1 entries (across shards) checking
-    /// `Entry::is_expired_at(now)`, and evicts expired ones via
-    /// [`BlobCache::invalidate_key`]. Honors `limit` precisely.
+    /// Pops due L1 deadlines across shards, revalidates them against the
+    /// current entry, and evicts only entries whose effective expiry elapsed.
+    /// Honors `limit` precisely.
     ///
     /// # Concurrency
     ///
-    /// Concurrent reads on the cache MUST NOT block. Per-shard locks are
-    /// taken only for the brief windows that `BlobCache::invalidate_key`
-    /// needs them; readers on other shards run unimpeded.
+    /// One shard write lock is held at a time. A read on that shard may wait
+    /// briefly; readers on other shards continue unimpeded. Persistent L2
+    /// deletion is published as one bounded WAL batch after the L1 locks are
+    /// released.
     ///
-    /// # Current implementation status
-    ///
-    /// Today this is **bounded scaffolding**: it sets up the time/entries
-    /// budget and returns a zero-work report. The actual L1 walk requires a
-    /// public iteration accessor on `BlobCache` (see flag #2 at the top of
-    /// this module). Once that lands, the body becomes:
-    ///
-    /// ```ignore
-    /// cache.for_each_l1_entry(|namespace, key, view| {
-    ///     if budget.exhausted() { return ControlFlow::Break(()); }
-    ///     report.entries_scanned += 1;
-    ///     if view.is_expired_at(now_ms) {
-    ///         let bytes = view.size as u64;
-    ///         if cache.invalidate_key(namespace, key) > 0 {
-    ///             report.entries_evicted += 1;
-    ///             report.bytes_reclaimed += bytes;
-    ///             accumulate_namespace(&mut report, namespace, bytes);
-    ///         }
-    ///     }
-    ///     budget.tick()
-    /// });
-    /// ```
     pub fn sweep_expired(cache: &BlobCache, limit: SweepLimit) -> SweepReport {
         let started = Instant::now();
-        let budget = Budget::new(limit, started);
-
-        // Touch `cache.stats()` so the sweeper observably interacts with the
-        // cache (and so the "concurrent reads never block" property test
-        // exercises a real `&BlobCache` codepath rather than a no-op).
-        let _ = cache.stats();
-
-        let mut report = SweepReport::default();
-
-        // Bounded scaffolding: real L1 walk awaits flag #2.
-        // The budget is honored even when there is no work to do — we still
-        // record elapsed time so callers can verify the contract.
-        budget.observe(&mut report.elapsed_ms);
-        report.truncated_due_to_limit = false;
-        report
+        let mut outcome = cache.sweep_expired_l1(limit.entries_cap(), limit.millis_cap());
+        let entries_remaining = limit.entries_cap().map_or(usize::MAX, |cap| {
+            cap.saturating_sub(outcome.entries_scanned)
+        });
+        let millis_remaining = limit.millis_cap().map(|cap| {
+            let elapsed = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+            cap.saturating_sub(elapsed)
+        });
+        let l2 = cache.sweep_expired_l2(entries_remaining, millis_remaining);
+        outcome.entries_scanned = outcome.entries_scanned.saturating_add(l2.entries_scanned);
+        outcome.entries_evicted = outcome.entries_evicted.saturating_add(l2.entries_evicted);
+        outcome.expirations = outcome.expirations.saturating_add(l2.expirations);
+        outcome.bytes_reclaimed = outcome.bytes_reclaimed.saturating_add(l2.bytes_reclaimed);
+        outcome.completed &= l2.completed;
+        outcome.elapsed_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        for (namespace, stats) in l2.by_namespace {
+            let aggregate = outcome.by_namespace.entry(namespace).or_default();
+            aggregate.entries_scanned = aggregate
+                .entries_scanned
+                .saturating_add(stats.entries_scanned);
+            aggregate.entries_evicted = aggregate
+                .entries_evicted
+                .saturating_add(stats.entries_evicted);
+            aggregate.bytes_reclaimed = aggregate
+                .bytes_reclaimed
+                .saturating_add(stats.bytes_reclaimed);
+        }
+        SweepReport {
+            entries_scanned: outcome.entries_scanned,
+            entries_evicted: outcome.entries_evicted,
+            bytes_reclaimed: outcome.bytes_reclaimed,
+            elapsed_ms: outcome.elapsed_ms,
+            truncated_due_to_limit: !outcome.completed,
+            by_namespace: outcome
+                .by_namespace
+                .into_iter()
+                .map(|(namespace, stats)| {
+                    (
+                        namespace,
+                        NamespaceSweepStats {
+                            entries_scanned: stats.entries_scanned,
+                            entries_evicted: stats.entries_evicted,
+                            bytes_reclaimed: stats.bytes_reclaimed,
+                        },
+                    )
+                })
+                .collect(),
+        }
     }
 
     /// Bounded reclamation of L2 orphan blob chains.
@@ -313,17 +262,17 @@ impl BlobCacheSweeper {
     /// `elapsed_micros` fields are accurate today.
     pub fn flush_namespace(cache: &BlobCache, namespace: &str) -> NamespaceFlushReport {
         let started = Instant::now();
+        let generation_before = cache.current_generation(namespace);
         let _flushed = cache.invalidate_namespace(namespace);
+        let generation_after = cache.current_generation(namespace);
         let elapsed = started.elapsed();
         // Saturate at u32::MAX; under the foreground-fast contract this
         // bound is never approached.
         let elapsed_micros = u32::try_from(elapsed.as_micros()).unwrap_or(u32::MAX);
         NamespaceFlushReport {
             namespace: namespace.to_string(),
-            // FLAG: generation values are placeholders pending a
-            // `BlobCache::current_generation(&str) -> u64` public accessor.
-            generation_before: 0,
-            generation_after: 0,
+            generation_before,
+            generation_after,
             elapsed_micros,
         }
     }
@@ -476,9 +425,6 @@ mod tests {
 
         let report = BlobCacheSweeper::sweep_expired(&cache, SweepLimit::Entries(10));
 
-        // Scaffolding contract: returns a well-formed report. The
-        // `truncated_due_to_limit` flag is false because no work was done
-        // — once the L1 walk lands (flag #2) the assertion list expands.
         assert_eq!(report.entries_scanned, 0);
         assert_eq!(report.entries_evicted, 0);
         assert_eq!(report.bytes_reclaimed, 0);
@@ -522,12 +468,7 @@ mod tests {
         assert_eq!(hit.value(), b"v");
     }
 
-    /// Verifies the contract that a TTL'd entry is removable, even though
-    /// today the sweeper's L1 walk is unimplemented and the actual physical
-    /// removal happens lazily on the next `get`. Marked `#[ignore]` because
-    /// it asserts behaviour that requires accessor flag #2 to be in place.
     #[test]
-    #[ignore = "requires BlobCache::for_each_l1_entry accessor (flag #2)"]
     fn sweep_expired_evicts_expired_but_not_unexpired() {
         let cache = cache();
         let policy = BlobCachePolicy::default().expires_at_unix_ms(1);
@@ -545,6 +486,8 @@ mod tests {
         let report = BlobCacheSweeper::sweep_expired(&cache, SweepLimit::Entries(10));
 
         assert_eq!(report.entries_evicted, 1);
+        assert_eq!(report.entries_scanned, 1);
+        assert!(report.bytes_reclaimed > 1);
         assert!(cache.get("n", "expired").is_none());
         assert!(cache.get("n", "alive").is_some());
     }
@@ -561,34 +504,6 @@ mod tests {
         assert!(!report.truncated_due_to_limit);
     }
 
-    /// Verifies that an orphan chain produced by the `fault_after_blob_write`
-    /// hook is reclaimed by the sweeper. Marked `#[ignore]` because both the
-    /// fault-injection hook and the L2-walk accessor are private to
-    /// `blob.rs`; this test is the contract this sweeper module commits to
-    /// satisfying once flag #2 lands and `inject_l2_fault_after_blob_write_once`
-    /// is exposed for cross-module use.
-    #[test]
-    #[ignore = "requires BlobCache::for_each_l2_record + cross-module fault hook (flag #2)"]
-    fn reclaim_orphans_reclaims_chain_left_by_interrupted_write() {
-        // Sketch (executable once accessor lands):
-        //
-        // let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
-        // let cache = BlobCache::new(
-        //     BlobCacheConfig::default()
-        //         .with_l1_bytes_max(128)
-        //         .with_l2_path(&path),
-        // );
-        // cache.inject_l2_fault_after_blob_write_once();
-        // let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        //     cache
-        //         .put("n", "partial", BlobCachePut::new(b"partial".to_vec()))
-        //         .unwrap();
-        // }));
-        // let report = BlobCacheSweeper::reclaim_orphans(&cache, SweepLimit::Entries(100));
-        // assert_eq!(report.blob_chains_reclaimed, 1);
-        // assert!(report.bytes_reclaimed >= b"partial".len() as u64);
-    }
-
     // -- flush_namespace ----------------------------------------------------
 
     #[test]
@@ -603,9 +518,8 @@ mod tests {
         let observed = started.elapsed();
 
         assert_eq!(report.namespace, "ns");
-        // Generation values are placeholders today (see flag #2).
         assert_eq!(report.generation_before, 0);
-        assert_eq!(report.generation_after, 0);
+        assert_eq!(report.generation_after, 1);
 
         // Foreground-fast contract: <100 µs typical. Allow generous slop for
         // CI noise (debug builds + virtualised runners can be 10× slower).
@@ -631,7 +545,6 @@ mod tests {
         let cache = cache();
         let report = BlobCacheSweeper::flush_namespace(&cache, "never-existed");
         assert_eq!(report.namespace, "never-existed");
-        // Implementation reports placeholders for both before/after today.
         assert_eq!(report.generation_before, 0);
         assert_eq!(report.generation_after, 0);
     }

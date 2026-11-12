@@ -60,7 +60,7 @@ pub(super) const QUEUE_PENDING_INTERNAL: &str = "__red_schema_queue_pending";
 // oldest_pending_age, dlq_target, attention, internal)`. Hot fields
 // (mode, depth, dlq_target, attention) come from the catalog
 // descriptor; total_pending / oldest_pending_age are computed via a
-// single pass over `red_queue_meta` pending rows (`queue_pending`
+// single pass over `red.queue.meta` pending rows (`queue_pending`
 // legacy and `queue_pending_lc` lifecycle) so they remain consistent
 // with the source of truth. `internal` exists so the `SHOW QUEUES`
 // desugar can hide DLQ-target queues by default and surface them
@@ -169,7 +169,7 @@ pub(super) const VERSIONED: &str = "red.versioned";
 pub(super) const VERSIONED_INTERNAL: &str = "__red_schema_versioned";
 pub(super) const READ_ONLY_ERROR: &str = "system schema is read-only";
 
-const COLLECTION_COLUMNS: [&str; 15] = [
+const COLLECTION_COLUMNS: [&str; 17] = [
     "name",
     "model",
     "schema_mode",
@@ -188,9 +188,11 @@ const COLLECTION_COLUMNS: [&str; 15] = [
     // otherwise. Issue #576 slice 1.
     "session_key",
     "session_gap_ms",
+    "description",
+    "description_generated",
 ];
 
-const COLUMN_COLUMNS: [&str; 7] = [
+const COLUMN_COLUMNS: [&str; 9] = [
     "collection",
     "name",
     "type",
@@ -198,6 +200,8 @@ const COLUMN_COLUMNS: [&str; 7] = [
     "default_value",
     "is_primary_key",
     "is_unique",
+    "description",
+    "description_generated",
 ];
 
 const DESCRIBE_COLUMNS: [&str; 5] = ["name", "type", "nullable", "default", "indexed"];
@@ -729,6 +733,21 @@ pub(super) fn rewrite_virtual_names(query: &str) -> Option<String> {
 
 pub(super) fn references_system_schema(query: &str) -> bool {
     contains_case_insensitive_outside_quotes(query, "red.")
+}
+
+pub(super) fn is_computed_stats_query(query: &str) -> bool {
+    let mut tokens = query
+        .trim_start()
+        .split(|c: char| c.is_whitespace() || c == '(' || c == ';');
+    let show_stats = tokens
+        .next()
+        .is_some_and(|token| token.eq_ignore_ascii_case("SHOW"))
+        && tokens
+            .next()
+            .is_some_and(|token| token.eq_ignore_ascii_case("STATS"));
+    show_stats
+        || contains_case_insensitive_outside_quotes(query, STATS)
+        || contains_case_insensitive_outside_quotes(query, STATS_INTERNAL)
 }
 
 pub(super) fn is_system_schema_write(query: &str) -> bool {
@@ -1355,7 +1374,7 @@ mod tests {
         // Two timeseries session columns were added by #576 slice 1.
         assert!(COLLECTION_COLUMNS.contains(&"session_key"));
         assert!(COLLECTION_COLUMNS.contains(&"session_gap_ms"));
-        assert_eq!(COLLECTION_COLUMNS.len(), 15);
+        assert_eq!(COLLECTION_COLUMNS.len(), 17);
     }
 
     #[test]

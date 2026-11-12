@@ -26,6 +26,8 @@ pub const CASES: &[(&str, fn())] = &[
 fn column(name: &str) -> PhysicalDeclaredColumnContract {
     PhysicalDeclaredColumnContract {
         name: name.into(),
+        description: None,
+        description_generated: false,
         data_type: "integer".into(),
         sql_type: Some(reddb_file::PhysicalSqlTypeName {
             name: "integer".into(),
@@ -47,6 +49,8 @@ pub fn persisted() -> PhysicalCollectionContract {
     total.check = Some("total < 100".into());
     PhysicalCollectionContract {
         name: "orders".into(),
+        description: None,
+        description_generated: false,
         declared_model: "table".into(),
         schema_mode: "strict".into(),
         origin: "explicit".into(),
@@ -130,9 +134,12 @@ fn contract_round_trip() {
         let decoded =
             collection_contract_from_persisted(expected.clone()).expect("runtime mapping");
         assert_eq!(collection_contract_to_persisted(&decoded), expected);
+        let native_value = reddb_engine::json::from_str(&native_json)
+            .expect("canonical file codec must emit valid JSON");
         assert_eq!(
-            collection_contract_to_json(&decoded).to_string_compact(),
-            native_json
+            collection_contract_to_json(&decoded),
+            native_value,
+            "runtime and file codecs must preserve the same JSON value"
         );
         let bytes = serialize_collection_contracts(&[decoded]);
         let restored = deserialize_collection_contracts(&bytes).expect("contract blob");

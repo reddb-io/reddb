@@ -54,6 +54,7 @@ impl RedDBServer {
         principal: Option<&str>,
     ) -> RedDBResult<OperationContext> {
         let consent = self.runtime.write_gate().check_consent(kind)?;
+        self.runtime.validated_request_commit_policy(None)?;
         Ok(OperationContextFactory::build(OperationContextInput {
             request_id: request_id.map(str::to_string),
             principal: principal.map(str::to_string),
@@ -66,14 +67,35 @@ impl RedDBServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{RedDBError, RedDBRuntime};
 
-    // The factory needs a real RedDBServer to exercise; that's
-    // expensive to stand up here. The behaviour is small enough to
-    // test indirectly through the operation_context unit tests
-    // (see src/application/operation_context.rs::tests). What
-    // matters for this module is that it compiles — type checks
-    // confirm WriteConsent is sealed and that build_write_context
-    // returns Result so handlers can propagate the gate error.
     #[test]
-    fn module_compiles() {}
+    fn commit_policy_context_child() {
+        if std::env::var_os("REDDB_COMMIT_CONTEXT_CHILD").is_none() {
+            return;
+        }
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let server = RedDBServer::new(runtime);
+        let error = server
+            .build_write_context(WriteKind::Dml, None, None)
+            .err()
+            .expect("unsupported policy must not mint write consent");
+        assert!(matches!(error, RedDBError::InvalidConfig(_)), "{error}");
+    }
+
+    #[test]
+    fn commit_policy_write_context_rejects_unsupported_configuration() {
+        // Isolate the process-wide configuration from concurrent tests.
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "server::request_context::tests::commit_policy_context_child",
+                "--nocapture",
+            ])
+            .env("REDDB_COMMIT_CONTEXT_CHILD", "1")
+            .env("RED_PRIMARY_COMMIT_POLICY", "remote_wal")
+            .output()
+            .expect("run configured child");
+        assert!(output.status.success(), "{output:?}");
+    }
 }

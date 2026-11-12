@@ -281,11 +281,10 @@ impl RedDBRuntime {
                     _ => {} // Local / RemoteWal / Quorum: no blocking yet
                 }
 
-                // Issue #148 follow-up — opt-in archive of the L2 Blob Cache
-                // directory tree. Default off so a standard backup stays
-                // small; flip via `red.config.backup.include_blob_cache=true`
-                // when warm-cache restore is required (per
-                // docs/operations/blob-cache-backup-restore.md §1).
+                // Compatibility path for the legacy standalone L2 pager.
+                // The server's single-file L2 is an internal collection in
+                // the primary snapshot and therefore has no separate path
+                // to archive here.
                 //
                 // The L2 tree is *derived* state (ADR 0006) — its absence
                 // never causes data loss; it only affects post-restore
@@ -323,7 +322,7 @@ impl RedDBRuntime {
                     } else {
                         tracing::debug!(
                             target: "reddb::backup",
-                            "include_blob_cache=true but no L2 path configured; nothing to archive"
+                            "include_blob_cache=true but no legacy standalone L2 path is configured"
                         );
                     }
                 }

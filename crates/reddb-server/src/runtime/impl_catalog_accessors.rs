@@ -77,10 +77,7 @@ impl RedDBRuntime {
             );
             return Ok(());
         }
-        self.inner
-            .db
-            .upload_to_remote_backend()
-            .map_err(|err| RedDBError::Engine(err.to_string()))
+        self.publish_remote_snapshot()
     }
 
     pub(super) fn checkpoint_local(&self) -> RedDBResult<()> {
@@ -121,7 +118,7 @@ impl RedDBRuntime {
         self.index_store_ref().clear_paged_btree_overlays();
         self.inner.probabilistic.replayed_names.lock().clear();
         drop(publication);
-        let checkpoint_lsn = self.cdc_current_lsn();
+        let checkpoint_lsn = self.replication_commit_lsn();
         self.inner
             .checkpoint_projection_stats
             .record_checkpoint(checkpoint_lsn, started.elapsed().as_millis() as u64);
@@ -153,6 +150,62 @@ impl RedDBRuntime {
             }
             _ => Ok(()),
         }
+    }
+
+    pub(super) fn publish_remote_snapshot(&self) -> RedDBResult<()> {
+        if let Some(lifecycle) = self.lease_lifecycle() {
+            let store = self.inner.db.store();
+            // Other snapshot entrypoints already hold this reentrant lock.
+            // Keep a consistent publication -> lease transition lock order.
+            let _publication = store.vault_publication_lock.lock();
+            if lifecycle.publish_snapshot(|| self.capture_serverless_snapshot())? {
+                return Ok(());
+            }
+        }
+        self.inner
+            .db
+            .upload_to_remote_backend()
+            .map_err(|err| RedDBError::Engine(err.to_string()))
+    }
+
+    pub(super) fn capture_serverless_snapshot(
+        &self,
+    ) -> RedDBResult<reddb_file::ServerlessWriterLeaseTempFile> {
+        use reddb_file::VfsFile;
+        use std::io::Write;
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        self.checkpoint_local()?;
+        let snapshot = reddb_file::ServerlessWriterLeaseTempFile::new("snapshot-payload");
+        if let Some(pager) = store.pager() {
+            // Use the pager's own handle: Windows excludes reads through any
+            // second handle while the native writer owns the file lock.
+            pager
+                .with_file(|source| -> std::io::Result<()> {
+                    let mut output = std::fs::File::create(snapshot.path())?;
+                    source.seek(std::io::SeekFrom::Start(0))?;
+                    let mut buffer = [0u8; 65536];
+                    loop {
+                        let count = source.read(&mut buffer)?;
+                        if count == 0 {
+                            break;
+                        }
+                        output.write_all(&buffer[..count])?;
+                    }
+                    output.sync_all()
+                })
+                .map_err(|err| RedDBError::Internal(err.to_string()))?
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        } else {
+            let path = self.inner.db.path().ok_or_else(|| {
+                RedDBError::InvalidOperation(
+                    "serverless snapshots require persistent local storage".into(),
+                )
+            })?;
+            std::fs::copy(path, snapshot.path())
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
+        Ok(snapshot)
     }
 
     pub fn run_maintenance(&self) -> RedDBResult<()> {

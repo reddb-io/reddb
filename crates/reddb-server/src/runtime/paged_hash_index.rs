@@ -4,7 +4,9 @@
 //! It reads only matching digest postings plus resident changes; full raw keys
 //! are rechecked, so a digest collision cannot create a match. No posting map is
 //! hydrated on reopen. Missing generations use a fallible bounded physical scan.
-use super::index_store::{bounded_hash_index_key, RegisteredIndex};
+use super::index_store::{
+    bounded_hash_index_key, bounded_hash_index_key_from, index_field_value_from, RegisteredIndex,
+};
 use super::{RedDBRuntime, RuntimeInner};
 use crate::storage::unified::hash_index::{HashCandidates, HashIndexError, PagedHashIndex};
 use crate::storage::unified::store::secondary_index::{
@@ -35,36 +37,48 @@ impl HashProjection {
         entity: &UnifiedEntity,
         bytes_max: usize,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        if !matches!(entity.kind, EntityKind::TableRow { .. }) {
+        if entity.xmax != 0 || !matches!(entity.kind, EntityKind::TableRow { .. }) {
             return Ok(None);
         }
         let EntityData::Row(row) = &entity.data else {
             return Ok(None);
         };
-        let selected = |name: &str| {
-            name == "body"
-                || self
-                    .columns
-                    .iter()
-                    .any(|column| column == name || column.split('.').next() == Some(name))
-        };
-        let fields: Vec<_> = if let Some(named) = &row.named {
-            named
-                .iter()
-                .filter(|(name, _)| selected(name))
-                .map(|(name, value)| (name.clone(), value.clone()))
-                .collect()
+        if let Some(named) = &row.named {
+            bounded_hash_index_key_from(
+                &self.columns,
+                bytes_max.min(self.key_bytes_max),
+                |column| index_field_value_from(column, |name| named.get(name)),
+            )
         } else if let Some(schema) = row.schema.as_ref().or(self.schema.as_ref()) {
-            schema
-                .iter()
-                .zip(&row.columns)
-                .filter(|(name, _)| selected(name))
-                .map(|(name, value)| (name.clone(), value.clone()))
-                .collect()
+            bounded_hash_index_key_from(
+                &self.columns,
+                bytes_max.min(self.key_bytes_max),
+                |column| {
+                    index_field_value_from(column, |name| {
+                        schema
+                            .iter()
+                            .position(|candidate| candidate == name)
+                            .and_then(|position| row.columns.get(position))
+                    })
+                },
+            )
         } else {
-            Vec::new()
-        };
-        bounded_hash_index_key(&self.columns, &fields, bytes_max.min(self.key_bytes_max))
+            Ok(None)
+        }
+    }
+
+    fn probe_workspace_factor(&self) -> usize {
+        if self.columns.len() > 1
+            || self.columns.iter().any(|column| column.contains('.'))
+            || self
+                .schema
+                .as_ref()
+                .is_none_or(|schema| schema.iter().any(|column| column == "body"))
+        {
+            3
+        } else {
+            2
+        }
     }
 }
 
@@ -84,7 +98,7 @@ impl SecondaryIndexProjector for HashProjection {
 
 fn projection_identity(columns: &[String], schema: Option<&[String]>) -> SecondaryIndexIdentity {
     let mut digest = Sha256::new();
-    digest.update(b"runtime-hash-sha256-v1");
+    digest.update(b"runtime-current-hash-sha256-v2");
     digest.update([u8::from(schema.is_some())]);
     for names in [columns, schema.unwrap_or(&[])] {
         digest.update((names.len() as u64).to_le_bytes());
@@ -94,7 +108,7 @@ fn projection_identity(columns: &[String], schema: Option<&[String]>) -> Seconda
         }
     }
     SecondaryIndexIdentity {
-        codec_version: 1,
+        codec_version: 2,
         definition: digest.finalize().into(),
     }
 }
@@ -151,17 +165,19 @@ impl PagedHashIndex for RuntimeHashIndex {
             inner,
             background_tasks: None,
         };
-        // Small lookups must not reserve a quarter of the entire engine budget
-        // per client. Retry larger rows/posting lists with admitted geometric
-        // growth, releasing the previous attempt before reserving its successor.
-        let ceiling = self.projection.key_bytes_max;
+        // Small lookups start with a bounded allowance. A row can be larger
+        // than its indexed key, so retry the exact reported decode requirement
+        // up to the per-row share of the process budget.
+        let ceiling = usize::try_from(runtime.memory_accounting().budget().resolved_bytes / 4)
+            .unwrap_or(usize::MAX)
+            .max(1);
         let mut limit = ceiling.min(64 * 1024);
         loop {
             match self.lookup_with_limit(&runtime, key, limit) {
                 Err(HashIndexError::ReadLimit { required_bytes, .. })
-                    if limit < ceiling && required_bytes <= ceiling =>
+                    if required_bytes > limit && required_bytes <= ceiling =>
                 {
-                    limit = limit.saturating_mul(2).max(required_bytes).min(ceiling);
+                    limit = required_bytes;
                 }
                 result => return result,
             }
@@ -183,15 +199,9 @@ impl RuntimeHashIndex {
         // Admission samples managers; finish it before taking publication or
         // source locks. The output owner outlives both scanning and this runtime.
         let (_scratch, read_bytes_max) = runtime
-            .reserve_index_scan_with_limit(&manager, limit)
+            .reserve_index_probe_with_limit(limit, self.projection.probe_workspace_factor())
             .map_err(read_error)?;
-        let output = runtime
-            .try_reserve_query_buffer(read_bytes_max)
-            .ok_or_else(|| read_error("HASH candidates exceed shared memory budget"))?;
-        let ids_max = read_bytes_max / std::mem::size_of::<EntityId>();
-        let mut ids = Vec::new();
-        ids.try_reserve_exact(ids_max).map_err(read_error)?;
-        let mut accept = |entity: &UnifiedEntity| -> Result<(), HashIndexError> {
+        let matches = |entity: &UnifiedEntity| -> Result<bool, HashIndexError> {
             let required_bytes = crate::storage::unified::memory_size::entity_bytes(entity);
             if required_bytes > read_bytes_max {
                 return Err(HashIndexError::ReadLimit {
@@ -199,61 +209,104 @@ impl RuntimeHashIndex {
                     limit_bytes: read_bytes_max,
                 });
             }
-            if self
+            Ok(self
                 .projection
                 .raw_key(entity, read_bytes_max)
                 .map_err(storage_error)?
                 .as_deref()
-                == Some(key)
-            {
-                if ids.len() == ids_max {
-                    return Err(HashIndexError::ReadLimit {
-                        required_bytes: read_bytes_max
-                            .saturating_add(std::mem::size_of::<EntityId>()),
-                        limit_bytes: read_bytes_max,
-                    });
-                }
-                ids.push(entity.id);
-            }
-            Ok(())
+                == Some(key))
         };
         // Freeze publication across base capture, source recheck and overlay.
         // Native handles additionally pin both trees against page reclamation.
         let _publication = store.vault_publication_lock.lock();
-        if let Some(index) = store.secondary_index(&self.collection, &self.name, &self.identity) {
-            let mut cursor = index
-                .candidates(&self.projection.digest(key))
-                .map_err(storage_error)?;
-            while let Some(id) = cursor.next_id().map_err(storage_error)? {
-                if let Some(entity) = manager.try_get(id, read_bytes_max).map_err(storage_error)? {
-                    accept(&entity)?;
-                }
-            }
-            let mut failure = None;
-            manager.for_each_entity(|entity| {
-                if let Err(error) = accept(entity) {
-                    failure = Some(error);
-                    return false;
-                }
-                true
-            });
-            if let Some(error) = failure {
-                return Err(error);
-            }
-        } else {
-            let mut failure = None;
-            manager
-                .try_for_each_entity(read_bytes_max, |entity| {
-                    if let Err(error) = accept(entity) {
-                        failure = Some(error);
-                        return false;
+        let index = store.secondary_index(&self.collection, &self.name, &self.identity);
+        let scan = |accept: &mut dyn FnMut(&UnifiedEntity) -> Result<(), HashIndexError>| {
+            if let Some(index) = &index {
+                let mut dangling_posting = false;
+                let mut cursor = index
+                    .candidates(&self.projection.digest(key))
+                    .map_err(storage_error)?;
+                while let Some(id) = cursor.next_id().map_err(storage_error)? {
+                    if let Some(entity) =
+                        manager.try_get(id, read_bytes_max).map_err(storage_error)?
+                    {
+                        accept(&entity)?;
+                    } else {
+                        dangling_posting = true;
                     }
-                    true
-                })
-                .map_err(storage_error)?;
-            if let Some(error) = failure {
-                return Err(error);
+                }
+                let mut failure = None;
+                if dangling_posting {
+                    manager
+                        .try_for_each_entity(read_bytes_max, |entity| {
+                            if let Err(error) = accept(entity) {
+                                failure = Some(error);
+                                return false;
+                            }
+                            true
+                        })
+                        .map_err(storage_error)?;
+                } else {
+                    manager.for_each_entity(|entity| {
+                        if let Err(error) = accept(entity) {
+                            failure = Some(error);
+                            return false;
+                        }
+                        true
+                    });
+                }
+                if let Some(error) = failure {
+                    return Err(error);
+                }
+            } else {
+                let mut failure = None;
+                manager
+                    .try_for_each_entity(read_bytes_max, |entity| {
+                        if let Err(error) = accept(entity) {
+                            failure = Some(error);
+                            return false;
+                        }
+                        true
+                    })
+                    .map_err(storage_error)?;
+                if let Some(error) = failure {
+                    return Err(error);
+                }
             }
+            Ok(())
+        };
+
+        // Count first, then admit exactly the candidate allocation. Reserving
+        // the whole decode ceiling made a one-row primary-key lookup fail when
+        // the bounded store still had enough headroom for its actual result.
+        let mut candidate_count = 0usize;
+        scan(&mut |entity| {
+            if matches(entity)? {
+                candidate_count = candidate_count.saturating_add(1);
+            }
+            Ok(())
+        })?;
+        let candidate_bytes = candidate_count.saturating_mul(std::mem::size_of::<EntityId>());
+        let output = runtime
+            .try_reserve_query_buffer(candidate_bytes)
+            .ok_or_else(|| read_error("HASH candidates exceed shared memory budget"))?;
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(candidate_count).map_err(read_error)?;
+        scan(&mut |entity| {
+            if matches(entity)? {
+                if ids.len() == candidate_count {
+                    return Err(read_error(
+                        "HASH candidate set changed while publication was fenced",
+                    ));
+                }
+                ids.push(entity.id);
+            }
+            Ok(())
+        })?;
+        if ids.len() != candidate_count {
+            return Err(read_error(
+                "HASH candidate set changed while publication was fenced",
+            ));
         }
         // A replacement may be reached through both base and overlay. Sorting
         // in place avoids another set allocation and retains all physical MVCC IDs.
@@ -331,7 +384,7 @@ mod tests {
             .expect("profile");
         let seed = RedDBRuntime::with_options(options.clone()).expect("seed");
         for sql in [
-            "CREATE TABLE hash_rows (id INTEGER, email TEXT)",
+            "CREATE TABLE hash_rows (id INTEGER, email TEXT, payload TEXT)",
             "CREATE UNIQUE INDEX by_email ON hash_rows (email) USING HASH",
             "INSERT INTO hash_rows (id, email) VALUES (1, 'alpha')",
             "INSERT INTO hash_rows (id, email) VALUES (2, 'beta')",
@@ -403,6 +456,67 @@ mod tests {
             .expect("metadata-only restore");
         assert_eq!(lookup(&runtime, "alpha").len(), 1);
         assert!(lookup(&runtime, "missing").is_empty());
+    }
+
+    #[test]
+    fn paged_hash_dangling_posting_scans_authoritative_backing() {
+        use crate::storage::engine::BTree;
+        use reddb_engine::storage::collection_read::{
+            CollectionCursor, CollectionRead, EncodedRecord, PagedCollection,
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TrackScan {
+            source: Arc<dyn CollectionRead + Send + Sync>,
+            scanned: Arc<AtomicBool>,
+        }
+        impl CollectionRead for TrackScan {
+            fn get_record(
+                &self,
+                id: EntityId,
+                limit: usize,
+            ) -> Result<Option<EncodedRecord>, StoreError> {
+                self.source.get_record(id, limit)
+            }
+            fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, StoreError> {
+                self.scanned.store(true, Ordering::SeqCst);
+                self.source.cursor()
+            }
+            fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, StoreError> {
+                self.scanned.store(true, Ordering::SeqCst);
+                self.source.owned_cursor()
+            }
+        }
+
+        let (_directory, runtime) = fixture();
+        let physical_id = lookup(&runtime, "alpha")[0];
+        let store = runtime.db().store();
+        let root = store.collection_root_page("hash_rows").expect("root");
+        let manager = store.get_collection("hash_rows").expect("hash rows");
+        let scanned = Arc::new(AtomicBool::new(false));
+        manager.install_backing(
+            Arc::new(TrackScan {
+                source: Arc::new(PagedCollection::new(Arc::new(BTree::with_root(
+                    Arc::clone(store.pager().expect("pager")),
+                    root,
+                )))),
+                scanned: Arc::clone(&scanned),
+            }),
+            root,
+            store.format_version(),
+            1024 * 1024,
+            2,
+        );
+        manager
+            .delete(physical_id)
+            .expect("remove indexed physical row");
+        assert!(!scanned.load(Ordering::SeqCst));
+
+        assert!(lookup(&runtime, "alpha").is_empty());
+        assert!(
+            scanned.load(Ordering::SeqCst),
+            "a dangling posting must invalidate the fast path and scan the backing"
+        );
     }
 
     #[test]
@@ -522,6 +636,49 @@ mod tests {
             }
             assert_eq!(lookup(&runtime, &key).len(), 1);
         }
+    }
+
+    #[test]
+    fn paged_hash_large_unindexed_payload_uses_exact_row_scratch() {
+        let (_directory, mut runtime) = fixture();
+        runtime
+            .execute_query_with_params(
+                "INSERT INTO hash_rows (id, email, payload) VALUES (3, 'large-row', $1)",
+                &[Value::text("x".repeat(64 * 1024))],
+            )
+            .expect("large unindexed payload");
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("hash_rows")
+            .expect("hash_rows");
+        let row_id = lookup(&runtime, "large-row")
+            .into_iter()
+            .next()
+            .expect("large row candidate");
+        let row_bytes = crate::storage::unified::memory_size::entity_bytes(
+            &manager
+                .try_get(row_id, usize::MAX)
+                .expect("read large row")
+                .expect("large row exists"),
+        );
+        drop(runtime.background_tasks.take());
+        runtime.refresh_memory_accounting();
+        let accounting = runtime.memory_accounting();
+        let available = accounting.budget().resolved_bytes - accounting.total_used_bytes();
+        let headroom = (row_bytes
+            .max(64 * 1024)
+            .saturating_mul(2)
+            .saturating_add(4096)) as u64;
+        assert!(
+            available > headroom,
+            "fixture must admit controlled pressure"
+        );
+        let held = runtime
+            .try_reserve_query_buffer((available - headroom) as usize)
+            .expect("leave exact HASH probe headroom");
+        assert_eq!(lookup(&runtime, "large-row").len(), 1);
+        drop(held);
     }
 
     #[test]

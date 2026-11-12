@@ -63,7 +63,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 
     /// Statement-local config resolver. SQL expressions materialize the
-    /// `red_config` snapshot lazily on the first `$config.*`/`CONFIG()`
+    /// `red.config` snapshot lazily on the first `$config.*`/`CONFIG()`
     /// access, keeping ordinary statements on the zero-scan path.
     static CURRENT_CONFIG_RESOLVER: std::cell::RefCell<Option<ConfigResolver>> =
         const { std::cell::RefCell::new(None) };
@@ -942,14 +942,12 @@ fn is_reserved_config_key(key: &str) -> bool {
         || key == super::function_catalog::REGISTRY_KEY
 }
 
-/// The system config-store collections (`red_config` / `red.config`) reached
-/// by the inline resolver. A `KV(<collection>, key)` read of one of these is
-/// gated exactly like `$config`; any other collection is unaffected (#1743).
+/// The canonical system config store reached by the inline resolver. Exact
+/// legacy aliases are normalized at this boundary, while other collections
+/// remain unaffected (#1743).
 fn is_config_collection(collection: &str) -> bool {
-    matches!(
-        collection.to_ascii_lowercase().as_str(),
-        "red_config" | "red.config"
-    )
+    let normalized = collection.to_ascii_lowercase();
+    reddb_engine::storage::system_collection_names::canonical_or_self(&normalized) == "red.config"
 }
 
 fn config_resource_target(key: &str) -> String {

@@ -35,7 +35,8 @@ impl RedDBRuntime {
     /// the store directly and never calls this method, so legitimate
     /// replica catch-up still works.
     pub fn check_write(&self, kind: crate::runtime::write_gate::WriteKind) -> RedDBResult<()> {
-        self.inner.write_gate.check(kind)
+        self.inner.write_gate.check(kind)?;
+        self.validated_request_commit_policy(None).map(|_| ())
     }
 
     /// Read-only handle to the gate, useful for transports that want
@@ -212,7 +213,7 @@ impl RedDBRuntime {
 
     /// Slice 10 of issue #527 — render-time scan of pending entries
     /// per (queue, group) for the `queue_pending_gauge` exposition.
-    /// Walks `red_queue_meta` live so the gauge cannot drift from
+    /// Walks `red.queue.meta` live so the gauge cannot drift from
     /// the source of truth.
     pub fn queue_pending_counts(&self) -> Vec<((String, String), u64)> {
         let store = self.inner.db.store();
@@ -348,7 +349,7 @@ impl RedDBRuntime {
                 error = %lease_err,
                 "graceful_shutdown: remote upload skipped — lease not held"
             );
-        } else if let Err(err) = self.inner.db.upload_to_remote_backend() {
+        } else if let Err(err) = self.publish_remote_snapshot() {
             tracing::error!(
                 target: "reddb::lifecycle",
                 error = %err,
@@ -380,6 +381,9 @@ impl RedDBRuntime {
             }
         }
 
+        if let Some(lease) = self.lease_lifecycle() {
+            let _ = lease.release();
+        }
         let completed_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)

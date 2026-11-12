@@ -3,6 +3,7 @@ fn main() {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
+        .bytes(".reddb.v1.WalStreamRecord.data")
         .compile_protos(&["proto/reddb.proto"], &["proto"])
         .expect("failed to compile reddb gRPC protobufs");
 }

@@ -285,7 +285,7 @@ fn external_ask_on_two_replicas_forwards_audit_and_cost_to_primary() {
         assert_eq!(reply.answer, "mock response");
     });
 
-    wait_for_primary_query(&primary_addr, "SELECT * FROM red_ask_audit", &question_one)
+    wait_for_primary_query(&primary_addr, "SELECT * FROM red.ask.audit", &question_one)
         .expect("primary audit row should be visible before the first ASK is considered complete");
 
     runtime().block_on(async {

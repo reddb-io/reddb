@@ -221,6 +221,36 @@ the conditional-write contract.
 
 ## Storage profile
 
+### Lease-fenced snapshot publication
+
+With `RED_LEASE_REQUIRED=true`, remote snapshots use immutable objects under
+`<database-key>.serverless/snapshots/` and a canonical
+`<database-key>.serverless/HEAD.json`. Boot observes this head, hydrates its exact
+snapshot, acquires the writer lease, and conditionally claims the observed head
+before admitting writes. If the head changed during hydration, boot fails and
+must restart from the newer snapshot. An old writer can finish uploading a
+payload after takeover, but cannot replace a head claimed by its successor.
+
+Flush, checkpoint, and graceful shutdown publish through this protocol. Native
+operational boots with an existing head use a private temporary cache directory,
+isolating recovery from an earlier boot's WAL and metadata. Size the system's
+temporary storage for the database and a staged snapshot. Initial migration uses
+the configured local/legacy restore path. Embedded caches retain their configured
+path and take the local writer lock before hydration.
+
+Drain every writer before upgrading a shared database. Older binaries ignore
+this head; after new writes, rolling back to the legacy remote blob would restore
+stale data. Keep the new head and its referenced payload together when recovering
+or copying the database. Unreferenced payload cleanup is not yet automatic.
+
+This protects published snapshots. Write acknowledgements still do not guarantee
+remote WAL durability; a process lost before publication can lose its local tail.
+Only one lease holder admits writes per database. Snapshot uploads currently
+serialize local publication and lease renewal; an upload exceeding the remaining
+lease lifetime can fence the writer.
+
+### Segment packaging
+
 The serverless artifact remains a single canonical `.rdb`. The target serverless
 profile additionally lets a runtime export and hydrate a derived *segment pack* —
 a manifest plus immutable parts and delta WAL segments — to support object-storage

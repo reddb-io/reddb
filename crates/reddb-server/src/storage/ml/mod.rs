@@ -14,7 +14,7 @@
 //! * [`MlJobQueue`] accepts training / backfill / inference-audit jobs
 //!   and runs them on a worker pool. Jobs persist their state so a
 //!   crash can resume from the last checkpoint.
-//! * Metadata lives in `red_config` under the `red.ml.*` namespace so
+//! * Metadata lives in `red.config` under the `red.ml.*` namespace so
 //!   it survives restarts, backups, and replica sync without adding
 //!   new system collections.
 //!

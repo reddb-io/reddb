@@ -14,7 +14,7 @@
 //!   — counter, increment per NACK tagged with the lifecycle's
 //!   retirement choice.
 //! - `queue_pending_gauge{queue, group}` — gauge, scraped live
-//!   from `red_queue_meta` at render time so it can't drift from
+//!   from `red.queue.meta` at render time so it can't drift from
 //!   the source of truth. Not stored in this module.
 //!
 //! Cardinality is bounded by the catalog: queue + group + mode are

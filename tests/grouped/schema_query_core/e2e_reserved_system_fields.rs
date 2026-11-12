@@ -163,6 +163,8 @@ fn startup_rejects_persisted_table_contract_reserved_columns() {
         .declared_columns
         .push(reddb::physical::DeclaredColumnContract {
             name: "collection".to_string(),
+            description: None,
+            description_generated: false,
             data_type: "TEXT".to_string(),
             sql_type: Some(reddb_types::SqlTypeName::simple("TEXT")),
             not_null: false,

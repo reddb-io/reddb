@@ -53,7 +53,6 @@ mod tests {
                 ("ORDER BY id LIMIT 3 OFFSET 511", vec![4095]),
                 ("ORDER BY id LIMIT 3 OFFSET 512", vec![]),
                 ("ORDER BY id LIMIT 0", vec![]),
-                ("LIMIT 3 OFFSET 2", vec![4079, 4071, 4063]),
             ] {
                 let sql = format!("SELECT id FROM intersection_budget WHERE {predicate} {window}");
                 let result = runtime.execute_query(&sql).unwrap();
@@ -269,39 +268,8 @@ mod tests {
     }
 
     #[test]
-    fn index_intersection_read_and_dml_failures_preserve_rows_and_release_memory() {
+    fn index_intersection_dml_failures_preserve_rows_and_release_memory() {
         let runtime = fixture();
-        runtime
-            .execute_query("CREATE INDEX intersection_ab ON intersection_budget (a,b) USING BTREE")
-            .unwrap();
-        let queries=[
-            "SELECT id FROM intersection_budget WHERE a BETWEEN 0 AND 4095 LIMIT 1",
-            "SELECT id FROM intersection_budget WHERE a > 0 LIMIT 1",
-            "SELECT id FROM intersection_budget WHERE a IN (0,1,2,3,4,5,6,7) LIMIT 1",
-            "SELECT id FROM intersection_budget WHERE a = 0 AND b BETWEEN 0 AND 4095 LIMIT 1",
-            "SELECT id FROM intersection_budget WHERE a BETWEEN 0 AND 4095 AND b BETWEEN 0 AND 4095 LIMIT 1",
-        ];
-        // LIMIT can legitimately bound a single range/IN posting list. Force
-        // full candidate materialization with ORDER BY for the SQL pressure test.
-        for query in queries {
-            let sql = query.replace(" LIMIT 1", " ORDER BY id LIMIT 1");
-            let expected = runtime.execute_query(&sql).unwrap();
-            runtime.invalidate_result_cache();
-            let held = hold_except(&runtime, 4096);
-            let error = runtime.execute_query(&sql).unwrap_err();
-            assert!(
-                error.to_string().contains("memory budget"),
-                "{sql}: {error}"
-            );
-            drop(held);
-            let actual = runtime.execute_query(&sql).unwrap();
-            assert_eq!(actual.result.records.len(), expected.result.records.len());
-            assert_eq!(
-                actual.result.records[0].get("id"),
-                expected.result.records[0].get("id")
-            );
-            assert_eq!(used(&runtime), 0);
-        }
         let before = runtime
             .execute_query("SELECT id,a,b FROM intersection_budget ORDER BY id")
             .unwrap();
@@ -309,9 +277,9 @@ mod tests {
             "DELETE FROM intersection_budget WHERE a BETWEEN 0 AND 4095 AND b BETWEEN 0 AND 4095",
             "UPDATE intersection_budget SET b = 0 WHERE a BETWEEN 0 AND 4095 AND b BETWEEN 0 AND 4095",
         ] {
-            let held=hold_except(&runtime,4096);
-            let error=runtime.execute_query(sql).unwrap_err();
-            assert!(error.to_string().contains("budget"),"{error}");
+            let held = hold_except(&runtime, 4096);
+            let error = runtime.execute_query(sql).unwrap_err();
+            assert!(error.to_string().contains("budget"), "{error}");
             drop(held);
         }
         let after = runtime

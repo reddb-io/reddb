@@ -217,6 +217,8 @@ mod tests {
     fn descriptor_contract() -> CollectionContract {
         CollectionContract {
             name: "events".to_string(),
+            description: None,
+            description_generated: false,
             declared_model: CollectionModel::Table,
             schema_mode: SchemaMode::SemiStructured,
             origin: ContractOrigin::Explicit,

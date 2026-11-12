@@ -172,7 +172,7 @@ fn semantic_cache_roundtrip_via_sql() {
 fn embed_returns_null_without_provider_config() {
     let _env = env_lock().lock().expect("env lock");
 
-    // EMBED needs `red_config` entries for a provider. With none set
+    // EMBED needs `red.config` entries for a provider. With none set
     // the scalar degrades to Null rather than panicking or crossing
     // the network. Negative-path guard — proves the wiring reaches
     // the runtime and fails closed.

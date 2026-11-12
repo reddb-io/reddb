@@ -1,7 +1,9 @@
 # Blob Cache backup and restore — operator runbook
 
 Operator playbook for managing **L2 Blob Cache** state across backup,
-restore, and emergency invalidation. Pairs with:
+restore, and emergency invalidation. The normal server uses the single-file
+backend; the standalone pager procedures later in this document exist only for
+direct engine callers using the compatibility backend. Pairs with:
 
 - [ADR 0006 — tiered blob cache](../../.red/adr/0006-tiered-blob-cache.md) — L1/L2
   layout, membership synopsis, and recovery contract.
@@ -15,45 +17,36 @@ restore, and emergency invalidation. Pairs with:
 - [`docs/guides/cache-comparison.md`](../guides/cache-comparison.md) — when
   to reach for the Blob Cache vs. result cache vs. external Redis.
 
-The `include_blob_cache=true` backup flag and the two
-`POST /admin/blob_cache/*` endpoints are now live. The remaining
-ergonomic seams (`red admin blob-cache` CLI subcommand,
-`REDDB_CACHE_BLOB_CLEAR_ON_START` env var) are still pending; each gap
-is flagged inline so the runbook tells you what to do today.
+The two `POST /admin/blob_cache/*` endpoints are live. The
+`include_blob_cache=true` flag applies only to the legacy standalone L2 pager;
+the server's internal L2 needs no separate archive step.
 
 ---
 
-## 1. Cache in backup — default and opt-in
+## 1. Server single-file backup and restore
 
-**By default, the Blob Cache is not included in a backup.** When you run
+The server stores L2 cache rows and their quota counter in the hidden
+`red.cache.blob_l2` collection inside the primary `.rdb`. When you run
 
 ```bash
 curl -X POST http://<host>:<port>/admin/backup \
   -H "Authorization: Bearer $RED_ADMIN_TOKEN"
 ```
 
-the snapshot covers the WAL chain, the unified collection store, and the
-manifest catalog (per [`docs/spec/manifest-format.md`](../spec/manifest-format.md)).
-**It does not include L1 entries, the L2 metadata B+ tree, or the L2 blob
-chains.**
+the snapshot covers that internal collection together with the WAL chain,
+unified collection store and manifest catalog. L1 is process memory and is not
+backed up. On restore, L1 starts cold and eligible values rehydrate from the L2
+rows already present in the restored `.rdb`.
 
-This default is intentional. Per ADR 0006, the cache is a *derived*
-acceleration structure — its contents can always be rebuilt from the
-authoritative L1 (the unified store) plus cold reads. Skipping it from
-the standard catalog keeps backup cost bounded and stable as cache size
-grows independently of the working set.
+No cache sidecar, cache directory or `include_blob_cache` setting is required
+for the normal server. Cache entries remain derived data: applications must be
+able to recompute them, and operators may flush them after restore when a cold
+start is preferred.
 
-**Consequences for restore (default posture):** the cache starts empty,
-the membership synopsis is empty, and the L2 metadata B+ tree opens
-against whatever `cache.blob.l2_path` points at on the restored host (in
-a classic restore, nothing). Latency on the first wave of post-restore
-reads will reflect cold-path performance: every `get` misses both L1 and
-L2, falls through to the primary store, and warms the cache as it goes.
+### 1.1 Legacy standalone backend: `include_blob_cache`
 
-### 1.1 Opt in: `include_blob_cache`
-
-To preserve the warm L2 across a backup-restore cycle, flip the
-config-tree knob:
+Direct engine callers can explicitly configure the older standalone pager via
+`cache.blob.l2_path`. Only for that backend, preserve the warm L2 by setting:
 
 ```bash
 curl -X POST http://<host>:<port>/config \
@@ -76,17 +69,17 @@ but never abort the snapshot+WAL backup, because the cache is derived
 state. Watch `reddb_backup_failures_total` if you need an alert on
 silent regressions.
 
-The §2 manual procedure is still useful when the operator wants a
+The §2 manual procedure is useful only for a standalone L2 when the operator wants a
 point-in-time L2 capture decoupled from the standard backup cadence
 (host migrations, big-bang region cutovers).
 
 ---
 
-## 2. Manual L2 dump procedure
+## 2. Legacy standalone L2 dump procedure
 
-For operators who need to preserve cache state across a restart or
-host-migration (warm cache after maintenance, big-bang region cutovers, etc.),
-the L2 directory can be copied out of band.
+The rest of this document applies only when `cache.blob.l2_path` was explicitly
+configured by a direct engine caller. Do not use these sidecar procedures for
+the normal server single-file backend.
 
 ### 2.1 Locate the L2 directory
 

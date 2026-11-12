@@ -2,6 +2,7 @@ use reddb_file::{
     decode_database_header, paged_superblock_slot_generation, FILE_CAPABILITY_TEMPERATURE,
     PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE,
 };
+use reddb_server::storage::compact::compact_paged;
 use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 use reddb_types::{Temperature, TemperatureUnit, Value};
 
@@ -70,10 +71,8 @@ fn temperature_schema_fences_format_before_values_and_survives_restart() {
     assert_temperature_capability_in_both_superblocks(&path);
 
     let runtime = RedDBRuntime::with_options(native_options(&path)).expect("reopen database");
-    let result = execute(
-        &runtime,
-        "SELECT value FROM readings ORDER BY id",
-    );
+    let cache_metrics = runtime.result_cache_metrics();
+    let result = execute(&runtime, "SELECT value FROM readings ORDER BY id");
     let expected = [
         Temperature::new(20, 0, TemperatureUnit::Celsius).expect("celsius"),
         Temperature::new(68, 0, TemperatureUnit::Fahrenheit).expect("fahrenheit"),
@@ -83,6 +82,12 @@ fn temperature_schema_fences_format_before_values_and_survives_restart() {
     for (record, expected) in result.result.records.iter().zip(expected) {
         assert_eq!(record.get("value"), Some(&Value::Temperature(expected)));
     }
+    execute(&runtime, "SELECT value FROM readings ORDER BY id");
+    assert_eq!(
+        runtime.result_cache_metrics().0 - cache_metrics.0,
+        1,
+        "result-cache format must fence without downgrading the capability file"
+    );
 
     let equivalent = execute(
         &runtime,
@@ -95,4 +100,21 @@ fn temperature_schema_fences_format_before_values_and_survives_restart() {
         .records
         .iter()
         .all(|record| record.get("equivalent") == Some(&Value::Boolean(true))));
+
+    runtime
+        .checkpoint()
+        .expect("checkpoint result-cache state before compaction");
+    drop(runtime);
+    let compacted = directory.path().join("compacted");
+    compact_paged(&path, &compacted).expect("compact temperature database");
+    let compacted_path = compacted.join("temperature.rdb");
+    assert_temperature_capability_in_both_superblocks(&compacted_path);
+
+    let compacted_runtime = RedDBRuntime::with_options(native_options(&compacted_path))
+        .expect("open compacted database");
+    let compacted_rows = execute(&compacted_runtime, "SELECT value FROM readings ORDER BY id");
+    assert_eq!(compacted_rows.result.records.len(), expected.len());
+    for (record, expected) in compacted_rows.result.records.iter().zip(expected) {
+        assert_eq!(record.get("value"), Some(&Value::Temperature(expected)));
+    }
 }

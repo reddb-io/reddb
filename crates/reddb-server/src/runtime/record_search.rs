@@ -496,7 +496,7 @@ pub(super) fn resolve_runtime_vector_source(
 fn embed_runtime_vector_text(runtime: &RedDBRuntime, text: &str) -> RedDBResult<Vec<f32>> {
     let db = &runtime.inner.db;
     let kv_getter = |key: &str| -> RedDBResult<Option<String>> {
-        match db.get_kv("red_config", key) {
+        match db.get_kv("red.config", key) {
             Some((Value::Text(value), _)) => Ok(Some(value.to_string())),
             Some(_) => Ok(None),
             None => Ok(None),

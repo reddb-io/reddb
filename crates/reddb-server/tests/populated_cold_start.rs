@@ -394,13 +394,3 @@ fn run_fixture(rows: u64) {
 fn populated_startup_smoke() {
     run_fixture(32);
 }
-
-#[test]
-#[ignore = "manual 50 GiB logical-data measurement"]
-fn populated_startup_50_gib() {
-    let rows = std::env::var("REDDB_POPULATED_ROWS")
-        .ok()
-        .map(|s| s.parse().unwrap())
-        .unwrap_or(50 * 1024);
-    run_fixture(rows);
-}

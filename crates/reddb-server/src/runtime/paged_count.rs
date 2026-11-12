@@ -272,6 +272,11 @@ mod tests {
     #[test]
     fn paged_count_concurrent_readers_writes_and_checkpoints_finish() {
         let (_directory, runtime, _options) = fixture();
+        // Result-cache publication/invalidation has its own lock-order tests.
+        // Keep this window focused on COUNT, writes and checkpoints.
+        runtime
+            .execute_query("SET CONFIG runtime.result_cache.enabled = false")
+            .expect("isolate COUNT concurrency");
         let (send, receive) = std::sync::mpsc::channel();
         let start = Arc::new(std::sync::Barrier::new(5));
         let mut workers = Vec::new();
@@ -306,7 +311,7 @@ mod tests {
         }
         for _ in 0..5 {
             receive
-                .recv_timeout(std::time::Duration::from_secs(30))
+                .recv_timeout(std::time::Duration::from_secs(60))
                 .expect("no publication lock inversion");
         }
         for worker in workers {

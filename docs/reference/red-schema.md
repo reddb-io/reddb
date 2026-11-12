@@ -99,6 +99,8 @@ Current columns:
 | `metric`          | Vector distance metric for vector collections; `NULL` for all other models. |
 | `session_key`     | Session-key column for time-series collections created `WITH SESSION_KEY`; `NULL` otherwise. |
 | `session_gap_ms`  | Session gap in milliseconds for time-series collections created `WITH SESSION_GAP`; `NULL` otherwise. |
+| `description`     | Manual or generated collection description; `NULL` when absent. |
+| `description_generated` | `true` when the description came from automatic AI enrichment. |
 
 `on_disk_bytes` is a conservative storage estimate, not a full database-file
 ownership report. It walks the live collection primary B-tree when the local
@@ -108,7 +110,7 @@ freelist pages, WAL bytes, double-write buffers, sidecar files, and collection
 artifacts that are not reachable from the primary B-tree root.
 
 Internal collection detection currently marks queue DLQs, `audit_log`,
-`red_*` stores, `__tenant_iso`, `__tenant_*`, and `__policy_*` collections as
+`red.*` stores, `__tenant_iso`, `__tenant_*`, and `__policy_*` collections as
 internal. Direct `SELECT` queries over `red.collections` include those rows unless
 the query filters them out.
 
@@ -137,6 +139,8 @@ Current columns:
 | `default_value`  | Declared default expression, or `NULL` when no default is known. |
 | `is_primary_key` | Whether the column is declared as a primary key. |
 | `is_unique`      | Whether the column has a declared unique constraint or is a primary key. |
+| `description`    | Manual or generated description for a declared column; `NULL` when absent or inferred. |
+| `description_generated` | `true` when the description came from automatic AI enrichment. |
 
 For explicit `CREATE TABLE` collections, rows come from the stored collection
 contract. Document collections without an explicit schema expose inferred

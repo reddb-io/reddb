@@ -47,10 +47,10 @@ Three integration tests:
 | `topology_e2e_deregister_reflected_within_refresh_interval` | After dropping replica_b from the advertisement, the next 30s refresh tick (driven against `RefreshScheduler`'s fake clock) shrinks the client's replica pool from 2 → 1. Subsequent reads stay off the dropped replica. |
 | `topology_e2e_force_primary_preserves_pre_prd_baseline` | `GrpcClient::connect_cluster(_, _, force_primary=true)` reproduces the legacy URI-only routing. 300 reads land on the primary; replica counters stay at 0. This is the baseline the post-PRD numbers are compared against. |
 
-Plus an `#[ignore]`-gated latency capture
-(`topology_perf_capture`) drives 1 000 reads under each routing mode
-and prints p50 / p99. Runs via
-`cargo test -p reddb-io-client --features grpc --test topology_e2e -- --ignored --nocapture topology_perf_capture`.
+The original investigation also used an ignored latency capture that drove
+1,000 reads under each routing mode and printed p50 / p99. That timing harness
+was retired from the test suite in November 2026; the measurements below are
+historical evidence, not a reproducible performance gate.
 
 ### Headline counters
 
@@ -199,8 +199,8 @@ When any of those triggers, the cluster-mode run should:
   `refresh_topology()` to wire the consumer + routing-update path
   through one entry point. Existing pool semantics
   (`Endpoint::pick`) unchanged.
-- `crates/reddb-client/tests/topology_e2e.rs` — new integration
-  test, plus the `#[ignore]`-gated `topology_perf_capture` harness.
+- `crates/reddb-client/tests/topology_e2e.rs` — integration tests for
+  discovery, deregistration, routing, and force-primary behavior.
 - `docs/perf/topology-discovery-2026-05-06.md` — this file.
 
 ## Reproducing locally
@@ -210,10 +210,6 @@ cd /home/cyber/Work/reddb.io/reddb/.claude/worktrees/agent-a84b4606331ae0701
 
 # Headline tests (300 reads + write-pinning + deregister + baseline).
 cargo test -p reddb-io-client --features grpc --test topology_e2e
-
-# Latency capture (1 000 reads under each routing mode).
-cargo test -p reddb-io-client --features grpc --test topology_e2e \
-    -- --ignored --nocapture topology_perf_capture
 
 # Workspace check.
 cargo check --workspace

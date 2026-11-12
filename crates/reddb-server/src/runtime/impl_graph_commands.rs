@@ -519,7 +519,7 @@ impl RedDBRuntime {
                     // §5); an explicit `USING` overrides it for this query.
                     use crate::application::ports::RuntimeEntityPort;
                     let kv_getter = |key: &str| -> RedDBResult<Option<String>> {
-                        match self.get_kv("red_config", key)? {
+                        match self.get_kv("red.config", key)? {
                             Some((Value::Text(s), _)) => Ok(Some(s.to_string())),
                             _ => Ok(None),
                         }

@@ -1,6 +1,6 @@
 use super::*;
 
-const RED_CONFIG_COLLECTION: &str = "red_config";
+const RED_CONFIG_COLLECTION: &str = "red.config";
 const DEFAULT_MAX_INPUTS: usize = 256;
 const DEFAULT_MAX_PROMPTS: usize = 256;
 
@@ -34,7 +34,7 @@ struct AiPromptSaveOptions {
 }
 
 impl RedDBServer {
-    /// GET /config — export all red_config KV pairs as a nested JSON tree.
+    /// GET /config — export all red.config KV pairs as a nested JSON tree.
     pub(crate) fn handle_config_export(&self) -> HttpResponse {
         let store = self.runtime.db().store();
         let Some(manager) = store.get_collection(RED_CONFIG_COLLECTION) else {
@@ -245,7 +245,7 @@ impl RedDBServer {
         }
     }
 
-    /// POST /config — import a JSON tree as flat dot-notation KV pairs into red_config.
+    /// POST /config — import a JSON tree as flat dot-notation KV pairs into red.config.
     pub(crate) fn handle_config_import(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,

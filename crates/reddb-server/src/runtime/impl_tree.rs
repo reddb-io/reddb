@@ -1285,7 +1285,7 @@ impl RedDBRuntime {
                 collection,
                 id.raw(),
                 "entity",
-            );
+            )?;
         }
         Ok(deleted)
     }

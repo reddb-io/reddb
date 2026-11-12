@@ -2301,6 +2301,8 @@ mod tests {
             .as_millis();
         db.save_collection_contract(crate::physical::CollectionContract {
             name: name.to_string(),
+            description: None,
+            description_generated: false,
             declared_model: crate::catalog::CollectionModel::Graph,
             schema_mode: crate::catalog::SchemaMode::Dynamic,
             origin: crate::physical::ContractOrigin::Explicit,
@@ -2732,7 +2734,7 @@ mod tests {
         let _env = EnvGuard::set(&[
             ("RED_PRIMARY_COMMIT_POLICY", "local"),
             ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
-            ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+            ("RED_COMMIT_FAIL_ON_TIMEOUT", "false"),
         ]);
         let data_path = temp_data_path("request-ack-n");
         let runtime = RedDBRuntime::with_options(
@@ -2757,7 +2759,7 @@ mod tests {
         assert_eq!(reply.kind, MessageKind::Error);
         let body = String::from_utf8_lossy(&reply.payload);
         assert!(
-            body.contains("commit policy timed out") && body.contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+            body.contains("commit policy timed out") && body.contains("local commit is durable"),
             "request ack_n should wait for replica ack, got {body}"
         );
         let _ = std::fs::remove_file(data_path);

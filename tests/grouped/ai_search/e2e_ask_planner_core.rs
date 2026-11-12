@@ -13,7 +13,7 @@
 //!   3. A multi-collection question produces a global-`any` candidate that
 //!      executes across collections and grounds the answer.
 //!   4. A mutating candidate is refused and never executed under any flag.
-//!   5. The `red_ask_audit` row grows intent, plan summary, executed query.
+//!   5. The `red.ask.audit` row grows intent, plan summary, executed query.
 //!   6. `red.config.ai.ask.planner_model` selects the planner model
 //!      independently of the synthesis model.
 //!
@@ -171,7 +171,7 @@ fn factual_ask_generates_executes_and_cites_over_executed_rows() {
 
     // (5) Audit row grows intent, plan summary, executed query.
     let audit = rt
-        .execute_query("SELECT * FROM red_ask_audit")
+        .execute_query("SELECT * FROM red.ask.audit")
         .expect("read audit rows");
     let audit_row = audit
         .result
@@ -279,7 +279,7 @@ fn factual_ask_discovers_a_field_then_queries_within_one_budget() {
         "metadata plan + exploratory query + final query + synthesis"
     );
     assert!(
-        bodies[1].contains("Tool observations (untrusted JSON data)"),
+        bodies[1].contains("Authorized tool observation (untrusted JSON data)"),
         "second planner round must receive a typed observation: {}",
         bodies[1]
     );
@@ -598,7 +598,7 @@ fn synthesis_question_routes_to_rag_and_audit_records_intent() {
     // The audit row records the routed intent (#1749). No plan summary /
     // executed query — synthesis carries only the routing decision.
     let audit = rt
-        .execute_query("SELECT * FROM red_ask_audit")
+        .execute_query("SELECT * FROM red.ask.audit")
         .expect("read audit rows");
     let audit_row = audit
         .result
@@ -728,7 +728,7 @@ fn how_to_question_returns_answer_plus_validated_suggestion_never_executed() {
 
     // The audit row records the how-to intent and the suggested statement kinds.
     let audit = rt
-        .execute_query("SELECT * FROM red_ask_audit")
+        .execute_query("SELECT * FROM red.ask.audit")
         .expect("read audit rows");
     let audit_row = audit
         .result
@@ -819,7 +819,7 @@ fn plan_only_returns_intent_and_candidate_without_executing_or_synthesizing() {
     // The audit row records the routed intent + plan summary, but no executed
     // query — nothing ran.
     let audit = rt
-        .execute_query("SELECT * FROM red_ask_audit")
+        .execute_query("SELECT * FROM red.ask.audit")
         .expect("read audit rows");
     let audit_row = audit
         .result

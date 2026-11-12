@@ -43,6 +43,10 @@
 //! - 10 `bool cache_hit`
 //! - 11 `string mode`               ("strict" | "lenient" — effective)
 //! - 12 `uint32 retry_count`
+//! - 13 `string reasoning_json`
+//! - 14 `string exploratory_queries_json`
+//! - 15 `optional string final_query`
+//! - 16 `string final_query_params_json`
 //!
 //! `Citation`:
 //! - 1 `uint32 marker`
@@ -108,6 +112,10 @@ pub struct GrpcAskReply {
     pub cache_hit: bool,
     pub mode: String,
     pub retry_count: u32,
+    pub reasoning_json: String,
+    pub exploratory_queries_json: String,
+    pub final_query: Option<String>,
+    pub final_query_params_json: String,
 }
 
 /// Proto field tags for `AskReply` — pinned constants. Editing any of
@@ -127,6 +135,10 @@ pub mod proto_tags {
         pub const CACHE_HIT: u32 = 10;
         pub const MODE: u32 = 11;
         pub const RETRY_COUNT: u32 = 12;
+        pub const REASONING_JSON: u32 = 13;
+        pub const EXPLORATORY_QUERIES_JSON: u32 = 14;
+        pub const FINAL_QUERY: u32 = 15;
+        pub const FINAL_QUERY_PARAMS_JSON: u32 = 16;
     }
     pub mod citation {
         pub const MARKER: u32 = 1;
@@ -174,6 +186,10 @@ pub fn build(result: &AskResult) -> GrpcAskReply {
         cache_hit: result.cache_hit,
         mode: mode_str(result.effective_mode).to_string(),
         retry_count: result.retry_count,
+        reasoning_json: result.reasoning.to_string_compact(),
+        exploratory_queries_json: result.exploratory_queries.to_string_compact(),
+        final_query: result.final_query.clone(),
+        final_query_params_json: result.final_query_params.to_string_compact(),
     }
 }
 
@@ -299,6 +315,10 @@ mod tests {
         assert_eq!(reply.cache_hit, r.cache_hit);
         assert_eq!(reply.retry_count, r.retry_count);
         assert_eq!(reply.mode, "strict");
+        assert_eq!(reply.reasoning_json, "null");
+        assert_eq!(reply.exploratory_queries_json, "[]");
+        assert_eq!(reply.final_query, None);
+        assert_eq!(reply.final_query_params_json, "[]");
         assert!(reply.validation.ok);
         assert_eq!(reply.citations.len(), 1);
         assert_eq!(reply.citations[0].marker, 1);
@@ -499,6 +519,10 @@ mod tests {
             cache_hit: _,
             mode: _,
             retry_count: _,
+            reasoning_json: _,
+            exploratory_queries_json: _,
+            final_query: _,
+            final_query_params_json: _,
         } = build(&r);
     }
 
@@ -516,6 +540,10 @@ mod tests {
         assert_eq!(ask_reply::CACHE_HIT, 10);
         assert_eq!(ask_reply::MODE, 11);
         assert_eq!(ask_reply::RETRY_COUNT, 12);
+        assert_eq!(ask_reply::REASONING_JSON, 13);
+        assert_eq!(ask_reply::EXPLORATORY_QUERIES_JSON, 14);
+        assert_eq!(ask_reply::FINAL_QUERY, 15);
+        assert_eq!(ask_reply::FINAL_QUERY_PARAMS_JSON, 16);
     }
 
     #[test]
@@ -533,6 +561,10 @@ mod tests {
             ask_reply::CACHE_HIT,
             ask_reply::MODE,
             ask_reply::RETRY_COUNT,
+            ask_reply::REASONING_JSON,
+            ask_reply::EXPLORATORY_QUERIES_JSON,
+            ask_reply::FINAL_QUERY,
+            ask_reply::FINAL_QUERY_PARAMS_JSON,
         ];
         let mut sorted = tags.to_vec();
         sorted.sort();
@@ -571,10 +603,14 @@ mod tests {
             "citations",
             "completion_tokens",
             "cost_usd",
+            "exploratory_queries",
+            "final_query",
+            "final_query_params",
             "mode",
             "model",
             "prompt_tokens",
             "provider",
+            "reasoning",
             "retry_count",
             "sources_flat",
             "validation",

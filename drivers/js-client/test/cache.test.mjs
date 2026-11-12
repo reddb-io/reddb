@@ -100,6 +100,54 @@ test('cache.get returns null on miss', async () => {
   }
 })
 
+test('cache.getEntry decodes the value and preserves TTL metadata', async () => {
+  const stub = await startMockServer({
+    'GET /health': () => ({ ok: true, version: 'mock' }),
+    'GET /cache/ns/my-ns/my-key': () => ({
+      key: 'my-key',
+      value: b64('hello'),
+      size_bytes: 5,
+      ttl_ms: 900,
+      expires_at_unix_ms: 1234,
+      version: 7,
+      stale: false,
+    }),
+  })
+  try {
+    const db = await connect(stub.baseUrl)
+    const entry = await db.cache.getEntry('my-ns', 'my-key')
+    assert.equal(Buffer.from(entry.value).toString('utf8'), 'hello')
+    assert.equal(entry.ttl_ms, 900)
+    assert.equal(entry.version, 7)
+  } finally {
+    await stub.close()
+  }
+})
+
+test('cache.getMany decodes values and preserves metadata', async () => {
+  const stub = await startMockServer({
+    'GET /health': () => ({ ok: true, version: 'mock' }),
+    'POST /cache/ns/ns1/mget': (body) => {
+      assert.deepEqual(body.keys, ['a', 'missing'])
+      return {
+        entries: [
+          { key: 'a', value: b64('one'), size_bytes: 3, ttl_ms: 99, stale: false },
+          { key: 'missing', value: null, size_bytes: null, ttl_ms: null, stale: false },
+        ],
+      }
+    },
+  })
+  try {
+    const db = await connect(stub.baseUrl)
+    const entries = await db.cache.getMany('ns1', ['a', 'missing'])
+    assert.equal(Buffer.from(entries[0].value).toString('utf8'), 'one')
+    assert.equal(entries[0].ttl_ms, 99)
+    assert.equal(entries[1].value, null)
+  } finally {
+    await stub.close()
+  }
+})
+
 test('cache.put sends PUT with base64-encoded value', async () => {
   let captured = null
   const stub = await startMockServer({
@@ -141,6 +189,30 @@ test('cache.put encodes Uint8Array value', async () => {
   }
 })
 
+test('cache.putMany encodes all values in one request', async () => {
+  let captured = null
+  const stub = await startMockServer({
+    'GET /health': () => ({ ok: true, version: 'mock' }),
+    'POST /cache/ns/ns1/mput': (body) => {
+      captured = body
+      return { stored: body.entries.length }
+    },
+  })
+  try {
+    const db = await connect(stub.baseUrl)
+    const stored = await db.cache.putMany('ns1', [
+      { key: 'a', value: 'one', ttl_ms: 1000 },
+      { key: 'b', value: new Uint8Array([0, 255]) },
+    ])
+    assert.equal(stored, 2)
+    assert.equal(captured.entries[0].value, b64('one'))
+    assert.equal(captured.entries[0].ttl_ms, 1000)
+    assert.deepEqual(Array.from(Buffer.from(captured.entries[1].value, 'base64')), [0, 255])
+  } finally {
+    await stub.close()
+  }
+})
+
 test('cache.exists returns status field', async () => {
   const stub = await startMockServer({
     'GET /health': () => ({ ok: true, version: 'mock' }),
@@ -164,6 +236,30 @@ test('cache.exists returns maybe when status missing', async () => {
     const db = await connect(stub.baseUrl)
     const status = await db.cache.exists('ns1', 'gone')
     assert.equal(status, 'maybe')
+  } finally {
+    await stub.close()
+  }
+})
+
+test('cache expiry methods patch TTL without rewriting values', async () => {
+  const bodies = []
+  const stub = await startMockServer({
+    'GET /health': () => ({ ok: true, version: 'mock' }),
+    'PATCH /cache/ns/ns1/k1/ttl': (body) => {
+      bodies.push(body)
+      return { updated: true }
+    },
+  })
+  try {
+    const db = await connect(stub.baseUrl)
+    assert.equal(await db.cache.expire('ns1', 'k1', 5000), true)
+    assert.equal(await db.cache.expireAt('ns1', 'k1', 123456), true)
+    assert.equal(await db.cache.persist('ns1', 'k1'), true)
+    assert.deepEqual(bodies, [
+      { ttl_ms: 5000 },
+      { expires_at_unix_ms: 123456 },
+      { persist: true },
+    ])
   } finally {
     await stub.close()
   }

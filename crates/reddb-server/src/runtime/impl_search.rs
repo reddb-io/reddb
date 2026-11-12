@@ -3,7 +3,7 @@ use crate::application::SearchContextInput;
 use crate::storage::unified::context_index::{entity_tokens_for_search, tokenize_query};
 use reddb_rql::ast::Expr;
 
-const ASK_AUDIT_COLLECTION: &str = "red_ask_audit";
+const ASK_AUDIT_COLLECTION: &str = "red.ask.audit";
 const ASK_SYNTHESIS_SYSTEM_PROMPT: &str = include_str!("ai/prompts/ask_synthesis.txt");
 
 fn mark_table_scan_as_index_seek(
@@ -1143,8 +1143,11 @@ impl RedDBRuntime {
         let _scope = if crate::runtime::impl_core::capture_current_snapshot().is_none() {
             use super::statement_frame::{StatementExecutionFrame, StatementIdentity};
             Some(
-                StatementExecutionFrame::build(self, StatementIdentity::Text("SEARCH CONTEXT"))?
-                    .install(self),
+                StatementExecutionFrame::build(
+                    self,
+                    StatementIdentity::UncachedText("SEARCH CONTEXT"),
+                )?
+                .install(self),
             )
         } else {
             None
@@ -3625,20 +3628,30 @@ impl RedDBRuntime {
             return false;
         }
 
-        let mut entries = self.inner.ask_answer_cache_entries.write();
-        let (ref mut keys, ref mut order) = *entries;
-        if keys.insert(key.to_string()) {
-            order.push_back(key.to_string());
-        }
-        while keys.len() > max_entries {
-            let Some(old_key) = order.pop_front() else {
-                break;
-            };
-            if keys.remove(&old_key) {
-                self.inner
-                    .result_blob_cache
-                    .invalidate_key(ASK_ANSWER_CACHE_NAMESPACE, &old_key);
+        let evicted = {
+            let mut entries = self.inner.ask_answer_cache_entries.write();
+            let (ref mut keys, ref mut order) = *entries;
+            if keys.insert(key.to_string()) {
+                order.push_back(key.to_string());
             }
+            let mut evicted = Vec::new();
+            while keys.len() > max_entries {
+                let Some(old_key) = order.pop_front() else {
+                    break;
+                };
+                if keys.remove(&old_key) {
+                    evicted.push(old_key);
+                }
+            }
+            evicted
+        };
+        // Durable invalidation enters the store publication fence. Never
+        // retain the Ask entry index across that I/O: database writes hold the
+        // fence before clearing this same index.
+        for old_key in evicted {
+            self.inner
+                .result_blob_cache
+                .invalidate_key(ASK_ANSWER_CACHE_NAMESPACE, &old_key);
         }
         true
     }
@@ -4405,7 +4418,7 @@ fn latest_config_value(runtime: &RedDBRuntime, key: &str) -> Option<reddb_types:
     use crate::application::ports::RuntimeEntityPort;
 
     runtime
-        .get_kv("red_config", key)
+        .get_kv("red.config", key)
         .ok()
         .flatten()
         .map(|(value, _)| value)
@@ -4561,6 +4574,8 @@ fn ask_audit_collection_contract() -> crate::physical::CollectionContract {
     let now = crate::utils::now_unix_millis() as u128;
     crate::physical::CollectionContract {
         name: ASK_AUDIT_COLLECTION.to_string(),
+        description: None,
+        description_generated: false,
         declared_model: crate::catalog::CollectionModel::Table,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
         origin: crate::physical::ContractOrigin::Implicit,
@@ -4743,7 +4758,7 @@ fn call_ask_chat(
     }
 }
 
-fn call_ask_llm(
+pub(super) fn call_ask_llm(
     provider: &crate::ai::AiProvider,
     transport: crate::runtime::ai::transport::AiTransport,
     api_key: String,

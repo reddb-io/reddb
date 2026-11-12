@@ -294,11 +294,11 @@ fn invalid_persisted_catalog_refuses_runtime_open() {
             .db()
             .store()
             .insert_auto(
-                "red_config",
+                "red.config",
                 UnifiedEntity::new(
                     EntityId::new(0),
                     EntityKind::TableRow {
-                        table: Arc::from("red_config"),
+                        table: Arc::from("red.config"),
                         row_id: 0,
                     },
                     EntityData::Row(RowData {

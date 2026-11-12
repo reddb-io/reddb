@@ -334,10 +334,17 @@ fn render_show_create_table_ddl(
         }
     }
     let columns = elements.join(", ");
-    let mut statements = vec![format!(
+    let mut create = format!(
         "CREATE TABLE {} ({columns})",
         render_sql_identifier(&contract.name)
-    )];
+    );
+    if let Some(description) = &contract.description {
+        create.push_str(&format!(
+            " WITH (DESCRIPTION = '{}')",
+            description.replace('\'', "''")
+        ));
+    }
+    let mut statements = vec![create];
 
     indices.sort_by(|left, right| left.name.cmp(&right.name));
     for index in indices {
@@ -395,6 +402,9 @@ fn render_show_create_column(column: &crate::physical::DeclaredColumnContract) -
     }
     if column.primary_key {
         parts.push("PRIMARY KEY".to_string());
+    }
+    if let Some(description) = &column.description {
+        parts.push(format!("DESCRIPTION '{}'", description.replace('\'', "''")));
     }
 
     parts.join(" ")
@@ -622,6 +632,7 @@ pub(super) fn collections_snapshot(
             })
         })
         .map(|collection| {
+            let contract = runtime.db().collection_contract(&collection.name);
             let collection_tenant = collection_tenant(store.as_ref(), &collection.name);
             let visible_tenant = collection_tenant.as_deref().or(tenant);
             let internal = internal_registry.is_internal(&collection.name);
@@ -685,6 +696,16 @@ pub(super) fn collections_snapshot(
                     vector_metric,
                     session_key,
                     session_gap_ms,
+                    contract
+                        .as_ref()
+                        .and_then(|contract| contract.description.as_deref())
+                        .map(Value::text)
+                        .unwrap_or(Value::Null),
+                    Value::Boolean(
+                        contract
+                            .as_ref()
+                            .is_some_and(|contract| contract.description_generated),
+                    ),
                 ],
             )
         })
@@ -1844,6 +1865,8 @@ pub(super) fn columns_snapshot(
                     column.default.as_deref(),
                     column.primary_key,
                     column.unique || column.primary_key,
+                    column.description.as_deref(),
+                    column.description_generated,
                 )
             }));
         } else if collection.model == CollectionModel::Document
@@ -1869,6 +1892,8 @@ fn column_record(
     default_value: Option<&str>,
     is_primary_key: bool,
     is_unique: bool,
+    description: Option<&str>,
+    description_generated: bool,
 ) -> UnifiedRecord {
     UnifiedRecord::with_schema(
         schema,
@@ -1880,6 +1905,8 @@ fn column_record(
             default_value.map(Value::text).unwrap_or(Value::Null),
             Value::Boolean(is_primary_key),
             Value::Boolean(is_unique),
+            description.map(Value::text).unwrap_or(Value::Null),
+            Value::Boolean(description_generated),
         ],
     )
 }
@@ -1973,6 +2000,8 @@ fn infer_document_columns(
                 nullable,
                 None,
                 false,
+                false,
+                None,
                 false,
             )
         })

@@ -5,7 +5,7 @@ impl RedDBRuntime {
         let data_path = self.inner.db.options().data_path.as_ref()?;
         let generation = self
             .primary_logical_head_lsn()
-            .max(self.cdc_current_lsn())
+            .max(self.replication_commit_lsn())
             .max(1);
         Some(reddb_file::ServerlessFilePlan::for_data_path(
             data_path, generation,

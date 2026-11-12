@@ -145,37 +145,6 @@ fn versioned_vector_delete_excludes_from_search() {
     );
 }
 
-/// DEFERRED — time-travel read surface for vectors. `VECTOR SEARCH` has
-/// no `AS OF` clause and `SELECT ... FROM <vector>` surfaces zero rows
-/// (vectors live in `EntityData::Vector`, not a queryable row), so a
-/// historical (tombstoned) vector version cannot be read back today.
-/// Versioned vector deletes already retain history physically (the
-/// tombstoned version stays alive with `xmax` set), so the read surface
-/// can be added later without a data-model change. Adding `AS OF` to the
-/// vector grammar + planner + a historical-version resolver is a large
-/// structural change and is intentionally out of scope for this pass;
-/// live-search correctness (deleted/superseded versions excluded) is the
-/// shipped guarantee. Un-ignore when the read surface lands.
-#[test]
-#[ignore = "time-travel AS OF read surface for vectors is deferred; history is retained physically — see module docs and this test's doc comment"]
-fn versioned_vector_as_of_resolves_prior_version() {
-    let rt = rt();
-    rt.execute_query("CREATE VECTOR vvec_asof DIM 2 METRIC cosine")
-        .expect("CREATE VECTOR");
-    VcsUseCases::new(&*rt)
-        .set_versioned("vvec_asof", true)
-        .unwrap();
-
-    let rid_v1 = insert_vector(&rt, "vvec_asof", "[1.0, 0.0]", "v1");
-    rt.execute_query(&format!("DELETE FROM vvec_asof WHERE rid = {rid_v1}"))
-        .expect("DELETE v1");
-
-    // Intended contract once the read surface lands: an AS OF read taken
-    // before the delete must still resolve "v1".
-    let hits = search_contents(&rt, "vvec_asof", "[1.0, 0.0]", 5);
-    assert_eq!(hits, vec!["v1".to_string()]);
-}
-
 /// (d) First-committer-wins on concurrent versioned vector delete: two
 /// transactions both snapshot the same live vector and DELETE it; T1
 /// commits, T2's commit must fail with a serialization conflict.

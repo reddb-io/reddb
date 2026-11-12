@@ -224,10 +224,10 @@ pub use local_backend::{local_backend_atomic_upload, local_backend_download};
 pub use logical_wal::{
     build_logical_wal_seek_index, encode_logical_wal_v2_for_compat, encode_logical_wal_v3,
     read_and_repair_logical_wal_entries, read_logical_wal_entries_from,
-    rewrite_logical_wal_entries, LogicalWalEntry, LOGICAL_WAL_CRC_LEN,
-    LOGICAL_WAL_SEEK_INDEX_INTERVAL, LOGICAL_WAL_SPOOL_MAGIC, LOGICAL_WAL_SPOOL_VERSION_CURRENT,
-    LOGICAL_WAL_SPOOL_VERSION_V1, LOGICAL_WAL_SPOOL_VERSION_V2, LOGICAL_WAL_SPOOL_VERSION_V3,
-    LOGICAL_WAL_V3_HEADER_LEN,
+    read_logical_wal_entries_from_bounded, rewrite_logical_wal_entries, LogicalWalEntry,
+    LOGICAL_WAL_CRC_LEN, LOGICAL_WAL_SEEK_INDEX_INTERVAL, LOGICAL_WAL_SPOOL_MAGIC,
+    LOGICAL_WAL_SPOOL_VERSION_CURRENT, LOGICAL_WAL_SPOOL_VERSION_V1, LOGICAL_WAL_SPOOL_VERSION_V2,
+    LOGICAL_WAL_SPOOL_VERSION_V3, LOGICAL_WAL_V3_HEADER_LEN,
 };
 pub use native_index_artifact::{
     decode_native_doc_pathvalue_frame, decode_native_fulltext_frame,
@@ -275,9 +275,9 @@ pub use native_store::{
     NATIVE_CATALOG_MAGIC, NATIVE_COLLECTION_ROOTS_MAGIC, NATIVE_MANIFEST_MAGIC,
     NATIVE_MANIFEST_SAMPLE_LIMIT, NATIVE_METADATA_STATE_MAGIC, NATIVE_RECOVERY_MAGIC,
     NATIVE_REGISTRY_MAGIC, NATIVE_VECTOR_ARTIFACT_MAGIC, STORE_MAGIC, STORE_VERSION_CURRENT,
-    STORE_VERSION_V1, STORE_VERSION_V10, STORE_VERSION_V11, STORE_VERSION_V12, STORE_VERSION_V2,
-    STORE_VERSION_V3, STORE_VERSION_V4, STORE_VERSION_V5, STORE_VERSION_V6, STORE_VERSION_V7,
-    STORE_VERSION_V8, STORE_VERSION_V9,
+    STORE_VERSION_V1, STORE_VERSION_V10, STORE_VERSION_V11, STORE_VERSION_V12, STORE_VERSION_V13,
+    STORE_VERSION_V2, STORE_VERSION_V3, STORE_VERSION_V4, STORE_VERSION_V5, STORE_VERSION_V6,
+    STORE_VERSION_V7, STORE_VERSION_V8, STORE_VERSION_V9,
 };
 pub use operational_manifest::{
     AppendOnlySegmentState, ForkHydrationState, ForkInfo, ForkOrigin, OperationalManifest,
@@ -368,15 +368,17 @@ pub use scrub::{
     scrub_embedded_store, StorageScrubFinding, StorageScrubReport, StorageScrubVerifiedCounters,
 };
 pub use serverless::{
-    decode_serverless_writer_lease_json, encode_serverless_writer_lease_json,
-    serverless_writer_lease_key, serverless_writer_lease_temp_path, ServerlessBootIndex,
-    ServerlessBootIndexEntry, ServerlessBootPlan, ServerlessCacheEntry,
-    ServerlessCacheEvictionPlan, ServerlessCachePolicy, ServerlessContentHash,
-    ServerlessExtentIndex, ServerlessExtentRef, ServerlessFilePlan, ServerlessGenerationPointer,
-    ServerlessHydratedRange, ServerlessHydrationPlan, ServerlessHydrationRequest,
-    ServerlessLocalCache, ServerlessManifest, ServerlessManifestEntry, ServerlessPackKind,
-    ServerlessSecondaryIndex, ServerlessSecondaryIndexEntry, ServerlessWriterLease,
-    ServerlessWriterLeaseTempFile, SERVERLESS_WRITER_LEASE_DEFAULT_TERM,
+    decode_serverless_snapshot_head_json, decode_serverless_writer_lease_json,
+    encode_serverless_snapshot_head_json, encode_serverless_writer_lease_json,
+    serverless_snapshot_head_key, serverless_snapshot_key, serverless_writer_lease_key,
+    serverless_writer_lease_temp_path, ServerlessBootIndex, ServerlessBootIndexEntry,
+    ServerlessBootPlan, ServerlessCacheEntry, ServerlessCacheEvictionPlan, ServerlessCachePolicy,
+    ServerlessContentHash, ServerlessExtentIndex, ServerlessExtentRef, ServerlessFilePlan,
+    ServerlessGenerationPointer, ServerlessHydratedRange, ServerlessHydrationPlan,
+    ServerlessHydrationRequest, ServerlessLocalCache, ServerlessManifest, ServerlessManifestEntry,
+    ServerlessPackKind, ServerlessSecondaryIndex, ServerlessSecondaryIndexEntry,
+    ServerlessSnapshotHead, ServerlessWriterLease, ServerlessWriterLeaseTempFile,
+    SERVERLESS_SNAPSHOT_HEAD_FORMAT_VERSION, SERVERLESS_WRITER_LEASE_DEFAULT_TERM,
 };
 pub use shm::{
     initialize_shm_file, read_shm_header_from_file, write_shm_header_to_file, ShmHeader,

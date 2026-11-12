@@ -311,6 +311,61 @@ impl RedDB {
         self.store()
             .fence_required_capabilities(required_capabilities)?;
         let _publication = self.store.vault_publication_lock.lock();
+        self.save_collection_contract_locked(contract)
+    }
+
+    pub fn save_generated_descriptions_if_version(
+        &self,
+        collection: &str,
+        expected_version: u32,
+        expected_created_at_unix_ms: u128,
+        description: Option<String>,
+        columns: &std::collections::HashMap<String, String>,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let _publication = self.store.vault_publication_lock.lock();
+        let Some(mut contract) = self.collection_contract(collection) else {
+            return Ok(false);
+        };
+        if contract.version != expected_version
+            || contract.created_at_unix_ms != expected_created_at_unix_ms
+            || self.store.get_collection(collection).is_none()
+        {
+            return Ok(false);
+        }
+        let mut changed = false;
+        if (contract.description.is_none() || contract.description_generated)
+            && description.as_ref().is_some_and(|text| !text.is_empty())
+        {
+            contract.description = description;
+            contract.description_generated = true;
+            changed = true;
+        }
+        for column in &mut contract.declared_columns {
+            if let Some(text) = columns.get(&column.name) {
+                if !text.is_empty()
+                    && (column.description.is_none() || column.description_generated)
+                {
+                    column.description = Some(text.clone());
+                    column.description_generated = true;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            contract.version = contract.version.saturating_add(1);
+            contract.updated_at_unix_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            self.save_collection_contract_locked(contract)?;
+        }
+        Ok(changed)
+    }
+
+    fn save_collection_contract_locked(
+        &self,
+        contract: crate::physical::CollectionContract,
+    ) -> Result<crate::physical::CollectionContract, Box<dyn std::error::Error>> {
         if let Ok(mut defaults) = self.collection_ttl_defaults_ms.write() {
             if let Some(ttl_ms) = contract.default_ttl_ms {
                 defaults.insert(contract.name.clone(), ttl_ms);
@@ -410,7 +465,7 @@ impl RedDB {
             // metadata catalogue from its last durable roots, removing the
             // dropped root and descriptors explicitly.  Calling the generic
             // metadata updater here used to fingerprint every row in changed
-            // internal collections (notably append-heavy red_config) while
+            // internal collections (notably append-heavy red.config) while
             // holding the publication lock, turning a tiny DROP after cold
             // boot into work proportional to the database's history.
             //

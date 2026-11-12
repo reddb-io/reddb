@@ -89,6 +89,33 @@ impl WalBuffer {
             .collect()
     }
 
+    /// Read shared records while bounding their aggregate payload bytes.
+    /// The first matching record is returned even when it exceeds the byte
+    /// budget so the transport can reject that indivisible record explicitly.
+    pub fn read_since_shared_bounded(
+        &self,
+        since_lsn: u64,
+        max_count: usize,
+        max_payload_bytes: usize,
+    ) -> Vec<(u64, Arc<[u8]>)> {
+        let records = self.records.read().unwrap_or_else(|e| e.into_inner());
+        let mut payload_bytes = 0usize;
+        records
+            .iter()
+            .filter(|(lsn, _)| *lsn > since_lsn)
+            .take(max_count)
+            .take_while(|(_, data)| {
+                let next_payload_bytes = payload_bytes.saturating_add(data.len());
+                let include = payload_bytes == 0 || next_payload_bytes <= max_payload_bytes;
+                if include {
+                    payload_bytes = next_payload_bytes;
+                }
+                include
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Current LSN.
     pub fn current_lsn(&self) -> u64 {
         *self.current_lsn.read().unwrap_or_else(|e| e.into_inner())
@@ -330,6 +357,28 @@ impl LogicalWalSpool {
             .take(max_count)
             .map(|entry| (entry.lsn, logical_wal_data_with_framing_term(&entry)))
             .collect())
+    }
+
+    pub fn read_since_bounded(
+        &self,
+        since_lsn: u64,
+        max_count: usize,
+        max_payload_bytes: usize,
+    ) -> io::Result<Vec<(u64, Vec<u8>)>> {
+        let start_offset = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.seek_floor_offset(since_lsn)
+        };
+        Ok(reddb_file::read_logical_wal_entries_from_bounded(
+            &self.path,
+            start_offset,
+            since_lsn,
+            max_count,
+            max_payload_bytes,
+        )?
+        .into_iter()
+        .map(|entry| (entry.lsn, logical_wal_data_with_framing_term(&entry)))
+        .collect())
     }
 
     /// Byte offset a resume at `since_lsn` would seek to before
@@ -606,6 +655,11 @@ impl PrimaryReplication {
         store: Arc<crate::storage::unified::UnifiedStore>,
     ) -> io::Result<Self> {
         let mut primary = Self::new_with_config(data_path, config);
+        if let Some(path) = data_path.filter(|_| primary.logical_wal_spool.is_none()) {
+            // A persistent primary must not silently downgrade to an in-memory
+            // stream when its durable spool cannot be opened.
+            primary.logical_wal_spool = Some(Arc::new(LogicalWalSpool::open(path)?));
+        }
         if let Some(bytes) = super::metadata::read(&store, super::metadata::SLOTS)? {
             let catalog =
                 reddb_file::ReplicationSlotCatalog::decode(&bytes).map_err(io::Error::other)?;
@@ -684,41 +738,40 @@ impl PrimaryReplication {
     }
 
     pub fn append_logical_record(&self, lsn: u64, encoded: Vec<u8>) {
-        self.wal_buffer.append(lsn, encoded.clone());
-        if let Some(spool) = &self.logical_wal_spool {
-            let _ = spool.append(lsn, &encoded);
+        if let Err(error) = self.try_append_logical_record(lsn, encoded) {
+            warn!(%error, lsn, "failed to publish logical replication record");
         }
+    }
+
+    /// Publish durable projections before making a record available to readers.
+    /// Replaying a committed outbox is idempotent, including a crash between the
+    /// segment append and the spool append.
+    pub(crate) fn try_append_logical_record(&self, lsn: u64, encoded: Vec<u8>) -> io::Result<()> {
+        let _guard = self
+            .primary_replica_wal_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if let Some(plan) = &self.primary_replica_file_plan {
-            let _guard = self
-                .primary_replica_wal_lock
-                .lock()
-                .unwrap_or_else(|err| err.into_inner());
-            match self.current_timeline(&plan.root) {
-                Ok(timeline) => {
-                    let plan = reddb_file::PrimaryReplicaFilePlan::new(plan.root.clone(), timeline);
-                    if let Err(err) = plan.append_wal_record(lsn, &encoded) {
-                        warn!(
-                            target: "reddb::replication::primary",
-                            lsn,
-                            error = %err,
-                            "failed to append primary-replica WAL segment"
-                        );
-                    }
-                }
-                Err(err) => {
-                    warn!(
-                        target: "reddb::replication::primary",
-                        lsn,
-                        error = %err,
-                        "failed to read primary-replica timeline history; skipping WAL append"
-                    );
-                }
+            let timeline = self
+                .current_timeline(&plan.root)
+                .map_err(io::Error::other)?;
+            let plan = reddb_file::PrimaryReplicaFilePlan::new(plan.root.clone(), timeline);
+            plan.append_wal_record(lsn, &encoded)
+                .map_err(io::Error::other)?;
+        }
+        if let Some(spool) = &self.logical_wal_spool {
+            if spool.current_lsn() < lsn {
+                spool.append(lsn, &encoded)?;
             }
         }
+        if self.wal_buffer.current_lsn() < lsn {
+            self.wal_buffer.append(lsn, encoded);
+        }
         let (lock, cvar) = &self.wal_appended;
-        let mut latest = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut latest = lock.lock().unwrap_or_else(|error| error.into_inner());
         *latest = (*latest).max(lsn);
         cvar.notify_all();
+        Ok(())
     }
 
     pub fn wait_for_logical_lsn_after(&self, since_lsn: u64, timeout: Duration) -> bool {
@@ -836,10 +889,10 @@ impl PrimaryReplication {
     /// its `replica_id` on a pull, the primary registers it so it is no
     /// longer blind to that replica's existence; subsequent pulls are
     /// idempotent no-ops. Returns `true` when a new registration was
-    /// created. A fresh slot starts at the replica's requested cursor rather
-    /// than the primary's current LSN, so an empty replica does not skip WAL
-    /// that was written before its first pull. Reconnects preserve existing
-    /// progress and do not bump the topology epoch.
+    /// created. A fresh slot starts at the replica's requested cursor, bounded
+    /// by the primary's current LSN, so an empty replica does not skip WAL and
+    /// a cursor from a different primary cannot publish future progress.
+    /// Reconnects preserve existing progress and do not bump the topology epoch.
     pub fn ensure_replica_registered(&self, id: &str, requested_since_lsn: u64) -> bool {
         let already = self
             .replicas
@@ -850,7 +903,8 @@ impl PrimaryReplication {
         if already {
             return false;
         }
-        self.register_replica_with_region_at(id.to_string(), None, requested_since_lsn);
+        let initial_lsn = requested_since_lsn.min(self.current_logical_lsn());
+        self.register_replica_with_region_at(id.to_string(), None, initial_lsn);
         true
     }
 

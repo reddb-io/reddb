@@ -211,6 +211,11 @@ pub struct RedDBOptions {
     pub remote_backend_atomic: Option<Arc<dyn crate::storage::backend::AtomicRemoteBackend>>,
     /// Remote object key used by the remote backend.
     pub remote_key: Option<String>,
+    /// Exact immutable snapshot selected by the serverless publication head
+    /// for this boot. Internal orchestration sets it before opening the
+    /// runtime; ordinary callers should leave it as `None`.
+    #[doc(hidden)]
+    pub remote_bootstrap_key: Option<String>,
     /// Replication configuration.
     pub replication: ReplicationConfig,
     /// Whether replica runtimes start the background replication loop.
@@ -288,6 +293,7 @@ impl fmt::Debug for RedDBOptions {
             .field("metadata", &self.metadata)
             .field("remote_backend", &backend_name)
             .field("remote_key", &self.remote_key)
+            .field("remote_bootstrap_key", &self.remote_bootstrap_key)
             .field("replication", &self.replication)
             .field("replica_loop_enabled", &self.replica_loop_enabled)
             .field("auth", &self.auth)
@@ -325,6 +331,7 @@ impl Clone for RedDBOptions {
             remote_backend: self.remote_backend.clone(),
             remote_backend_atomic: self.remote_backend_atomic.clone(),
             remote_key: self.remote_key.clone(),
+            remote_bootstrap_key: self.remote_bootstrap_key.clone(),
             replication: self.replication.clone(),
             replica_loop_enabled: self.replica_loop_enabled,
             auth: self.auth.clone(),
@@ -371,6 +378,7 @@ impl Default for RedDBOptions {
             remote_backend: None,
             remote_backend_atomic: None,
             remote_key: None,
+            remote_bootstrap_key: None,
             replication: ReplicationConfig::standalone(),
             replica_loop_enabled: true,
             auth: AuthConfig::default(),
@@ -861,6 +869,12 @@ pub enum RedDBError {
     FeatureNotEnabled(String),
     NotFound(String),
     ReadOnly(String),
+    /// The local commit is durable, but the requested replica durability was
+    /// not confirmed. Retrying the mutation may execute it a second time.
+    CommitUncertain {
+        lsn: u64,
+        detail: String,
+    },
     InvalidOperation(String),
     Engine(String),
     Catalog(String),
@@ -920,6 +934,8 @@ impl fmt::Display for RedDBError {
             Self::FeatureNotEnabled(msg) => write!(f, "feature disabled: {msg}"),
             Self::NotFound(msg) => write!(f, "not found: {msg}"),
             Self::ReadOnly(msg) => write!(f, "read-only violation: {msg}"),
+            Self::CommitUncertain { lsn, detail } => write!(f,
+                "commit_uncertain: commit policy timed out at lsn {lsn}: {detail}; local commit is durable; replica durability is unconfirmed"),
             Self::InvalidOperation(msg) => write!(f, "INVALID_OPERATION: {msg}"),
             Self::Engine(msg) => write!(f, "engine error: {msg}"),
             Self::Catalog(msg) => write!(f, "catalog error: {msg}"),

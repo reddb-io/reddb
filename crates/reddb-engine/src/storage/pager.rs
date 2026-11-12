@@ -550,9 +550,8 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 "file format downgrade is not supported".into(),
             ));
         }
-        let legacy_disk_residency = current.version
-            >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
-            && current.version < reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION;
+        let legacy_disk_residency =
+            reddb_file::file_format::page_format_is_disk_resident(current.version);
         let required_capabilities = current.required_capabilities
             | if version >= reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION
                 && legacy_disk_residency
@@ -563,7 +562,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             };
         let requires_disk_residency =
             if version < reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION {
-                version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
+                reddb_file::file_format::page_format_is_disk_resident(version)
             } else {
                 required_capabilities & reddb_file::FILE_CAPABILITY_DISK_RESIDENCY != 0
             };
@@ -629,9 +628,8 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 "recovery read-only format cannot enable capabilities".into(),
             ));
         }
-        let legacy_disk_residency = current.version
-            >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
-            && current.version < reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION;
+        let legacy_disk_residency =
+            reddb_file::file_format::page_format_is_disk_resident(current.version);
         let required = current.required_capabilities
             | capabilities
             | if legacy_disk_residency {

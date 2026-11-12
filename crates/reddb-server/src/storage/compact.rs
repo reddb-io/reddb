@@ -985,6 +985,9 @@ fn compact_paged_inner(
     }
     catalog::write_catalog(&target, &catalog.encode(&roots)?)?;
     target.update_physical_header(physical)?;
+    if source.header.required_capabilities != 0 {
+        target.fence_required_capabilities(source.header.required_capabilities)?;
+    }
     target.fence_file_format_version(source.header.version)?;
     target.sync()?;
     // Preserve source schema/LSN, but retain the newly allocated page boundary.

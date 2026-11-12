@@ -20,8 +20,8 @@ pub struct SecondaryIndexIdentity {
 
 /// The projector is immutable, deterministic and must not re-enter storage.
 /// It writes a canonical key into the supplied bounded scratch buffer. The
-/// store appends the physical identity, retaining all MVCC versions. Visibility
-/// and logical uniqueness remain the query/transaction layer's responsibility.
+/// store appends the physical identity. Current secondary indexes omit retired
+/// MVCC versions; historical reads use the query layer's authoritative fallback.
 pub trait SecondaryIndexProjector: Send + Sync {
     fn project(
         &self,

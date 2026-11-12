@@ -2,6 +2,53 @@ use super::*;
 use crate::replication::cdc::ChangeRecord;
 use crate::replication::logical::{ApplyMode, LogicalChangeApplier};
 
+const REPLICA_LOOP_CRASH_ENV: &str = "REDDB_REPLICA_LOOP_CRASH_AT";
+const REPLICA_LOOP_CRASH_LSN_ENV: &str = "REDDB_REPLICA_LOOP_CRASH_LSN";
+const REPLICA_LOOP_AFTER_CURSOR_BEFORE_ACK: &str = "after_cursor_before_ack";
+
+fn maybe_crash_replica_loop(point: &str, applied_lsn: u64) {
+    let target_matches = std::env::var(REPLICA_LOOP_CRASH_LSN_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_none_or(|target| target == applied_lsn);
+    if target_matches && std::env::var(REPLICA_LOOP_CRASH_ENV).ok().as_deref() == Some(point) {
+        std::process::exit(177);
+    }
+}
+
+async fn acknowledge_replica_cursor(
+    client: &mut crate::grpc::proto::red_db_client::RedDbClient<tonic::transport::Channel>,
+    request_auth: &crate::replication::request_auth::ReplicaRequestAuth,
+    runtime: &RedDBRuntime,
+    replica_id: &str,
+    applied_lsn: u64,
+) -> Result<(), tonic::Status> {
+    let apply_errors = runtime.replica_apply_error_counts();
+    let apply_errors_total = apply_errors.iter().map(|(_, count)| *count).sum::<u64>();
+    let divergence_total = apply_errors
+        .iter()
+        .find(|(kind, _)| {
+            matches!(
+                kind,
+                crate::replication::logical::ApplyErrorKind::Divergence
+            )
+        })
+        .map(|(_, count)| *count)
+        .unwrap_or(0);
+    let ack_payload = reddb_wire::replication::WalStreamAck {
+        replica_id: replica_id.to_string(),
+        applied_lsn,
+        durable_lsn: applied_lsn,
+        apply_errors_total,
+        divergence_total,
+    };
+    let ack_request = request_auth.request(crate::grpc::proto::JsonPayloadRequest {
+        payload_json: String::from_utf8(ack_payload.encode_json())
+            .unwrap_or_else(|_| "{}".to_string()),
+    });
+    client.ack_replica_lsn(ack_request).await.map(|_| ())
+}
+
 fn catchup_mode_from_wire(
     catchup: Option<&reddb_wire::replication::CatchupModeReply>,
 ) -> reddb_file::ReplicaCatchupMode {
@@ -28,6 +75,100 @@ fn rebootstrap_ready_message(
     )
 }
 
+fn should_fallback_to_legacy_wal(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::Unimplemented
+}
+
+async fn pull_wal_chunk(
+    client: &mut crate::grpc::proto::red_db_client::RedDbClient<tonic::transport::Channel>,
+    request_auth: &crate::replication::request_auth::ReplicaRequestAuth,
+    open: &reddb_wire::replication::WalStreamOpen,
+    routing_endpoints: &reddb_wire::routing::RoutingEndpoints,
+    binary_stream_supported: &mut Option<bool>,
+) -> Result<
+    (
+        reddb_wire::replication::WalStreamChunk,
+        Option<reddb_wire::routing::RoutingEndpoints>,
+    ),
+    tonic::Status,
+> {
+    if *binary_stream_supported != Some(false) {
+        let request = crate::grpc::proto::WalStreamRequest {
+            version: 1,
+            since_lsn: open.since_lsn,
+            max_count: u32::try_from(open.max_count).unwrap_or(u32::MAX),
+            replica_id: open.replica_id.clone(),
+            term: open.term,
+            await_data: open.await_data,
+            await_timeout_ms: open.await_timeout_ms,
+            routing_endpoints: routing_endpoints
+                .iter()
+                .map(|(protocol, address)| (protocol.clone(), address.clone()))
+                .collect(),
+            max_chunk_bytes: 1024 * 1024,
+        };
+        match client
+            .stream_wal_records(request_auth.request(request))
+            .await
+        {
+            Ok(response) => {
+                *binary_stream_supported = Some(true);
+                let mut stream = response.into_inner();
+                // Consume one bounded chunk per apply/relay/cursor/ACK cycle.
+                // Dropping the remaining stream applies backpressure to the
+                // capacity-one producer; the next request resumes from the
+                // newly durable LSN instead of accumulating a whole catch-up
+                // response in replica memory.
+                let chunk = stream.message().await?.ok_or_else(|| {
+                    tonic::Status::data_loss("primary returned an empty WAL stream")
+                })?;
+                if chunk.version != 1 {
+                    return Err(tonic::Status::data_loss(format!(
+                        "primary returned unsupported WAL stream version {}",
+                        chunk.version
+                    )));
+                }
+                let endpoints = crate::grpc::validated_routing_endpoints(chunk.primary_endpoints);
+                let endpoints = (!endpoints.is_empty()).then_some(endpoints);
+                return Ok((
+                    reddb_wire::replication::WalStreamChunk {
+                        records: chunk
+                            .records
+                            .into_iter()
+                            .map(|record| reddb_wire::replication::WalStreamRecord {
+                                lsn: record.lsn,
+                                data: record.data.to_vec(),
+                            })
+                            .collect(),
+                        current_lsn: chunk.current_lsn,
+                        oldest_available_lsn: chunk.oldest_available_lsn,
+                        partial_resync: chunk.partial_resync,
+                        partial_resync_count: chunk.partial_resync_count,
+                        needs_rebootstrap: chunk.needs_rebootstrap,
+                        invalidation_reason: chunk.invalidation_reason,
+                        catchup: crate::grpc::wire_wal_catchup(chunk.catchup)?,
+                    },
+                    endpoints,
+                ));
+            }
+            Err(status) if should_fallback_to_legacy_wal(&status) => {
+                *binary_stream_supported = Some(false);
+            }
+            Err(status) => return Err(status),
+        }
+    }
+
+    let request = request_auth.request(crate::grpc::proto::JsonPayloadRequest {
+        payload_json: String::from_utf8(open.encode_json_with_endpoints(Some(routing_endpoints)))
+            .expect("invariant: WAL open encoder emits UTF-8 JSON"),
+    });
+    let response = client.pull_wal_records(request).await?;
+    reddb_wire::replication::WalStreamChunk::decode_json_with_endpoints(
+        response.into_inner().payload.as_bytes(),
+    )
+    .map_err(|error| tonic::Status::data_loss(error.to_string()))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReplicaRejoinStartup {
     Continue {
@@ -44,6 +185,24 @@ enum ReplicaRejoinStartup {
 mod tests {
     use super::*;
     use crate::RedDBOptions;
+
+    #[test]
+    fn legacy_wal_fallback_is_only_for_old_servers() {
+        assert!(should_fallback_to_legacy_wal(
+            &tonic::Status::unimplemented("old primary")
+        ));
+        for status in [
+            tonic::Status::unauthenticated("bad credential"),
+            tonic::Status::permission_denied("missing capability"),
+            tonic::Status::resource_exhausted("record too large"),
+            tonic::Status::data_loss("invalid chunk"),
+        ] {
+            assert!(
+                !should_fallback_to_legacy_wal(&status),
+                "must not downgrade after {status}"
+            );
+        }
+    }
 
     #[test]
     fn catchup_mode_from_wire_defaults_to_basebackup_then_wal() {
@@ -520,7 +679,6 @@ impl RedDBRuntime {
 
         runtime.block_on(async move {
             use crate::grpc::proto::red_db_client::RedDbClient;
-            use crate::grpc::proto::JsonPayloadRequest;
 
             let mut client = loop {
                 match RedDbClient::connect(endpoint.clone()).await {
@@ -594,35 +752,40 @@ impl RedDBRuntime {
             // entering the 30-second tail-follow wait on an empty primary.
             // Every subsequent pull keeps the efficient await-data behavior.
             let mut await_data = false;
+            let mut binary_stream_supported = None;
+            // A crash or transport failure can leave the local durable cursor
+            // ahead of the primary slot. Reconcile it before awaiting or
+            // applying more WAL, and retain it until the primary accepts the ACK.
+            let mut pending_ack_lsn = (since_lsn > 0).then_some(since_lsn);
 
             loop {
-                let payload = reddb_wire::replication::WalStreamOpen {
+                let open = reddb_wire::replication::WalStreamOpen {
                     since_lsn,
                     max_count,
                     replica_id: Some(replica_id.clone()),
                     term: self.current_replication_term(),
-                    await_data,
+                    await_data: await_data && pending_ack_lsn.is_none(),
                     await_timeout_ms: 30_000,
                 };
-                let request = request_auth.request(JsonPayloadRequest {
-                    payload_json: String::from_utf8(payload.encode_json_with_endpoints(Some(&self.routing_endpoints())))
-                        .expect("invariant: WAL open encoder emits UTF-8 JSON"),
-                });
-
-                let pull_result = client.pull_wal_records(request).await;
+                let routing_endpoints = self.routing_endpoints();
+                let pull_result = pull_wal_chunk(
+                    &mut client,
+                    &request_auth,
+                    &open,
+                    &routing_endpoints,
+                    &mut binary_stream_supported,
+                )
+                .await;
                 if let Err(error) = &pull_result {
                     self.persist_replication_health(
                         "connecting",
-                        &format!("primary pull_wal_records request failed: {error}"),
+                        &format!("primary WAL stream request failed: {error}"),
                         None,
                         None,
                     );
                 }
-                if let Ok(response) = pull_result {
-                    if let Ok((chunk, endpoints)) = reddb_wire::replication::WalStreamChunk::decode_json_with_endpoints(
-                        response.into_inner().payload.as_bytes(),
-                    )
-                    {
+                match pull_result {
+                    Ok((chunk, endpoints)) => {
                         await_data = true;
                         self.cache_routing_primary_endpoints(endpoints);
                         let current_lsn = Some(chunk.current_lsn);
@@ -747,6 +910,43 @@ impl RedDBRuntime {
                             std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(250)));
                             continue;
                         }
+                        if let Some(applied_lsn) = pending_ack_lsn {
+                            if applied_lsn > chunk.current_lsn {
+                                self.persist_replication_health(
+                                    "rejoin_primary_behind",
+                                    &format!(
+                                        "local durable cursor {applied_lsn} is ahead of primary head {}",
+                                        chunk.current_lsn
+                                    ),
+                                    current_lsn,
+                                    oldest_available_lsn,
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(
+                                    poll_ms.max(250),
+                                ));
+                                continue;
+                            }
+                            if acknowledge_replica_cursor(
+                                &mut client,
+                                &request_auth,
+                                self,
+                                &replica_id,
+                                applied_lsn,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                self.persist_replication_health(
+                                    "ack_error",
+                                    "primary ack_replica_lsn request failed",
+                                    current_lsn,
+                                    oldest_available_lsn,
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(poll_ms));
+                                continue;
+                            }
+                            pending_ack_lsn = None;
+                        }
                         {
                             let mut batch_applied_lsn = None;
                             let mut applied_relay_records: Vec<(u64, &[u8])> = Vec::new();
@@ -778,8 +978,17 @@ impl RedDBRuntime {
                                         batch_applied_lsn = Some(since_lsn);
                                         applied_relay_records.push((change.lsn, &record.data));
                                     }
-                                    Ok(_) => {
-                                        // Idempotent / Skipped: no advance, no error.
+                                    Ok(
+                                        crate::replication::logical::ApplyOutcome::Idempotent
+                                        | crate::replication::logical::ApplyOutcome::Skipped,
+                                    ) => {
+                                        // The local cursor can be ahead of the primary slot when
+                                        // a process stops after cursor persistence but before ACK.
+                                        // Re-run the relay write idempotently so it validates the
+                                        // already-durable segment, then repeat cursor + ACK.
+                                        since_lsn = since_lsn.max(applier.last_applied_lsn());
+                                        batch_applied_lsn = Some(since_lsn);
+                                        applied_relay_records.push((change.lsn, &record.data));
                                     }
                                     Err(err) => {
                                         self.inner.replica_apply_metrics.record(err.kind());
@@ -882,31 +1091,21 @@ impl RedDBRuntime {
                                     }
                                 }
                                 if !ack_failed {
-                                    let apply_errors = self.replica_apply_error_counts();
-                                    let apply_errors_total =
-                                        apply_errors.iter().map(|(_, count)| *count).sum::<u64>();
-                                    let divergence_total = apply_errors
-                                        .iter()
-                                        .find(|(kind, _)| {
-                                            matches!(
-                                                kind,
-                                                crate::replication::logical::ApplyErrorKind::Divergence
-                                            )
-                                        })
-                                        .map(|(_, count)| *count)
-                                        .unwrap_or(0);
-                                    let ack_payload = reddb_wire::replication::WalStreamAck {
-                                        replica_id: replica_id.clone(),
+                                    pending_ack_lsn = Some(applied_lsn);
+                                    maybe_crash_replica_loop(
+                                        REPLICA_LOOP_AFTER_CURSOR_BEFORE_ACK,
                                         applied_lsn,
-                                        durable_lsn: applied_lsn,
-                                        apply_errors_total,
-                                        divergence_total,
-                                    };
-                                    let ack_request = request_auth.request(JsonPayloadRequest {
-                                        payload_json: String::from_utf8(ack_payload.encode_json())
-                                            .unwrap_or_else(|_| "{}".to_string()),
-                                    });
-                                    if client.ack_replica_lsn(ack_request).await.is_err() {
+                                    );
+                                    if acknowledge_replica_cursor(
+                                        &mut client,
+                                        &request_auth,
+                                        self,
+                                        &replica_id,
+                                        applied_lsn,
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
                                         ack_failed = true;
                                         self.persist_replication_health(
                                             "ack_error",
@@ -914,6 +1113,8 @@ impl RedDBRuntime {
                                             current_lsn,
                                             oldest_available_lsn,
                                         );
+                                    } else {
+                                        pending_ack_lsn = None;
                                     }
                                 }
                             }
@@ -928,16 +1129,10 @@ impl RedDBRuntime {
                             current_lsn,
                             oldest_available_lsn,
                         );
-                    } else {
-                        self.persist_replication_health(
-                            "apply_error",
-                            "failed to parse pull_wal_records response",
-                            None,
-                            None,
-                        );
                     }
-                } else {
-                    std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(250)));
+                    Err(_) => {
+                        std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(250)));
+                    }
                 }
             }
         });

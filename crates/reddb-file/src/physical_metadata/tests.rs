@@ -306,6 +306,8 @@ fn physical_analytics_view_descriptor_round_trips() {
 fn physical_declared_column_contract_round_trips() {
     let column = PhysicalDeclaredColumnContract {
         name: "amount".to_string(),
+        description: Some("Monetary amount".to_string()),
+        description_generated: true,
         data_type: "DECIMAL(12, 2)".to_string(),
         sql_type: Some(PhysicalSqlTypeName {
             name: "DECIMAL".to_string(),
@@ -341,6 +343,8 @@ fn physical_declared_column_contract_round_trips() {
 fn physical_collection_contract_round_trips() {
     let contract = PhysicalCollectionContract {
         name: "orders".to_string(),
+        description: Some("Customer orders".to_string()),
+        description_generated: false,
         declared_model: "table".to_string(),
         schema_mode: "strict".to_string(),
         origin: "explicit".to_string(),
@@ -353,6 +357,8 @@ fn physical_collection_contract_round_trips() {
         context_index_fields: vec!["body".to_string()],
         declared_columns: vec![PhysicalDeclaredColumnContract {
             name: "id".to_string(),
+            description: Some("Order identifier".to_string()),
+            description_generated: true,
             data_type: "UUID".to_string(),
             sql_type: Some(PhysicalSqlTypeName {
                 name: "UUID".to_string(),
@@ -411,12 +417,22 @@ fn physical_collection_contract_round_trips() {
         decode_physical_collection_contract_json(&json).unwrap(),
         contract
     );
+    let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let object = legacy.as_object_mut().unwrap();
+    object.remove("description");
+    object.remove("description_generated");
+    let legacy = serde_json::to_string(&legacy).unwrap();
+    let decoded = decode_physical_collection_contract_json(&legacy).unwrap();
+    assert_eq!(decoded.description, None);
+    assert!(!decoded.description_generated);
 }
 
 #[test]
 fn physical_collection_contract_with_ai_policy_round_trips() {
     let contract = PhysicalCollectionContract {
         name: "posts".to_string(),
+        description: None,
+        description_generated: false,
         declared_model: "table".to_string(),
         schema_mode: "strict".to_string(),
         origin: "explicit".to_string(),
@@ -695,6 +711,8 @@ fn physical_metadata_core_contracts_round_trip() {
 fn physical_column_expressions_roundtrip_and_legacy_absence() {
     let column = PhysicalDeclaredColumnContract {
         name: "total".into(),
+        description: None,
+        description_generated: false,
         data_type: "INTEGER".into(),
         generated: Some("price * quantity".into()),
         check: Some("total < 100".into()),

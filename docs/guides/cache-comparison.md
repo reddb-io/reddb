@@ -1,6 +1,6 @@
 # Cache vs KV vs Redis: which RedDB surface fits
 
-Status: 2026-05-06 — first cut. Companion to
+Status: 2026-11-09 — current server behavior. Companion to
 [ADR 0006 — Tiered Blob Cache](../../.red/adr/0006-tiered-blob-cache.md).
 
 RedDB exposes several cache-shaped surfaces. They are not interchangeable
@@ -25,12 +25,13 @@ what the *value* looks like and how you want it invalidated.
 | Queryable JSON config / sessions / flags                                    | KV                                                                                                           |
 | Opaque byte blobs with TTL and invalidation                                 | Blob Cache                                                                                                   |
 | Embedding vectors with similarity lookup                                    | Semantic Cache                                                                                               |
-| SQL result rows materialized for re-read                                    | Built-in result cache (now Blob Cache backed when `runtime.result_cache.backend = blob_cache`)               |
+| SQL result rows materialized for re-read                                    | Built-in result cache backed by Blob Cache                                                                  |
 | Database pages                                                              | Page Cache (internal, not user-facing)                                                                       |
 
-The four user-visible caches in RedDB today are KV, Blob Cache, Semantic
-Cache, and the runtime SQL result cache. Page Cache exists but it
-protects database pages on the read path and is never addressed by
+Applications can directly address KV, Blob Cache, and Semantic Cache. The
+runtime SQL result cache is automatic rather than user-addressable, and it is
+backed by the same Blob Cache L1/L2 engine under a reserved namespace. Page
+Cache protects database pages on the read path and is never addressed by
 application code.
 
 ### Why these are separate modules
@@ -53,15 +54,17 @@ should hit the same entry even though their byte representation differs.
 ADR 0006 leaves the door open for Semantic Cache to use Blob Cache as
 its durable exact-key backend, but its lookup surface stays similarity.
 
-The runtime SQL result cache stores small `SELECT` results keyed by
-statement shape and scope, invalidated through table dependencies. With
-ADR 0006 in flight it becomes an adapter over Blob Cache when
-`runtime.result_cache.backend = blob_cache`. The Interface that
-application SQL callers see does not change; the storage underneath does.
-Eligible Blob-backed entries also survive a clean runtime restart via
-the per-database L2 files until their 30-second TTL expires. Tenant and
-auth identity stay part of the key, and table writes conservatively
-flush the result-cache namespace so stale L2 entries are not served.
+The runtime SQL result cache stores small `SELECT` results in Blob Cache,
+keyed by statement shape and scope and invalidated through table dependencies.
+Tenant and auth identity stay part of the key. Table writes flush the
+result-cache namespace when a dependency matches or L2 entries are untracked;
+otherwise unrelated results stay cached. After a matching invalidation, new
+results remain in memory during frequent writes; a background worker promotes them to the single-file L2 after one
+second of quiet, with their remaining TTL. Restart
+before promotion recomputes the result. Persisted results are accepted after
+recovery only when their data epoch matches the epoch committed with the data;
+older payload formats and results made obsolete by any intervening data write
+are recomputed.
 
 Page Cache and Entity Cache are internal acceleration structures.
 They are listed here only so readers stop trying to use them as
@@ -72,15 +75,15 @@ page cache / Blob Cache split.
 
 ## Picking between RedDB Blob Cache and Redis
 
-RedDB does not try to win by copying Redis' memory model. The useful
-RedDB angle is "cache with a durable L2 and SQL-adjacent invalidation,
-in the same engine as the data". Redis is still the right answer for a
-large set of workloads.
+RedDB does not try to win by copying Redis' memory model. The useful RedDB
+angle is "a bounded exact-key cache with SQL-adjacent invalidation, in the
+same process as the data". Redis is still the right answer for a large set of
+workloads.
 
 | Need                                                                   | Pick           |
 |------------------------------------------------------------------------|----------------|
 | Sub-ms tail latency, memory-only                                       | Redis          |
-| Survive restart without separate Redis                                 | RedDB          |
+| Survive cache-process restart with warm data                            | Both           |
 | Database-aware invalidation tied to writes                             | RedDB          |
 | Pub/sub, sorted sets, streams, modules                                 | Redis          |
 | Single operational engine for app + cache                              | RedDB          |
@@ -93,17 +96,16 @@ from also running Redis as a memory-only sidecar for pub/sub.
 ### How to read the table
 
 "Sub-ms tail latency, memory-only" is structural. RedDB Blob Cache has a
-fast L1 hit path, but its design point is L1 + durable L2 with a
-membership synopsis between them. If you need consistent sub-millisecond
+fast in-process L1 hit path, but the public remote API uses HTTP and JSON with
+base64 for bytes. If you need consistent sub-millisecond
 p99 against a memory-resident hot set with no durability requirement,
 Redis is already optimized for that and RedDB is not chasing it.
 
-"Survive restart without separate Redis" is the inverse. RedDB Blob
-Cache's L2 lives in the same database file as the rest of your data and
-participates in the same backup, replication, and recovery story. After
-a restart, hot entries reload from L2 into L1 instead of cold-missing to
-the origin. You do not need to operate a second system to keep a useful
-cache warm across deploys.
+The normal RedDB server cache stores L2 values in a hidden internal collection
+inside the primary `.rdb`, so eligible entries survive a clean restart without
+an extra cache file. Redis can also preserve warm data with its persistence
+options. In either product, treat cache values as regenerable rather than as
+the authoritative copy.
 
 "Database-aware invalidation tied to writes" is the killer feature for
 read-heavy SQL apps. The same write that mutates a table can invalidate
@@ -120,9 +122,9 @@ target, one replication topology, one set of metrics, one upgrade path.
 For small and mid-size deployments this is often the deciding factor.
 
 "Massive horizontal cluster scale-out" is honest. Redis Cluster shards
-across hundreds of nodes today. RedDB Blob Cache replicates per-node and
-does not yet do cluster-wide invalidation propagation (see "Out of
-scope").
+across hundreds of nodes today. RedDB Blob Cache is node-local and does not
+yet replicate entries or propagate invalidations across the cluster (see
+"Out of scope").
 
 ---
 
@@ -134,15 +136,24 @@ cache — protecting database pages and protecting user-visible cached
 bytes are different jobs and the two tiers stay separate so neither
 Interface goes shallow. Hits clone a handle, not the payload.
 
-**L2** is a durable native cache store inside the database file. It
-holds entry metadata (expiry, tags, dependencies, version, blob pointer)
-in a metadata B-tree and stores blob bytes in page-aligned chunks
-through the existing native blob direction. WAL ordering is
-metadata-last: bytes are written first, then the metadata commit makes
-the value visible. After restart, hot entries hydrate from L2 instead
-of missing to the origin.
+**L2** is a durable cache store. The server stores its rows and byte counter in
+the hidden `red.cache.blob_l2` collection in the same `.rdb`; each value change
+and quota-counter change share one WAL publication. The record carries expiry,
+namespace generation, priority, version and checksum metadata. Tag and
+dependency invalidation conservatively clears the affected L2 namespace so an
+unrehydrated entry cannot reappear after a write. After restart, eligible
+entries hydrate from L2 instead of missing to the origin.
 
-The two tiers are connected by a *membership synopsis* — a per-namespace
+Expiry deadlines also enter the store's persisted ordered projection. A
+dedicated cache worker deletes due L2 rows in bounded batches, with the byte
+counter in the same WAL publication, and the normal MVCC reclamation path makes
+their pages reusable.
+
+Embedded engine integrations can select a standalone L2 file backend. The
+normal server and its result cache use the internal collection backend and do
+not create that sidecar.
+
+When L2 is enabled, the tiers are connected by a *membership synopsis* — a per-namespace
 filter that lets the cache cheaply say "definitely absent" and skip the
 L2 metadata read entirely on a miss. See "Existence checks" below.
 
@@ -160,9 +171,9 @@ The MVP ships two TTL axes:
 
 Hard expiry always wins. Expired entries are not returned from `get`.
 
-### Follow-ups (gated on demand)
+### Engine-only extended policy
 
-The ADR defines additional axes that are *not* in the first cut:
+The native engine API also supports:
 
 - **Idle TTL** (`idle_ttl_ms`) — sliding expiry for session-like
   entries.
@@ -171,9 +182,7 @@ The ADR defines additional axes that are *not* in the first cut:
 - **Jitter** (`jitter_pct`) — randomize expiry to avoid synchronized
   expiry spikes.
 
-These land when there is a real caller asking for them, not
-speculatively. If you need one, open an issue with the workload that
-requires it.
+These fields are not exposed by the remote HTTP API yet.
 
 ---
 
@@ -196,11 +205,10 @@ exposes:
   Bump the namespace generation; old entries become invisible
   immediately and a background sweeper reclaims them.
 
-Dependency invalidation is what makes "cache with a database underneath"
-qualitatively different from "cache next to a database". The same write
-path that already calls `invalidate_result_cache_for_table` for the SQL
-result cache calls `cache.invalidate_dependencies(...)` for Blob Cache,
-and your derived application caches drop in lockstep with the table.
+Dependency invalidation is currently an engine API used by the SQL result
+cache adapter. The public HTTP API does not let an application register table
+dependencies; remote callers should use tags, prefixes or explicit
+invalidation after a database write.
 
 ---
 
@@ -214,8 +222,7 @@ Blob Cache's `exists(namespace, key)` returns `Present`, `Absent`, or
 - `Present` is authoritative. L1 or verified L2 metadata confirmed it.
 - `MaybePresent` is the "synopsis says maybe, you said you do not want
   to pay for an L2 metadata read" answer. Callers that need an exact
-  answer call `get(...)` or request an exact `exists`, which forces the
-  metadata verification.
+  answer call `get(...)`, which performs the metadata verification.
 
 The contract is: **the synopsis is a negative filter, never the source
 of truth for a positive answer**. A Bloom-style filter can have stale
@@ -231,15 +238,13 @@ that is a bug in the caller, not the cache.
 
 ## Per-namespace byte limits, replication, backup
 
-**Per-namespace byte limits.** Capacity is enforced in bytes, both
-globally and per namespace. A noisy cache namespace cannot starve the
-page cache or query execution memory because the byte accounting is
-explicit. Operators set the limits in the runtime config matrix
-alongside other engine quotas.
+**Capacity.** L1 capacity is enforced globally in bytes and is capped by the
+process-wide memory budget. Namespace count is separately bounded. A
+per-namespace byte quota is not implemented yet, so mutually untrusted noisy
+namespaces still need separate instances or application-level quotas.
 
-**Replication contract: per-node invalidation.** The first cut
-replicates cache state per node. Each replica maintains its own L1, its
-own synopsis, and its own L2. Invalidation is *per-node* — the write
+**Replication contract: node-local only.** Cache state is not replicated.
+Each server maintains its own L1. Invalidation is *per-node* — the write
 path that issues `invalidate_dependencies(...)` issues it on the node
 that processed the write. Cluster-wide invalidation propagation is
 explicitly out of scope for the first cut and will be its own ADR
@@ -251,21 +256,23 @@ node. In a multi-writer or split-brain-tolerant topology, you should
 treat each node's Blob Cache as a separate cache for correctness
 purposes until the cluster invalidation ADR lands.
 
-**Backup and restore: opt-in.** Cache state is excluded from default
-backups because it is, by definition, regenerable. If you want cache
-state included in a backup target — for instance, to keep an L2 warm
-across a cold restore — that is opt-in per namespace in the backup
-config. The default is "skip; refill from origin on first miss".
+**Backup and restore.** The server L2 is an internal collection in the primary
+`.rdb`, so normal single-file snapshots and restores carry it with the database.
+The separate-file compatibility backend retains opt-in backup helpers for
+direct engine callers.
 
 ---
 
 ## Reference benchmark numbers
 
-Numbers are not embedded in this guide. They live in
-[`docs/perf/blob-cache-bench-2026-05-06.md`](../perf/blob-cache-bench-2026-05-06.md)
-once Lane #149 lands. When that document publishes, this section will
-keep saying "see the cited bench" — update the citation in one place,
-not the prose here.
+The existing
+[`native Blob Cache benchmark`](../perf/blob-cache-bench-2026-05-06.md)
+is useful for engine regression work, but its hot-path comparison calls RedDB
+in-process while Redis crosses loopback TCP. It is not evidence that the
+public RedDB HTTP cache is faster than Redis. A product comparison must put
+both systems behind equivalent process boundaries and test the same payload,
+batching, concurrency and persistence settings. No remote parity number is
+claimed here yet.
 
 The companion perf docs that already exist:
 
@@ -274,9 +281,9 @@ The companion perf docs that already exist:
 - [`docs/perf/when-not-reddb.md`](../perf/when-not-reddb.md) — honest
   gaps with closure issues.
 
-Until the cache-specific bench document publishes, treat any "RedDB
-Blob Cache vs Redis" number you see in a slide deck as
-not-yet-citeable.
+Treat any "RedDB Blob Cache vs Redis" number that mixes native RedDB calls
+with Redis TCP calls as an internal microbenchmark, not a customer-facing
+latency claim.
 
 ---
 
@@ -291,38 +298,33 @@ Listing them here so nobody has to re-derive the boundary later:
   different module ecosystem, not in scope. RedDB has separate queues
   and probabilistic structures that may grow into adjacent niches, but
   not inside this module.
-- **Sub-ms memory-only latency parity.** RedDB Blob Cache is a
-  durable-L2 design. If your design point is "everything fits in RAM
+- **Sub-ms network latency parity.** RedDB Blob Cache's public API uses HTTP.
+  If your design point is "everything fits in RAM
   and p99 must be sub-millisecond", Redis already wins that and we are
   not chasing it.
 - **Cluster-wide invalidation propagation.** First cut is per-node
   invalidation. Cluster-wide propagation will be its own ADR; do not
   assume it.
-- **Public SQL surface in first cut.** Blob Cache is internal first.
-  A public HTTP / SQL surface is deferred to issue #151.
+- **Public SQL surface.** Blob Cache is intentionally not queryable through
+  SQL; use the HTTP/SDK exact-key API.
 
 ---
 
-## Public API surface — decision (2026-05-07, resolves #200)
+## Public API surface
 
 The Blob Cache exposes itself through **two surfaces, by design**:
 
-1. **SDK** — `@reddb-io/sdk` (JS/TS, #196), `@reddb-io/client` (thin
-   remote, #196), and `drivers/python` (#197). Application code calls
-   `cache.get / put / invalidate` and gets typed responses without
-   protocol code. Developer-facing surface.
-2. **HTTP admin** — `/admin/cache/*` endpoints (compare-and-set #195,
-   sweep / flush-namespace / stats #198). Operators reach these through
-   `red admin cache` CLI subcommands. Operator-facing surface.
+1. **Application HTTP/JS SDK** — tenant-scoped `/cache/ns/*` routes for
+   exact-key and batch reads/writes, TTL mutation and invalidation.
+2. **Operations** — metrics and the existing admin maintenance/statistics
+   routes for authorized operators.
 
 **Explicitly killed in this decision:**
 
 - **SQL surface** (`CACHE INSERT / SELECT / DELETE`). Adds entanglement
   with the query engine without a measurable adoption win. Cache is a
-  byte-blob primitive; SQL pushes it through a query planner that
-  doesn't help here. Bench `fc1d392a` shows L1 hot p50 = 259 ns; any
-  SQL-layer wrapping adds tens of microseconds of dispatch and breaks
-  the p50 guarantee.
+  byte-blob primitive; SQL pushes it through a query planner that does
+  not help exact-key reads.
 - **gRPC.** HTTP admin already covers the operator path; the SDKs
   already cover the developer path. A third wire format adds generated-
   code burden + protobuf schema drift without solving any problem the

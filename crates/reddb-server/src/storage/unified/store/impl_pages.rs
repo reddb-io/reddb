@@ -738,6 +738,22 @@ impl UnifiedStore {
         // children and the manifest that forgets old roots have been synced.
         publish_paged_metadata(pager, metadata)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        // PAGE_RESULT_CACHE_FILE_VERSION predates the disk-resident cache
+        // catalog. Publish the complete resume metadata first, then promote
+        // the header so the next boot may trust and reuse its derived roots.
+        if self.config.resident_memory_bytes_max.is_some()
+            && pager
+                .header()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                .version
+                == reddb_file::file_format::PAGE_RESULT_CACHE_FILE_VERSION
+        {
+            pager
+                .fence_file_format_version(
+                    reddb_file::file_format::PAGE_RESULT_CACHE_DISK_FILE_VERSION,
+                )
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        }
         *self.recovery_xid_summary.write() = next_xid_summary;
         self.ownership_catalog_epoch
             .store(catalog_epoch, Ordering::Release);
@@ -1115,10 +1131,15 @@ impl UnifiedStore {
             commit: None,
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
+            result_cache_epoch: Arc::new(result_cache_epoch::ResultCacheEpochState::default()),
             snapshot_manager: std::sync::OnceLock::new(),
             embedded_commit_session: std::sync::OnceLock::new(),
             #[cfg(test)]
             test_fail_deferred_wal_append: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            test_versioned_update_after_old: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            test_fail_versioned_update_phase: std::sync::atomic::AtomicU8::new(0),
             #[cfg(test)]
             test_require_deferred_publication_fence: std::sync::atomic::AtomicBool::new(false),
             vault_publication_lock: parking_lot::ReentrantMutex::new(()),
@@ -1187,6 +1208,7 @@ impl UnifiedStore {
             .map_err(StoreError::Io)?;
         let catalog = store.load_from_pages(false, None)?;
         StoreCommitCoordinator::replay_read_only(&store, &wal_path).map_err(StoreError::Io)?;
+        store.load_result_cache_epoch()?;
         let pending_drops = store.legacy_pending_collection_drops()?.unwrap_or_default();
         for name in pending_drops {
             if !catalog
@@ -1281,10 +1303,15 @@ impl UnifiedStore {
             commit,
             replayed_turbo_inserts: parking_lot::Mutex::new(HashMap::new()),
             replayed_probabilistic_deltas: parking_lot::Mutex::new(Vec::new()),
+            result_cache_epoch: Arc::new(result_cache_epoch::ResultCacheEpochState::default()),
             snapshot_manager: std::sync::OnceLock::new(),
             embedded_commit_session: std::sync::OnceLock::new(),
             #[cfg(test)]
             test_fail_deferred_wal_append: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            test_versioned_update_after_old: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            test_fail_versioned_update_phase: std::sync::atomic::AtomicU8::new(0),
             #[cfg(test)]
             test_require_deferred_publication_fence: std::sync::atomic::AtomicBool::new(false),
             vault_publication_lock: parking_lot::ReentrantMutex::new(()),
@@ -1315,6 +1342,7 @@ impl UnifiedStore {
                 .replay_into(&store, boot_wal)
                 .map_err(StoreError::Io)?;
         }
+        store.load_result_cache_epoch()?;
         trace_startup_phase(path, "paged_wal_replay", wal_replay_started);
         if catalog_load.migrated {
             // Publish only the renamed catalog keys. Existing row, key and

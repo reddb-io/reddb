@@ -23,8 +23,10 @@ fn native_graph_read_scope(
     if capture_current_snapshot().is_some() {
         return Ok(None);
     }
-    let frame =
-        StatementExecutionFrame::build(runtime, StatementIdentity::Text("GRAPH PROPERTIES"))?;
+    let frame = StatementExecutionFrame::build(
+        runtime,
+        StatementIdentity::UncachedText("GRAPH PROPERTIES"),
+    )?;
     Ok(Some(frame.install(runtime)))
 }
 

@@ -1,12 +1,11 @@
 # Function-length nudge for the TigerStyle-derived house style (PRD #1252,
 # ADR 0062).
 #
-# House limit: 200 lines per function (file-shape limit lives at 2000/file,
-# enforced by `scripts/afk-pre-merge.sh`). `clippy::too_many_lines` fires
-# when a function's *code* lines (blank and comment-only lines excluded)
-# exceed this threshold. We pick 200 — generous enough for idiomatic Rust
-# `match`/builder code, tight enough that anything over it is a real
-# signal that the function is doing more than one thing.
+# House limit: 200 lines per function. `clippy::too_many_lines` fires when
+# a function's *code* lines (blank and comment-only lines excluded) exceed
+# this threshold. We pick 200 — generous enough for idiomatic Rust
+# `match`/builder code, tight enough that anything over it is a real signal
+# that the function is doing more than one thing.
 #
 # The lint is wired as a warn-level ratchet in [workspace.lints.clippy].
 # Backpressure runs `cargo clippy --locked -- -D warnings`, which promotes

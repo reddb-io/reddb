@@ -159,7 +159,7 @@ pub struct ServerCommandConfig {
     /// built-in default derived from `path` + stderr-only.
     pub telemetry: Option<crate::telemetry::TelemetryConfig>,
     /// HTTP handler-pool knobs from the CLI layer (issue #574 slice 5).
-    /// Carries flag and env values; red_config and built-in defaults
+    /// Carries flag and env values; red.config and built-in defaults
     /// are applied later by [`crate::server::http_limits::resolve_http_limits`]
     /// once the runtime is open.
     pub http_limits_cli: crate::server::HttpLimitsCliInput,
@@ -1745,11 +1745,11 @@ fn build_runtime_and_auth_store(
 }
 
 /// Open the runtime, initialise structured logging from merged CLI +
-/// `red_config` settings, and return a guard the caller must keep
+/// `red.config` settings, and return a guard the caller must keep
 /// alive for the server lifetime (drop flushes pending log writes).
 ///
 /// Merge priority: CLI flag (explicit `Some`) beats `red.logging.*`
-/// in red_config, beats the built-in default. A CLI-flag value of
+/// in red.config, beats the built-in default. A CLI-flag value of
 /// `None` / empty means "inherit from config or default" — never
 /// "disable". The one exception is `--no-log-file` which forces
 /// `log_dir = None` regardless of config.
@@ -1780,6 +1780,17 @@ fn build_runtime_with_bootstrap(
     ),
     String,
 > {
+    let mut db_options = db_options;
+    let lease_boot = crate::runtime::lease_loop::prepare_lease_loop_if_required(&mut db_options)
+        .map_err(|err| {
+            let msg = err.to_string();
+            crate::telemetry::operator_event::OperatorEvent::StartupFailed {
+                phase: "lease_prepare".to_string(),
+                error: msg.clone(),
+            }
+            .emit_global();
+            msg
+        })?;
     let runtime = RedDBRuntime::with_options(db_options.clone()).map_err(|err| {
         // Issue #205 — runtime construction failure is the canonical
         // StartupFailed phase. The audit sink isn't installed yet
@@ -1799,7 +1810,7 @@ fn build_runtime_with_bootstrap(
     // when `RED_LEASE_REQUIRED=true`. Failure here aborts boot: the
     // operator asked for a fence; running unfenced would silently
     // expose split-brain risk.
-    crate::runtime::lease_loop::start_lease_loop_if_required(&runtime).map_err(|err| {
+    crate::runtime::lease_loop::start_prepared_lease_loop(&runtime, lease_boot).map_err(|err| {
         let msg = err.to_string();
         crate::telemetry::operator_event::OperatorEvent::StartupFailed {
             phase: "lease_loop".to_string(),
@@ -1826,7 +1837,7 @@ fn build_runtime_with_bootstrap(
         crate::runtime::config_watcher::ConfigWatcher::new(config_path, store).spawn();
     }
 
-    // Phase 6 logging: merge red_config overrides onto the CLI-built
+    // Phase 6 logging: merge red.config overrides onto the CLI-built
     // telemetry config, then install the global subscriber.
     let merged = merge_telemetry_with_config(
         cli_telemetry
@@ -2624,7 +2635,7 @@ fn persist_bootstrap_state(
 
 /// Read `red.logging.*` keys from the persistent config store and
 /// merge them into the CLI-built `TelemetryConfig`. Merge priority:
-/// explicit CLI flag > red_config > built-in default.
+/// explicit CLI flag > red.config > built-in default.
 ///
 /// The "was a flag passed" signal comes from the `*_explicit` bools
 /// on `TelemetryConfig`, populated by the CLI parser. This replaces

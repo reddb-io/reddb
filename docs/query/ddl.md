@@ -32,7 +32,7 @@ indexes. `IF EXISTS` makes missing targets a no-op success for both `DROP` and
 
 | Model | DROP | TRUNCATE | CREATE | ALTER |
 |---|---|---|---|---|
-| Collection (polymorphic) | `DROP COLLECTION [IF EXISTS] name` | `TRUNCATE COLLECTION [IF EXISTS] name` | Use a typed `CREATE` form | Use typed `ALTER` forms |
+| Collection (polymorphic) | `DROP COLLECTION [IF EXISTS] name` | `TRUNCATE COLLECTION [IF EXISTS] name` | `CREATE COLLECTION name KIND kind` for supported kinds, or a typed `CREATE` form | `ALTER COLLECTION name SET DESCRIPTION 'text'` for any model |
 | Table | `DROP TABLE [IF EXISTS] name` | `TRUNCATE TABLE [IF EXISTS] name` | `CREATE TABLE [IF NOT EXISTS] name (...)` | `ALTER TABLE name ...` |
 | Document | `DROP DOCUMENT [IF EXISTS] name` | `TRUNCATE DOCUMENT [IF EXISTS] name` | Implicit on document insert; table DDL can declare shared schema | Not model-specific yet |
 | Graph | `DROP GRAPH [IF EXISTS] name` | `TRUNCATE GRAPH [IF EXISTS] name` | Implicit on graph writes | Not model-specific yet |
@@ -49,6 +49,22 @@ indexes. `IF EXISTS` makes missing targets a no-op success for both `DROP` and
 The collection-model rows are the canonical DDL surface for persisted user data.
 The remaining rows are supporting database objects that participate in the same
 parser and authorization surface but are not collection entities.
+
+## Collection descriptions
+
+`ALTER COLLECTION name SET DESCRIPTION 'text'` works across collection models.
+Declared attributes use `ALTER COLLECTION name ALTER COLUMN attribute SET
+DESCRIPTION 'text'`. `CREATE TABLE` accepts `DESCRIPTION 'text'` on each
+declared column and `WITH (DESCRIPTION = 'text')` for the collection.
+`CREATE COLLECTION name KIND document DESCRIPTION 'text'` and keyed creation
+forms such as `CREATE GRAPH name DESCRIPTION 'text'` accept a collection
+description as well.
+
+Set `red.config.ai.collection_descriptions.auto_enrich = true` to request
+background suggestions after successful collection creation or alteration. The
+default is `false`; a configured inference provider supplies the AI call.
+Generated descriptions never replace manual ones and are marked by
+`description_generated` in `red.collections` and `red.columns`.
 
 ## Typed vs Polymorphic
 

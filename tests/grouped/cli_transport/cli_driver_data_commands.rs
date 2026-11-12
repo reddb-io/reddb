@@ -88,30 +88,33 @@ fn query_output_matches_driver_row_format_goldens() {
 fn explicit_bind_routes_query_through_the_driver_http_adapter() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock HTTP server");
     let address = listener.local_addr().expect("mock HTTP address");
-    let server = thread::spawn(move || {
-        for (expected_request, body) in [
-            ("GET /health ", r#"{"ok":true,"status":"ok"}"#),
+    let server = thread::spawn(move || loop {
+        let (mut stream, _) = listener.accept().expect("accept HTTP request");
+        let mut request = [0u8; 4096];
+        let count = stream.read(&mut request).expect("read HTTP request");
+        let request = String::from_utf8_lossy(&request[..count]);
+        let (body, query_complete) = if request.starts_with("GET /health ") {
+            (r#"{"ok":true,"status":"ok"}"#, false)
+        } else if request.starts_with("GET /v1/topology?") {
+            ("{}", false)
+        } else if request.starts_with("POST /query ") {
             (
-                "POST /query ",
                 r#"{"ok":true,"result":{"statement":"select","affected":0,"columns":["source"],"rows":[{"source":"driver-http"}]}}"#,
-            ),
-        ] {
-            let (mut stream, _) = listener.accept().expect("accept HTTP request");
-            let mut request = [0u8; 4096];
-            let count = stream.read(&mut request).expect("read HTTP request");
-            let request = String::from_utf8_lossy(&request[..count]);
-            assert!(
-                request.starts_with(expected_request),
-                "unexpected request: {request}"
-            );
-            let response = format!(
+                true,
+            )
+        } else {
+            panic!("unexpected request: {request}");
+        };
+        let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             );
-            stream
-                .write_all(response.as_bytes())
-                .expect("write HTTP response");
+        stream
+            .write_all(response.as_bytes())
+            .expect("write HTTP response");
+        if query_complete {
+            break;
         }
     });
 
