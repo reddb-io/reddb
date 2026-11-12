@@ -1,5 +1,8 @@
 # Git for Data — Overview
 
+See [model validation](model-validation.md) for the current test inventory and
+the remaining work across collection models.
+
 > **Current limitation:** checkout changes VCS metadata but does not isolate
 > reads or writes by branch. Non-fast-forward merge records metadata and
 > conflicts, but does not apply merged data. Conflict resolution returns an
