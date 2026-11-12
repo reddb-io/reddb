@@ -192,6 +192,7 @@ vcs_merge(input):
   lca    = vcs_lca(ours, theirs)
 
   if theirs.ancestors.contains(ours):
+    if graph may require application: return Err("graph application not implemented")
     # fast-forward — just move the branch ref
     save_ref(branch, theirs)
     return MergeOutcome { fast_forward: true, ... }
@@ -200,6 +201,8 @@ vcs_merge(input):
     return Err("not a fast-forward")
 
   conflicts = materialize_merge_conflicts(lca, ours, theirs, merge_state_id)
+  if no conflicts and source graph may require application:
+    return Err("graph application not implemented")
   save_merge_state(merge_state_id, kind = merge, base = lca,
                    ours, theirs, conflicts_count = conflicts.len())
   if conflicts are present:
@@ -218,6 +221,13 @@ non-forced checkout. These checks do not lock the branch against other
 connections. Conflict resolution itself returns an error and leaves the marker
 intact until resolved data can be applied. Forced checkout clears the workset's
 pending pointer; it does not remove the recorded merge state or conflicts.
+For versioned graphs, fast-forward merges with differing visible graph versions
+and clean divergent merges with source-side graph changes are rejected until
+graph data application exists. Some graph inserts lack an MVCC creation stamp
+and appear in all snapshots. When such entities exist, merges between different
+commits are conservatively rejected even when the graph did not change. An
+update followed by a revert may also be rejected. This guard does not provide
+branch isolation or implement graph merges.
 
 ### materialize_merge_conflicts
 

@@ -4,6 +4,9 @@
 > reads or writes by branch. Non-fast-forward merge records metadata and
 > conflicts, but does not apply merged data. Conflict resolution returns an
 > error and retains the conflict until data application is implemented.
+> Merges that detect graph changes requiring application return an error.
+> Some autocommit graph inserts have no MVCC creation xid and can appear in
+> earlier `AS OF` snapshots.
 > Do not rely on these operations for isolated
 > agent changes or reviewed publication of graph data.
 

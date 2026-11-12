@@ -1088,6 +1088,12 @@ impl RedDBRuntime {
                     "cannot fast-forward a detached HEAD".to_string(),
                 ));
             }
+            if graph_merge_may_require_application(self, store, &head_hash, &from_hash)? {
+                return Err(RedDBError::InvalidOperation(
+                    "cannot merge graph changes: applying graph data is not implemented"
+                        .to_string(),
+                ));
+            }
             save_ref(
                 store,
                 &Ref {
@@ -1115,6 +1121,12 @@ impl RedDBRuntime {
         // Detect conflicts before advancing HEAD. Data-level application
         // and completion of a paused merge are not implemented yet.
         let lca = RedDBRuntime::vcs_lca(self, &head_hash, &from_hash)?;
+        let source_has_graph_changes = graph_merge_may_require_application(
+            self,
+            store,
+            lca.as_deref().unwrap_or(&head_hash),
+            &from_hash,
+        )?;
 
         let message = input
             .opts
@@ -1165,6 +1177,18 @@ impl RedDBRuntime {
         } else {
             Vec::new()
         };
+
+        if conflicts.is_empty() && source_has_graph_changes {
+            let horizon = snapshot
+                .in_progress
+                .iter()
+                .copied()
+                .fold(snapshot.xid, Xid::min);
+            snapshot_manager.unpin(horizon);
+            return Err(RedDBError::InvalidOperation(
+                "cannot merge graph changes: applying graph data is not implemented".to_string(),
+            ));
+        }
 
         let mut ms_fields: HashMap<String, Value> = HashMap::new();
         ms_fields.insert("id".to_string(), Value::text(merge_state_id.as_str()));
@@ -1860,6 +1884,45 @@ impl RedDBRuntime {
             "commitish `{spec}` did not resolve to any ref or commit"
         )))
     }
+}
+
+/// Until graph merge application exists, reject changes in visible graph
+/// versions. Unstamped graph inserts are visible to every snapshot, so any
+/// such entity also requires a conservative rejection for distinct commits.
+fn graph_merge_may_require_application(
+    rt: &RedDBRuntime,
+    store: &UnifiedStore,
+    from_hash: &str,
+    to_hash: &str,
+) -> RedDBResult<bool> {
+    if from_hash == to_hash {
+        return Ok(false);
+    }
+    let sm = rt.inner.transaction_state.snapshot_manager();
+    let from = rt.vcs_resolve_snapshot(AsOfSpec::Commit(from_hash.to_string()))?;
+    let to = rt.vcs_resolve_snapshot(AsOfSpec::Commit(to_hash.to_string()))?;
+    for coll in store.list_collections() {
+        if coll.starts_with("red_") || coll.starts_with("red.") || !is_versioned(store, &coll)? {
+            continue;
+        }
+        let Some(manager) = store.get_collection(&coll) else {
+            continue;
+        };
+        for entity in manager.query_all(|entity| {
+            matches!(
+                entity.kind,
+                EntityKind::GraphNode(_) | EntityKind::GraphEdge(_)
+            )
+        }) {
+            if entity.xmin == XID_NONE
+                || snapshot_sees_entity(&from, &sm, &entity)
+                    != snapshot_sees_entity(&to, &sm, &entity)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Detect entities changed on both sides of a 3-way merge and write

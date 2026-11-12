@@ -135,6 +135,15 @@ fn assert_conflict(err: &reddb::RedDBError) {
     );
 }
 
+fn assert_main_ref(rt: &RedDBRuntime, expected: &str) {
+    let refs = vcs(rt).branch_list().unwrap();
+    let main = refs
+        .iter()
+        .find(|item| item.name == "refs/heads/main")
+        .unwrap();
+    assert_eq!(main.target, expected);
+}
+
 #[test]
 #[ignore = "VCS checkout does not yet isolate graph reads and writes by branch"]
 fn graph_branch_checkout_isolates_writes_from_main() {
@@ -177,6 +186,114 @@ fn graph_branch_checkout_isolates_writes_from_main() {
         live_score(&rt, "graph_branch_isolation", "agent-node"),
         None
     );
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_fast_forward_does_not_advance_head_without_applying_changes() {
+    let rt = rt();
+    let conn = 70018;
+    set_current_connection_id(conn);
+    rt.execute_query("CREATE GRAPH graph_ff_guard").unwrap();
+    vcs(&rt).set_versioned("graph_ff_guard", true).unwrap();
+    insert_node(&rt, "graph_ff_guard", "base", 1);
+    let main_head = commit(&rt, conn, "base");
+    vcs(&rt)
+        .branch_create(CreateBranchInput {
+            name: "agent".to_string(),
+            from: None,
+            connection_id: conn,
+        })
+        .unwrap();
+    vcs(&rt)
+        .checkout(CheckoutInput {
+            connection_id: conn,
+            target: CheckoutTarget::Branch("agent".to_string()),
+            force: false,
+        })
+        .unwrap();
+    insert_node(&rt, "graph_ff_guard", "new", 2);
+    commit(&rt, conn, "agent write");
+    vcs(&rt)
+        .checkout(CheckoutInput {
+            connection_id: conn,
+            target: CheckoutTarget::Branch("main".to_string()),
+            force: false,
+        })
+        .unwrap();
+
+    let err = vcs(&rt)
+        .merge(MergeInput {
+            connection_id: conn,
+            from: "agent".to_string(),
+            opts: MergeOpts::default(),
+            author: author(),
+        })
+        .expect_err("merge must not claim success without applying graph changes");
+    assert!(err.to_string().contains("graph"), "{err}");
+    let status = vcs(&rt)
+        .status(StatusInput {
+            connection_id: conn,
+        })
+        .unwrap();
+    assert_eq!(status.head_commit.as_deref(), Some(main_head.as_str()));
+    assert_eq!(status.merge_state_id, None);
+    assert_main_ref(&rt, &main_head);
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_clean_divergent_merge_does_not_advance_head_without_applying_changes() {
+    let rt = rt();
+    let conn = 70019;
+    set_current_connection_id(conn);
+    rt.execute_query("CREATE GRAPH graph_merge_guard").unwrap();
+    vcs(&rt).set_versioned("graph_merge_guard", true).unwrap();
+    insert_node(&rt, "graph_merge_guard", "base", 1);
+    commit(&rt, conn, "base");
+    vcs(&rt)
+        .branch_create(CreateBranchInput {
+            name: "agent".to_string(),
+            from: None,
+            connection_id: conn,
+        })
+        .unwrap();
+    vcs(&rt)
+        .checkout(CheckoutInput {
+            connection_id: conn,
+            target: CheckoutTarget::Branch("agent".to_string()),
+            force: false,
+        })
+        .unwrap();
+    insert_node(&rt, "graph_merge_guard", "agent", 2);
+    commit(&rt, conn, "agent write");
+    vcs(&rt)
+        .checkout(CheckoutInput {
+            connection_id: conn,
+            target: CheckoutTarget::Branch("main".to_string()),
+            force: false,
+        })
+        .unwrap();
+    insert_node(&rt, "graph_merge_guard", "main", 3);
+    let main_head = commit(&rt, conn, "main write");
+
+    let err = vcs(&rt)
+        .merge(MergeInput {
+            connection_id: conn,
+            from: "agent".to_string(),
+            opts: MergeOpts::default(),
+            author: author(),
+        })
+        .expect_err("merge must not claim success without applying graph changes");
+    assert!(err.to_string().contains("graph"), "{err}");
+    let status = vcs(&rt)
+        .status(StatusInput {
+            connection_id: conn,
+        })
+        .unwrap();
+    assert_eq!(status.head_commit.as_deref(), Some(main_head.as_str()));
+    assert_eq!(status.merge_state_id, None);
+    assert_main_ref(&rt, &main_head);
     clear_current_connection_id();
 }
 
@@ -253,6 +370,27 @@ fn graph_commit_excludes_transactions_still_open_at_checkpoint() {
     );
     rt.execute_query("ROLLBACK")
         .expect("rollback second writer");
+    clear_current_connection_id();
+}
+
+#[test]
+#[ignore = "autocommit graph inserts lack a creation xid and appear in older snapshots"]
+fn graph_autocommit_insert_is_absent_from_earlier_checkpoint() {
+    let rt = rt();
+    let conn = 70020;
+    set_current_connection_id(conn);
+    rt.execute_query("CREATE GRAPH graph_insert_history")
+        .unwrap();
+    vcs(&rt)
+        .set_versioned("graph_insert_history", true)
+        .unwrap();
+    let before = commit(&rt, conn, "before insert");
+    insert_node(&rt, "graph_insert_history", "later", 2);
+    commit(&rt, conn, "after insert");
+    assert_eq!(
+        as_of_score(&rt, "graph_insert_history", "later", &before),
+        None
+    );
     clear_current_connection_id();
 }
 
