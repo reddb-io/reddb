@@ -46,6 +46,21 @@ fn child_reference(page: &Page, level: u8, index: usize) -> Result<PageReference
         .ok_or_else(|| invalid(page.page_id(), "invalid child reference"))
 }
 
+fn read_entry<P: PageStore>(
+    pager: &P,
+    reference: PageReference,
+    level: u8,
+    prefix: u32,
+    generation: u64,
+    index: usize,
+) -> Result<[u8; page_proof::PROOF_REFERENCE_BYTES], PagerError> {
+    let page = read_node(pager, reference, level, prefix, generation)?;
+    let entry = &page.content()[page_proof::entry_range(level, index)];
+    let mut result = [0; page_proof::PROOF_REFERENCE_BYTES];
+    result[..entry.len()].copy_from_slice(entry);
+    Ok(result)
+}
+
 fn expected_digest<P: PageStore>(
     pager: &P,
     root: PageProofRoot,
@@ -54,18 +69,17 @@ fn expected_digest<P: PageStore>(
     let mut reference = root.reference;
     let mut prefix = 0;
     for level in (0..=PROOF_LEVEL_MAX).rev() {
-        let page = read_node(pager, reference, level, prefix, root.generation)?;
         let index = usize::from(((page_id >> (u32::from(level) * 8)) & 255) as u8);
+        let entry = read_entry(pager, reference, level, prefix, root.generation, index)?;
         if level == 0 {
-            let digest: [u8; 32] = page.content()[page_proof::entry_range(level, index)]
-                .try_into()
-                .expect("leaf digest field");
+            let digest: [u8; 32] = entry[..32].try_into().expect("leaf digest field");
             if digest == [0; 32] {
                 return Err(invalid(page_id, "page is outside this tree's ownership"));
             }
             return Ok(digest);
         }
-        reference = child_reference(&page, level, index)?;
+        reference = page_proof::decode_reference(&entry)
+            .ok_or_else(|| invalid(reference.page_id, "invalid child reference"))?;
         if reference.page_id == 0 {
             return Err(invalid(page_id, "page is outside this tree's ownership"));
         }
@@ -88,6 +102,14 @@ fn verified_page<P: PageStore>(
         ));
     }
     Ok(page)
+}
+
+fn verify_stored_page<P: PageStore>(
+    pager: &P,
+    root: PageProofRoot,
+    page_id: u32,
+) -> Result<(), PagerError> {
+    verified_page(pager, root, page_id).map(|_| ())
 }
 
 /// Copy a path on its first mutation after sealing. Later edits reuse private
@@ -150,8 +172,9 @@ fn update_path<P: PageStore>(
         if level != 0 {
             let index = usize::from(((page_id >> (u32::from(level) * 8)) & 255) as u8);
             if reference.page_id != 0 {
-                let page = read_node(pager, reference, level, prefix, root.generation)?;
-                reference = child_reference(&page, level, index)?;
+                let entry = read_entry(pager, reference, level, prefix, root.generation, index)?;
+                reference = page_proof::decode_reference(&entry)
+                    .ok_or_else(|| invalid(reference.page_id, "invalid child reference"))?;
             }
             prefix = page_proof::child_prefix(prefix, level, index);
         }
@@ -280,17 +303,44 @@ impl<P: PageStore> TreePageStore<P> {
     }
 
     pub(super) fn proof_pages(&self) -> Result<Vec<u32>, PagerError> {
+        Ok(self.page_inventory(false)?.unwrap_or_default())
+    }
+
+    /// A sealed map proves ownership independently of damaged data images.
+    /// Reading it cannot clear the mutation fence or authorize a new seal.
+    pub(super) fn published_owned_pages(&self) -> Result<Option<Vec<u32>>, PagerError> {
+        self.page_inventory(true)
+    }
+
+    fn page_inventory(&self, include_data: bool) -> Result<Option<Vec<u32>>, PagerError> {
         let Some(proof) = &self.proof else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
         let state = proof.read();
-        self.available()?;
+        if include_data {
+            if !state.sealed {
+                return Err(invalid(
+                    0,
+                    "ownership inventory requires a sealed generation",
+                ));
+            }
+        } else {
+            self.available()?;
+        }
         let mut pages = Vec::new();
         if state.root.reference.page_id == 0 {
-            return Ok(pages);
+            return Ok(Some(pages));
         }
+        let count = self.inner.page_count()?;
+        let mut seen = std::collections::HashSet::new();
         let mut pending = vec![(state.root.reference, PROOF_LEVEL_MAX, 0)];
         while let Some((reference, level, prefix)) = pending.pop() {
+            if reference.page_id == 0
+                || reference.page_id >= count
+                || !seen.insert(reference.page_id)
+            {
+                return Err(invalid(reference.page_id, "invalid proof node ownership"));
+            }
             let page = read_node(
                 self.inner.as_ref(),
                 reference,
@@ -310,9 +360,19 @@ impl<P: PageStore> TreePageStore<P> {
                         ));
                     }
                 }
+            } else if include_data {
+                for index in 0..page_proof::PROOF_FANOUT {
+                    if page.content()[page_proof::entry_range(level, index)] != [0; 32] {
+                        let id = page_proof::child_prefix(prefix, level, index);
+                        if id == 0 || id >= count || !seen.insert(id) {
+                            return Err(invalid(id, "invalid proven data ownership"));
+                        }
+                        pages.push(id);
+                    }
+                }
             }
         }
-        Ok(pages)
+        Ok(Some(pages))
     }
 }
 
@@ -333,7 +393,7 @@ impl<P: PageStore> PageStore for TreePageStore<P> {
         let mut state = proof.write();
         self.available()?;
         let result = (|| {
-            verified_page(self.inner.as_ref(), state.root, page_id)?;
+            verify_stored_page(self.inner.as_ref(), state.root, page_id)?;
             if page.page_id() != page_id {
                 return Err(invalid(page_id, "write address mismatch"));
             }
@@ -372,7 +432,7 @@ impl<P: PageStore> PageStore for TreePageStore<P> {
         let mut state = proof.write();
         self.available()?;
         let result = (|| {
-            verified_page(self.inner.as_ref(), state.root, page_id)?;
+            verify_stored_page(self.inner.as_ref(), state.root, page_id)?;
             state.set(self.inner.as_ref(), page_id, [0; 32])?;
             self.inner.free_page(page_id)
         })();

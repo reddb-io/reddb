@@ -8,6 +8,7 @@ pub(super) struct Catalog {
     retired_roots: Vec<u32>,
     deferred_pages: Vec<u32>,
     pub resume: Option<f::native_resume::CatalogResume>,
+    proofs: Option<Arc<f::page_proof::CatalogProofs>>,
 }
 impl Catalog {
     pub fn has_cross_references(&self) -> bool {
@@ -99,6 +100,15 @@ impl Catalog {
         let retired_roots = f::decode_native_paged_retired_trees(&data, &mut position)?;
         let deferred_pages = f::decode_native_paged_deferred_pages(&data, &mut position)?;
         let epoch = f::native_store::decode_native_paged_ownership_epoch(&data, &mut position)?;
+        let proofs = f::page_proof::decode_catalog(&data, &mut position)?.map(Arc::new);
+        ensure(
+            proofs.is_none()
+                || (source.header.required_capabilities
+                    & f::file_format::FILE_CAPABILITY_TREE_PROOFS
+                    != 0
+                    && reference.page_id != 0),
+            "tree proofs require independent catalog authority",
+        )?;
         let resume = f::native_resume::decode_catalog_resume(&data)?;
         if let Some(resume) = &resume {
             let mut canonical = Vec::new();
@@ -113,6 +123,39 @@ impl Catalog {
             data[position..].iter().all(|byte| *byte == 0),
             "unknown catalog extension",
         )?;
+        if let Some(proofs) = &proofs {
+            let live = roots
+                .iter()
+                .map(|root| root.root_page)
+                .chain(
+                    resume
+                        .iter()
+                        .flat_map(|resume| resume.collections.values())
+                        .flat_map(|state| {
+                            state.key_index_root.into_iter().chain(
+                                state
+                                    .secondary_indices
+                                    .values()
+                                    .map(|index| index.root_page),
+                            )
+                        }),
+                )
+                .filter(|root| *root != 0)
+                .collect::<std::collections::BTreeSet<_>>();
+            ensure(
+                live.iter().all(|root| proofs.contains_key(root)),
+                "live tree has no generation proof",
+            )?;
+            ensure(
+                proofs.iter().all(|(root, proof)| {
+                    (live.contains(root) || retired_roots.contains(root))
+                        && *root < source.header.page_count
+                        && proof.reference.page_id < source.header.page_count
+                }),
+                "unowned catalog tree proof",
+            )?;
+        }
+        source.install_tree_proofs(proofs.clone())?;
         Ok(Self {
             header,
             roots,
@@ -121,6 +164,7 @@ impl Catalog {
             retired_roots,
             deferred_pages,
             resume,
+            proofs,
         })
     }
 
@@ -128,7 +172,7 @@ impl Catalog {
     /// ownership proof. Never treat arbitrary unclassified pages as garbage.
     pub fn claim_retired(&self, source: &Arc<Source>) -> Result<()> {
         for root in &self.retired_roots {
-            let tree = BTree::with_root(Arc::clone(source), *root);
+            let tree = source.tree(*root, false)?;
             for page in tree.retired_pages()? {
                 source.claim(page)?;
             }
@@ -185,6 +229,14 @@ impl Catalog {
     }
 
     pub fn encode(&self, roots: &BTreeMap<u32, u32>) -> Result<Vec<u8>> {
+        self.encode_with_proofs(roots, self.proofs.as_deref())
+    }
+
+    pub fn encode_with_proofs(
+        &self,
+        roots: &BTreeMap<u32, u32>,
+        proofs: Option<&f::page_proof::CatalogProofs>,
+    ) -> Result<Vec<u8>> {
         let remap = |root: u32| -> Result<u32> {
             if root == 0 {
                 Ok(0)
@@ -218,6 +270,9 @@ impl Catalog {
         f::encode_native_paged_deferred_pages(&mut data, &[])?;
         if let Some(epoch) = self.epoch {
             f::native_store::encode_native_paged_ownership_epoch(&mut data, epoch)?;
+        }
+        if let Some(proofs) = proofs {
+            f::page_proof::encode_catalog(&mut data, proofs)?;
         }
         if let Some(mut resume) = self.resume.clone() {
             for state in resume.collections.values_mut() {
@@ -257,6 +312,7 @@ mod tests {
 
     fn duplicate_config_catalog() -> Catalog {
         Catalog {
+            proofs: None,
             header: f::NativePagedMetadataHeader {
                 format_version: 11,
                 collection_count: 3,

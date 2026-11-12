@@ -147,3 +147,46 @@ counterexample: six passed, including the three catalog publication crash phases
 test failed by returning `committed-1`. The interrupted DWB recovery I/O matrix passed separately.
 The subsequent split-stack change does not integrate runtime tree proofs. These results qualify the
 catalog and engine prerequisites, not closure of the remaining SQL generation defect.
+
+## Native integration and offline recovery qualification
+
+At `4f1228b59`, native collection, key and secondary trees restore their independently sealed proof
+descriptors. The original SQL reused-page regression passed. The eight-test runtime page-integrity
+round subsequently passed, including catalog publication crashes, DWB repair and the resident native
+API journey. The resident journey commits an insertion and deletion, kills the process before
+checkpoint, verifies that the sealed base image stayed unchanged, and requires exact rows, another
+write, checkpoint and cold reopen. Both subprocess phases have a 60-second progress limit. This is
+the native resident `UnifiedStore` API; it does not qualify the separate embedded packaging format.
+
+The expanded 48-table catalog crash journey exposed another stack overflow. Proof descent now copies
+only the selected compact reference out of its page-reading helper instead of retaining 16-KiB pages
+in the caller's stack frame. The unchanged expanded journey passed in 78.04 seconds.
+
+Offline compaction and recovery now restore the source's catalog proofs and build fresh proofs for
+relocated output trees. A discarded index's sealed map can enumerate its pages independently of the
+damaged index images. Every map node still has to pass its digest, prefix, level and generation checks;
+page aliases and out-of-range ownership fail. This read-only inventory cannot clear a failed mutation
+fence or authorize sealing a modified tree. Authoritative collection records are verified as before.
+
+All 56 offline integration tests passed across three selections: 52 in the main round (including
+the WAL-over-256-MiB journey), three physical-WAL tests, and the new valid-CRC index recovery journey.
+HASH and BTREE images with a valid CRC but the wrong content must be detected and rebuilt from verified
+rows, preserve the source bytes, return exact indexed values and survive a second cold reopen.
+Corrupting the independent proof map as well must prevent publication.
+
+Physical-redo fixtures now seal the expected replacement generation independently, leave its home
+page at the previous image, and require committed WAL to repair it while preserving XID/identity floors
+and secondary-index parity. A separate negative test supplies a committed, CRC-valid WAL image without
+matching published tree authority: recovery must reject it and retain the source and WAL unchanged.
+Torn-tail fixtures retain their final catalog page in DWB/WAL instead of relocating data behind the
+proof map's back.
+
+After these ownership changes, all 51 portable engine integration cases passed in 187.48 seconds.
+`cargo check --locked -p reddb-io-server -j1` also passed. The four existing atomic-API deprecation
+warnings remain outside this change.
+
+This remains a draft qualification. A complete old DWB frame still needs an end-to-end rejection
+regression and recovery-source authority before merge; a frame's own CRC is not proof of freshness.
+Legacy preparation and retirement also need their full migration/reuse journey. None of these local
+results closes the other promotion, cross-pod retry, concurrent UNIQUE rebuild, backup or multimodel
+resilience scenarios.

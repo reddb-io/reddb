@@ -5,6 +5,22 @@ impl<P: PageStore> BTree<P> {
         Arc::strong_count(&self.retirement_pin) != 1
     }
 
+    /// Enumerate a sealed generation's authenticated ownership without reading
+    /// its data. Recovery may discard these pages even when their images fail
+    /// verification. This does not certify the contents of any data page.
+    pub fn published_owned_pages(&self) -> BTreeResult<Option<Vec<u32>>> {
+        let pages = self.pager.published_owned_pages()?;
+        if let Some(pages) = &pages {
+            let root = self.root_page_id();
+            if root != 0 && !pages.contains(&root) {
+                return Err(BTreeError::Corrupted(
+                    "data root is outside its published ownership".into(),
+                ));
+            }
+        }
+        Ok(pages)
+    }
+
     /// Enumerate a retired generation before changing the allocator. Never
     /// follow leaf sibling links as additional ownership edges: interior
     /// children already own every leaf. Validate overflow chains as well.

@@ -2556,6 +2556,22 @@ impl UnifiedStore {
                         false,
                     )?));
                 }
+                if proofs.as_ref().is_some_and(|proofs| {
+                    proofs.iter().any(|(root, proof)| {
+                        let owns = |id| {
+                            live_roots.contains(id)
+                                || already_retired.contains(id)
+                                || empty_duplicate_roots.contains(id)
+                        };
+                        !owns(root) || owns(&proof.reference.page_id)
+                    })
+                }) {
+                    return Err(page_integrity(
+                        1,
+                        None,
+                        "unowned or aliased tree generation proof",
+                    ));
+                }
                 let deferred = reddb_file::decode_native_paged_deferred_pages(content, &mut pos)
                     .map_err(|e| StoreError::Serialization(e.to_string()))?;
                 if deferred

@@ -141,7 +141,7 @@ pub fn salvage_paged_collections(
         )?;
         let skipped_pages = match guard.raw_page(finding.root_page, true) {
             Ok(_) => {
-                let tree = BTree::with_root(Arc::clone(&guard), finding.root_page);
+                let tree = guard.tree(finding.root_page, true)?;
                 tree.visit_recoverable_leaves(
                     |id| {
                         guard.claim(id).map_err(|error| {

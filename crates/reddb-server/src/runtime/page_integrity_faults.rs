@@ -8,6 +8,9 @@ use std::path::Path;
 #[path = "catalog_publication_faults.rs"]
 mod catalog_publication_faults;
 
+#[path = "resident_generation_faults.rs"]
+mod resident_generation_faults;
+
 fn open(path: &Path) -> RedDBResult<RedDBRuntime> {
     let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
         RedDBRuntime::with_options(
@@ -57,10 +60,18 @@ fn collection_root(path: &Path, collection: &str) -> (u32, Page) {
     )
     .expect("read fixture roots");
     let catalog = pager.read_manifest_page().expect("catalog");
-    let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
-        .expect("catalog trailer")
-        .expect("resume roots");
-    let root = resume.collections[collection].root_page;
+    let header = reddb_file::decode_native_paged_metadata_header(catalog.content())
+        .expect("catalog header")
+        .expect("native catalog");
+    let mut position = reddb_file::METADATA_HEADER_BYTES;
+    let root = (0..header.collection_count)
+        .map(|_| {
+            reddb_file::decode_native_paged_collection_root(catalog.content(), &mut position)
+                .expect("collection root")
+        })
+        .find(|root| root.collection == collection)
+        .expect("fixture collection")
+        .root_page;
     let page = pager.read_page(root).expect("healthy collection leaf");
     assert_eq!(page.page_type().expect("page type"), PageType::BTreeLeaf);
     page.verify_checksum().expect("fixture checksum");
