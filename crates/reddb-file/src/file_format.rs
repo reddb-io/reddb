@@ -42,8 +42,7 @@ pub const FILE_CAPABILITIES_SUPPORTED: u64 =
 /// Whether a pre-capability format version implies disk residency.
 /// Capability-aware callers must use [`DatabaseHeader::requires_disk_residency`].
 pub fn page_format_is_disk_resident(version: u32) -> bool {
-    version >= PAGE_DISK_RESIDENCY_FILE_VERSION
-        && version < PAGE_REQUIRED_CAPABILITIES_FILE_VERSION
+    (PAGE_DISK_RESIDENCY_FILE_VERSION..PAGE_REQUIRED_CAPABILITIES_FILE_VERSION).contains(&version)
         && version != PAGE_RESULT_CACHE_FILE_VERSION
 }
 
