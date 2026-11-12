@@ -220,7 +220,7 @@ fn checksum_valid_old_image_of_reused_collection_page_is_rejected() {
         assert_eq!(updated.result.records.len(), 1);
         assert_eq!(
             updated.result.records[0].get("payload"),
-            Some(&Value::text(&payload))
+            Some(&Value::text(payload.as_str()))
         );
         runtime
             .graceful_shutdown(false)
