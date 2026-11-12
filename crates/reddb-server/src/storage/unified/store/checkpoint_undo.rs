@@ -195,7 +195,9 @@ mod tests {
     fn overflow_checkpoint_undo_survives_interrupted_recovery_and_publication() {
         let config = || UnifiedStoreConfig::default().with_page_cache_slots(4);
         if let Some(path) = std::env::var_os(CHILD) {
-            if std::env::var_os("REDDB_TEST_PAGE_UNDO_IO").is_some() {
+            if std::env::var_os("REDDB_TEST_PAGE_UNDO_IO").is_some()
+                || std::env::var_os("REDDB_TEST_PAGE_REPLAY_IO").is_some()
+            {
                 let error = match UnifiedStore::open_with_config(path, config()) {
                     Ok(_) => panic!("undo recovery must propagate its I/O failure"),
                     Err(error) => error,
@@ -422,6 +424,57 @@ mod tests {
                         wal,
                         "failed undo must not consume its before-images"
                     );
+                }
+                let replay_pages = std::fs::read(&path).expect("replay fixture pages");
+                let replay_wal = std::fs::read(&wal_path).expect("replay fixture WAL");
+                for fault in ["empty", "partial", "sync"] {
+                    let replay_directory = tempfile::tempdir().expect("isolated replay fixture");
+                    let replay_path = replay_directory.path().join("replay.rdb");
+                    let replay_wal_path = reddb_file::layout::unified_wal_path(&replay_path);
+                    std::fs::create_dir_all(replay_wal_path.parent().expect("WAL parent"))
+                        .expect("replay support directory");
+                    std::fs::write(&replay_path, &replay_pages).expect("copy replay pages");
+                    std::fs::write(&replay_wal_path, &replay_wal).expect("copy replay WAL");
+                    for _ in 0..2 {
+                        let output = std::process::Command::new(
+                            std::env::current_exe().expect("test binary"),
+                        )
+                        .args(["--exact", TEST, "--nocapture"])
+                        .env(CHILD, &replay_path)
+                        .env("REDDB_TEST_PAGE_REPLAY_IO", fault)
+                        .output()
+                        .expect("replay publication I/O child");
+                        assert_eq!(
+                            output.status.code(),
+                            Some(196),
+                            "replay/{fault}: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                        assert!(
+                            std::fs::read(&replay_wal_path)
+                                .expect("retained replay WAL")
+                                .starts_with(&replay_wal),
+                            "replay may append ownership evidence but must retain committed WAL"
+                        );
+                    }
+                    for _ in 0..2 {
+                        let recovered = UnifiedStore::open_with_config(&replay_path, config())
+                            .expect("recover interrupted replay publication");
+                        assert_eq!(recovered.get_collection("rows").expect("rows").count(), 32);
+                        for id in 1..=32 {
+                            assert_eq!(
+                                recovered
+                                    .get("rows", EntityId::new(id))
+                                    .expect("replayed row")
+                                    .data
+                                    .as_row()
+                                    .expect("row")
+                                    .columns,
+                                row(id, 2).data.as_row().expect("expected row").columns
+                            );
+                        }
+                        recovered.persist().expect("publish recovered replay");
+                    }
                 }
                 for _ in 0..2 {
                     let result = run(true);

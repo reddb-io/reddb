@@ -34,8 +34,11 @@ absent, rejects a duplicate UNIQUE key, accepts a new insert, checkpoints, verif
 indexes, and reopens again. No host disk is filled.
 
 The checkpoint-undo journey additionally interrupts restoration of WAL before-images with empty
-and partial writes and a sync failure, checks that the complete WAL remains unchanged, then
-interrupts recovery twice more and verifies every large row through three recovery/persist cycles.
+and partial writes and a sync failure, checking that the complete WAL remains unchanged. Isolated
+copies then fail twice during publication of the logically replayed trees for the same three I/O
+faults. Replay may append ownership records, but must retain the original committed WAL prefix.
+Each copy must recover all large rows and survive another persist/reopen. The original fixture
+also interrupts undo twice more and verifies every large row through three recovery/persist cycles.
 
 These are native process-death tests with the OS page cache retained. They supplement the
 power-loss models in SimVfs; they do not emulate a dishonest storage device or a machine power cut.
