@@ -409,10 +409,13 @@ impl<V: Vfs> WalWriter<V> {
 
     fn sync_flushed_file(&mut self) -> io::Result<()> {
         let method = self.next_sync_method();
-        match method {
-            WalSyncMethod::Data => self.file.get_ref().sync_data()?,
-            WalSyncMethod::All => self.file.get_ref().sync_all()?,
-        }
+        let result = match method {
+            WalSyncMethod::Data => self.file.get_ref().sync_data(),
+            WalSyncMethod::All => self.file.get_ref().sync_all(),
+        };
+        // A failed durability barrier has an uncertain outcome. Keep the
+        // writer fenced even if a later sync would succeed.
+        self.file.record_write_result(result)?;
         self.mark_sync_complete(method, self.current_lsn);
         Ok(())
     }

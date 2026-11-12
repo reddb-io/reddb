@@ -12,16 +12,22 @@ returns `StorageFull` after zero bytes or a partial prefix. It exercises both
 buffered and larger direct WAL writes. After the first failure, appending,
 syncing and truncating must fail, the durable LSN must not advance, and dropping
 the writer must leave the WAL unchanged even after capacity returns.
+An additional sync-failure case verifies that an uncertain full batch is retained
+without advancing the acknowledged durable LSN, and the writer stays fenced.
 
 The runtime test uses a test-only, per-writer fault at the real WAL buffer flush.
 It runs SQL against a persistent PrimaryReplicaDev database with HASH and BTREE
-indexes, in Strict and WalDurableGrouped modes. It checkpoints the baseline,
-commits an MVCC update without checkpointing, then fails an INSERT after zero or
-17 bytes. It checks reads and rejects another write and checkpoint in the failed
-process. After dropping the runtime and exiting the child process, cold recovery
+indexes, in Strict and WalDurableGrouped modes, using both the default resident
+factory and the disk-backed qualification factory. Across these 16 cases it
+checkpoints the baseline, commits an MVCC update without checkpointing, then fails
+single-row and multi-row INSERTs after zero or 17 bytes. It checks reads and rejects
+another write and checkpoint in the failed process. After dropping the runtime
+and exiting the child process, cold recovery
 must retain the confirmed update and exclude the incomplete INSERT. Retrying on
 the reopened database, checkpointing, checking persisted index completeness and
 reopening again must preserve the exact rows.
+Failed insert publication also removes the staged resident rows: a live scan
+must not see an INSERT which returned a WAL error.
 
 A failed `write_all` can have written an unknown prefix. The writer is therefore
 fenced until close/reopen, even if free space becomes available immediately.
@@ -37,7 +43,7 @@ and require recovery, rather than claiming that restoring space alone resolves
 an unknown partial-write position.
 
 This does not establish fault coverage for data-page writes, checkpoint metadata
-publication, fsync failures, embedded single-file WAL exhaustion, or all concurrent
+publication, runtime recovery after fsync failures, embedded single-file WAL exhaustion, or all concurrent
 writer interleavings. Those need their own injected boundaries. Nor does it imply
 that every failed commit is absent: a full write followed by a failed durability
 acknowledgement can have an uncertain outcome, which these partial-write cases do

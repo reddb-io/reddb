@@ -1657,7 +1657,7 @@ impl StoreCommitCoordinator {
                     let _ = target_lsn;
                 }
                 Err(err) => {
-                    guard.last_error = Some(err.to_string());
+                    guard.last_error = Some(format!("WAL failed; reopen required: {err}"));
                     // A failed write may have left a partial batch. Do not
                     // retry it in a busy loop or later acknowledge its LSN.
                     cond.notify_all();

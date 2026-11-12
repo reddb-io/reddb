@@ -673,17 +673,25 @@ fn disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry() {
     const CHILD_PATH: &str = "REDDB_DISK_FULL_PATH";
     const CHILD_MODE: &str = "REDDB_DISK_FULL_MODE";
     const CHILD_BYTES: &str = "REDDB_DISK_FULL_BYTES";
-    let open = |path: std::path::PathBuf, mode| {
-        let runtime = RedDBRuntime::with_options(
-            RedDBOptions::persistent(path)
-                .with_memory_budget(64 * 1024 * 1024)
-                .with_bounded_disk_residency(true)
-                .with_storage_profile(
-                    crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
-                )
-                .expect("profile")
-                .with_durability_mode(mode),
-        )
+    const CHILD_BATCH: &str = "REDDB_DISK_FULL_BATCH";
+    const CHILD_BOUNDED: &str = "REDDB_DISK_FULL_BOUNDED";
+    let open = |path: std::path::PathBuf, mode, bounded| {
+        let create = || {
+            RedDBRuntime::with_options(
+                RedDBOptions::persistent(path)
+                    .with_memory_budget(64 * 1024 * 1024)
+                    .with_storage_profile(
+                        crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+                    )
+                    .expect("profile")
+                    .with_durability_mode(mode),
+            )
+        };
+        let runtime = if bounded {
+            crate::storage::RedDB::with_disk_residency_for_qualification(create)
+        } else {
+            create()
+        }
         .expect("open runtime");
         runtime
             .background_tasks
@@ -714,10 +722,20 @@ fn disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry() {
             .execute_query("SELECT id FROM disk_full_rows")
             .expect("scan rows");
         assert_eq!(result.result.records.len(), if retried { 2 } else { 1 });
-        let result = runtime
-            .execute_query("SELECT id FROM disk_full_rows WHERE id = 2")
-            .expect("new row by HASH");
-        assert_eq!(result.result.records.len(), usize::from(retried));
+        for predicate in ["id = 2", "org_id >= 'org-b'"] {
+            let result = runtime
+                .execute_query(&format!(
+                    "SELECT id,payload FROM disk_full_rows WHERE {predicate}"
+                ))
+                .expect("retried row by index");
+            assert_eq!(result.result.records.len(), usize::from(retried));
+            if retried {
+                assert_eq!(
+                    result.result.records[0].get("payload"),
+                    Some(&Value::text("retry"))
+                );
+            }
+        }
     };
     if let Some(path) = std::env::var_os(CHILD_PATH) {
         let mode = if std::env::var(CHILD_MODE).expect("mode") == "strict" {
@@ -725,7 +743,8 @@ fn disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry() {
         } else {
             DurabilityMode::WalDurableGrouped
         };
-        let runtime = open(path.into(), mode);
+        let bounded = std::env::var(CHILD_BOUNDED).expect("residency") == "true";
+        let runtime = open(path.into(), mode, bounded);
         for sql in [
             "BEGIN",
             "UPDATE disk_full_rows SET payload = 'committed' WHERE id = 1",
@@ -739,7 +758,11 @@ fn disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry() {
             .parse()
             .expect("byte count");
         runtime.db().store().test_fail_wal_flush_after(bytes);
-        let sql = "INSERT INTO disk_full_rows (id,org_id,payload) VALUES (2,'org-b','retry')";
+        let sql = if std::env::var(CHILD_BATCH).expect("batch mode") == "true" {
+            "INSERT INTO disk_full_rows (id,org_id,payload) VALUES (2,'org-b','retry'),(3,'org-c','rejected')"
+        } else {
+            "INSERT INTO disk_full_rows (id,org_id,payload) VALUES (2,'org-b','retry')"
+        };
         let error = runtime
             .execute_query(sql)
             .err()
@@ -749,6 +772,7 @@ fn disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry() {
         // The one-shot fault is gone, but this writer cannot safely continue.
         assert!(runtime.execute_query(sql).is_err());
         assert!(runtime.checkpoint().is_err());
+        assert_rows(&runtime, false);
         // Exercise Drop as well: it must not flush the rejected batch. Exiting
         // then ensures the parent validates a genuinely cold recovery.
         drop(runtime);
@@ -759,11 +783,14 @@ fn disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry() {
         ("strict", DurabilityMode::Strict),
         ("grouped", DurabilityMode::WalDurableGrouped),
     ] {
-        for bytes in [0, 17] {
+        for (bytes, batch, bounded) in [false, true].into_iter().flat_map(|bounded| {
+            [(0, false), (17, false), (0, true), (17, true)]
+                .map(|(bytes, batch)| (bytes, batch, bounded))
+        }) {
             let directory = tempfile::tempdir().expect("disk full fixture");
             let path = directory.path().join("disk-full.rdb");
             {
-                let runtime = open(path.clone(), mode);
+                let runtime = open(path.clone(), mode, bounded);
                 for sql in [
                     "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
                     "CREATE TABLE disk_full_rows (id INT, org_id TEXT, payload TEXT)",
@@ -780,16 +807,18 @@ fn disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry() {
                 .env(CHILD_PATH, &path)
                 .env(CHILD_MODE, mode_name)
                 .env(CHILD_BYTES, bytes.to_string())
+                .env(CHILD_BATCH, batch.to_string())
+                .env(CHILD_BOUNDED, bounded.to_string())
                 .output().expect("disk full child");
             assert_eq!(
                 output.status.code(),
                 Some(197),
-                "{mode_name}/{bytes}: {}\n{}",
+                "{mode_name}/{bytes}/batch={batch}/bounded={bounded}: {}\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
             {
-                let runtime = open(path.clone(), mode);
+                let runtime = open(path.clone(), mode, bounded);
                 assert_rows(&runtime, false);
                 runtime
                     .execute_query(
@@ -803,7 +832,7 @@ fn disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry() {
                     .expect("index integrity")
                     .is_empty());
             }
-            let runtime = open(path.clone(), mode);
+            let runtime = open(path.clone(), mode, bounded);
             assert_rows(&runtime, true);
         }
     }

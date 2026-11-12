@@ -26,6 +26,7 @@ struct State {
     bytes: Vec<u8>,
     events: Vec<Event>,
     write_budget: Option<usize>,
+    sync_full: bool,
 }
 
 #[derive(Debug)]
@@ -112,6 +113,12 @@ impl VfsFile for RecordingFile {
     }
 
     fn sync_all(&self) -> io::Result<()> {
+        if self.state.lock().expect("VFS state").sync_full {
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "disk full at sync",
+            ));
+        }
         self.state
             .lock()
             .expect("recording VFS lock should not be poisoned")
@@ -252,4 +259,31 @@ fn disk_full_wal_never_retries_a_partial_batch_or_flushes_it_on_drop() {
             "drop must not retry an unacknowledged partial batch"
         );
     }
+}
+
+#[test]
+fn disk_full_sync_fences_the_writer_without_claiming_the_batch_is_absent() {
+    let vfs = RecordingVfs::default();
+    let mut writer = WalWriter::open_with_vfs(vfs.clone(), Path::new("wal")).expect("open WAL");
+    let durable = writer.durable_lsn();
+    let record = WalRecord::Commit { tx_id: 1 }.encode();
+    writer.append_bytes(&record).expect("buffer commit");
+    vfs.state.lock().expect("VFS state").sync_full = true;
+    assert_eq!(
+        writer.sync().expect_err("failed sync").kind(),
+        io::ErrorKind::StorageFull
+    );
+    assert_eq!(writer.durable_lsn(), durable);
+    let uncertain = vfs.state.lock().expect("VFS state").bytes.clone();
+    assert_eq!(
+        &uncertain[durable as usize..],
+        record,
+        "the full batch can be on disk despite the failed acknowledgement"
+    );
+    vfs.state.lock().expect("VFS state").sync_full = false;
+    assert!(writer.sync().is_err());
+    assert!(writer.append(&WalRecord::Commit { tx_id: 2 }).is_err());
+    assert!(writer.truncate().is_err());
+    drop(writer);
+    assert_eq!(vfs.state.lock().expect("VFS state").bytes, uncertain);
 }

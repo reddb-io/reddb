@@ -915,7 +915,20 @@ impl UnifiedStore {
                 }]
             })
             .unwrap_or_default();
-        self.finish_paged_write(actions)?;
+        if let Err(error) = self.finish_paged_write(actions) {
+            // Rows are already installed in the resident segment. A failed
+            // WAL publication must not leave a successful-looking scan.
+            for id in &ids {
+                self.apply_replayed_action(
+                    &StoreWalAction::DeleteEntityRecord {
+                        collection: collection.to_string(),
+                        entity_id: id.raw(),
+                    },
+                    true,
+                )?;
+            }
+            return Err(error);
+        }
 
         if trace {
             tracing::debug!(
@@ -943,7 +956,7 @@ impl UnifiedStore {
     ) -> Result<EntityId, StoreError> {
         let collection = Self::canonical_collection(collection);
         // Include the WAL append in the checkpoint publication fence.
-        let _publication = self.vault_publication_lock.lock();
+        let mut publication = Some(self.vault_publication_lock.lock());
         let manager = self.get_or_create_collection(collection);
         let mut entity = entity;
         entity.canonicalize_system_collection_names();
@@ -1053,11 +1066,28 @@ impl UnifiedStore {
             if registry_dirty {
                 self.mark_paged_registry_dirty();
             }
-            if let Some(mut pending) = self.enqueue_grouped_actions(&actions)? {
-                drop(_publication);
-                self.complete_grouped_actions(&mut pending, &actions)?;
-            } else {
-                self.finish_paged_write(actions)?;
+            // Retain an embedded failure ticket until rollback completes, so
+            // a checkpoint cannot publish the staged row in between.
+            let mut pending = None;
+            let persisted = (|| {
+                pending = self.enqueue_grouped_actions(&actions)?;
+                if let Some(pending) = pending.as_mut() {
+                    drop(publication.take());
+                    self.complete_grouped_actions(pending, &actions)
+                } else {
+                    self.finish_paged_write(actions)
+                }
+            })();
+            if let Err(error) = persisted {
+                let _publication = self.vault_publication_lock.lock();
+                self.apply_replayed_action(
+                    &StoreWalAction::DeleteEntityRecord {
+                        collection: collection.to_string(),
+                        entity_id: id.raw(),
+                    },
+                    true,
+                )?;
+                return Err(error);
             }
         } else {
             self.note_in_memory_result_mutation(collection)?;
