@@ -464,8 +464,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let (_, image) = self.newest_superblock()?;
         let header = reddb_file::decode_database_header(&image)
             .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
-        if header.is_recovery_read_only() && !self.config.read_only
-        {
+        if header.is_recovery_read_only() && !self.config.read_only {
             return Err(PagerError::InvalidDatabase(
                 "recovered database is read-only; export verified data into a new store".into(),
             ));
@@ -1741,7 +1740,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         Ok(pager_io::clear_dwb_zone(&mut *file)?)
     }
 
-    /// Read the internal manifest page (page 1), the zone the superblock roots.
+    /// Read the sealed catalog root, or page 1 for a legacy bootstrap header.
     ///
     /// ADR 0074 §2: manifest corruption fails the open didactically, naming the
     /// zone — it never falls back to a sidecar and never returns garbage.

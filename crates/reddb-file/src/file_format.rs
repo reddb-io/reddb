@@ -40,9 +40,10 @@ pub const FILE_CAPABILITY_CATALOG_ROOT: u64 = 1 << 2;
 /// Recovery output whose identity high-water marks are unknown cannot admit writers.
 pub const FILE_CAPABILITY_RECOVERY_READ_ONLY: u64 = 1 << 3;
 /// Capabilities understood by this reader. Unknown mandatory bits are fatal.
-pub const FILE_CAPABILITIES_SUPPORTED: u64 =
-    FILE_CAPABILITY_TEMPERATURE | FILE_CAPABILITY_DISK_RESIDENCY | FILE_CAPABILITY_CATALOG_ROOT
-        | FILE_CAPABILITY_RECOVERY_READ_ONLY;
+pub const FILE_CAPABILITIES_SUPPORTED: u64 = FILE_CAPABILITY_TEMPERATURE
+    | FILE_CAPABILITY_DISK_RESIDENCY
+    | FILE_CAPABILITY_CATALOG_ROOT
+    | FILE_CAPABILITY_RECOVERY_READ_ONLY;
 
 /// Whether a pre-capability format version implies disk residency.
 /// Capability-aware callers must use [`DatabaseHeader::requires_disk_residency`].

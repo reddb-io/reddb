@@ -987,7 +987,11 @@ fn compact_paged_inner(
     target.update_physical_header(physical)?;
     let capabilities = (source.header.required_capabilities
         & !f::file_format::FILE_CAPABILITY_RECOVERY_READ_ONLY)
-        | if source.header.requires_disk_residency() { f::FILE_CAPABILITY_DISK_RESIDENCY } else { 0 };
+        | if source.header.requires_disk_residency() {
+            f::FILE_CAPABILITY_DISK_RESIDENCY
+        } else {
+            0
+        };
     if capabilities != 0 {
         target.fence_required_capabilities(capabilities)?;
     }

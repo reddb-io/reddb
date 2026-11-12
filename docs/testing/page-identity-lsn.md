@@ -51,6 +51,28 @@ misdirected/lost-write fault model in [ADR 0074](../../.red/adr/0074-storage-fau
 Resource sketch: identity adds one integer comparison after a disk read; nonzero LSNs additionally
 consult a durable boundary. Neither path scans the database or allocates a page inventory.
 
+## Independent catalog publication
+
+The follow-up writes catalog generations to newly allocated pages. Both superblock copies carry
+the new root address and a digest over the complete physical catalog chain, including continuation
+links and page identities. The required catalog-root capability is fenced before dependent bytes.
+Page 1 remains the bootstrap for legacy files; a capability-aware reader follows the sealed root.
+
+All new homes cross their durability barrier before publication. Both fallback headers forget the
+old catalog before its pages are released. Recovery also fences both headers before releasing an
+older catalog after a crash between the two header writes. The SQL crash journey covers publication
+before either header, after both, and after only one followed by another recovery interruption and
+damage to the newest header. Cold HASH/BTREE reads, exact rows, UNIQUE enforcement, new writes and
+another checkpoint/reopen are the required outcomes.
+
+Offline reconstruction uses the same catalog publisher and validates the source catalog digest.
+Recovered output with unknown identity high-water marks retains its read-only fence through an
+explicit required capability; changing catalog formats cannot silently re-enable writers. See
+[ADR 0079](../../.red/adr/0079-fenced-legacy-recovery-output.md).
+
+Resource sketch: publication adds two sealed-header writes and their existing fsync barriers. It
+hashes the bounded catalog chain while encoding/reading it; it does not scan collection data at boot.
+
 ## Generation proof implementation in progress
 
 The follow-up adds an authenticated page map to the shared B-tree. Its persisted byte contract is
@@ -73,6 +95,12 @@ A complete known-current DWB image must restore the expected page and survive an
 The test also checks that an unchanged page remains readable through the prior proof path after a
 copy-on-first-mutation update. This is a proof-path preservation check, not MVCC over mutable pages.
 
+Deleting the last row retires the proof map through the same deferred fence before publishing a
+zero root. The lifecycle regression uses an overflow value, cold reopens the populated tree, deletes
+it, publishes and releases its complete ownership, then reopens empty and creates the tree again.
+Repeated cycles must reuse pages without growing the file. A zero data root cannot restore a
+nonempty proof descriptor.
+
 ```console
 cargo test --locked -p reddb-io-engine --test portable page_proofs_cover -- --test-threads=1
 ```
@@ -82,9 +110,7 @@ unfixed until integration completes. Required publication work remains:
 
 - Persist and restore the exact proof descriptor for every live data, key and secondary tree,
   together with retained retired trees; empty trees must not orphan their proof nodes.
-- Bind the catalog's own image to independent durable authority. Storing expected hashes inside
-  an old but self-consistent catalog does not establish the current generation.
-- Fence the new required reader capability in both superblocks before dependent bytes, while
+- Fence the tree-proof required reader capability in both superblocks before dependent bytes, while
   preserving legacy compatibility and bounded startup/preparation.
 - Resolve interrupted proof/catalog publication through the existing WAL ownership and before-image
   protocol. Validate the recovery source before consuming evidence; an old complete DWB frame must

@@ -256,6 +256,25 @@ impl<P: PageStore> TreePageStore<P> {
         Ok(Some(state.root))
     }
 
+    pub(super) fn reset_empty(&self) -> Result<(), PagerError> {
+        let Some(proof) = &self.proof else {
+            return Ok(());
+        };
+        let result = (|| {
+            let pages = self.proof_pages()?;
+            let mut state = proof.write();
+            self.available()?;
+            for id in pages {
+                // The host's deferred fence retains all previously published paths.
+                self.inner.free_page(id)?;
+            }
+            state.root = PageProofRoot::default();
+            state.sealed = true;
+            Ok(())
+        })();
+        self.finish(result)
+    }
+
     pub(super) fn proof_pages(&self) -> Result<Vec<u32>, PagerError> {
         let Some(proof) = &self.proof else {
             return Ok(Vec::new());

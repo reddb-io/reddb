@@ -68,6 +68,11 @@ impl<P: PageStore> BTree<P> {
                 "missing published page generation proof".into(),
             ));
         }
+        if root_page_id == 0 && proof.reference.page_id != 0 {
+            return Err(BTreeError::Corrupted(
+                "empty tree retains a published page generation proof".into(),
+            ));
+        }
         Ok(Self {
             retirement_pin: Arc::new(()),
             pager: Arc::new(super::page_proofs::TreePageStore::verified(pager, proof)?),
@@ -754,6 +759,7 @@ impl<P: PageStore> BTree<P> {
 
                     if page.cell_count() == 0 && page_id == root_id {
                         self.pager.free_page(root_id)?;
+                        self.pager.reset_empty()?;
                         *self.root_page_id.write().map_err(|e| {
                             BTreeError::LockPoisoned(format!(
                                 "delete: root_page_id write lock: {e}"

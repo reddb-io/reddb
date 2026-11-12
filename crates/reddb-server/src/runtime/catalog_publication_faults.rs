@@ -55,9 +55,10 @@ fn publish_one_slot(path: &Path) -> reddb_file::page_proof::PageReference {
     let prior_offset = usize::try_from(previous.page_id).expect("prior root") * PAGE_SIZE;
     let prior =
         Page::from_slice(&bytes[prior_offset..prior_offset + PAGE_SIZE]).expect("prior catalog");
-    let epoch = reddb_file::native_store::decode_native_paged_catalog_ownership_epoch(prior.content())
-        .expect("prior catalog epoch")
-        .expect("checkpoint epoch");
+    let epoch =
+        reddb_file::native_store::decode_native_paged_catalog_ownership_epoch(prior.content())
+            .expect("prior catalog epoch")
+            .expect("checkpoint epoch");
     let next = bytes
         .chunks_exact(PAGE_SIZE)
         .enumerate()
@@ -69,8 +70,10 @@ fn publish_one_slot(path: &Path) -> reddb_file::page_proof::PageReference {
             if page.page_type().ok()? != PageType::Header || page.verify_checksum().is_err() {
                 return None;
             }
-            let candidate =
-                reddb_file::native_store::decode_native_paged_catalog_ownership_epoch(page.content()).ok()??;
+            let candidate = reddb_file::native_store::decode_native_paged_catalog_ownership_epoch(
+                page.content(),
+            )
+            .ok()??;
             if candidate <= epoch {
                 return None;
             }

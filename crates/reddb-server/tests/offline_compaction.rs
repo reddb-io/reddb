@@ -34,7 +34,7 @@ fn recovery_page_fixture(path: &std::path::Path) -> (u32, Page) {
         store.persist().unwrap();
     }
     let pager = Pager::open_default(path).unwrap();
-let catalog = pager.read_manifest_page().unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let header = reddb_file::decode_native_paged_metadata_header(catalog.content())
         .unwrap()
         .unwrap();

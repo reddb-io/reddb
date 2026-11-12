@@ -242,6 +242,92 @@ fn page_proofs_cover_cold_point_cursor_overflow_and_prior_valid_images() {
 }
 
 #[test]
+fn emptied_verified_tree_reclaims_proofs_and_can_be_recreated_after_reopen() {
+    let mut pager = open(None);
+    let mut random = 0x4d595df4d0f33173_u64;
+    let large: Vec<u8> = (0..32_000)
+        .map(|_| {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            random.to_le_bytes()[0]
+        })
+        .collect();
+    let mut stable_page_count = None;
+    for cycle in 0..4 {
+        let tree = BTree::new_verified(Arc::clone(&pager)).expect("new verified collection");
+        tree.insert(b"record", &large).expect("overflow insert");
+        let (root, proof) = tree
+            .seal_page_proofs()
+            .expect("seal populated tree")
+            .expect("proof");
+        let owned = tree.retired_pages().expect("complete tree ownership");
+        assert!(owned.len() > 5, "fixture must own overflow and proof pages");
+        let bytes = durable(&pager);
+        drop(tree);
+        drop(pager);
+        let (reopened, tree) = restored(bytes, root, proof);
+        pager = reopened;
+        assert_eq!(
+            tree.get(b"record").expect("cold overflow read"),
+            Some(large.clone())
+        );
+        assert!(tree.delete(b"record").expect("delete last row"));
+        assert_eq!(tree.root_page_id(), 0);
+        assert!(
+            tree.retired_pages()
+                .expect("empty tree ownership")
+                .is_empty(),
+            "the zero root cannot retain unpublishable proof pages"
+        );
+        let (root, proof) = tree
+            .seal_page_proofs()
+            .expect("seal empty tree")
+            .expect("proof");
+        assert_eq!(proof, PageProofRoot::default());
+        let (pending, _) = pager
+            .deferred_reclamation_pages()
+            .expect("retirement ledger");
+        assert!(
+            owned.iter().all(|id| pending.contains(id)),
+            "all old ownership stays fenced"
+        );
+        pager
+            .sync()
+            .expect("persist empty generation before retiring pages");
+        pager
+            .complete_deferred_publication(&pending, &[])
+            .expect("retain one publication");
+        pager
+            .complete_deferred_publication(&[], &pending)
+            .expect("release after publication");
+        let bytes = durable(&pager);
+        let count = pager.page_count().expect("bounded allocation");
+        if cycle >= 2 {
+            assert_eq!(
+                Some(count),
+                stable_page_count,
+                "repeated empty generations must reuse pages"
+            );
+        }
+        stable_page_count = Some(count);
+        drop(tree);
+        drop(pager);
+        let (reopened, empty) = restored(bytes, root, proof);
+        assert_eq!(empty.get(b"record").expect("cold empty lookup"), None);
+        assert_eq!(
+            empty
+                .cursor_first()
+                .expect("empty cursor")
+                .next()
+                .expect("end"),
+            None
+        );
+        pager = reopened;
+    }
+}
+
+#[test]
 fn catalog_publication_fences_fallback_headers_and_failed_updates() {
     let pager = open(None);
     pager
