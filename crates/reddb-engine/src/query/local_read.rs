@@ -1,27 +1,35 @@
 //! Single-owner SELECT over a committed native artifact. This is a local file-owner
 //! API, not a server principal/tenant session or an application transaction engine.
+#[cfg(feature = "full")]
+use crate::catalog::codec::deserialize_collection_contracts;
 use crate::catalog::enforcement::{
     INTERNAL_EXPIRES_AT_KEY, INTERNAL_TTL_MILLIS_KEY, INTERNAL_TTL_SECONDS_KEY,
 };
-use crate::catalog::{
-    codec::deserialize_collection_contracts, CollectionContract, CollectionModel,
-};
-use crate::storage::{
-    entity::EntityData, error::StoreError, manager::ManagerConfig,
-    resident_file::EmbeddedResidentStore,
-};
+use crate::catalog::{CollectionContract, CollectionModel};
+use crate::storage::{entity::EntityData, error::StoreError};
+#[cfg(feature = "full")]
+use crate::storage::{manager::ManagerConfig, resident_file::EmbeddedResidentStore};
+#[cfg(feature = "full")]
 use reddb_file::VfsFile;
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
+#[cfg(feature = "full")]
+use std::path::PathBuf;
 
 use super::{
     evaluator::EvalError,
     planning::build_table_plan_with_host,
-    runtime::{projection::projected_columns, table_plan::execute_table_plan_with_host},
+    runtime::{
+        projection::projected_columns,
+        table_plan::{execute_table_plan_with_host, visit_table_plan_with_host},
+    },
     scalar::ScalarResult,
 };
 
 pub(crate) mod admission;
 pub(crate) mod host;
+pub(crate) mod source;
+
+use source::StoreView;
 
 /// Bound materialization before cloning records, independently of SQL LIMIT.
 pub const LOCAL_READ_ROWS_MAX: usize = 100_000;
@@ -32,6 +40,13 @@ pub struct ReadScope {
     pub table: String,
     pub field: String,
     pub value: reddb_types::Value,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct StreamQueryResult {
+    pub columns: Vec<String>,
+    pub rows: u64,
+    pub complete: bool,
 }
 
 #[derive(Debug)]
@@ -92,11 +107,13 @@ impl From<EvalError> for LocalReadError {
 
 /// Holds the exclusively owned file and reconstructs snapshot + committed WAL once.
 /// Callers retain the file lock until this value is dropped. No mutator is exposed.
+#[cfg(feature = "full")]
 pub struct LocalReadDatabase<F: VfsFile> {
     store: EmbeddedResidentStore<F>,
     contracts: HashMap<String, CollectionContract>,
 }
 
+#[cfg(feature = "full")]
 impl<F: VfsFile> LocalReadDatabase<F> {
     pub fn open(file: F, name: impl Into<PathBuf>) -> Result<Self, LocalReadError> {
         let store = EmbeddedResidentStore::open(file, name, ManagerConfig::default(), false, 0)?;
@@ -122,8 +139,9 @@ impl<F: VfsFile> LocalReadDatabase<F> {
     }
 }
 
+#[cfg(feature = "full")]
 pub(crate) fn query_resident(
-    resident: &crate::storage::resident_store::ResidentStore,
+    resident: &dyn StoreView,
     contracts: &HashMap<String, CollectionContract>,
     sql: &str,
 ) -> Result<ScalarResult, LocalReadError> {
@@ -132,15 +150,16 @@ pub(crate) fn query_resident(
 }
 
 pub(crate) fn query_resident_bound(
-    resident: &crate::storage::resident_store::ResidentStore,
+    resident: &dyn StoreView,
     contracts: &HashMap<String, CollectionContract>,
     query: reddb_rql::ast::TableQuery,
 ) -> Result<ScalarResult, LocalReadError> {
     execute_resident_query(resident, contracts, admission::table(query)?, None)
 }
 
+#[cfg(feature = "full")]
 pub(crate) fn query_resident_scoped(
-    resident: &crate::storage::resident_store::ResidentStore,
+    resident: &dyn StoreView,
     contracts: &HashMap<String, CollectionContract>,
     query: reddb_rql::ast::TableQuery,
     scope: &ReadScope,
@@ -148,8 +167,77 @@ pub(crate) fn query_resident_scoped(
     execute_resident_query(resident, contracts, admission::table(query)?, Some(scope))
 }
 
+pub(crate) fn query_store_stream(
+    store: &dyn StoreView,
+    contracts: &HashMap<String, CollectionContract>,
+    query: reddb_rql::ast::TableQuery,
+    visit: &mut dyn FnMut(&[reddb_types::Value]) -> Result<bool, LocalReadError>,
+) -> Result<StreamQueryResult, LocalReadError> {
+    let query = admission::table(query)?;
+    let contract = contracts.get(&query.table).ok_or_else(|| {
+        LocalReadError::Catalog(format!(
+            "no persisted collection contract for {}",
+            query.table
+        ))
+    })?;
+    if contract.declared_model != CollectionModel::Table
+        || contract.default_ttl_ms.is_some()
+        || contract.retention_duration_ms.is_some()
+    {
+        return Err(LocalReadError::Unsupported(
+            "local SELECT currently requires a table without TTL or retention",
+        ));
+    }
+    let columns = crate::catalog::schema::resolved_contract_columns(contract)
+        .map_err(|error| LocalReadError::Catalog(error.to_string()))?;
+    admission::expressions(&query, &columns)?;
+    let schema = std::sync::Arc::new(columns.iter().map(|column| column.name.clone()).collect());
+    let source = source::StoreRows {
+        store,
+        table: &query.table,
+        schema,
+        allow_materialization: false,
+    };
+    let projections = reddb_rql::sql_lowering::effective_table_projections(&query);
+    if projections
+        .iter()
+        .any(|projection| matches!(projection, reddb_rql::ast::Projection::All))
+    {
+        return Err(LocalReadError::Unsupported(
+            "streaming SELECT requires explicit output columns",
+        ));
+    }
+    let names = projected_columns(&[], &projections);
+    let host = host::ReadHost::with_source(&query, &columns, &projections, &source);
+    let plan = build_table_plan_with_host(&host, &query);
+    let mut rows = 0u64;
+    let mut complete = true;
+    visit_table_plan_with_host(&host, &plan, &query, &mut |record| {
+        let row = names
+            .iter()
+            .map(|name| {
+                record
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(reddb_types::Value::Null)
+            })
+            .collect::<Vec<_>>();
+        rows = rows.checked_add(1).ok_or(LocalReadError::ResourceLimit)?;
+        if !visit(&row)? {
+            complete = false;
+            return Ok(false);
+        }
+        Ok(true)
+    })?;
+    Ok(StreamQueryResult {
+        columns: names,
+        rows,
+        complete,
+    })
+}
+
 fn execute_resident_query(
-    resident: &crate::storage::resident_store::ResidentStore,
+    resident: &dyn StoreView,
     contracts: &HashMap<String, CollectionContract>,
     query: reddb_rql::ast::TableQuery,
     scope: Option<&ReadScope>,
@@ -176,13 +264,10 @@ fn execute_resident_query(
             "inspection scope column is missing".into(),
         ));
     }
-    let manager = resident
-        .get_collection(&query.table)
-        .ok_or_else(|| LocalReadError::Catalog(format!("collection {} is missing", query.table)))?;
     let schema = std::sync::Arc::new(columns.iter().map(|column| column.name.clone()).collect());
     let mut entities = Vec::new();
     let mut exceeded = false;
-    manager.scan_for_each(None, |entity| {
+    resident.scan_collection(&query.table, &mut |entity, metadata| {
         if let Some(scope) = scope {
             let Some(record) = super::records::runtime_table_record_from_entity_ref_with_schema(
                 entity,
@@ -198,24 +283,25 @@ fn execute_resident_query(
             exceeded = true;
             return false;
         }
-        entities.push(entity.clone());
+        let has_ttl = metadata.is_some_and(|metadata| {
+            metadata.has(INTERNAL_TTL_SECONDS_KEY)
+                || metadata.has(INTERNAL_TTL_MILLIS_KEY)
+                || metadata.has(INTERNAL_EXPIRES_AT_KEY)
+        });
+        entities.push((entity.clone(), has_ttl));
         true
-    });
+    })?;
     if exceeded {
         return Err(LocalReadError::ResourceLimit);
     }
     let mut records = Vec::with_capacity(entities.len());
-    for entity in entities {
+    for (entity, has_ttl) in entities {
         if !matches!(entity.data, EntityData::Row(_)) {
             return Err(LocalReadError::Unsupported(
                 "local table contains non-row entities",
             ));
         }
-        if manager.get_metadata(entity.id).is_some_and(|metadata| {
-            metadata.has(INTERNAL_TTL_SECONDS_KEY)
-                || metadata.has(INTERNAL_TTL_MILLIS_KEY)
-                || metadata.has(INTERNAL_EXPIRES_AT_KEY)
-        }) {
+        if has_ttl {
             return Err(LocalReadError::Unsupported(
                 "local SELECT does not yet admit row TTL metadata",
             ));

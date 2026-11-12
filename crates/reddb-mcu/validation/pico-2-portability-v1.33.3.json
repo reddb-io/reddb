@@ -1,0 +1,24 @@
+{
+  "date": "2026-11-11",
+  "package": "reddb-io-mcu",
+  "version": "1.33.3",
+  "target": "thumbv8m.main-none-eabihf",
+  "board": "Raspberry Pi Pico 2",
+  "command": "cargo check -p reddb-io-mcu --lib --target thumbv8m.main-none-eabihf",
+  "result": "expected failure",
+  "first_blocker": {
+    "crate": "memchr 2.8.0",
+    "error": "can't find crate for std",
+    "interpretation": "The Pico 2 target provides core but not Rust std; the shared MCU graph still requires a no_std + alloc port."
+  },
+  "resolved_before_this_probe": [
+    "host-only resident storage is excluded from the MCU feature set",
+    "64-bit host atomics are excluded from the MCU feature set",
+    "Rayon, Vault crypto and process file locks are excluded from the MCU feature set"
+  ],
+  "not_claimed": [
+    "Pico 2 firmware compilation",
+    "RP2350 emulator execution",
+    "physical-board support"
+  ]
+}

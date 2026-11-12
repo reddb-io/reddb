@@ -95,6 +95,11 @@ const targets = [
     type: 'cargo-toml',
   },
   {
+    label: 'crates/reddb-mcu/Cargo.toml',
+    file: path.join(root, 'crates', 'reddb-mcu', 'Cargo.toml'),
+    type: 'cargo-toml',
+  },
+  {
     label: 'crates/reddb-rql/Cargo.toml',
     file: path.join(root, 'crates', 'reddb-rql', 'Cargo.toml'),
     type: 'cargo-toml',
@@ -223,6 +228,7 @@ syncCargoLock(path.join(root, 'Cargo.lock'), [
   'reddb-io-file',
   'reddb-io-rql',
   'reddb-io-engine',
+  'reddb-io-mcu',
   'reddb-io-wire',
   'reddb-io-tonic',
   'reddb-io-tonic-prost',
@@ -284,6 +290,7 @@ const stageList = [
   'crates/reddb-file/Cargo.toml',
   'crates/reddb-rql/Cargo.toml',
   'crates/reddb-engine/Cargo.toml',
+  'crates/reddb-mcu/Cargo.toml',
   'crates/reddb-wire/Cargo.toml',
   'crates/reddb-tonic/Cargo.toml',
   'crates/reddb-tonic-prost/Cargo.toml',

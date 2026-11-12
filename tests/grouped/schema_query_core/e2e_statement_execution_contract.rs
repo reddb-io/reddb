@@ -27,6 +27,21 @@ fn temp_db_path(label: &str) -> support::TempDbFile {
     support::temp_db_file(label)
 }
 
+fn wait_for_result_blob_insertions(rt: &RedDBRuntime, before: u64, added: u64, message: &str) {
+    let expected = before + added;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while rt.result_blob_cache().stats().insertions() < expected
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert_eq!(
+        rt.result_blob_cache().stats().insertions(),
+        expected,
+        "{message}"
+    );
+}
+
 fn exec(rt: &RedDBRuntime, sql: &str) {
     rt.execute_query(sql)
         .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
@@ -447,6 +462,7 @@ fn blob_result_cache_rehydrates_after_restart_with_tenant_and_auth_isolation() {
 
     {
         let rt = persistent_runtime(&path);
+        let before = rt.result_blob_cache().stats().insertions();
         set_current_auth_identity("alice".to_string(), Role::Read);
         set_current_tenant("acme".to_string());
         assert_eq!(selected_text(&rt, "SELECT CURRENT_TENANT()"), "acme");
@@ -456,6 +472,12 @@ fn blob_result_cache_rehydrates_after_restart_with_tenant_and_auth_isolation() {
         assert_eq!(selected_text(&rt, "SELECT CURRENT_USER()"), "alice");
         clear_current_tenant();
         clear_current_auth_identity();
+        wait_for_result_blob_insertions(
+            &rt,
+            before,
+            3,
+            "the isolated scalar results should reach durable L2",
+        );
         rt.checkpoint().expect("checkpoint before restart");
     }
 
@@ -500,9 +522,16 @@ fn blob_result_cache_write_after_restart_invalidates_unrehydrated_l2_entries() {
         let rt = persistent_runtime(&path);
         exec(&rt, "CREATE TABLE items (id INT)");
         exec(&rt, "INSERT INTO items (id) VALUES (1)");
+        let before = rt.result_blob_cache().stats().insertions();
         assert_eq!(
             selected_ids(&rt, "SELECT id FROM items ORDER BY id"),
             vec![1]
+        );
+        wait_for_result_blob_insertions(
+            &rt,
+            before,
+            1,
+            "the table result should reach durable L2 before restart",
         );
         rt.checkpoint().expect("checkpoint before restart");
     }
@@ -531,12 +560,19 @@ fn blob_result_cache_recovers_table_result_after_restart() {
         let rt = persistent_runtime(&path);
         exec(&rt, "CREATE TABLE items (id INT)");
         exec(&rt, "INSERT INTO items (id) VALUES (1)");
+        let before = rt.result_blob_cache().stats().insertions();
         assert_eq!(selected_ids(&rt, query), vec![1]);
         let result = rt.execute_query(query).expect("cached result");
         let fields = result.result.records[0]
             .iter_fields()
             .map(|(name, value)| (name.to_string(), value.clone()))
             .collect::<std::collections::BTreeMap<_, _>>();
+        wait_for_result_blob_insertions(
+            &rt,
+            before,
+            1,
+            "the table result should reach durable L2 before restart",
+        );
         rt.checkpoint().expect("checkpoint result cache");
         fields
     };
@@ -563,10 +599,17 @@ fn blob_result_cache_recovers_join_result_after_restart() {
         let rt = persistent_runtime(&path);
         exec(&rt, "CREATE TABLE items (id INT)");
         exec(&rt, "INSERT INTO items (id) VALUES (1)");
+        let insertions = rt.result_blob_cache().stats().insertions();
         assert_eq!(selected_ids(&rt, query), vec![1]);
         let before = rt.result_cache_metrics();
         assert_eq!(selected_ids(&rt, query), vec![1]);
         assert_eq!(rt.result_cache_metrics().0 - before.0, 1);
+        wait_for_result_blob_insertions(
+            &rt,
+            insertions,
+            1,
+            "the join result should reach durable L2 before restart",
+        );
         rt.checkpoint().expect("checkpoint join result");
     }
     {
@@ -653,7 +696,14 @@ fn blob_result_cache_keeps_unrelated_entries_after_table_write() {
     exec(&rt, "INSERT INTO items (id) VALUES (1)");
     exec(&rt, "INSERT INTO noise (id) VALUES (1)");
     let query = "SELECT id FROM items ORDER BY id";
+    let insertions = rt.result_blob_cache().stats().insertions();
     assert_eq!(selected_ids(&rt, query), vec![1]);
+    wait_for_result_blob_insertions(
+        &rt,
+        insertions,
+        1,
+        "the items result should reach L2 before the unrelated write",
+    );
     exec(&rt, "UPDATE noise SET id = 2 WHERE id = 1");
     let before = rt.result_cache_metrics();
     let blob_hits = rt.result_blob_cache().stats().hits();
@@ -726,16 +776,11 @@ fn blob_result_cache_promotes_volatile_result_after_writes_stop() {
         exec(&rt, "INSERT INTO items (id) VALUES (2)");
         assert_eq!(selected_ids(&rt, query), vec![1, 2]);
         let before = rt.result_blob_cache().stats().insertions();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while rt.result_blob_cache().stats().insertions() == before
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
-        assert_eq!(
-            rt.result_blob_cache().stats().insertions(),
-            before + 1,
-            "the background worker should publish the result after the quiet period"
+        wait_for_result_blob_insertions(
+            &rt,
+            before,
+            1,
+            "the background worker should publish the result after the quiet period",
         );
         assert_eq!(selected_ids(&rt, query), vec![1, 2]);
         rt.checkpoint().expect("checkpoint promoted result");

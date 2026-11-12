@@ -31,6 +31,7 @@ pub(crate) struct MemoryFile {
     pub(crate) fail_write_range: Option<std::ops::Range<u64>>,
     pub(crate) failed_write_offset: Option<u64>,
     pub(crate) fail_len: Cell<bool>,
+    pub(crate) max_len: Option<u64>,
     /// Large allocator sweeps synchronize thousands of single-page rewrites.
     /// Preserve the same durable image without cloning the whole file per sync.
     pub(crate) incremental_sync: bool,
@@ -82,6 +83,9 @@ impl VfsFile for MemoryFile {
     }
 
     fn set_len(&self, len: u64) -> io::Result<()> {
+        if self.max_len.is_some_and(|max_len| len > max_len) {
+            return Err(io::Error::other("injected storage capacity exhausted"));
+        }
         let length = usize::try_from(len).map_err(|_| io::ErrorKind::InvalidInput)?;
         let mut bytes = self.bytes.borrow_mut();
         let previous = bytes.len();
@@ -95,6 +99,13 @@ impl VfsFile for MemoryFile {
     }
 
     fn write_all(&mut self, buffer: &[u8]) -> io::Result<()> {
+        let end = self
+            .position
+            .checked_add(buffer.len() as u64)
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        if self.max_len.is_some_and(|max_len| end > max_len) {
+            return Err(io::Error::other("injected storage capacity exhausted"));
+        }
         if let Err(error) = self.operation(Operation::Write(self.position, buffer.len())) {
             self.write_prefix(&buffer[..self.fail_prefix.unwrap_or(buffer.len() / 2)]);
             return Err(error);

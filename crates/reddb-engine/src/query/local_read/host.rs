@@ -1,4 +1,4 @@
-use super::{EvalError, LocalReadError};
+use super::{source::RowSource, EvalError, LocalReadError};
 use crate::{
     catalog::schema::ResolvedColumnRule,
     query::{
@@ -24,6 +24,7 @@ pub(crate) struct ReadHost<'a> {
     projections: &'a [Projection],
     records: RefCell<Option<Vec<UnifiedRecord>>>,
     record_count: usize,
+    source: Option<&'a dyn RowSource>,
     error: RefCell<Option<EvalError>>,
 }
 impl<'a> ReadHost<'a> {
@@ -40,6 +41,24 @@ impl<'a> ReadHost<'a> {
             projections,
             records: RefCell::new(Some(records)),
             record_count,
+            source: None,
+            error: RefCell::new(None),
+        }
+    }
+
+    pub(crate) fn with_source(
+        query: &'a TableQuery,
+        columns: &'a [ResolvedColumnRule],
+        projections: &'a [Projection],
+        source: &'a dyn RowSource,
+    ) -> Self {
+        Self {
+            query,
+            columns,
+            projections,
+            records: RefCell::new(None),
+            record_count: source.estimated_rows(),
+            source: Some(source),
             error: RefCell::new(None),
         }
     }
@@ -111,6 +130,34 @@ impl TablePlanHost for ReadHost<'_> {
             .borrow_mut()
             .take()
             .expect("admitted unary table plan scans once"))
+    }
+    fn visit_scan(
+        &self,
+        node: &CanonicalLogicalNode,
+        visit: &mut dyn FnMut(UnifiedRecord) -> Result<bool, Self::Error>,
+    ) -> Result<(), Self::Error> {
+        match self.source {
+            Some(source) => source.scan(visit),
+            None => {
+                for record in self.scan(node)? {
+                    if !visit(record)? {
+                        break;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+    fn row_operators(&self) -> bool {
+        self.source.is_some()
+    }
+    fn admit_materialization(&self) -> Result<(), Self::Error> {
+        if self.source.is_some_and(|source| !source.materialize()) {
+            return Err(LocalReadError::Unsupported(
+                "storage source cannot materialize this plan within its memory budget",
+            ));
+        }
+        Ok(())
     }
     fn try_filter_lookup(&self) -> Result<Option<Vec<UnifiedRecord>>, Self::Error> {
         Ok(None)

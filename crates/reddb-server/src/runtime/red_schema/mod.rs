@@ -1443,6 +1443,19 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_leaves_canonical_backing_collections_unchanged() {
+        assert_eq!(
+            rewrite_virtual_names("SELECT * FROM red.timeseries.meta"),
+            None
+        );
+        assert_eq!(
+            rewrite_virtual_names("SELECT * FROM red.timeseries.series"),
+            None
+        );
+        assert_eq!(rewrite_virtual_names("SELECT * FROM red.queue.meta"), None);
+    }
+
+    #[test]
     fn rewrite_handles_red_subscriptions() {
         let rewritten = rewrite_virtual_names("SELECT * FROM red.subscriptions").unwrap();
         assert_eq!(rewritten, "SELECT * FROM __red_schema_subscriptions");

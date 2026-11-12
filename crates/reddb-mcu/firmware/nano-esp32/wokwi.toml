@@ -1,0 +1,4 @@
+[wokwi]
+version = 1
+firmware = "build/reddb-mcu-nano-esp32.bin"
+elf = "build/reddb-mcu-nano-esp32.elf"

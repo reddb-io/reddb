@@ -1955,6 +1955,8 @@ mod tests {
         assert_eq!(result.statement_type, "select");
 
         let key = result_cache_key("SELECT 1");
+        rt.inner.result_blob_entries.write().5 = Some(std::time::Instant::now());
+        rt.promote_volatile_result_cache_entry();
         assert!(
             rt.inner
                 .result_blob_cache

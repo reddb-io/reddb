@@ -268,3 +268,18 @@ The full portable engine round then passed all 59 cases in 209.03 seconds. The s
 changes only the previously accepted short-file branch; complete reserved zones enter the same
 phase-validation and replay sequence as before.
 `cargo check --locked -p reddb-io-engine -j1`, formatting and `git diff --check` also passed.
+
+## Integration with the MCU preparation path
+
+Main advanced to `fa7b81a76` while this change was being qualified. Its legacy MCU recovery streams
+the same DWB format, and its prepared-batch API stages entries before publishing their frame header.
+Recovery now selects the streaming path for unguarded files and independent phase validation for
+guarded files; the truncated-extent check precedes both. Guarded readers also reject an insufficient
+host read-buffer budget before allocating their zone buffer.
+
+Two integration regressions first failed: a guarded pager could begin a legacy prepared batch, and
+a new capability fence could publish over an already active batch. Both operations now fail before
+changing source bytes. The tests require a normal guarded write after the rejected batch and a
+successful legacy commit after the rejected upgrade, followed by cold reads of exact values.
+All five prepared-batch cases passed in 1.02 seconds. All four MCU SQL cases passed in 20.39 seconds,
+including 43,200 streamed rows after reboot and reader/writer rejection of an insufficient budget.

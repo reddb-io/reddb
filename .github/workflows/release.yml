@@ -1047,6 +1047,9 @@ jobs:
           publish_one reddb-io-server
           publish_one reddb-io-client
           publish_one reddb-io
+          # First-release bootstrap: the new engine/file versions must be
+          # visible in the crates.io index before this package is verified.
+          publish_one reddb-io-mcu
 
   publish-js-driver:
     name: Publish @reddb-io/sdk (npm)

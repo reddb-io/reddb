@@ -556,7 +556,7 @@ fn test_queue_push_dedup_survives_persistent_reopen() {
     let path = PersistentDbPath::new("queue_dedup_reopen");
     let rt = path.open_runtime();
 
-    exec(&rt, "CREATE QUEUE durable_dedup DEDUP_WINDOW 1 s");
+    exec(&rt, "CREATE QUEUE durable_dedup DEDUP_WINDOW 300 s");
     let first = exec(&rt, "QUEUE PUSH durable_dedup 'first' DEDUP 'retry-1'");
     let first_id = text(&first.result.records[0], "message_id");
 

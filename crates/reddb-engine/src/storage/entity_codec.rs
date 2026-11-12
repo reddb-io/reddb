@@ -1,6 +1,7 @@
 //! Canonical logical entity adapter for native store versions V1 through V12.
 //! Physical record framing and value bytes remain owned by `reddb-file`.
 use super::entity::*;
+use crate::catalog::CollectionContract;
 use reddb_file::native_store::{
     write_native_varu32 as write_varu32, write_native_varu64 as write_varu64,
 };
@@ -10,6 +11,19 @@ use reddb_file::{
     native_value::{write_native_value, NativeReader},
 };
 use std::collections::HashMap;
+
+/// Mandatory paged-file capabilities promised by a persisted collection schema.
+pub fn required_file_capabilities_for_contract(contract: &CollectionContract) -> u64 {
+    contract
+        .declared_columns
+        .iter()
+        .fold(0, |required, column| {
+            required
+                | reddb_types::DataType::from_sql_name(&column.data_type).map_or(0, |data_type| {
+                    reddb_file::native_value::required_file_capabilities_for_data_type(data_type)
+                })
+        })
+}
 
 fn persistent_name(name: &str) -> &str {
     super::system_collection_names::canonical_or_self(name)

@@ -48,6 +48,11 @@ Recovery itself must establish the same phase fences before touching homes.
   publication, including eviction writes. Ordinary header encoding preserves
   the extension from the newest slot instead of a cached publication value.
   Guarded files reject mutable handles configured without DWB protection.
+- Legacy prepared batches cannot start on guarded files, and a capability
+  upgrade cannot cross an active prepared batch. Those batches do not publish
+  independent frame authority. Unguarded MCU recovery retains its streaming
+  implementation; guarded recovery requires the full zone to fit the host's
+  declared read-buffer budget before allocating it or changing source bytes.
 - Legacy files retain their previous DWB interpretation until the capability
   is fenced. Unknown mandatory bits make older readers reject the file.
   Tree proofs remain responsible for detecting wrong home images; a consumed

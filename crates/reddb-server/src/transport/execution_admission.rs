@@ -262,7 +262,7 @@ mod tests {
             let active_high_water = Arc::clone(&active_high_water);
             tasks.push(tokio::spawn(async move {
                 barrier.wait().await;
-                let _permit = admission.acquire().await.expect("execution slot");
+                let _permit = admission.acquire_latency().await.expect("execution slot");
                 let now = active.fetch_add(1, Ordering::AcqRel) + 1;
                 active_high_water.fetch_max(now, Ordering::Relaxed);
                 tokio::task::yield_now().await;
