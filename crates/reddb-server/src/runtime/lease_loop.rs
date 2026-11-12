@@ -1,4 +1,4 @@
-//! Serverless writer-lease boot path (PLAN.md Phase 5 / W6).
+//! Writer-lease boot path with optional serverless snapshot hydration.
 //!
 //! Boot-time entrypoint that opts the runtime into lease-fenced
 //! writes when:
@@ -35,7 +35,7 @@ use crate::runtime::RedDBRuntime;
 
 pub struct LeaseBootPlan {
     store: Arc<LeaseStore>,
-    snapshot_publication: Arc<SnapshotPublicationStore>,
+    snapshot_publication: Option<Arc<SnapshotPublicationStore>>,
     holder_id: String,
     database_key: String,
     ttl_ms: u64,
@@ -77,13 +77,25 @@ pub fn prepare_lease_loop_if_required(
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "leases/".to_string());
-    let snapshot_publication = Arc::new(SnapshotPublicationStore::new(
-        backend.clone(),
-        database_key.clone(),
-    ));
+    // A primary/replica or cluster lease fences ownership of its local store.
+    // Only snapshot-backed profiles may replace that store from a remote head.
+    let snapshot_publication = match options.storage_profile.deploy_profile {
+        crate::storage::DeployProfile::Embedded | crate::storage::DeployProfile::Serverless => {
+            Some(Arc::new(SnapshotPublicationStore::new(
+                backend.clone(),
+                database_key.clone(),
+            )))
+        }
+        crate::storage::DeployProfile::PrimaryReplica | crate::storage::DeployProfile::Cluster => {
+            None
+        }
+    };
     options.remote_bootstrap_key = snapshot_publication
-        .observe_for_boot()
-        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        .as_ref()
+        .map(|publication| publication.observe_for_boot())
+        .transpose()
+        .map_err(|err| RedDBError::Internal(err.to_string()))?
+        .flatten();
     if options.remote_bootstrap_key.is_some()
         && options.storage_profile.deploy_profile != crate::storage::DeployProfile::Embedded
     {
@@ -97,13 +109,15 @@ pub fn prepare_lease_loop_if_required(
             "true".into(),
         );
     }
+    let initial_snapshot_required =
+        snapshot_publication.is_some() && options.remote_bootstrap_key.is_none();
     Ok(Some(LeaseBootPlan {
         store: Arc::new(LeaseStore::new(backend).with_prefix(prefix)),
         snapshot_publication,
         holder_id: lease_holder_id(),
         database_key,
         ttl_ms: lease_ttl_secs() * 1000,
-        initial_snapshot_required: options.remote_bootstrap_key.is_none(),
+        initial_snapshot_required,
     }))
 }
 
@@ -140,14 +154,6 @@ pub fn start_prepared_lease_loop(
     } else {
         None
     };
-    let database = runtime.db();
-    let snapshot_path = local_snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.path())
-        .or_else(|| database.path())
-        .ok_or_else(|| {
-            RedDBError::InvalidOperation("serverless boot requires a persistent local cache".into())
-        })?;
     let runtime_for_drain = Arc::downgrade(&runtime.inner);
     let mark_draining: MarkDraining = Arc::new(move || {
         if let Some(inner) = runtime_for_drain.upgrade() {
@@ -156,19 +162,30 @@ pub fn start_prepared_lease_loop(
     });
     let term = runtime.current_replication_term();
     let current_term = Arc::new(move || term);
-    let lifecycle = Arc::new(
-        LeaseLifecycle::new(
-            plan.store,
-            runtime.write_gate_arc(),
-            runtime.audit_log_arc(),
-            mark_draining,
-            current_term,
-            plan.holder_id,
-            plan.database_key,
-            plan.ttl_ms,
-        )
-        .with_snapshot_publication(plan.snapshot_publication, snapshot_path),
+    let mut lifecycle = LeaseLifecycle::new(
+        plan.store,
+        runtime.write_gate_arc(),
+        runtime.audit_log_arc(),
+        mark_draining,
+        current_term,
+        plan.holder_id,
+        plan.database_key,
+        plan.ttl_ms,
     );
+    if let Some(publication) = plan.snapshot_publication {
+        let database = runtime.db();
+        let snapshot_path = local_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.path())
+            .or_else(|| database.path())
+            .ok_or_else(|| {
+                RedDBError::InvalidOperation(
+                    "serverless boot requires a persistent local cache".into(),
+                )
+            })?;
+        lifecycle = lifecycle.with_snapshot_publication(publication, snapshot_path);
+    }
+    let lifecycle = Arc::new(lifecycle);
     lifecycle.try_acquire()?;
 
     // Stash the lifecycle on the runtime so admin handlers and the

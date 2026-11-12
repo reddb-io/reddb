@@ -504,6 +504,13 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
     }
 
     let _ = primary.stop_and_read_output();
+    // Older lease-only boots could leave serverless control objects behind.
+    // This profile must recover its local replica without consulting them.
+    let foreign_head = backend_root.join("manual-promotion.serverless/HEAD.json");
+    std::fs::create_dir_all(foreign_head.parent().expect("head directory"))
+        .expect("create unrelated serverless directory");
+    let foreign_head_bytes = b"unrelated serverless publication must remain untouched";
+    std::fs::write(&foreign_head, foreign_head_bytes).expect("old serverless control object");
     let request = FailoverPromotionRequest {
         holder_id: Some("replica-b".to_string()),
         ttl_ms: Some(30_000),
@@ -577,6 +584,10 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         "before={before:?}"
     );
     assert!(contains_text(&after, "after-promotion"), "after={after:?}");
+    assert_eq!(
+        std::fs::read(&foreign_head).expect("unrelated head after promotion"),
+        foreign_head_bytes
+    );
 
     let mut stale_primary = spawn_primary_with_failover(
         &primary_path,
@@ -590,5 +601,44 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
             .to_ascii_lowercase()
             .contains("fenced lease op"),
         "stale primary did not report term fencing:\n{stale_output}"
+    );
+
+    let _ = promoted.stop_and_read_output();
+    let mut reopened = spawn_primary_with_failover(
+        &replica_path,
+        replica_http,
+        replica_grpc,
+        Some(&promoted_failover),
+    );
+    wait_for_health(&mut reopened, replica_http, "restarted promoted primary");
+    let client = runtime
+        .block_on(Reddb::connect(&format!("grpc://127.0.0.1:{replica_grpc}")))
+        .expect("reconnect after a second crash");
+    for (id, expected) in [(1, "before-promotion"), (2, "after-promotion")] {
+        let result = runtime
+            .block_on(client.query_with_options(
+                &format!("SELECT name FROM failover_probe WHERE id = {id}"),
+                QueryOptions::strong(),
+            ))
+            .expect("cold acknowledged row");
+        assert_eq!(result.rows.len(), 1, "row {id}: {result:?}");
+        assert!(contains_text(&result, expected), "row {id}: {result:?}");
+    }
+    runtime
+        .block_on(client.query("INSERT INTO failover_probe (id, name) VALUES (3, 'after-restart')"))
+        .expect("writer makes progress after restart");
+    let scan = runtime
+        .block_on(client.query_with_options(
+            "SELECT id, name FROM failover_probe ORDER BY id",
+            QueryOptions::strong(),
+        ))
+        .expect("scan agrees with cold points and new write");
+    assert_eq!(scan.rows.len(), 3, "scan={scan:?}");
+    for expected in ["before-promotion", "after-promotion", "after-restart"] {
+        assert!(contains_text(&scan, expected), "scan={scan:?}");
+    }
+    assert_eq!(
+        std::fs::read(&foreign_head).expect("unrelated head after restart"),
+        foreign_head_bytes
     );
 }
