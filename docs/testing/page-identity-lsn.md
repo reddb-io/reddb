@@ -306,3 +306,17 @@ lock; data writes, root publication and split behavior retain their previous ord
 journey then passed in 23.37 seconds, using the default worker stack. No stack limit was increased.
 An explicit readonly control also checks private replay of an authorized `Ready` frame, unchanged
 source bytes, later writer consumption and another durable write/cold recovery.
+
+## Legacy reversion preserves guarded files
+
+The public sidecar reversion tool previously accepted a guarded file, stripped its superblock
+slots, restored the legacy fixed manifest and deleted the retained pre-migration backup. A populated
+store regression reproduced that acceptance before the fix. Reversion now checks the legacy
+decoder contract before any write. Each new publication capability must be refused with the data
+file and rollback copy unchanged and no retired sidecars created. The existing unguarded populated
+migration/reversion round trip remains a positive control.
+
+The overflow undo journey also reports its last child phase on timeout. Its 60-second child deadline,
+32 large rows, four-page cache and interrupted-recovery assertions are unchanged. Earlier runs
+intermittently exceeded that deadline; the identical binary later passed under Cargo in 75.49 seconds
+overall. This is scoped execution evidence, not a diagnosed storage deadlock or proof of its absence.
