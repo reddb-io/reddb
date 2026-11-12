@@ -178,6 +178,27 @@ mod tests {
     const CHILD: &str = "REDDB_CHECKPOINT_PAGE_UNDO_CHILD";
     const TEST: &str = "storage::unified::store::commit::checkpoint_undo::tests::overflow_checkpoint_undo_survives_interrupted_recovery_and_publication";
 
+    fn run_child(command: &mut std::process::Command) -> std::process::Output {
+        let mut child = command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("recovery child");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while child.try_wait().expect("child status").is_none() {
+            if std::time::Instant::now() >= deadline {
+                child.kill().expect("stop stuck recovery");
+                let output = child.wait_with_output().expect("stuck recovery output");
+                panic!(
+                    "recovery made no progress: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        child.wait_with_output().expect("recovery child output")
+    }
+
     fn row(id: u64, generation: u64) -> UnifiedEntity {
         let mut random = id + generation * 137;
         let payload: String = (0..24 * 1024)
@@ -255,7 +276,7 @@ mod tests {
                 if recovery {
                     command.env("REDDB_TEST_EXIT_DURING_PAGE_UNDO", "1");
                 }
-                command.output().expect("child process")
+                run_child(&mut command)
             };
             let result = run(false);
             assert_eq!(
@@ -406,13 +427,12 @@ mod tests {
                 std::fs::write(&wal_path, baseline_wal).expect("restore valid WAL");
                 for fault in ["empty", "partial", "sync"] {
                     let wal = std::fs::read(&wal_path).expect("undo WAL before I/O failure");
-                    let output =
+                    let output = run_child(
                         std::process::Command::new(std::env::current_exe().expect("test binary"))
                             .args(["--exact", TEST, "--nocapture"])
                             .env(CHILD, &path)
-                            .env("REDDB_TEST_PAGE_UNDO_IO", fault)
-                            .output()
-                            .expect("undo recovery I/O child");
+                            .env("REDDB_TEST_PAGE_UNDO_IO", fault),
+                    );
                     assert_eq!(
                         output.status.code(),
                         Some(196),
@@ -436,14 +456,14 @@ mod tests {
                     std::fs::write(&replay_path, &replay_pages).expect("copy replay pages");
                     std::fs::write(&replay_wal_path, &replay_wal).expect("copy replay WAL");
                     for _ in 0..2 {
-                        let output = std::process::Command::new(
-                            std::env::current_exe().expect("test binary"),
-                        )
-                        .args(["--exact", TEST, "--nocapture"])
-                        .env(CHILD, &replay_path)
-                        .env("REDDB_TEST_PAGE_REPLAY_IO", fault)
-                        .output()
-                        .expect("replay publication I/O child");
+                        let output = run_child(
+                            std::process::Command::new(
+                                std::env::current_exe().expect("test binary"),
+                            )
+                            .args(["--exact", TEST, "--nocapture"])
+                            .env(CHILD, &replay_path)
+                            .env("REDDB_TEST_PAGE_REPLAY_IO", fault),
+                        );
                         assert_eq!(
                             output.status.code(),
                             Some(196),
