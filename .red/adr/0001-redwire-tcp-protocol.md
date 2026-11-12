@@ -100,6 +100,7 @@ TCP port as HTTP/1.x and HTTP/2 (gRPC) without ambiguity:
 | 0x26 | `VectorSearch`           | C→S | vector index probe |
 | 0x27 | `GraphTraverse`          | C→S | graph walk |
 | 0x28 | `QueryWithParams`        | C→S | SQL plus positional typed params |
+| 0x33 | `TypedInsert`            | C→S | typed single-row insert; reply is `BulkOk` or `Error` |
 
 Kinds are stable: a value once shipped is never reused for a different message.
 
@@ -133,6 +134,30 @@ tag followed by the tag-specific body:
 | 0x07 | json | `u32 len` + canonical JSON bytes |
 | 0x08 | timestamp | `i64` Unix seconds |
 | 0x09 | uuid | 16 raw UUID bytes |
+
+## TypedInsert
+
+`TypedInsert` is gated by the `FEATURE_TYPED_MUTATIONS` bit (`0x0000_0004`)
+in the server feature mask. A client must fail locally when the bit is absent;
+older servers do not know message kind `0x33`.
+
+Payload layout v1, all little-endian:
+
+```text
+u8 version = 1
+u16 collection_len
+u8[collection_len] collection_utf8
+u16 field_count
+repeat field_count:
+  u16 field_name_len
+  u8[field_name_len] field_name_utf8
+  param_value value
+```
+
+The value tags are exactly the `QueryWithParams` tags above. Empty collections,
+empty or duplicate field names, invalid UTF-8, truncation, and trailing bytes are
+rejected. A zero-field request is valid so table defaults can construct the row.
+`BulkOk.ids` carries the inserted `rid` as a decimal string.
 
 ## Handshake
 

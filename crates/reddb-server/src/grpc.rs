@@ -63,9 +63,9 @@ use proto::{
     JsonPayloadRequest, KvWatchEvent, KvWatchRequest, ManifestRequest, OperationReply,
     PayloadReply, PrepareQueryReply, PrepareQueryRequest, QueryReply, QueryRequest, QueryValue,
     ScanEntity, ScanReply, ScanRequest, StatsReply, TopologyReply, TopologyRequest,
-    UpdateEntityRequest, Validation, ValidationItem, WalCatchup as GrpcWalCatchup,
-    WalStreamChunk as GrpcWalStreamChunk, WalStreamRecord as GrpcWalStreamRecord,
-    WalStreamRequest as GrpcWalStreamRequest,
+    TypedCreateRowRequest, UpdateEntityRequest, Validation, ValidationItem,
+    WalCatchup as GrpcWalCatchup, WalStreamChunk as GrpcWalStreamChunk,
+    WalStreamRecord as GrpcWalStreamRecord, WalStreamRequest as GrpcWalStreamRequest,
 };
 
 pub(crate) mod catalog_dispatch;
@@ -615,6 +615,13 @@ mod grpc_query_value_tests {
     use super::*;
     use proto::query_value::Kind;
 
+    fn mutation_field(name: &str, kind: Kind) -> proto::MutationField {
+        proto::MutationField {
+            name: name.to_string(),
+            value: Some(QueryValue { kind: Some(kind) }),
+        }
+    }
+
     #[tokio::test]
     async fn grpc_execution_refuses_when_shared_runtime_queue_is_full() {
         let runtime =
@@ -836,6 +843,97 @@ mod grpc_query_value_tests {
         assert_eq!(reply.record_count, 1);
         assert!(reply.result_json.contains("Alice"), "{}", reply.result_json);
         assert!(!reply.result_json.contains("Bob"), "{}", reply.result_json);
+    }
+
+    #[tokio::test]
+    async fn grpc_typed_create_row_preserves_types_and_uses_contract_defaults() {
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        runtime
+            .execute_query(
+                "CREATE TABLE typed_users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, active BOOLEAN DEFAULT = true)",
+            )
+            .expect("create typed table");
+        let service = RedDBGrpcServer::new(runtime.clone()).grpc_runtime();
+
+        let reply = RedDb::create_row_typed(
+            &service,
+            Request::new(TypedCreateRowRequest {
+                collection: "typed_users".to_string(),
+                fields: vec![
+                    mutation_field("id", Kind::IntValue(7)),
+                    mutation_field("name", Kind::TextValue("Ada".to_string())),
+                ],
+            }),
+        )
+        .await
+        .expect("typed insert")
+        .into_inner();
+
+        assert!(reply.ok);
+        let selected = runtime
+            .execute_query("SELECT id, name, active FROM typed_users WHERE id = 7")
+            .expect("select typed row");
+        assert_eq!(selected.result.records.len(), 1);
+        assert_eq!(
+            selected.result.records[0].get("id"),
+            Some(&Value::Integer(7))
+        );
+        assert_eq!(
+            selected.result.records[0].get("name"),
+            Some(&Value::text("Ada"))
+        );
+        assert_eq!(
+            selected.result.records[0].get("active"),
+            Some(&Value::Boolean(true))
+        );
+    }
+
+    #[tokio::test]
+    async fn grpc_typed_create_row_rejects_ambiguous_or_invalid_fields_before_write() {
+        let runtime =
+            RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
+        runtime
+            .execute_query(
+                "CREATE TABLE typed_rejects (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+            )
+            .expect("create typed table");
+        let service = RedDBGrpcServer::new(runtime.clone()).grpc_runtime();
+
+        let duplicate = RedDb::create_row_typed(
+            &service,
+            Request::new(TypedCreateRowRequest {
+                collection: "typed_rejects".to_string(),
+                fields: vec![
+                    mutation_field("id", Kind::IntValue(1)),
+                    mutation_field("id", Kind::IntValue(2)),
+                    mutation_field("name", Kind::TextValue("Ada".to_string())),
+                ],
+            }),
+        )
+        .await
+        .expect_err("duplicate field must fail");
+        assert_eq!(duplicate.code(), tonic::Code::InvalidArgument);
+        assert!(duplicate.message().contains("duplicate field 'id'"));
+
+        let missing_kind = RedDb::create_row_typed(
+            &service,
+            Request::new(TypedCreateRowRequest {
+                collection: "typed_rejects".to_string(),
+                fields: vec![proto::MutationField {
+                    name: "id".to_string(),
+                    value: Some(QueryValue { kind: None }),
+                }],
+            }),
+        )
+        .await
+        .expect_err("missing value kind must fail");
+        assert_eq!(missing_kind.code(), tonic::Code::InvalidArgument);
+
+        let selected = runtime
+            .execute_query("SELECT id FROM typed_rejects")
+            .expect("select after rejected inserts");
+        assert!(selected.result.records.is_empty());
     }
 
     #[tokio::test]
