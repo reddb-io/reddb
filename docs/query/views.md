@@ -144,7 +144,7 @@ SELECT * FROM recent_orders;   -- only 'acme' orders
 ## Limitations
 
 - View definitions live in memory — persist across restart is on the
-  roadmap (materialized-view cache already writes to `red_config`).
+  roadmap (materialized-view cache already writes to `red.config`).
 - No indexable materialized views yet (read-only cache).
 - `WITH (security_barrier = true)` PG option not yet honoured —
   predicates are always pushed through the rewrite.

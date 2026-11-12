@@ -12,7 +12,7 @@
 //!   2. Producer enqueues from a separate gRPC client during the
 //!      waiter's WAIT → the message is delivered to the waiter.
 //!   3. WAIT > server cap → tonic `Status` error whose message
-//!      names the cap key (`red.config.queue.max_wait_ms`) and the
+//!      names the cap key (`queue.max_wait_ms` in `red.config`) and the
 //!      active cap value (60000ms default).
 //!   4. Registry cancellation while a WAIT is parked → tonic
 //!      `Status` error with the explicit `QUEUE READ WAIT cancelled`
@@ -193,7 +193,7 @@ async fn grpc_wait_above_cap_is_rejected_with_explicit_error() {
 
     let msg = err.message();
     assert!(
-        msg.contains("red.config.queue.max_wait_ms"),
+        msg.contains("queue.max_wait_ms"),
         "rejection should name the cap key over gRPC, status={err:?}"
     );
     assert!(

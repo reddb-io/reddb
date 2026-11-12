@@ -3,10 +3,10 @@
 use super::*;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-const PROB_HLL_STATE_PREFIX: &str = "red.probabilistic.hll.";
-const PROB_SKETCH_STATE_PREFIX: &str = "red.probabilistic.sketch.";
-const PROB_FILTER_STATE_PREFIX: &str = "red.probabilistic.filter.";
-const PROB_ENCODING_MARKER_KEY: &str = "red.probabilistic.state_encoding";
+const PROB_HLL_STATE_PREFIX: &str = "probabilistic.hll.";
+const PROB_SKETCH_STATE_PREFIX: &str = "probabilistic.sketch.";
+const PROB_FILTER_STATE_PREFIX: &str = "probabilistic.filter.";
+const PROB_ENCODING_MARKER_KEY: &str = "probabilistic.state_encoding";
 const PROB_ENCODING_RAW_V1: &str = "raw-v1";
 const PROB_WAL_KIND_HLL: u8 = 1;
 const PROB_WAL_KIND_SKETCH: u8 = 2;
@@ -761,7 +761,7 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
             store.set_config_tree(
-                &format!("red.collection_tenants.{name}"),
+                &format!("collection_tenants.{name}"),
                 &crate::serde_json::Value::String(tenant_id),
             );
         }

@@ -894,7 +894,7 @@ where
 // Plan budget (ADR 0068 §4, issue #1748)
 // ===========================================================================
 
-/// Default `red.config.ai.ask.max_plan_steps` cap when unset.
+/// Default `ai.ask.max_plan_steps` cap when unset.
 pub const DEFAULT_MAX_PLAN_STEPS: usize = 3;
 
 /// A budgeted step in the executed plan. Every retrieval refinement, metadata

@@ -371,7 +371,7 @@ pub fn refresh(rt: &RedDBRuntime, members: &[ClusterMember]) -> RedDBResult<Refr
 /// Pull the live cluster state off the runtime and materialise it.
 pub fn refresh_from_runtime(rt: &RedDBRuntime) -> RedDBResult<RefreshOutcome> {
     let db = rt.db();
-    let primary_addr = rt.config_string("red.grpc.advertise_addr", "");
+    let primary_addr = rt.config_string("grpc.advertise_addr", "");
     let primary_region = db.options().replication.region.clone();
     let primary_lsn = db
         .replication

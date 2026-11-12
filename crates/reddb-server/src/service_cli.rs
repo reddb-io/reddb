@@ -1748,7 +1748,7 @@ fn build_runtime_and_auth_store(
 /// `red.config` settings, and return a guard the caller must keep
 /// alive for the server lifetime (drop flushes pending log writes).
 ///
-/// Merge priority: CLI flag (explicit `Some`) beats `red.logging.*`
+/// Merge priority: CLI flag (explicit `Some`) beats `logging.*`
 /// in red.config, beats the built-in default. A CLI-flag value of
 /// `None` / empty means "inherit from config or default" — never
 /// "disable". The one exception is `--no-log-file` which forces
@@ -2633,7 +2633,7 @@ fn persist_bootstrap_state(
     Ok(())
 }
 
-/// Read `red.logging.*` keys from the persistent config store and
+/// Read `logging.*` keys from the persistent config store and
 /// merge them into the CLI-built `TelemetryConfig`. Merge priority:
 /// explicit CLI flag > red.config > built-in default.
 ///
@@ -2652,19 +2652,19 @@ fn merge_telemetry_with_config(
     let store = runtime.db().store();
 
     if !cli.level_explicit {
-        if let Some(Value::Text(v)) = store.get_config("red.logging.level") {
+        if let Some(Value::Text(v)) = store.get_config("logging.level") {
             cli.level_filter = v.to_string();
         }
     }
     if !cli.format_explicit {
-        if let Some(Value::Text(v)) = store.get_config("red.logging.format") {
+        if let Some(Value::Text(v)) = store.get_config("logging.format") {
             if let Some(parsed) = crate::telemetry::LogFormat::parse(&v) {
                 cli.format = parsed;
             }
         }
     }
     if !cli.rotation_keep_days_explicit {
-        match store.get_config("red.logging.keep_days") {
+        match store.get_config("logging.keep_days") {
             Some(Value::Integer(n)) if n >= 0 && n <= u16::MAX as i64 => {
                 cli.rotation_keep_days = n as u16
             }
@@ -2680,7 +2680,7 @@ fn merge_telemetry_with_config(
         }
     }
     if !cli.file_prefix_explicit {
-        if let Some(Value::Text(v)) = store.get_config("red.logging.file_prefix") {
+        if let Some(Value::Text(v)) = store.get_config("logging.file_prefix") {
             if !v.is_empty() {
                 cli.file_prefix = v.to_string();
             }
@@ -2689,7 +2689,7 @@ fn merge_telemetry_with_config(
     // --no-log-file is a kill-switch: config cannot resurrect the
     // file sink. Explicit --log-dir also wins.
     if !cli.log_dir_explicit && !cli.log_file_disabled {
-        if let Some(Value::Text(v)) = store.get_config("red.logging.dir") {
+        if let Some(Value::Text(v)) = store.get_config("logging.dir") {
             if !v.is_empty() {
                 cli.log_dir = Some(std::path::PathBuf::from(v.as_ref()));
             }
@@ -2728,7 +2728,7 @@ mod telemetry_merge_tests {
     #[test]
     fn config_log_dir_promoted_when_flag_absent() {
         let runtime = fresh_runtime();
-        set_str(&runtime, "red.logging.dir", "/var/log/reddb");
+        set_str(&runtime, "logging.dir", "/var/log/reddb");
         let merged = merge_telemetry_with_config(cli_base(), &runtime);
         assert_eq!(
             merged.log_dir.as_deref(),
@@ -2739,7 +2739,7 @@ mod telemetry_merge_tests {
     #[test]
     fn explicit_log_dir_wins_over_config() {
         let runtime = fresh_runtime();
-        set_str(&runtime, "red.logging.dir", "/var/log/reddb");
+        set_str(&runtime, "logging.dir", "/var/log/reddb");
         let mut cli = cli_base();
         cli.log_dir = Some(std::path::PathBuf::from("/custom/dir"));
         cli.log_dir_explicit = true;
@@ -2753,7 +2753,7 @@ mod telemetry_merge_tests {
     #[test]
     fn no_log_file_beats_config_log_dir() {
         let runtime = fresh_runtime();
-        set_str(&runtime, "red.logging.dir", "/var/log/reddb");
+        set_str(&runtime, "logging.dir", "/var/log/reddb");
         let mut cli = cli_base();
         cli.log_dir = None;
         cli.log_file_disabled = true;
@@ -2770,7 +2770,7 @@ mod telemetry_merge_tests {
         // though TelemetryConfig::default() is Pretty. The old equality
         // check silently dropped config here.
         let runtime = fresh_runtime();
-        set_str(&runtime, "red.logging.format", "pretty");
+        set_str(&runtime, "logging.format", "pretty");
         let merged = merge_telemetry_with_config(cli_base(), &runtime);
         assert_eq!(merged.format, LogFormat::Pretty);
     }
@@ -2778,7 +2778,7 @@ mod telemetry_merge_tests {
     #[test]
     fn explicit_format_wins_over_config() {
         let runtime = fresh_runtime();
-        set_str(&runtime, "red.logging.format", "pretty");
+        set_str(&runtime, "logging.format", "pretty");
         let mut cli = cli_base();
         cli.format = LogFormat::Json;
         cli.format_explicit = true;
@@ -4162,7 +4162,7 @@ mod tests {
         );
 
         set_current_auth_identity("alice".to_string(), Role::Admin);
-        let config_denied = runtime.execute_query("SET CONFIG red.config.audit.enabled = true");
+        let config_denied = runtime.execute_query("SET CONFIG audit.enabled = true");
         clear_current_auth_identity();
         let err = config_denied.expect_err("managed config guardrail must deny ordinary admin");
         assert!(
@@ -4173,7 +4173,7 @@ mod tests {
         let denied_config_events = runtime
             .execute_query(
                 "SELECT action, resource, outcome FROM red.control_events \
-                 WHERE action = 'config:write' AND resource = 'config:red.config.audit.enabled'",
+                 WHERE action = 'config:write' AND resource = 'config:red.config/audit.enabled'",
             )
             .expect("red.control_events denied config write");
         assert_eq!(denied_config_events.result.records.len(), 1);
@@ -4263,9 +4263,9 @@ mod tests {
                     }
                 ],
                 "config": [
-                    {"key": "red.ai.default.provider", "value": "openai"},
+                    {"key": "ai.default.provider", "value": "openai"},
                     {
-                        "key": "red.ai.openai.default.secret_ref",
+                        "key": "ai.openai.default.secret_ref",
                         "secret_ref": {"collection": "red.vault", "key": "openai"}
                     }
                 ],
@@ -4319,14 +4319,14 @@ mod tests {
 
         let store = runtime.db().store();
         match store
-            .get_config("red.ai.default.provider")
+            .get_config("ai.default.provider")
             .expect("plain config persisted")
         {
             Value::Text(s) => assert_eq!(s.as_ref(), "openai"),
             other => panic!("expected provider text, got {other:?}"),
         }
         let Value::Json(bytes) = store
-            .get_config("red.ai.openai.default.secret_ref")
+            .get_config("ai.openai.default.secret_ref")
             .expect("secret ref config persisted")
         else {
             panic!("secret ref must be stored as structured JSON");

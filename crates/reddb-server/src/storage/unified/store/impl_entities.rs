@@ -338,7 +338,7 @@ impl UnifiedStore {
     ///
     /// `red.config` is last-writer-wins (ADR 0014): each write replaces the
     /// key's earlier rows. Appending instead grew the store on every boot,
-    /// since boot re-seeds keys such as `red.system.*`.
+    /// since boot re-seeds keys such as `system.*`.
     pub fn set_config_tree(&self, prefix: &str, json: &crate::serde_json::Value) -> usize {
         // Historical best-effort adapter. Authoritative callers propagate the
         // result of try_set_config_tree instead of ignoring failed persistence.
@@ -350,6 +350,7 @@ impl UnifiedStore {
         prefix: &str,
         json: &crate::serde_json::Value,
     ) -> Result<usize, StoreError> {
+        super::config_keys::validate_config_key(prefix)?;
         self.try_set_key_value_tree("red.config", prefix, json)
     }
 
@@ -384,9 +385,14 @@ impl UnifiedStore {
         json: &crate::serde_json::Value,
     ) -> Result<usize, StoreError> {
         let _publication = self.vault_publication_lock.lock();
-        let manager = self.get_or_create_collection(collection);
         let mut pairs = Vec::new();
         flatten_config_json(prefix, json, &mut pairs);
+        if Self::canonical_collection(collection) == "red.config" {
+            for (key, _) in &pairs {
+                super::config_keys::validate_config_key(key)?;
+            }
+        }
+        let manager = self.get_or_create_collection(collection);
         // Existing rows per key, with the value each one holds.
         let mut previous: HashMap<String, Vec<(EntityId, Option<reddb_types::Value>)>> = pairs
             .iter()
@@ -410,7 +416,7 @@ impl UnifiedStore {
             manager.try_for_each_entity(usize::MAX, &mut capture)?;
         }
         let batch_system = collection == "red.config"
-            && prefix == "red.system"
+            && prefix == "system"
             && self.config.embedded_wal_path.is_some()
             && !Self::deferred_store_wal_capture_active();
         let mut system_rows = Vec::new();
@@ -475,7 +481,16 @@ impl UnifiedStore {
     }
 
     pub fn try_get_config(&self, key: &str) -> Result<Option<reddb_types::Value>, StoreError> {
+        super::config_keys::validate_config_key(key)?;
         self.try_get_key_value("red.config", key)
+    }
+
+    pub(crate) fn try_get_config_entity(
+        &self,
+        key: &str,
+    ) -> Result<Option<UnifiedEntity>, StoreError> {
+        super::config_keys::validate_config_key(key)?;
+        self.try_get_key_value_entity("red.config", key)
     }
 
     pub fn try_get_storage_metadata(
@@ -490,25 +505,42 @@ impl UnifiedStore {
         collection: &str,
         key: &str,
     ) -> Result<Option<reddb_types::Value>, StoreError> {
+        Ok(self
+            .try_get_key_value_entity(collection, key)?
+            .and_then(|entity| {
+                entity
+                    .data
+                    .as_row()
+                    .and_then(|row| row.get_field("value"))
+                    .cloned()
+            }))
+    }
+
+    fn try_get_key_value_entity(
+        &self,
+        collection: &str,
+        key: &str,
+    ) -> Result<Option<UnifiedEntity>, StoreError> {
         let Some(manager) = self.get_collection(collection) else {
             return Ok(None);
         };
         let _publication = manager
             .has_backing()
             .then(|| self.vault_publication_lock.lock());
-        let mut latest: Option<(u64, reddb_types::Value)> = None;
+        let mut latest: Option<UnifiedEntity> = None;
         manager.try_for_each_key_entity(key, |entity| {
             if let EntityData::Row(row) = &entity.data {
                 let key_matches = matches!(row.get_field("key"), Some(reddb_types::Value::Text(stored)) if stored.as_ref() == key);
-                if key_matches && latest.as_ref().is_none_or(|(id, _)| entity.id.raw() >= *id) {
-                    if let Some(value) = row.get_field("value") {
-                        latest = Some((entity.id.raw(), value.clone()));
-                    }
+                if key_matches
+                    && row.get_field("value").is_some()
+                    && latest.as_ref().is_none_or(|current| entity.id >= current.id)
+                {
+                    latest = Some(entity.clone());
                 }
             }
             true
         })?;
-        Ok(latest.map(|(_, value)| value))
+        Ok(latest)
     }
 
     /// Replace the opaque store-level auxiliary metadata blob. Persisted
@@ -606,6 +638,7 @@ impl UnifiedStore {
     /// Insert an entity into a collection
     pub fn insert(&self, collection: &str, entity: UnifiedEntity) -> Result<EntityId, StoreError> {
         let collection = Self::canonical_collection(collection);
+        super::config_keys::validate_config_entity(collection, &entity)?;
         let manager = self
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
@@ -715,6 +748,7 @@ impl UnifiedStore {
         let collection = Self::canonical_collection(collection);
         for entity in &mut entities {
             entity.canonicalize_system_collection_names();
+            super::config_keys::validate_config_entity(collection, entity)?;
         }
         // A transaction can begin after checkpoint visibility is frozen.
         // Fence the entire row batch, including its captured or committed WAL.
@@ -924,7 +958,20 @@ impl UnifiedStore {
                 }]
             })
             .unwrap_or_default();
-        self.finish_paged_write(actions)?;
+        if let Err(error) = self.finish_paged_write(actions) {
+            // Rows are already installed in the resident segment. A failed
+            // WAL publication must not leave a successful-looking scan.
+            for id in &ids {
+                self.apply_replayed_action(
+                    &StoreWalAction::DeleteEntityRecord {
+                        collection: collection.to_string(),
+                        entity_id: id.raw(),
+                    },
+                    true,
+                )?;
+            }
+            return Err(error);
+        }
 
         if trace {
             tracing::debug!(
@@ -951,8 +998,9 @@ impl UnifiedStore {
         entity: UnifiedEntity,
     ) -> Result<EntityId, StoreError> {
         let collection = Self::canonical_collection(collection);
+        super::config_keys::validate_config_entity(collection, &entity)?;
         // Include the WAL append in the checkpoint publication fence.
-        let _publication = self.vault_publication_lock.lock();
+        let mut publication = Some(self.vault_publication_lock.lock());
         let manager = self.get_or_create_collection(collection);
         let mut entity = entity;
         entity.canonicalize_system_collection_names();
@@ -1062,11 +1110,28 @@ impl UnifiedStore {
             if registry_dirty {
                 self.mark_paged_registry_dirty();
             }
-            if let Some(mut pending) = self.enqueue_grouped_actions(&actions)? {
-                drop(_publication);
-                self.complete_grouped_actions(&mut pending, &actions)?;
-            } else {
-                self.finish_paged_write(actions)?;
+            // Retain an embedded failure ticket until rollback completes, so
+            // a checkpoint cannot publish the staged row in between.
+            let mut pending = None;
+            let persisted = (|| {
+                pending = self.enqueue_grouped_actions(&actions)?;
+                if let Some(pending) = pending.as_mut() {
+                    drop(publication.take());
+                    self.complete_grouped_actions(pending, &actions)
+                } else {
+                    self.finish_paged_write(actions)
+                }
+            })();
+            if let Err(error) = persisted {
+                let _publication = self.vault_publication_lock.lock();
+                self.apply_replayed_action(
+                    &StoreWalAction::DeleteEntityRecord {
+                        collection: collection.to_string(),
+                        entity_id: id.raw(),
+                    },
+                    true,
+                )?;
+                return Err(error);
             }
         } else {
             self.note_in_memory_result_mutation(collection)?;
@@ -1249,6 +1314,7 @@ impl UnifiedStore {
         mut new_version: UnifiedEntity,
         metadata: Option<&Metadata>,
     ) -> Result<(), StoreError> {
+        super::config_keys::validate_config_entity(collection, &new_version)?;
         let manager = self
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;

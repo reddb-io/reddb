@@ -1596,6 +1596,99 @@ fn restore_identifier_is_safe(name: &str) -> bool {
     })
 }
 
+fn canonical_restored_config_key(key: &str) -> Result<&str, String> {
+    let canonical = key
+        .strip_prefix("red.config.")
+        .or_else(|| key.strip_prefix("red."));
+    let Some(canonical) = canonical else {
+        return Ok(key);
+    };
+    if canonical.is_empty() {
+        return Err(format!(
+            "config key `{key}` has a redundant `red.` prefix but no canonical suffix"
+        ));
+    }
+    Ok(canonical)
+}
+
+// Match boot migration collision semantics before restore assigns new entity
+// IDs: a canonical history always wins; otherwise the legacy spelling whose
+// final row appears latest in the dump wins. The map is bounded by unique
+// config keys rather than dump rows.
+fn restored_config_key_winners<R: Read>(
+    reader: R,
+) -> std::io::Result<std::collections::HashMap<String, String>> {
+    use std::collections::hash_map::Entry;
+
+    let mut winners = std::collections::HashMap::<String, String>::new();
+    for line in restore_input_lines(reader) {
+        let line = line?;
+        let Ok(reddb::json::Value::Object(record)) = reddb::json::from_str(line.trim()) else {
+            continue;
+        };
+        let Some(collection) = record.get("collection").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if reddb_engine::storage::system_collection_names::canonical_or_self(collection)
+            != "red.config"
+        {
+            continue;
+        }
+        let Some(original) = record
+            .get("fields")
+            .and_then(|value| value.as_object())
+            .and_then(|fields| fields.get("key"))
+            .and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+        let Ok(canonical) = canonical_restored_config_key(original) else {
+            continue;
+        };
+        match winners.entry(canonical.to_string()) {
+            Entry::Vacant(entry) => {
+                entry.insert(original.to_string());
+            }
+            Entry::Occupied(mut entry) => {
+                let canonical_already_won = entry.get() == canonical;
+                let current_is_canonical = original == canonical;
+                if current_is_canonical || !canonical_already_won {
+                    entry.insert(original.to_string());
+                }
+            }
+        }
+    }
+    Ok(winners)
+}
+
+// Logical dumps created before the red.config content-key normalization carry
+// either `red.<key>` or `red.config.<key>`. Restore is the only write boundary
+// that accepts those historical spellings; all live write paths reject them.
+// False means that this row belongs to a losing collision history and must not
+// be inserted under the winner's canonical key.
+fn normalize_restored_config_key(
+    collection: &str,
+    fields: &mut reddb::json::Map<String, reddb::json::Value>,
+    winners: &std::collections::HashMap<String, String>,
+) -> Result<bool, String> {
+    if collection != "red.config" {
+        return Ok(true);
+    }
+    let Some(reddb::json::Value::String(key)) = fields.get_mut("key") else {
+        return Ok(true);
+    };
+    let original = key.clone();
+    let canonical = canonical_restored_config_key(&original)?;
+    if winners
+        .get(canonical)
+        .is_some_and(|winner| winner != &original)
+    {
+        return Ok(false);
+    }
+    *key = canonical.to_string();
+    Ok(true)
+}
+
 fn restore_input_lines<R: Read>(reader: R) -> impl Iterator<Item = std::io::Result<String>> {
     BufReader::new(reader).lines()
 }
@@ -2600,6 +2693,16 @@ fn run_cli() {
                 std::process::exit(1);
             });
 
+            let config_key_winners = std::fs::File::open(&input_path)
+                .and_then(restored_config_key_winners)
+                .unwrap_or_else(|error| {
+                    if json_mode {
+                        json_error("restore", &format!("read failed: {error}"));
+                    }
+                    eprintln!("read failed: {error}");
+                    std::process::exit(1);
+                });
+
             let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
                 if json_mode {
                     json_error("restore", &err);
@@ -2794,13 +2897,22 @@ fn run_cli() {
                     }
                 };
                 // Preserve field names and decoded values through the typed runtime entry.
-                let obj = match fields {
+                let mut obj = match fields {
                     reddb::json::Value::Object(m) => m,
                     _ => {
                         errors += 1;
                         continue;
                     }
                 };
+                match normalize_restored_config_key(&collection, &mut obj, &config_key_winners) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        errors += 1;
+                        eprintln!("line {}: {error}", line_no + 1);
+                        continue;
+                    }
+                }
                 let mut cols = Vec::new();
                 let mut values = Vec::new();
                 let mut invalid = false;
@@ -6452,6 +6564,33 @@ mod tests {
             lines.next().expect("first line").expect("read line"),
             r#"{"collection":"items","fields":{"id":"1"}}"#,
         );
+    }
+
+    struct OneConfigLineThenError {
+        emitted: bool,
+    }
+
+    impl Read for OneConfigLineThenError {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.emitted {
+                return Err(io::Error::other("synthetic restore read failure"));
+            }
+            let line =
+                b"{\"collection\":\"red.config\",\"fields\":{\"key\":\"red.auth.enabled\"}}\n";
+            assert!(buf.len() >= line.len());
+            buf[..line.len()].copy_from_slice(line);
+            self.emitted = true;
+            Ok(line.len())
+        }
+    }
+
+    #[test]
+    fn restore_config_collision_scan_fails_closed_on_read_error() {
+        let error = restored_config_key_winners(OneConfigLineThenError { emitted: false })
+            .expect_err("a partial collision scan must not permit restore writes");
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "synthetic restore read failure");
     }
 
     #[test]

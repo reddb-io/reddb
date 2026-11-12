@@ -14,7 +14,7 @@
 //!      waiter's WAIT → the message is delivered to the waiter (one
 //!      DataRow frame carrying the payload).
 //!   3. WAIT > server cap → an ErrorResponse frame whose message names
-//!      the cap key (`red.config.queue.max_wait_ms`) and the active cap
+//!      the cap key (`queue.max_wait_ms` in `red.config`) and the active cap
 //!      value (60000ms default), with no park.
 //!   4. Registry cancellation while a WAIT is parked → an ErrorResponse
 //!      frame with the explicit `QUEUE READ WAIT cancelled` message —
@@ -249,7 +249,7 @@ async fn pg_wire_wait_above_cap_is_rejected_with_explicit_error() {
         )
     });
     assert!(
-        msg.contains("red.config.queue.max_wait_ms"),
+        msg.contains("queue.max_wait_ms"),
         "rejection should name the cap key over PG-wire, msg={msg}"
     );
     assert!(

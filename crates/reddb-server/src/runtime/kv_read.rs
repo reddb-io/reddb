@@ -79,9 +79,15 @@ impl<'a> KvReadResolver<'a> {
     fn project<T>(
         &self,
         key: &str,
-        projection: impl FnMut(&UnifiedEntity) -> T,
+        mut projection: impl FnMut(&UnifiedEntity) -> T,
     ) -> RedDBResult<Option<T>> {
         let store = self.runtime.db().store();
+        if crate::storage::UnifiedStore::canonical_collection(self.collection) == "red.config" {
+            return store
+                .try_get_config_entity(key)
+                .map(|entity| entity.as_ref().map(&mut projection))
+                .map_err(RedDBError::from);
+        }
         let Some(manager) = store.get_collection(self.collection) else {
             return Ok(None);
         };
@@ -120,6 +126,48 @@ pub(super) fn is_versioned(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config_row(key: &str, value: &str) -> UnifiedEntity {
+        UnifiedEntity::new(
+            EntityId::new(0),
+            crate::storage::EntityKind::TableRow {
+                table: std::sync::Arc::from("red.config"),
+                row_id: 0,
+            },
+            crate::storage::EntityData::Row(crate::storage::RowData {
+                columns: Vec::new(),
+                named: Some(
+                    [
+                        ("key".to_string(), Value::text(key)),
+                        ("value".to_string(), Value::text(value)),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                schema: None,
+            }),
+        )
+    }
+
+    #[test]
+    fn red_config_reads_choose_the_newest_physical_row() {
+        use crate::application::ports::RuntimeEntityPort;
+
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let store = runtime.db().store();
+        let first = store
+            .insert_auto("red.config", config_row("test.latest", "old"))
+            .expect("first config row");
+        let latest = store
+            .insert_auto("red.config", config_row("test.latest", "new"))
+            .expect("latest config row");
+        assert!(latest > first);
+
+        assert_eq!(
+            runtime.get_kv("red.config", "test.latest").expect("read"),
+            Some((Value::text("new"), latest))
+        );
+    }
 
     #[test]
     fn cold_keyed_reads_match_resident_and_propagate_decode_failures() {

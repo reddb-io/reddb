@@ -99,7 +99,7 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
             store.set_config_tree(
-                &format!("red.collection_tenants.{}", query.name),
+                &format!("collection_tenants.{}", query.name),
                 &crate::serde_json::Value::String(tenant_id),
             );
         }
@@ -221,11 +221,11 @@ impl RedDBRuntime {
                 "cluster"
             };
             store.set_config_tree(
-                &format!("red.vault.{}.key_scope", query.name),
+                &format!("vault.{}.key_scope", query.name),
                 &crate::serde_json::Value::String(key_scope.to_string()),
             );
             store.set_config_tree(
-                &format!("red.vault.{}.status", query.name),
+                &format!("vault.{}.status", query.name),
                 &crate::serde_json::Value::String("sealed".to_string()),
             );
         }
@@ -256,7 +256,7 @@ impl RedDBRuntime {
                     .db
                     .set_collection_default_ttl_ms(&query.name, raw_retention_ms);
                 store.set_config_tree(
-                    &format!("red.metrics.{}.raw_retention_ms", query.name),
+                    &format!("metrics.{}.raw_retention_ms", query.name),
                     &crate::serde_json::Value::Number(raw_retention_ms as f64),
                 );
             }
@@ -265,16 +265,16 @@ impl RedDBRuntime {
                 .clone()
                 .unwrap_or_else(|| "current_tenant".to_string());
             store.set_config_tree(
-                &format!("red.metrics.{}.tenant_identity", query.name),
+                &format!("metrics.{}.tenant_identity", query.name),
                 &crate::serde_json::Value::String(tenant_identity),
             );
             store.set_config_tree(
-                &format!("red.metrics.{}.namespace", query.name),
+                &format!("metrics.{}.namespace", query.name),
                 &crate::serde_json::Value::String("default".to_string()),
             );
             if !query.metrics_rollup_policies.is_empty() {
                 store.set_config_tree(
-                    &format!("red.metrics.{}.rollup_policies", query.name),
+                    &format!("metrics.{}.rollup_policies", query.name),
                     &crate::serde_json::Value::Array(
                         query
                             .metrics_rollup_policies
@@ -302,7 +302,7 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
             store.set_config_tree(
-                &format!("red.collection_tenants.{}", query.name),
+                &format!("collection_tenants.{}", query.name),
                 &crate::serde_json::Value::String(tenant_id),
             );
         }
@@ -480,7 +480,7 @@ impl RedDBRuntime {
         Ok(result)
     }
 
-    /// Stamp `red.collection.{name}.kind = "chain"` and append the genesis
+    /// Stamp `collection.{name}.kind = "chain"` and append the genesis
     /// row. Idempotent against `IF NOT EXISTS`: if the collection already
     /// has a row at height 0 we leave it.
     fn install_blockchain_kind(&self, name: &str) -> RedDBResult<()> {
@@ -558,7 +558,7 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
             store.set_config_tree(
-                &format!("red.collection_tenants.{}", query.name),
+                &format!("collection_tenants.{}", query.name),
                 &crate::serde_json::Value::String(tenant_id),
             );
         }
@@ -2419,13 +2419,13 @@ fn apply_alter_operations_to_contract(
                 }
             }
             // Partition ops don't touch the column contract — metadata is
-            // persisted separately via `red.config.partition.*`.
+            // persisted separately via `partition.*` inside `red.config`.
             AlterOperation::AttachPartition { .. } | AlterOperation::DetachPartition { .. } => {}
             // RLS toggles don't touch the column contract — flag is persisted
-            // separately via `red.config.rls.enabled.{table}` and enforced
+            // separately via `rls.enabled.{table}` inside `red.config` and enforced
             // through the in-memory `rls_enabled_tables` set.
             AlterOperation::EnableRowLevelSecurity | AlterOperation::DisableRowLevelSecurity => {}
-            // Phase 2.5.4: tenancy toggles persist via `red.config.tenant_tables.*`
+            // Phase 2.5.4: tenancy toggles persist via `tenant_tables.*` in `red.config`
             // and are enforced through `tenant_tables` + RLS auto-policy.
             AlterOperation::EnableTenancy { .. } | AlterOperation::DisableTenancy => {}
             AlterOperation::SetAppendOnly(on) => {
@@ -3548,7 +3548,7 @@ mod tests {
         let options = RedDBOptions::persistent(&path);
         {
             let rt = RedDBRuntime::with_options(options.clone()).expect("runtime");
-            assert!(!rt.config_bool("red.config.ai.collection_descriptions.auto_enrich", false));
+            assert!(!rt.config_bool("ai.collection_descriptions.auto_enrich", false));
             rt.execute_query("CREATE TABLE contacts (email EMAIL DESCRIPTION 'Contact address', balance MONEY) WITH (DESCRIPTION = 'Contact records')").expect("table");
             rt.execute_query(
                 "CREATE COLLECTION articles KIND document DESCRIPTION 'Published articles'",

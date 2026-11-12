@@ -278,7 +278,7 @@ async fn wait_above_server_cap_is_rejected_over_redwire() {
     );
     let msg = format!("{err}");
     assert!(
-        msg.contains("red.config.queue.max_wait_ms"),
+        msg.contains("queue.max_wait_ms"),
         "error frame should name the cap key for operators, got: {msg:?}"
     );
     assert!(

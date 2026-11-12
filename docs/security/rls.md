@@ -188,7 +188,7 @@ See [Multi-Tenancy](multi-tenancy.md) for the declarative form.
 ## Observability
 
 `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` persists the toggle to
-`red_config.rls.enabled.{table}` so it survives restart. Policy
+the `rls.enabled.{table}` key in `red.config` so it survives restart. Policy
 definitions live in memory for now — re-run `CREATE POLICY` on boot
 if you need them preserved.
 

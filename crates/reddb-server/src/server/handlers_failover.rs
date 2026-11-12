@@ -77,12 +77,10 @@ impl RedDBServer {
             return json_error(412, reason);
         };
 
-        let applied_lsn = self
-            .runtime
-            .config_u64("red.replication.last_applied_lsn", 0);
+        let applied_lsn = self.runtime.config_u64("replication.last_applied_lsn", 0);
         let last_seen_primary_lsn = self
             .runtime
-            .config_u64("red.replication.last_seen_primary_lsn", 0);
+            .config_u64("replication.last_seen_primary_lsn", 0);
 
         // A caught-up replica transitions from `healthy` to `connecting`
         // when its primary disappears. That state is promotion-ready only
@@ -368,7 +366,7 @@ mod tests {
         options.remote_key = Some(database_key.to_string());
         let runtime = RedDBRuntime::with_options(options).expect("runtime boots");
         runtime.db().store().set_config_tree(
-            "red.replication",
+            "replication",
             &crate::json!({
                 "replica_id": "replica-a",
                 "state": "healthy",
@@ -420,7 +418,7 @@ mod tests {
         runtime
             .db()
             .store()
-            .set_config_tree("red.replication", &crate::json!({ "state": "connecting" }));
+            .set_config_tree("replication", &crate::json!({ "state": "connecting" }));
         let server = RedDBServer::new(runtime);
 
         let response = server.handle_admin_failover_promote(promote_request());
@@ -439,7 +437,7 @@ mod tests {
 
         let runtime = replica_runtime_for_promote(&data_path, &database_key);
         runtime.db().store().set_config_tree(
-            "red.replication",
+            "replication",
             &crate::json!({
                 "state": "healthy",
                 "last_applied_lsn": 41,

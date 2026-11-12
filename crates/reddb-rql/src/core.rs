@@ -989,7 +989,7 @@ pub struct AskQuery {
     /// by default, and `PLAN` is the inspection-only surface.
     pub plan_only: bool,
     /// Per-query plan-step budget request (`ASK '...' STEPS N`). Clamped to
-    /// `red.config.ai.ask.max_plan_steps` at planning time and never exceeds
+    /// `ai.ask.max_plan_steps` in `red.config` at planning time and never exceeds
     /// it; `None` falls back to the configured cap.
     pub steps: Option<usize>,
 }
@@ -1978,7 +1978,7 @@ pub struct AutoEmbedConfig {
     pub fields: Vec<String>,
     /// AI provider from an explicit `USING <provider>`. Empty when none was
     /// given — the runtime then resolves it via the embeddings task pointer
-    /// `red.config.ai.embeddings.provider` (ADR-0068 §5).
+    /// `ai.embeddings.provider` in `red.config` (ADR-0068 §5).
     pub provider: String,
     /// Optional model override
     pub model: Option<String>,

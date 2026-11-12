@@ -304,7 +304,7 @@ pub const MATRIX: &[ConfigDefault] = &[
     },
     // ai.ner.* — opt-in LLM backend for AskPipeline Stage 1 (issue #189).
     ConfigDefault {
-        key: "red.config.ai.collection_descriptions.auto_enrich",
+        key: "ai.collection_descriptions.auto_enrich",
         tier: Tier::Optional,
         default: || JsonValue::Bool(false),
     },

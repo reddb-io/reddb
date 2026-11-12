@@ -208,7 +208,7 @@ no textual round-trip anywhere on the substitution path.
 - `&path` secret reference (vault design §8) — lexer has no `&`
   token; parses as an error today. Track via the vault-design
   follow-up.
-- `red.config.ai.openai.…` autopopulation from secret references —
+- `ai.openai.…` content-key autopopulation in `red.config` from secret references —
   same: not implemented, not a concern until S6 lands.
 
 When S6 lands, the design mandates that the vault path resolves to a

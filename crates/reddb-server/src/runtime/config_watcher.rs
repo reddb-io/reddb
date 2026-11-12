@@ -4,7 +4,7 @@
 //! via `REDDB_CONFIG_FILE`) for changes and applies hot-reloadable keys
 //! to `red.config` without a server restart.
 //!
-//! **Hot-reloadable:** `red.logging.*`, `slow_query.*`, `disk_space.critical_pct`.
+//! **Hot-reloadable:** `logging.*`, `slow_query.*`, `disk_space.critical_pct`.
 //!
 //! **Restart-required:** everything else. Detected changes to non-hot-reloadable
 //! fields emit `OperatorEvent::ConfigChangeRequiresRestart` and are NOT applied.
@@ -27,11 +27,11 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Fields updatable in a live process without restart.
 const HOT_RELOAD_WHITELIST: &[&str] = &[
-    "red.logging.level",
-    "red.logging.format",
-    "red.logging.keep_days",
-    "red.logging.dir",
-    "red.logging.file_prefix",
+    "logging.level",
+    "logging.format",
+    "logging.keep_days",
+    "logging.dir",
+    "logging.file_prefix",
     "slow_query.threshold_ms",
     "slow_query.sample_pct",
     "disk_space.critical_pct",
@@ -293,8 +293,8 @@ mod tests {
 
     #[test]
     fn hot_reload_whitelist_contains_expected_keys() {
-        assert!(HOT_RELOAD_WHITELIST.contains(&"red.logging.level"));
-        assert!(HOT_RELOAD_WHITELIST.contains(&"red.logging.format"));
+        assert!(HOT_RELOAD_WHITELIST.contains(&"logging.level"));
+        assert!(HOT_RELOAD_WHITELIST.contains(&"logging.format"));
         assert!(HOT_RELOAD_WHITELIST.contains(&"slow_query.threshold_ms"));
         assert!(HOT_RELOAD_WHITELIST.contains(&"slow_query.sample_pct"));
         assert!(HOT_RELOAD_WHITELIST.contains(&"disk_space.critical_pct"));
@@ -302,13 +302,14 @@ mod tests {
 
     #[test]
     fn flatten_json_produces_dotted_keys() {
-        let raw = r#"{"red":{"logging":{"level":"info","format":"json"}},"slow_query":{"threshold_ms":500}}"#;
+        let raw =
+            r#"{"logging":{"level":"info","format":"json"},"slow_query":{"threshold_ms":500}}"#;
         let json: JsonValue = crate::serde_json::from_str(raw).unwrap();
         let mut flat = Vec::new();
         flatten_json("", &json, &mut flat);
         let keys: Vec<&str> = flat.iter().map(|(k, _)| k.as_str()).collect();
-        assert!(keys.contains(&"red.logging.level"));
-        assert!(keys.contains(&"red.logging.format"));
+        assert!(keys.contains(&"logging.level"));
+        assert!(keys.contains(&"logging.format"));
         assert!(keys.contains(&"slow_query.threshold_ms"));
     }
 

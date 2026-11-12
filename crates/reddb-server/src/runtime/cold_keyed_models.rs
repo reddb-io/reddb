@@ -668,6 +668,179 @@ fn committed_mvcc_index_reads_survive_crash_during_checkpoint_publication() {
 }
 
 #[test]
+fn disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry() {
+    use crate::api::DurabilityMode;
+    const CHILD_PATH: &str = "REDDB_DISK_FULL_PATH";
+    const CHILD_MODE: &str = "REDDB_DISK_FULL_MODE";
+    const CHILD_BYTES: &str = "REDDB_DISK_FULL_BYTES";
+    const CHILD_BATCH: &str = "REDDB_DISK_FULL_BATCH";
+    const CHILD_BOUNDED: &str = "REDDB_DISK_FULL_BOUNDED";
+    let open = |path: std::path::PathBuf, mode, bounded| {
+        let create = || {
+            RedDBRuntime::with_options(
+                RedDBOptions::persistent(path)
+                    .with_memory_budget(64 * 1024 * 1024)
+                    .with_storage_profile(
+                        crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+                    )
+                    .expect("profile")
+                    .with_durability_mode(mode),
+            )
+        };
+        let runtime = if bounded {
+            crate::storage::RedDB::with_disk_residency_for_qualification(create)
+        } else {
+            create()
+        }
+        .expect("open runtime");
+        runtime
+            .background_tasks
+            .as_ref()
+            .expect("workers")
+            .shutdown();
+        runtime
+    };
+    let assert_rows = |runtime: &RedDBRuntime, retried: bool| {
+        // Probe each index before an unindexed scan can warm stale postings.
+        for predicate in [
+            "id = 1",
+            "org_id >= 'org-a' AND org_id < 'org-b'",
+            "payload = 'committed'",
+        ] {
+            let result = runtime
+                .execute_query(&format!(
+                    "SELECT id,payload FROM disk_full_rows WHERE {predicate}"
+                ))
+                .expect("read confirmed row");
+            assert_eq!(result.result.records.len(), 1, "{predicate}");
+            assert_eq!(
+                result.result.records[0].get("payload"),
+                Some(&Value::text("committed"))
+            );
+        }
+        let result = runtime
+            .execute_query("SELECT id FROM disk_full_rows")
+            .expect("scan rows");
+        assert_eq!(result.result.records.len(), if retried { 2 } else { 1 });
+        for predicate in ["id = 2", "org_id >= 'org-b'"] {
+            let result = runtime
+                .execute_query(&format!(
+                    "SELECT id,payload FROM disk_full_rows WHERE {predicate}"
+                ))
+                .expect("retried row by index");
+            assert_eq!(result.result.records.len(), usize::from(retried));
+            if retried {
+                assert_eq!(
+                    result.result.records[0].get("payload"),
+                    Some(&Value::text("retry"))
+                );
+            }
+        }
+    };
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        let mode = if std::env::var(CHILD_MODE).expect("mode") == "strict" {
+            DurabilityMode::Strict
+        } else {
+            DurabilityMode::WalDurableGrouped
+        };
+        let bounded = std::env::var(CHILD_BOUNDED).expect("residency") == "true";
+        let runtime = open(path.into(), mode, bounded);
+        for sql in [
+            "BEGIN",
+            "UPDATE disk_full_rows SET payload = 'committed' WHERE id = 1",
+            "COMMIT",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        // The confirmed update above has no checkpoint; it must survive WAL replay.
+        let bytes = std::env::var(CHILD_BYTES)
+            .expect("prefix")
+            .parse()
+            .expect("byte count");
+        runtime.db().store().test_fail_wal_flush_after(bytes);
+        let sql = if std::env::var(CHILD_BATCH).expect("batch mode") == "true" {
+            "INSERT INTO disk_full_rows (id,org_id,payload) VALUES (2,'org-b','retry'),(3,'org-c','rejected')"
+        } else {
+            "INSERT INTO disk_full_rows (id,org_id,payload) VALUES (2,'org-b','retry')"
+        };
+        let error = runtime
+            .execute_query(sql)
+            .err()
+            .expect("disk full must reject INSERT");
+        assert!(error.to_string().contains("disk full"), "{error}");
+        assert_rows(&runtime, false);
+        // The one-shot fault is gone, but this writer cannot safely continue.
+        assert!(runtime.execute_query(sql).is_err());
+        assert!(runtime.checkpoint().is_err());
+        assert_rows(&runtime, false);
+        // Exercise Drop as well: it must not flush the rejected batch. Exiting
+        // then ensures the parent validates a genuinely cold recovery.
+        drop(runtime);
+        std::process::exit(197);
+    }
+
+    for (mode_name, mode) in [
+        ("strict", DurabilityMode::Strict),
+        ("grouped", DurabilityMode::WalDurableGrouped),
+    ] {
+        for (bytes, batch, bounded) in [false, true].into_iter().flat_map(|bounded| {
+            [(0, false), (17, false), (0, true), (17, true)]
+                .map(|(bytes, batch)| (bytes, batch, bounded))
+        }) {
+            let directory = tempfile::tempdir().expect("disk full fixture");
+            let path = directory.path().join("disk-full.rdb");
+            {
+                let runtime = open(path.clone(), mode, bounded);
+                for sql in [
+                    "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+                    "CREATE TABLE disk_full_rows (id INT, org_id TEXT, payload TEXT)",
+                    "CREATE UNIQUE INDEX disk_full_id ON disk_full_rows (id) USING HASH",
+                    "CREATE INDEX disk_full_org ON disk_full_rows (org_id) USING BTREE",
+                    "INSERT INTO disk_full_rows (id,org_id,payload) VALUES (1,'org-a','original')",
+                ] {
+                    runtime.execute_query(sql).expect(sql);
+                }
+                runtime.checkpoint().expect("baseline checkpoint");
+            }
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", "runtime::cold_keyed_models::disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry", "--nocapture"])
+                .env(CHILD_PATH, &path)
+                .env(CHILD_MODE, mode_name)
+                .env(CHILD_BYTES, bytes.to_string())
+                .env(CHILD_BATCH, batch.to_string())
+                .env(CHILD_BOUNDED, bounded.to_string())
+                .output().expect("disk full child");
+            assert_eq!(
+                output.status.code(),
+                Some(197),
+                "{mode_name}/{bytes}/batch={batch}/bounded={bounded}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            {
+                let runtime = open(path.clone(), mode, bounded);
+                assert_rows(&runtime, false);
+                runtime
+                    .execute_query(
+                        "INSERT INTO disk_full_rows (id,org_id,payload) VALUES (2,'org-b','retry')",
+                    )
+                    .expect("space restored and WAL recovered");
+                assert_rows(&runtime, true);
+                runtime.checkpoint().expect("checkpoint recovered state");
+                if bounded {
+                    assert!(runtime
+                        .verify_persisted_indexes("disk_full_rows")
+                        .expect("index integrity")
+                        .is_empty());
+                }
+            }
+            let runtime = open(path.clone(), mode, bounded);
+            assert_rows(&runtime, true);
+        }
+    }
+}
+
+#[test]
 fn repeated_cold_boot_reuses_published_index_pages() {
     let directory = tempfile::tempdir().expect("cold growth fixture");
     let path = directory.path().join("cold-growth.rdb");
@@ -4036,7 +4209,7 @@ fn cold_queue_group_and_wait_cap_survive_checkpoint() {
         .execute_query("QUEUE GROUP CREATE cold_queue_metadata workers")
         .expect("consumer group");
     runtime
-        .execute_query("SET CONFIG red.config.queue.max_wait_ms = 1")
+        .execute_query("SET CONFIG queue.max_wait_ms = 1")
         .expect("queue wait cap");
     runtime.checkpoint().expect("publish queue metadata");
 

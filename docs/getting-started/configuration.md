@@ -1,6 +1,6 @@
 # Configuration
 
-RedDB is configured through three layers: CLI flags, environment variables, and the `red_config` KV store. All runtime settings can be managed via HTTP without restart.
+RedDB is configured through three layers: CLI flags, environment variables, and the `red.config` Config collection. All runtime settings can be managed via HTTP without restart.
 
 If you need the terminology for router, transport, embedded mode, and the `red` binary, read [Modes and Transports](/getting-started/modes-and-transports.md) first.
 
@@ -230,9 +230,9 @@ These flags work with any `red` command:
 | `--no-color` | | Disable colored output |
 | `--version` | | Show version |
 
-## Runtime Configuration (`red_config`)
+## Runtime Configuration (`red.config`)
 
-RedDB stores runtime settings in the `red_config` collection using dot-notation keys. Changes take effect immediately without restart.
+RedDB stores runtime settings in the `red.config` collection using bare dot-notation content keys. The collection name is not repeated inside a key: use `ai.inference.provider`, never `red.ai.inference.provider` or `red.config.ai.inference.provider`. Changes take effect immediately without restart.
 
 ### Import / Export
 
@@ -245,7 +245,7 @@ curl -X POST http://127.0.0.1:5000/config -d @examples/config.json
 
 # Override specific values (new AI schema — ADR 0068 §5)
 curl -X POST http://127.0.0.1:5000/config \
-  -d '{"red":{"config":{"ai":{"inference":{"provider":"ollama"},"embeddings":{"provider":"ollama"},"providers":{"ollama":{"models":{"inference":"llama3","embeddings":"nomic-embed-text"}}}}}}}'
+  -d '{"ai":{"inference":{"provider":"ollama"},"embeddings":{"provider":"ollama"},"providers":{"ollama":{"models":{"inference":"llama3","embeddings":"nomic-embed-text"}}}}}'
 ```
 
 See [`examples/config.json`](https://github.com/reddb-io/reddb/blob/main/examples/config.json) for a complete example with all defaults.
@@ -256,15 +256,15 @@ You can read and write configuration directly from the query engine:
 
 ```sql
 -- Set a config value
-SET CONFIG red.config.ai.inference.provider = 'groq'
-SET CONFIG red.storage.hnsw.ef_search = 100
+SET CONFIG ai.inference.provider = 'groq'
+SET CONFIG storage.hnsw.ef_search = 100
 
 -- Show all config
 SHOW CONFIG
 
 -- Show config subtree
-SHOW CONFIG red.ai
-SHOW CONFIG red.storage.hnsw
+SHOW CONFIG ai
+SHOW CONFIG storage.hnsw
 ```
 
 ### Individual Key API
@@ -273,15 +273,15 @@ Read, write, or delete a single config key via HTTP:
 
 ```bash
 # Read a key or subtree
-curl http://127.0.0.1:5000/config/red.config.ai.inference.provider
+curl http://127.0.0.1:5000/config/ai.inference.provider
 
 # Set a key
-curl -X PUT http://127.0.0.1:5000/config/red.config.ai.inference.provider \
+curl -X PUT http://127.0.0.1:5000/config/ai.inference.provider \
   -H 'content-type: application/json' \
   -d '{"value": "groq"}'
 
 # Delete a key
-curl -X DELETE http://127.0.0.1:5000/config/red.config.ai.ask.model
+curl -X DELETE http://127.0.0.1:5000/config/ai.ask.model
 ```
 
 ### Resolution Order
@@ -289,10 +289,10 @@ curl -X DELETE http://127.0.0.1:5000/config/red.config.ai.ask.model
 For any setting, RedDB checks in order:
 
 1. **Environment variable** (e.g., `REDDB_AI_PROVIDER`)
-2. **`red_config` KV store** (e.g., `red.config.ai.inference.provider`)
+2. **`red.config` Config collection** (e.g., `ai.inference.provider`)
 3. **Hardcoded default**
 
-### AI & LLM (`red.config.ai.*`)
+### AI & LLM (`ai.*` inside `red.config`)
 
 The AI namespace splits **inference** (generation, ASK) from **embeddings**
 (AUTO EMBED, SEARCH SIMILAR TEXT). Each task has a *pointer* naming which
@@ -310,24 +310,25 @@ silently re-routes to a different provider.
 
 | Key | Default | Description |
 |:----|:--------|:------------|
-| `red.config.ai.ask.provider` | — | ASK planner provider (wins over the inference pointer) |
-| `red.config.ai.ask.model` | inference model | ASK model (wins over the provider models block) |
-| `red.config.ai.ask.planner` | `false` | Enable planner-first routing and read-only candidate execution for ordinary ASK queries; `ASK ... PLAN` remains explicit |
-| `red.config.ai.ask.planner_model` | ASK model | Planner model for the ASK planner |
-| `red.config.ai.ask.effort` | — | Planner effort hint (e.g. `low`/`medium`/`high`) |
-| `red.config.ai.ask.max_plan_steps` | `3` | Hard cap shared by ASK metadata-tool calls and the terminal read-only query |
-| `red.config.ai.collection_descriptions.auto_enrich` | `false` | Generate missing collection and attribute descriptions after collection DDL; Cloud may enable this for its AI plan |
-| `red.config.ai.inference.provider` | `openai` | Task pointer: which provider generates |
-| `red.config.ai.embeddings.provider` | `openai` | Task pointer: which provider embeds |
-| `red.config.ai.providers.{provider}.base_url` | — | Custom API base URL for a provider |
-| `red.config.ai.providers.{provider}.models.inference` | provider default | Inference model for that provider |
-| `red.config.ai.providers.{provider}.models.embeddings` | provider default | Embeddings model for that provider |
-| `red.config.ai.{provider}.{alias}.key` | — | API key (e.g., `red.config.ai.groq.default.key`) |
-
-| `red.config.ai.max_embedding_inputs` | `256` | Max inputs per embedding batch |
-| `red.config.ai.max_prompt_batch` | `256` | Max prompts per batch |
-| `red.config.ai.timeout.connect_secs` | `10` | API connection timeout |
-| `red.config.ai.timeout.read_secs` | `90` | API read timeout |
+| `ai.ask.provider` | — | ASK planner provider (wins over the inference pointer) |
+| `ai.ask.model` | inference model | ASK model (wins over the provider models block) |
+| `ai.ask.planner` | `false` | Enable planner-first routing and read-only candidate execution for ordinary ASK queries; `ASK ... PLAN` remains explicit |
+| `ai.ask.planner_model` | ASK model | Planner model for the ASK planner |
+| `ai.ask.effort` | — | Planner effort hint (e.g. `low`/`medium`/`high`) |
+| `ai.ask.max_plan_steps` | `3` | Hard cap shared by ASK metadata-tool calls and the terminal read-only query |
+| `ai.collection_descriptions.auto_enrich` | `false` | Generate missing collection and attribute descriptions after collection DDL; Cloud may enable this for its AI plan |
+| `ai.default.provider` | `openai` | Global fallback provider when no task pointer is set |
+| `ai.default.model` | provider default | Global fallback inference model |
+| `ai.inference.provider` | `openai` | Task pointer: which provider generates |
+| `ai.embeddings.provider` | `openai` | Task pointer: which provider embeds |
+| `ai.providers.{provider}.base_url` | — | Custom API base URL for a provider |
+| `ai.providers.{provider}.models.inference` | provider default | Inference model for that provider |
+| `ai.providers.{provider}.models.embeddings` | provider default | Embeddings model for that provider |
+| `ai.providers.{provider}.tokens.{alias}.secret_ref` | — | Optional reference to `red.secret.ai.providers.{provider}.tokens.{alias}` |
+| `ai.max_embedding_inputs` | `256` | Max inputs per embedding batch |
+| `ai.max_prompt_batch` | `256` | Max prompts per batch |
+| `ai.timeout.connect_secs` | `10` | API connection timeout |
+| `ai.timeout.read_secs` | `90` | API read timeout |
 
 `auto_enrich` uses the configured inference provider and runs after successful
 collection DDL. It needs an inference credential; it never requires an embeddings
@@ -335,81 +336,79 @@ API. Cloud can enable the flag and supply a managed inference allowance, while a
 local installation can opt in with its own provider. Manual descriptions take
 priority over generated suggestions.
 For a container environment override, set
-`REDDB_RED_CONFIG_AI_COLLECTION_DESCRIPTIONS_AUTO_ENRICH=true`.
+`REDDB_AI_COLLECTION_DESCRIPTIONS_AUTO_ENRICH=true`.
 
-> **Clean break (ADR 0068 §5):** the old keys `red.config.ai.default.provider`,
-> `red.config.ai.default.model`, and the per-credential base-URL shape
-> `red.config.ai.{provider}.{alias}.base_url` were **removed** — writing any
-> of them is rejected with a didactic error naming the replacement key.
-> There is no deprecation window.
+> **Clean break (ADR 0068 §5):** the per-credential base-URL shape
+> `ai.{provider}.{alias}.base_url` was removed. Use
+> `ai.providers.{provider}.base_url` instead.
 
-### Server (`red.server.*`)
+### Server (`server.*`)
 
 | Key | Default | Description |
 |:----|:--------|:------------|
-| `red.server.max_scan_limit` | `1000` | Max rows in a single scan |
-| `red.server.max_body_size` | `1048576` | Max HTTP body size (1 MB) |
-| `red.server.read_timeout_ms` | `5000` | HTTP read timeout |
-| `red.server.write_timeout_ms` | `5000` | HTTP write timeout |
+| `server.max_scan_limit` | `1000` | Max rows in a single scan |
+| `server.max_body_size` | `1048576` | Max HTTP body size (1 MB) |
+| `server.read_timeout_ms` | `5000` | HTTP read timeout |
+| `server.write_timeout_ms` | `5000` | HTTP write timeout |
 
-### Storage (`red.storage.*`)
-
-| Key | Default | Description |
-|:----|:--------|:------------|
-| `red.storage.page_size` | `4096` | Page size in bytes |
-| `red.storage.page_cache_capacity` | `100000` | Page cache capacity |
-| `red.storage.auto_checkpoint_pages` | `1000` | Checkpoint after N dirty pages |
-| `red.storage.snapshot_retention` | `16` | Snapshots to keep |
-| `red.storage.segment.max_entities` | `100000` | Entities per segment before sealing |
-| `red.storage.segment.compression_level` | `6` | Compression level (0-9) |
-| `red.storage.hnsw.m` | `16` | HNSW max connections per node |
-| `red.storage.hnsw.ef_search` | `50` | HNSW query-time candidate list |
-| `red.storage.ivf.n_lists` | `100` | IVF Voronoi cells |
-| `red.storage.ivf.n_probes` | `10` | IVF cells to probe |
-| `red.storage.bm25.k1` | `1.2` | BM25 TF saturation |
-| `red.storage.bm25.b` | `0.75` | BM25 length normalization |
-
-### Search & RAG (`red.search.*`)
+### Storage (`storage.*`)
 
 | Key | Default | Description |
 |:----|:--------|:------------|
-| `red.search.rag.max_total_chunks` | `25` | Context chunks for LLM |
-| `red.search.rag.similarity_threshold` | `0.8` | Vector similarity threshold |
-| `red.search.rag.graph_depth` | `2` | Graph traversal depth |
-| `red.search.fusion.vector_weight` | `0.5` | Vector weight in hybrid search |
-| `red.search.fusion.graph_weight` | `0.3` | Graph weight in hybrid search |
-| `red.search.fusion.dedup_threshold` | `0.85` | Deduplication similarity |
+| `storage.page_size` | `4096` | Page size in bytes |
+| `storage.page_cache_capacity` | `100000` | Page cache capacity |
+| `storage.auto_checkpoint_pages` | `1000` | Checkpoint after N dirty pages |
+| `storage.snapshot_retention` | `16` | Snapshots to keep |
+| `storage.segment.max_entities` | `100000` | Entities per segment before sealing |
+| `storage.segment.compression_level` | `6` | Compression level (0-9) |
+| `storage.hnsw.m` | `16` | HNSW max connections per node |
+| `storage.hnsw.ef_search` | `50` | HNSW query-time candidate list |
+| `storage.ivf.n_lists` | `100` | IVF Voronoi cells |
+| `storage.ivf.n_probes` | `10` | IVF cells to probe |
+| `storage.bm25.k1` | `1.2` | BM25 TF saturation |
+| `storage.bm25.b` | `0.75` | BM25 length normalization |
 
-### Auth (`red.auth.*`)
-
-| Key | Default | Description |
-|:----|:--------|:------------|
-| `red.auth.enabled` | `false` | Enable authentication |
-| `red.auth.session_ttl_secs` | `3600` | Session TTL (1 hour) |
-| `red.auth.require_auth` | `false` | Require auth for all operations |
-
-### Backup & Recovery (`red.backup.*`)
+### Search & RAG (`search.*`)
 
 | Key | Default | Description |
 |:----|:--------|:------------|
-| `red.backup.enabled` | `false` | Enable scheduled backups |
-| `red.backup.interval_secs` | `3600` | Backup interval (1 hour) |
-| `red.backup.retention_count` | `24` | Snapshots to keep |
-| `red.backup.upload` | `false` | Auto-upload to remote backend |
-| `red.backup.backend` | `local` | Backend: `local`, `s3`, `r2`, `turso`, `d1` |
-| `red.wal.archive.enabled` | `false` | Archive WAL segments before truncation |
-| `red.wal.archive.retention_hours` | `168` | WAL archive retention (7 days) |
-| `red.wal.archive.prefix` | `wal/` | Remote key prefix for WAL segments |
-| `red.cdc.enabled` | `true` | Enable change data capture |
-| `red.cdc.buffer_size` | `100000` | CDC event buffer capacity |
+| `search.rag.max_total_chunks` | `25` | Context chunks for LLM |
+| `search.rag.similarity_threshold` | `0.8` | Vector similarity threshold |
+| `search.rag.graph_depth` | `2` | Graph traversal depth |
+| `search.fusion.vector_weight` | `0.5` | Vector weight in hybrid search |
+| `search.fusion.graph_weight` | `0.3` | Graph weight in hybrid search |
+| `search.fusion.dedup_threshold` | `0.85` | Deduplication similarity |
 
-### Query Engine (`red.query.*`)
+### Auth (`auth.*`)
 
 | Key | Default | Description |
 |:----|:--------|:------------|
-| `red.query.connection_pool.max_connections` | `64` | Max connections |
-| `red.query.connection_pool.max_idle` | `16` | Max idle connections |
-| `red.query.max_recursion_depth` | `1000` | Max CTE recursion depth |
+| `auth.enabled` | `false` | Enable authentication |
+| `auth.session_ttl_secs` | `3600` | Session TTL (1 hour) |
+| `auth.require_auth` | `false` | Require auth for all operations |
+
+### Backup & Recovery (`backup.*`, `wal.*`, `cdc.*`)
+
+| Key | Default | Description |
+|:----|:--------|:------------|
+| `backup.enabled` | `false` | Enable scheduled backups |
+| `backup.interval_secs` | `3600` | Backup interval (1 hour) |
+| `backup.retention_count` | `24` | Snapshots to keep |
+| `backup.upload` | `false` | Auto-upload to remote backend |
+| `backup.backend` | `local` | Backend: `local`, `s3`, `r2`, `turso`, `d1` |
+| `wal.archive.enabled` | `false` | Archive WAL segments before truncation |
+| `wal.archive.retention_hours` | `168` | WAL archive retention (7 days) |
+| `wal.archive.prefix` | `wal/` | Remote key prefix for WAL segments |
+| `cdc.enabled` | `true` | Enable change data capture |
+| `cdc.buffer_size` | `100000` | CDC event buffer capacity |
+
+### Query Engine (`query.*`)
+
+| Key | Default | Description |
+|:----|:--------|:------------|
+| `query.connection_pool.max_connections` | `64` | Max connections |
+| `query.connection_pool.max_idle` | `16` | Max idle connections |
+| `query.max_recursion_depth` | `1000` | Max CTE recursion depth |
 
 ## Performance Tuning
 
@@ -417,10 +416,10 @@ The keys most relevant to query performance are spread across the storage and qu
 
 | Key | Default | Description |
 |:----|:--------|:------------|
-| `red.storage.hnsw.ef_search` | `50` | HNSW query-time precision (higher = more accurate, slower) |
-| `red.storage.hnsw.m` | `16` | HNSW max connections (higher = better recall, more memory) |
-| `red.storage.segment.max_entities` | `100000` | Entities per segment before sealing |
-| `red.query.connection_pool.max_connections` | `64` | Max concurrent query connections |
+| `storage.hnsw.ef_search` | `50` | HNSW query-time precision (higher = more accurate, slower) |
+| `storage.hnsw.m` | `16` | HNSW max connections (higher = better recall, more memory) |
+| `storage.segment.max_entities` | `100000` | Entities per segment before sealing |
+| `query.connection_pool.max_connections` | `64` | Max concurrent query connections |
 
 ### Automatic Optimizations
 

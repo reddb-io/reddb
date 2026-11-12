@@ -16,8 +16,8 @@ impl RedDBRuntime {
             .filter_map(|protocol| {
                 let key = format!("routing.{protocol}.advertise_addr");
                 let legacy = match *protocol {
-                    "grpc" => self.config_string("red.grpc.advertise_addr", ""),
-                    "red" => self.config_string("red.redwire.advertise_addr", ""),
+                    "grpc" => self.config_string("grpc.advertise_addr", ""),
+                    "red" => self.config_string("redwire.advertise_addr", ""),
                     _ => String::new(),
                 };
                 let address = self.config_string(&key, &legacy);

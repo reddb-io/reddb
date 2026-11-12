@@ -99,7 +99,7 @@ pub(super) fn collection_tenant(
     store: &crate::storage::unified::UnifiedStore,
     collection: &str,
 ) -> Option<String> {
-    match store.get_config(&format!("red.collection_tenants.{collection}")) {
+    match store.get_config(&format!("collection_tenants.{collection}")) {
         Some(Value::Text(value)) => Some(value.to_string()),
         _ => None,
     }

@@ -13,10 +13,10 @@ Unicode without SQL-literal escaping. Earlier dumps containing SQL-formatted str
 unambiguously repaired: regenerate them from the original database.
 
 Virtual `red`, `red.*` and `__red_schema_*` collections are excluded because
-they are rebuilt by the runtime and cannot be inserted into. `red_config` stays
+they are rebuilt by the runtime and cannot be inserted into. `red.config` stays
 included, including when `--collection` selects another collection. A full dump
 retains the encrypted vault-KV record; its existing certificate requirements
-still apply. Collection overrides do not rename `red_config`.
+still apply. Collection overrides do not rename `red.config`.
 
 Restore continues past bad records, checkpoints successful imports, reports
 line errors, and exits nonzero if any record failed. In `--json` mode a partial
