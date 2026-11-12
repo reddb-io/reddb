@@ -18,7 +18,6 @@ path = "src/lib.rs"
 [features]
 default = ["full"]
 full = ["dep:fs2"]
-mcu = []
 
 [dependencies]
 reddb-types = { workspace = true }

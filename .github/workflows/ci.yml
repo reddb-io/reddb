@@ -765,6 +765,9 @@ jobs:
         env:
           RUST_MIN_STACK: "8388608"
         run: cargo nextest run --workspace --locked --profile ci -E 'not kind(test)'
+      - name: Qualify bounded MCU flash profiles
+        if: matrix.shard == 'unit'
+        run: cargo nextest run --locked -p reddb-io-mcu --features host-flash-model --profile ci
       - name: Run integration-test shard
         if: matrix.shard != 'unit'
         # cargo test runs the grouped integration binaries sequentially, so the

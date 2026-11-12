@@ -55,11 +55,11 @@ This ADR proposes the MCU exception to ADR 0038's embedded scale contract. It
 does not broaden the canonical embedded profile and does not claim support for
 every board. Each adapter and resource envelope requires its own qualification.
 
-The canonical crates expose a default `full` feature and an additive `mcu`
-selection. `mcu` excludes resident/server deployment machinery that cannot be
-used by the paged single-owner controller, while compiling the same SQL/RQL,
-catalog, record and page implementations. The host flash model is separately
-opt-in and is never required by a firmware build.
+The canonical crates expose a default `full` feature. The `reddb-io-mcu`
+package disables that default and excludes resident/server deployment machinery
+that cannot be used by the paged single-owner controller, while compiling the
+same SQL/RQL, catalog, record and page implementations. The host flash model is
+separately opt-in and is never required by a firmware build.
 
 ## Invariants
 

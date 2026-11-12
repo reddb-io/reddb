@@ -1,6 +1,6 @@
 # reddb-io-mcu
 
-Embedded integration package for RedDB 1.33.5. It composes board-owned byte I/O
+Experimental embedded integration package for RedDB. It composes board-owned byte I/O
 with the canonical RedDB SQL/RQL parser, local executor, pager, B-tree, RER1
 records and `.rdb` layout.
 
@@ -9,24 +9,27 @@ one-page cache. Use `query_stream` for histories that cannot be materialized in
 RAM. The bounded writer currently admits `CREATE TABLE` and append-only
 `INSERT`; streaming plans that require whole-set work such as `ORDER BY` are
 rejected before execution. Files with catalog extensions this writer cannot
-preserve are rejected before mutation. A canonical 1.33.5 server can open and
-query the `.rdb` produced by this package.
+preserve are rejected before mutation. A same-version canonical server can open
+and query the `.rdb` produced by this package.
 
-This revision qualifies the host integration surface and the Nano ESP32's
-dual-core `xtensa-esp32s3-espidf` firmware in Espressif `esp-emu` 0.51.0. It
-does not claim that the graph cross-compiles for every Arduino or the Pico SDK:
-the Pico 2 target has no Rust `std`, so it still needs the `no_std + alloc`
-slice. Physical flash layout, sparse pieces, wear accounting and power-cut
-behavior belong in the concrete board `VfsFile`, never in the SQL engine or
-`.rdb` format. Flash adapters must implement `VfsFile::reserve` so capacity
-exhaustion is reported before a prepared double-write frame is sealed.
+The package cross-compiles and links the Nano ESP32's dual-core
+`xtensa-esp32s3-espidf` firmware. The latest committed full-system receipt uses
+Espressif `esp-emu` 0.51.0; this preview repeats the host flash/reboot tests and
+the ESP32-S3 build, but does not claim a new emulator run. It also does not
+claim that the graph cross-compiles for every Arduino or the Pico SDK: the Pico
+2 target has no Rust `std`, so it still needs the `no_std + alloc` slice.
+Physical flash layout, sparse pieces, wear accounting and power-cut behavior
+belong in the concrete board `VfsFile`, never in the SQL engine or `.rdb`
+format. Flash adapters must implement `VfsFile::reserve` so capacity exhaustion
+is reported before a prepared double-write frame is sealed.
 
 ## Nano ESP32 cross-check
 
-The `mcu` Cargo features retain the shared SQL/RQL, types, catalog codecs,
-pager, B-tree and record codecs. Host-only resident storage, process file locks,
-Rayon, Vault crypto, serverless/replica planning and deterministic fault
-injection remain in the default `full` feature set.
+`reddb-io-mcu` disables the canonical crates' default `full` features while
+retaining the shared SQL/RQL, types, catalog codecs, pager, B-tree and record
+codecs. Host-only resident storage, process file locks, Rayon, Vault crypto,
+serverless/replica planning and deterministic fault injection remain in the
+default `full` feature set.
 
 With the `espup` ESP32-S3 toolchain installed, reproduce the library check with:
 
@@ -39,14 +42,16 @@ levelling, preallocates a 12,378,112-byte file, and wraps it in
 `FixedCapacityFile`. The adapter changes physical allocation semantics only;
 the shared pager, catalog, SQL executor and `.rdb` bytes remain unchanged.
 
-The dual-core emulator receipt ingests 16,384 measurements, injects a one-shot
-CPU reset during the third file write of the next SQL transaction, recovers
+The latest dual-core emulator receipt ingests 16,384 measurements, injects a
+one-shot CPU reset during the third file write of the next SQL transaction, recovers
 exactly 16,384 rows, continues to 43,200, and streams the complete history. A
 second process boot opens `state=Existing` and queries the same 43,200 rows
 without reinsertion or gateway. The ESP-IDF allocator prefers PSRAM for general
 heap allocations; every measured phase enforces at least 32 KiB of internal
 heap and 512 KiB of PSRAM headroom. The observed minima were 79,824 internal
-bytes and 8,224,572 PSRAM bytes on upstream `main` commit `65863978d`.
+bytes and 8,224,572 PSRAM bytes on upstream `main` commit `65863978d`. The
+current preview firmware rebuild uses 3,858,384 of the 4,194,304-byte app
+partition (91.99%).
 Physical Nano ESP32 execution and electrical power-cut testing remain separate
 qualification boundaries.
 

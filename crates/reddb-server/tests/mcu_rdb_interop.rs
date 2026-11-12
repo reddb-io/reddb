@@ -13,13 +13,16 @@ fn canonical_server_reads_mcu_paged_rdb() {
     let mut database = PagedLocalDatabase::create(file).expect("create MCU database");
     database
         .query(
-            "CREATE TABLE measurements (recorded_at BIGINT PRIMARY KEY, temperature DOUBLE NOT NULL)",
+            "CREATE TABLE measurements (recorded_at BIGINT PRIMARY KEY, temperature TEMPERATURE NOT NULL)",
             1_000,
         )
         .expect("create canonical table");
     database
         .query(
-            "INSERT INTO measurements VALUES (1, 20.5), (2, 21.0)",
+            "INSERT INTO measurements VALUES \
+             (1, CAST('20 C' AS TEMPERATURE)), \
+             (2, CAST('68 F' AS TEMPERATURE)), \
+             (3, CAST('293.15 K' AS TEMPERATURE))",
             2_000,
         )
         .expect("insert canonical rows");
@@ -52,6 +55,10 @@ fn canonical_server_reads_mcu_paged_rdb() {
         .collect();
     assert_eq!(
         rows,
-        [("1".into(), "20.5".into()), ("2".into(), "21".into())]
+        [
+            ("1".into(), "20 C".into()),
+            ("2".into(), "68 F".into()),
+            ("3".into(), "293.15 K".into()),
+        ]
     );
 }

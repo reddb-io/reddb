@@ -287,6 +287,7 @@ impl<F: VfsFile + 'static> StorageStrategy for PagedStrategy<F> {
         }
         let mut name = None;
         let mut records = Vec::with_capacity(actions.len());
+        let mut required_capabilities = 0;
         for action in actions {
             let StoreWalAction::UpsertEntityRecord { collection, record } = action else {
                 return Err(LocalReadError::Unsupported(
@@ -315,6 +316,8 @@ impl<F: VfsFile + 'static> StorageStrategy for PagedStrategy<F> {
                     "paged local INSERT requires committed rows without metadata",
                 ));
             }
+            required_capabilities |=
+                crate::storage::entity_codec::required_file_capabilities(&entity);
             records.push((entity.id.raw(), record.clone()));
         }
         if records.first().map(|(id, _)| *id)
@@ -325,7 +328,11 @@ impl<F: VfsFile + 'static> StorageStrategy for PagedStrategy<F> {
             ));
         }
         self.store
-            .insert_records(name.as_deref().expect("nonempty actions"), &records)
+            .insert_records(
+                name.as_deref().expect("nonempty actions"),
+                &records,
+                required_capabilities,
+            )
             .map_err(storage_error)
     }
 

@@ -6,9 +6,11 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-publish = false
-description = "RedDB integration package for bounded embedded storage hosts."
+description = "Experimental RedDB integration package for bounded embedded storage hosts."
 readme = "README.md"
+documentation = "https://docs.rs/reddb-io-mcu"
+keywords = ["database", "embedded", "microcontroller", "esp32", "storage"]
+categories = ["database-implementations", "embedded"]
 
 [lib]
 name = "reddb_mcu"
@@ -18,8 +20,8 @@ default = []
 host-flash-model = []
 
 [dependencies]
-reddb-engine = { package = "reddb-io-engine", path = "../reddb-engine", version = "1.0", default-features = false, features = ["mcu"] }
-reddb-file = { package = "reddb-io-file", path = "../reddb-file", version = "1.0", default-features = false, features = ["mcu"] }
+reddb-engine = { package = "reddb-io-engine", path = "../reddb-engine", version = "1.0", default-features = false }
+reddb-file = { package = "reddb-io-file", path = "../reddb-file", version = "1.0", default-features = false }
 reddb-types = { workspace = true }
 
 [dev-dependencies]

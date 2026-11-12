@@ -243,6 +243,13 @@ impl<F: VfsFile> PagedFileStore<F> {
         if document.len() > RECORD_BYTES_MAX - 1024 {
             return Err(error("catalog document exceeds resource budget"));
         }
+        let required_capabilities =
+            crate::storage::entity_codec::required_file_capabilities_for_contract(&contract);
+        if required_capabilities != 0 {
+            self.pager
+                .fence_required_capabilities(required_capabilities)
+                .map_err(error)?;
+        }
         self.failed = true;
         let result = (|| {
             self.pager.begin_write_batch().map_err(error)?;
@@ -269,7 +276,12 @@ impl<F: VfsFile> PagedFileStore<F> {
 
     /// Records are canonical serialized entities admitted before any I/O.
     /// One prepared native DWB frame commits rows and catalog roots together.
-    pub fn insert_records(&mut self, name: &str, records: &[(u64, Vec<u8>)]) -> io::Result<()> {
+    pub fn insert_records(
+        &mut self,
+        name: &str,
+        records: &[(u64, Vec<u8>)],
+        required_capabilities: u64,
+    ) -> io::Result<()> {
         self.check_healthy()?;
         if !self.collections.contains_key(name) {
             return Err(error("collection missing"));
@@ -286,6 +298,11 @@ impl<F: VfsFile> PagedFileStore<F> {
             .checked_add(records.len() as u64)
             .filter(|id| *id < u64::MAX)
             .ok_or_else(|| error("entity identity overflow"))?;
+        if required_capabilities != 0 {
+            self.pager
+                .fence_required_capabilities(required_capabilities)
+                .map_err(error)?;
+        }
         self.failed = true;
         let result = (|| {
             self.pager.begin_write_batch().map_err(error)?;

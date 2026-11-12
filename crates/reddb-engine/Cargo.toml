@@ -14,7 +14,6 @@ name = "reddb_engine"
 [features]
 default = ["full"]
 full = ["dep:reddb-crypto", "dep:rayon", "reddb-file/full"]
-mcu = ["reddb-file/mcu"]
 
 [dependencies]
 reddb-types = { workspace = true }
