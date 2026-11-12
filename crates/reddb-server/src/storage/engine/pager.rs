@@ -282,6 +282,31 @@ impl NativeWalBarrier {
 }
 
 impl WalBarrier for NativeWalBarrier {
+    fn validate_page_lsn(&self, lsn: u64, checkpoint_lsn: u64) -> std::io::Result<()> {
+        if lsn <= checkpoint_lsn {
+            return Ok(());
+        }
+        let wal = self
+            .0
+            .read()
+            .map_err(|_| std::io::Error::other("WAL slot lock poisoned"))?
+            .clone();
+        let durable_lsn = match wal {
+            Some(wal) => wal
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .durable_lsn(),
+            None => checkpoint_lsn,
+        };
+        if lsn > durable_lsn {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("page LSN {lsn} exceeds durable WAL boundary {durable_lsn}"),
+            ));
+        }
+        Ok(())
+    }
+
     fn has_page_ownership_journal(&self) -> std::io::Result<bool> {
         Ok(self.ownership_recorder()?.is_some())
     }
@@ -1322,8 +1347,9 @@ mod tests {
             .expect("insert_cell() should succeed");
         // Use the public Page API to set the LSN.
         page.set_lsn(stamped_lsn);
+        let page_id = page.page_id();
         pager
-            .write_page(page.page_id(), page)
+            .write_page(page_id, page)
             .expect("write_page() should succeed");
         pager.flush().expect("flush() should succeed");
 
@@ -1339,6 +1365,16 @@ mod tests {
             stamped_lsn
         );
 
+        drop(pager);
+        let pager = Pager::open(&db_path, PagerConfig::default()).expect("cold reopen");
+        pager.set_wal_writer(Arc::clone(&wal));
+        assert_eq!(
+            pager
+                .read_page(page_id)
+                .expect("durable WAL authorizes cold page")
+                .lsn(),
+            stamped_lsn
+        );
         drop(pager);
         let _ = fs::remove_file(&wal_path);
         cleanup(&db_path);
