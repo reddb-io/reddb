@@ -412,7 +412,9 @@ impl Pager {
         let mut buf = [0u8; PAGE_SIZE];
         let n = plaintext.len().min(PAGE_SIZE);
         buf[..n].copy_from_slice(&plaintext[..n]);
-        Ok(Page::from_bytes(buf))
+        let page = Page::from_bytes(buf);
+        reddb_engine::storage::pager_io::check_page_identity(&page, page_id)?;
+        Ok(page)
     }
 
     /// Write a page through the configured encryptor if any. Page 0
@@ -423,6 +425,7 @@ impl Pager {
         if page_id == 0 || self.encryption.is_none() {
             return self.write_page(page_id, page);
         }
+        reddb_engine::storage::pager_io::check_page_identity(&page, page_id)?;
         // Canonical per-page envelope overhead (nonce + GCM tag),
         // owned by reddb-io-crypto (#1053, ADR 0054).
         const OVERHEAD: usize = crate::storage::encryption::page_encryptor::OVERHEAD;
@@ -448,9 +451,9 @@ impl Pager {
     /// to the data file. This is the postgres rule: a page on disk
     /// implies its WAL record is already durable on disk.
     ///
-    /// Existing call sites that construct a Pager without a WAL
-    /// keep their previous behaviour (no LSN check) — wiring is
-    /// strictly opt-in.
+    /// Cold checksummed reads with a nonzero page LSN beyond the completed
+    /// checkpoint also require this durable WAL authority. LSN-zero pages
+    /// remain protected by DWB and do not need an attached writer.
     pub fn set_wal_writer(&self, wal: Arc<Mutex<crate::storage::wal::writer::WalWriter>>) {
         let mut slot = self
             .core
@@ -590,6 +593,14 @@ mod tests {
         file.read_exact(&mut zone)
             .expect("read_exact() should succeed");
         zone
+    }
+
+    fn read_owned_zone(pager: &Pager) -> [u8; SUPERBLOCK_ZONE_SIZE] {
+        pager
+            .core
+            .with_file(reddb_engine::storage::pager_io::read_superblock_zone)
+            .expect("owned pager file")
+            .expect("superblock read")
     }
 
     #[test]
@@ -842,7 +853,7 @@ mod tests {
     fn an_update_writes_the_stale_copy_and_leaves_the_newest_one_intact() {
         let path = temp_db_path("ping-pong");
         let pager = Pager::open_default(&path).expect("open_default() should succeed");
-        let before = reddb_file::select_paged_superblock(&read_zone(&path))
+        let before = reddb_file::select_paged_superblock(&read_owned_zone(&pager))
             .expect("operation should succeed");
 
         pager
@@ -850,7 +861,7 @@ mod tests {
             .expect("allocate_page() should succeed");
         pager.sync().expect("sync() should succeed");
 
-        let zone = read_zone(&path);
+        let zone = read_owned_zone(&pager);
         let after = reddb_file::select_paged_superblock(&zone)
             .expect("select_paged_superblock() should succeed");
         assert_ne!(
@@ -898,7 +909,7 @@ mod tests {
         pager.core.with_file(|file| file.0 = writable).unwrap();
         pager.allocate_page(PageType::BTreeLeaf).unwrap();
 
-        let zone = read_zone(&path);
+        let zone = read_owned_zone(&pager);
         for copy in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
             let start = copy * SUPERBLOCK_SLOT_SIZE;
             let header =

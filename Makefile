@@ -139,6 +139,12 @@ test-memory-regressions:
 	cargo test --locked -p reddb-io-server --lib trusted_wire_column_checks_recovered_row_shape_and_keeps_alias -- --test-threads=1
 
 .PHONY: test-recovery-io
+.PHONY: test-page-identity
+test-page-identity:
+	cargo test --locked -p reddb-io-server --lib runtime::page_integrity_faults:: -- --test-threads=1
+	cargo test --locked -p reddb-io-server --lib storage::engine:: -- --test-threads=1
+	cargo test --locked -p reddb-io-engine --test portable -- --test-threads=1
+
 test-recovery-io:
 	cargo test --locked -p reddb-io-server --lib runtime::recovery_io_faults:: -- --test-threads=1
 	cargo test --locked -p reddb-io-server --lib overflow_checkpoint_undo_survives -- --test-threads=1
