@@ -468,15 +468,9 @@ fn operational_serverless_boot_recovers_canonical_snapshots() {
     let root = tempfile::tempdir().expect("operational boot directory");
     let status = spawn_child("operational_serverless_boot_child", root.path())
         .env("RED_LEASE_REQUIRED", "true")
-        .env("RED_LEASE_TTL_SECS", "60")
-        .env(
-            "RED_LEASE_PREFIX",
-            format!(
-                "{}{sep}",
-                root.path().join("leases").display(),
-                sep = std::path::MAIN_SEPARATOR
-            ),
-        )
+        .env("RED_LEASE_TTL_SECS", "6")
+        .env("RED_LEASE_PREFIX", "leases/")
+        .env("REDDB_LOCAL_BACKEND_ROOT", root.path())
         .status()
         .expect("run production boot child");
     assert!(
@@ -494,14 +488,17 @@ fn operational_serverless_boot_child() -> ExitCode {
         prepare_lease_loop_if_required, start_prepared_lease_loop,
     };
     use reddb_server::storage::profile::StorageDeployPreset;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("reddb::lifecycle=debug,reddb::serverless=debug")
+        .try_init();
     let root = PathBuf::from(std::env::var(ROOT_ENV).expect("root env"));
     let base_path = root.join("writer").join("data.rdb");
-    let remote_key = root.join("remote").join("main.rdb");
-    for id in 1..=3 {
+    let remote_key = "remote/main.rdb";
+    for id in 1..=4 {
         let mut options = RedDBOptions::persistent(&base_path)
             .with_storage_profile(StorageDeployPreset::Serverless.selection())
             .expect("serverless preset")
-            .with_remote_backend(Arc::new(LocalBackend), remote_key.to_string_lossy())
+            .with_remote_backend(Arc::new(LocalBackend), remote_key)
             .with_atomic_remote_backend(Arc::new(LocalBackend));
         let boot = prepare_lease_loop_if_required(&mut options).expect("prepare production boot");
         if id > 1 {
@@ -513,18 +510,38 @@ fn operational_serverless_boot_child() -> ExitCode {
         }
         let runtime = RedDBRuntime::with_options(options).expect("open native serverless cache");
         assert!(runtime.db().is_paged());
+        eprintln!("operational boot {id}, path {:?}", runtime.db().path());
         start_prepared_lease_loop(&runtime, boot).expect("claim observed head before serving");
         for previous in 1..id {
             assert!(row_exists(&runtime, previous));
+        }
+        if id == 4 {
+            runtime.graceful_shutdown(false).expect("close observer");
+            break;
         }
         runtime
             .execute_query(&format!(
                 "INSERT INTO serverless_process_writes (id, holder) VALUES ({id}, 'operational')"
             ))
             .expect("native writer commits");
+        assert!(row_exists(&runtime, id));
+        runtime.lifecycle().mark_draining();
+        // The renewal thread must retain ownership while requests drain.
+        // Crossing its ttl/3 refresh boundary used to release the lease here.
+        std::thread::sleep(Duration::from_secs(3));
         runtime
             .graceful_shutdown(false)
             .expect("publish final native snapshot");
+        let head = reddb_file::decode_serverless_snapshot_head_json(
+            &fs::read(root.join(reddb_file::serverless_snapshot_head_key(remote_key)))
+                .expect("head after shutdown"),
+        )
+        .expect("decode shutdown head");
+        eprintln!("operational shutdown {id}, head {head:?}");
+        assert!(
+            head.publication_sequence >= id * 2,
+            "shutdown must advance the canonical snapshot"
+        );
     }
     ExitCode::SUCCESS
 }

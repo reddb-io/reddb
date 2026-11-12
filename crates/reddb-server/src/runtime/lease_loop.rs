@@ -39,6 +39,7 @@ pub struct LeaseBootPlan {
     holder_id: String,
     database_key: String,
     ttl_ms: u64,
+    initial_snapshot_required: bool,
 }
 
 /// Observe the exact snapshot head before runtime hydration. The later lease
@@ -102,6 +103,7 @@ pub fn prepare_lease_loop_if_required(
         holder_id: lease_holder_id(),
         database_key,
         ttl_ms: lease_ttl_secs() * 1000,
+        initial_snapshot_required: options.remote_bootstrap_key.is_none(),
     }))
 }
 
@@ -131,7 +133,21 @@ pub fn start_prepared_lease_loop(
     let Some(plan) = plan else {
         return Ok(());
     };
-    let local_snapshot = runtime.capture_serverless_snapshot()?;
+    // Existing heads are claimed without re-uploading or re-checkpointing the
+    // hydrated database. Only migration to the first head needs a payload.
+    let local_snapshot = if plan.initial_snapshot_required {
+        Some(runtime.capture_serverless_snapshot()?)
+    } else {
+        None
+    };
+    let database = runtime.db();
+    let snapshot_path = local_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.path())
+        .or_else(|| database.path())
+        .ok_or_else(|| {
+            RedDBError::InvalidOperation("serverless boot requires a persistent local cache".into())
+        })?;
     let runtime_for_drain = Arc::downgrade(&runtime.inner);
     let mark_draining: MarkDraining = Arc::new(move || {
         if let Some(inner) = runtime_for_drain.upgrade() {
@@ -151,7 +167,7 @@ pub fn start_prepared_lease_loop(
             plan.database_key,
             plan.ttl_ms,
         )
-        .with_snapshot_publication(plan.snapshot_publication, local_snapshot.path()),
+        .with_snapshot_publication(plan.snapshot_publication, snapshot_path),
     );
     lifecycle.try_acquire()?;
 
@@ -180,15 +196,11 @@ fn spawn_refresh_thread(runtime: RedDBRuntime, lifecycle: Arc<LeaseLifecycle>) {
         .name("reddb-lease-refresh".into())
         .spawn(move || {
             wheel.run_until_shutdown(move |_id| {
-                // Bail out cleanly on shutdown so the holder thread does not
-                // refresh past the runtime's lifetime and confuse the next
-                // writer's acquire attempt.
+                // Keep the lease through drain and final publication. Shutdown
+                // releases it only after the last snapshot; a lease-loss path
+                // terminates below when refresh fails.
                 let phase = runtime.lifecycle().phase();
-                if matches!(
-                    phase,
-                    crate::runtime::lifecycle::Phase::Draining
-                        | crate::runtime::lifecycle::Phase::Stopped
-                ) {
+                if phase == crate::runtime::lifecycle::Phase::Stopped {
                     let _ = lifecycle.release();
                     return false;
                 }
