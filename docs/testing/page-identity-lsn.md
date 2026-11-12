@@ -129,3 +129,17 @@ using the existing bounded pager cache; no resident page-to-hash inventory. The 
 references are under 200 bytes. A populated tree initially needs four 16-KiB proof nodes. Dense leaf
 nodes store 32 bytes per protected page, before sparse-node and copy-on-write overhead. Full-image
 hashing covers up to 80 KiB per verified read; cold start does not scan data to rebuild proofs.
+
+## Local qualification snapshot (2026-11-12)
+
+At `d32a13a3d`, all 51 portable engine tests passed, including the empty-generation lifecycle and
+catalog publication I/O matrix. All 54 offline-compaction tests also passed: 53 in the main round,
+then the separately selected WAL-over-256-MiB streaming test. This includes native deep-tree salvage,
+recovery-only write fencing, persisted indexes, schema, vault, audit and multimodel reconstruction.
+`cargo check --locked -p reddb-io-server -j1`, formatting and `git diff --check` passed.
+
+The native page-integrity round at `f398373c3` ran all seven tests without excluding the SQL
+counterexample: six passed, including the three catalog publication crash phases; the reused-data-page
+test failed by returning `committed-1`. The interrupted DWB recovery I/O matrix passed separately.
+The subsequent split-stack change does not integrate runtime tree proofs. These results qualify the
+catalog and engine prerequisites, not closure of the remaining SQL generation defect.
