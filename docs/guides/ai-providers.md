@@ -140,13 +140,13 @@ pointers say which provider serves each modality:
 
 ```sql
 -- Task pointers: who generates, who embeds
-SET CONFIG red.config.ai.inference.provider  = 'groq'
-SET CONFIG red.config.ai.embeddings.provider = 'openai'
+SET CONFIG ai.inference.provider  = 'groq'
+SET CONFIG ai.embeddings.provider = 'openai'
 
 -- Per-provider model + base URL live in the provider block
-SET CONFIG red.config.ai.providers.groq.models.inference     = 'llama-3.3-70b-versatile'
-SET CONFIG red.config.ai.providers.openai.models.embeddings  = 'text-embedding-3-small'
-SET CONFIG red.config.ai.providers.groq.base_url             = 'https://api.groq.com/openai/v1'
+SET CONFIG ai.providers.groq.models.inference     = 'llama-3.3-70b-versatile'
+SET CONFIG ai.providers.openai.models.embeddings  = 'text-embedding-3-small'
+SET CONFIG ai.providers.groq.base_url             = 'https://api.groq.com/openai/v1'
 ```
 
 Posting a credential with `"default": true` sets these pointers for you
@@ -162,9 +162,10 @@ curl -X POST http://127.0.0.1:5000/ai/credentials \
 ASK 'what changed in the last 24 hours?'
 ```
 
-**Resolution order for any AI call:** ASK-specific config
-(`red.config.ai.ask.*`) → task pointer → the pointed provider's `models`
-block → the provider's built-in default.
+**Provider resolution:** ASK-specific config (`ai.ask.*` in `red.config`) →
+task pointer → global `ai.default.provider` → built-in provider. **Model
+resolution:** ASK-specific model → pointed provider's `models` block → global
+`ai.default.model` → provider built-in model.
 
 `ASK … USING <provider>` overrides the **inference** side only —
 embeddings still resolve through the embeddings task pointer. A task
@@ -172,10 +173,8 @@ pointer aimed at a provider that lacks the modality (Anthropic has no
 embeddings API) fails with a didactic error naming the pointer to fix;
 there is no silent re-route.
 
-> **Clean break:** `red.config.ai.default.provider`,
-> `red.config.ai.default.model`, and the old
-> `red.config.ai.{provider}.{alias}.base_url` base-URL shape were removed.
-> Writing any of them is rejected with an error naming the new key.
+> **Clean break:** the old `ai.{provider}.{alias}.base_url` base-URL shape
+> was removed. Use `ai.providers.{provider}.base_url` instead.
 
 ---
 
@@ -200,9 +199,9 @@ curl -X POST http://127.0.0.1:5000/ai/credentials \
 ```
 
 `endpoint`, `api_base`, and `base_url` name the same setting. Use one field.
-The endpoint is per provider at `red.config.ai.providers.<provider>.base_url`;
+The endpoint is per provider at `ai.providers.<provider>.base_url` in `red.config`;
 keys are per credential alias in the encrypted Vault. `default: true` sets
-`red.config.ai.providers.<provider>.credential` to the registered alias, so
+`ai.providers.<provider>.credential` to the registered alias, so
 calls without `credential` use that key. An explicit alias overrides it.
 For another endpoint, configure another database deployment; aliases under the
 same provider share its endpoint.
@@ -227,7 +226,7 @@ export REDDB_RED_ROUTER_PROMPT_MODEL=YOUR_CHAT_MODEL_ID
 The equivalent prefix for `openai-compat` is `REDDB_OPENAI_COMPAT_`.
 Quoted provider tokens work in SQL, for example `USING 'red-router'` or
 `USING 'openai-compat'`. Set the embedding model separately in
-`red.config.ai.providers.red-router.models.embeddings`.
+`ai.providers.red-router.models.embeddings` in `red.config`.
 Endpoints must be absolute HTTP(S) URLs without userinfo, query, or fragment.
 Plain HTTP is allowed for loopback services; private-network deployments can
 opt in with `REDDB_AI_ALLOW_PRIVATE_PROVIDERS=1`. URL syntax validation always
@@ -279,7 +278,7 @@ Vault setup itself is covered in [Security → Vault](/security/vault.md).
 bootstrap fallback):
 
 1. Vault token: `red.secret.ai.providers.<provider>.tokens.<alias>`
-2. Vault indirection: `red.config.ai.providers.<provider>.tokens.<alias>.secret_ref` points at another vault path
+2. Vault indirection: `ai.providers.<provider>.tokens.<alias>.secret_ref` in `red.config` points at another vault path
 3. Env var `REDDB_<PROVIDER>_API_KEY_<ALIAS>` (or `REDDB_<PROVIDER>_API_KEY` for the default alias)
 
 For the **default** alias (no `"credential"` in the request), the vault path is
@@ -288,7 +287,7 @@ For the **default** alias (no `"credential"` in the request), the vault path is
 
 > **Clean break (issue #1745).** The old vault path shape
 > (`red.secret.ai.<provider>.<alias>.api_key`) and the deprecated plaintext
-> config path (`red.config.ai.<provider>.<alias>.key`) are **removed** — there
+> config content key (`ai.<provider>.<alias>.key`) is **removed** — there
 > is no deprecation window. A credential still parked at either is rejected
 > with a didactic error naming the new vault path to populate; it is never
 > silently read. Migrate any staged keys to the `providers.<provider>.tokens.<alias>`

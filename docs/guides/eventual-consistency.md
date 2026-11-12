@@ -128,19 +128,19 @@ Sync mode is appropriate for financial operations where you need to read the upd
 
 ## Configuration
 
-### Via red_config (declarative)
+### Via `red.config` (declarative)
 
 ```sql
 -- Register fields for eventual consistency
-SET CONFIG 'red.ec.wallets.fields' = '["balance", "points"]'
-SET CONFIG 'red.ec.wallets.balance.reducer' = 'sum'
-SET CONFIG 'red.ec.wallets.balance.mode' = 'async'
-SET CONFIG 'red.ec.wallets.balance.interval_secs' = '60'
-SET CONFIG 'red.ec.wallets.points.reducer' = 'sum'
-SET CONFIG 'red.ec.wallets.points.mode' = 'sync'
+SET CONFIG 'ec.wallets.fields' = '["balance", "points"]'
+SET CONFIG 'ec.wallets.balance.reducer' = 'sum'
+SET CONFIG 'ec.wallets.balance.mode' = 'async'
+SET CONFIG 'ec.wallets.balance.interval_secs' = '60'
+SET CONFIG 'ec.wallets.points.reducer' = 'sum'
+SET CONFIG 'ec.wallets.points.mode' = 'sync'
 ```
 
-The EC registry loads automatically from `red_config` at startup.
+The EC registry loads automatically from `red.config` at startup.
 
 ### Via Rust API (embedded)
 
@@ -265,12 +265,12 @@ The `flush()` method also auto-consolidates, so any path that calls `flush()` be
 A high-throughput click counter that handles thousands of concurrent increments:
 
 ```bash
-# Configure via red_config
+# Configure via red.config
 curl localhost:5000/config -d '{
-  "red.ec.urls.fields": "[\"clicks\"]",
-  "red.ec.urls.clicks.reducer": "sum",
-  "red.ec.urls.clicks.mode": "async",
-  "red.ec.urls.clicks.interval_secs": "10"
+  "ec.urls.fields": "[\"clicks\"]",
+  "ec.urls.clicks.reducer": "sum",
+  "ec.urls.clicks.mode": "async",
+  "ec.urls.clicks.interval_secs": "10"
 }'
 
 # Create a URL

@@ -229,7 +229,7 @@ fn a_second_writer_process_cannot_open_an_open_embedded_store() {
     assert_eq!(rows.result.records.len(), 2);
 }
 
-/// Boot re-seeds `red.system.*` and other config keys. `red_config` used to
+/// Boot re-seeds `system.*` and other config keys. `red.config` used to
 /// append a row per write, so every open added ~22 rows (~2 KB) to the
 /// snapshot even when nothing else changed.
 #[test]

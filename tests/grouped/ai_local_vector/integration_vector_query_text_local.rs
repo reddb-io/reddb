@@ -87,7 +87,7 @@ fn text(record: &UnifiedRecord, column: &str) -> String {
 /// land, without going through HTTP — the embedding routing path only
 /// reads the registry KV.
 fn register_installed_local_model(rt: &RedDBRuntime, name: &str, dimensions: u32) {
-    let key = format!("red.config.ai.models.{name}");
+    let key = format!("ai.models.{name}");
     let payload = format!(
         r#"{{"name":"{name}","provider":"local","source":"sentence-transformers/all-MiniLM-L6-v2","task":"embedding","revision":"main","engine":"candle","dimensions":{dimensions},"status":"installed","pull_policy":"if_missing"}}"#
     );
@@ -256,7 +256,7 @@ fn text_vector_search_with_local_provider_fails_on_uninstalled_model() {
     EntityUseCases::new(&rt)
         .create_kv(CreateKvInput {
             collection: "red.config".to_string(),
-            key: "red.config.ai.models.pending".to_string(),
+            key: "ai.models.pending".to_string(),
             value: Value::text(payload.to_string()),
             metadata: Vec::new(),
         })

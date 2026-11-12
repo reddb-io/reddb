@@ -4,7 +4,7 @@ use super::commit::{StoreWalAction, StoreWalCaptureGuard};
 use super::*;
 
 impl UnifiedStore {
-    /// Publish the boot-time red.system replacements together, retaining the
+    /// Publish the boot-time `system.*` replacements together, retaining the
     /// prior rows for rollback if the embedded WAL publication fails.
     pub(crate) fn write_system_config_batch(
         &self,

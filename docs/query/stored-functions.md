@@ -72,7 +72,7 @@ an ALTER affects later calls while an already-started call retains its definitio
 CALL results bypass the result cache. SHOW FUNCTION returns canonical CREATE DDL
 that can be replayed through the same public query API to import a definition.
 
-The initial catalog uses a reserved internal `red_config` entry. SET CONFIG,
+The initial catalog uses a reserved internal `red.config` entry. SET CONFIG,
 configuration export and inline CONFIG access do not expose or modify that entry.
 Raw access to internal storage is a trusted administrative interface; applications
 must not grant tenants direct access to internal `red_*` collections. This is not
@@ -175,7 +175,7 @@ existing scan path. Parallel budget propagation remains pending. Ordinary SQL re
 parallel paths. Cost sketch: N visited candidates add N budget checks and about
 N/256 clock samples, with no per-candidate budget allocation, locks or atomics;
 ordinary scan callbacks bypass per-row accounting. Reading the two limits uses
-the existing configuration accessors, each scanning `red_config`; long config
+the existing configuration accessors, each scanning `red.config`; long config
 histories add lookup cost. This is an implementation cost estimate, not a
 measured throughput claim. Exact vector search adds about 2N work units for N
 candidates; TurboQuant adds one callback per scoring block plus candidate/rerank

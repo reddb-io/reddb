@@ -65,7 +65,7 @@ impl RedDBRuntime {
     /// has not been assigned yet. Used as the bounded `replica_id`
     /// dimension on `reddb_replication_reconnects_total`.
     pub fn replication_replica_id(&self) -> String {
-        self.config_string("red.replication.replica_id", "")
+        self.config_string("replication.replica_id", "")
     }
 
     /// Issue #1243 — drive the reconnect tracker from a replica health

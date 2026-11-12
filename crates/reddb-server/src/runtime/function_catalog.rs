@@ -12,7 +12,7 @@ use reddb_types::Value;
 
 use super::function_validation::{error, validate_definition};
 
-pub(crate) const REGISTRY_KEY: &str = "red.rql.function_catalog";
+pub(crate) const REGISTRY_KEY: &str = "rql.function_catalog";
 const CATALOG_BYTES_MAX: usize = 4 * 1024 * 1024;
 const FUNCTIONS_MAX: usize = 1024;
 type FunctionKey = (Option<String>, String);

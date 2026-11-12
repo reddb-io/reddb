@@ -69,7 +69,7 @@ pub use sweeper::{
 // `cache.blob.l2_path` pager plus its reddb-file control sidecar.
 //
 // When the operator opts into `include_blob_cache=true` on a backup
-// (`red.config.backup.include_blob_cache`), we upload both files to
+// (`backup.include_blob_cache`), we upload both files to
 // the configured remote backend under a stable prefix.
 //
 // Shape contract:

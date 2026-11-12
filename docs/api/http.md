@@ -519,7 +519,7 @@ The response groups results by structure type:
 | `PUT` | `/config/{key}` | Set a config key (scalar or JSON subtree) |
 | `DELETE` | `/config/{key}` | Delete a config key |
 
-Configuration is stored as dot-notation key-value pairs in the `red_config` collection. The `/config` endpoints automatically flatten JSON trees on import and nest them on export.
+Configuration is stored as dot-notation key-value pairs in the `red.config` collection. The `/config` endpoints automatically flatten JSON trees on import and nest them on export.
 
 ### Export Configuration
 
@@ -535,14 +535,11 @@ Response:
 {
   "ok": true,
   "config": {
-    "red": {
-      "ai": {
-        "default": {
-          "provider": "groq",
-          "model": "llama-3.3-70b-versatile"
-        },
+    "ai": {
+      "inference": { "provider": "groq" },
+      "providers": {
         "groq": {
-          "default": { "key": "gsk_xxx" }
+          "models": { "inference": "llama-3.3-70b-versatile" }
         }
       }
     }
@@ -558,10 +555,8 @@ Response:
 curl -X POST http://127.0.0.1:5000/config \
   -H 'content-type: application/json' \
   -d '{
-    "red": {
-      "ai": {
-        "default": { "provider": "ollama", "model": "llama3" }
-      }
+    "ai": {
+      "default": { "provider": "ollama", "model": "llama3" }
     }
   }'
 ```
@@ -569,7 +564,7 @@ curl -X POST http://127.0.0.1:5000/config \
 Response:
 
 ```json
-{"ok": true, "imported": 2, "keys": ["red.ai.default.provider", "red.ai.default.model"]}
+{"ok": true, "imported": 2, "keys": ["ai.default.provider", "ai.default.model"]}
 ```
 
 ### Individual Config Keys
@@ -577,7 +572,7 @@ Response:
 Read a single key or a subtree by path:
 
 ```bash
-curl http://127.0.0.1:5000/config/red.ai.default.provider
+curl http://127.0.0.1:5000/config/ai.default.provider
 ```
 
 If the key is an exact match, the response returns that value. If the key is a prefix, the response returns the nested subtree.
@@ -585,7 +580,7 @@ If the key is an exact match, the response returns that value. If the key is a p
 Set a single scalar value:
 
 ```bash
-curl -X PUT http://127.0.0.1:5000/config/red.ai.default.provider \
+curl -X PUT http://127.0.0.1:5000/config/ai.default.provider \
   -H 'content-type: application/json' \
   -d '{"value": "groq"}'
 ```
@@ -593,7 +588,7 @@ curl -X PUT http://127.0.0.1:5000/config/red.ai.default.provider \
 Set a subtree (the server flattens it into individual keys):
 
 ```bash
-curl -X PUT http://127.0.0.1:5000/config/red.storage.hnsw \
+curl -X PUT http://127.0.0.1:5000/config/storage.hnsw \
   -H 'content-type: application/json' \
   -d '{"value": {"m": 32, "ef_search": 100}}'
 ```
@@ -601,7 +596,7 @@ curl -X PUT http://127.0.0.1:5000/config/red.storage.hnsw \
 Delete a config key:
 
 ```bash
-curl -X DELETE http://127.0.0.1:5000/config/red.ai.default.model
+curl -X DELETE http://127.0.0.1:5000/config/ai.default.model
 ```
 
 ### Configuration via SQL
@@ -612,7 +607,7 @@ You can also manage configuration through the query engine:
 # SET CONFIG via SQL
 curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
-  -d '{"query": "SET CONFIG red.ai.default.provider = '\''groq'\''"}'
+  -d '{"query": "SET CONFIG ai.default.provider = '\''groq'\''"}'
 
 # SHOW CONFIG via SQL
 curl -X POST http://127.0.0.1:5000/query \
@@ -622,7 +617,7 @@ curl -X POST http://127.0.0.1:5000/query \
 # SHOW CONFIG subtree via SQL
 curl -X POST http://127.0.0.1:5000/query \
   -H 'content-type: application/json' \
-  -d '{"query": "SHOW CONFIG red.ai"}'
+  -d '{"query": "SHOW CONFIG ai"}'
 ```
 
 ## AI
@@ -632,7 +627,7 @@ curl -X POST http://127.0.0.1:5000/query \
 | `POST` | `/ai/embeddings` | Generate embeddings via the pooled AI transport (single, batch, query-row, query-result) |
 | `POST` | `/ai/prompt` | Execute prompts via the pooled AI transport (single, batch, query-row, query-result) |
 | `POST` | `/ai/ask` | One-shot question against the database using any provider |
-| `POST` | `/ai/credentials` | Store provider API keys by alias in KV (`red_config`) |
+| `POST` | `/ai/credentials` | Store provider API keys by alias in the encrypted `red.vault` collection |
 
 ### Supported Providers
 
@@ -654,16 +649,18 @@ RedDB ships with a multi-provider AI layer. Every provider that exposes an OpenA
 
 ### Credential Configuration
 
-`POST /ai/credentials` stores API keys in the RedDB vault (the `red_config` KV collection). You can store keys by provider name and optional alias.
+`POST /ai/credentials` stores API keys in the encrypted `red.vault` collection and writes only non-secret provider settings or a secret reference into `red.config`. You can store keys by provider name and optional alias.
 
-Credentials are persisted as dot-notation keys in the `red_config` collection:
+Credentials and their non-secret settings use these canonical paths:
 
 | Key Pattern | Example | Description |
 |:------------|:--------|:------------|
-| `red.ai.{provider}.{alias}.key` | `red.ai.groq.default.key` | API key for a provider/alias |
-| `red.ai.{provider}.{alias}.base_url` | `red.ai.custom.prod.base_url` | Base URL override |
-| `red.ai.default.provider` | `red.ai.default.provider` | Default provider for all AI requests |
-| `red.ai.default.model` | `red.ai.default.model` | Default model for all AI requests |
+| `red.secret.ai.providers.{provider}.tokens.{alias}` | `red.secret.ai.providers.groq.tokens.default` | Vault-only API key for a provider/alias |
+| `ai.providers.{provider}.base_url` | `ai.providers.custom.base_url` | Base URL override inside `red.config` |
+| `ai.default.provider` | `ai.default.provider` | Global fallback provider |
+| `ai.default.model` | `ai.default.model` | Global fallback model |
+| `ai.inference.provider` | `ai.inference.provider` | Provider used for generation |
+| `ai.providers.{provider}.models.inference` | `ai.providers.groq.models.inference` | Inference model for that provider |
 
 Store an API key:
 
@@ -704,7 +701,7 @@ curl -X POST http://127.0.0.1:5000/ai/credentials \
 
 You can also set the default provider and model through other methods:
 
-- **Config endpoint**: `POST /config` with `{"red":{"ai":{"default":{"provider":"groq","model":"llama-3.3-70b-versatile"}}}}`
+- **Config endpoint**: `POST /config` with `{"ai":{"inference":{"provider":"groq"},"providers":{"groq":{"models":{"inference":"llama-3.3-70b-versatile"}}}}}`
 - **Environment variables**: `REDDB_AI_PROVIDER` and `REDDB_AI_MODEL`
 
 ### Credential Resolution Chain
@@ -712,9 +709,9 @@ You can also set the default provider and model through other methods:
 When a request includes a `credential` alias, RedDB resolves the API key using the following chain. The first match wins.
 
 1. **Environment variable with alias**: `REDDB_{PROVIDER}_API_KEY_{ALIAS}` (e.g. `REDDB_OPENAI_API_KEY_PROD`)
-2. **RedDB vault**: KV key `{provider}/{alias}` in the `red_config` collection
+2. **RedDB vault**: secret path `red.secret.ai.providers.{provider}.tokens.{alias}` in `red.vault`
 3. **Default environment variable**: `REDDB_{PROVIDER}_API_KEY` (e.g. `REDDB_GROQ_API_KEY`)
-4. **Default vault entry**: KV key `{provider}/default` in the `red_config` collection
+4. **Default vault entry**: secret path `red.secret.ai.providers.{provider}.tokens.default` in `red.vault`
 
 ### Embeddings
 
@@ -1016,14 +1013,14 @@ You can enable and tune backup, WAL archiving, and CDC through the runtime confi
 
 ```bash
 # Enable scheduled backups
-curl -X PUT localhost:5000/config/red.backup.enabled -d '{"value": true}'
-curl -X PUT localhost:5000/config/red.backup.interval_secs -d '{"value": 3600}'
+curl -X PUT localhost:5000/config/backup.enabled -d '{"value": true}'
+curl -X PUT localhost:5000/config/backup.interval_secs -d '{"value": 3600}'
 
 # Enable WAL archiving
-curl -X PUT localhost:5000/config/red.wal.archive.enabled -d '{"value": true}'
+curl -X PUT localhost:5000/config/wal.archive.enabled -d '{"value": true}'
 
 # CDC is enabled by default
-curl localhost:5000/config/red.cdc
+curl localhost:5000/config/cdc
 ```
 
 See [Configuration -- Backup & Recovery](/getting-started/configuration.md#backup--recovery-redbackup) for the full list of keys.

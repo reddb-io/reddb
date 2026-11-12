@@ -84,7 +84,7 @@ fn rt() -> RedDBRuntime {
 }
 
 fn register_installed_local_model(rt: &RedDBRuntime, name: &str, dimensions: u32) {
-    let key = format!("red.config.ai.models.{name}");
+    let key = format!("ai.models.{name}");
     let payload = format!(
         r#"{{"name":"{name}","provider":"local","source":"sentence-transformers/all-MiniLM-L6-v2","task":"embedding","revision":"v1.0","engine":"candle","dimensions":{dimensions},"status":"installed","pull_policy":"if_missing"}}"#
     );

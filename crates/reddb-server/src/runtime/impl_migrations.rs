@@ -41,7 +41,7 @@ fn val_bool(v: &Value) -> Option<bool> {
 fn migration_author(rt: &RedDBRuntime) -> Author {
     let store = rt.inner.db.store();
     let name = store
-        .get_config("red.vcs.author.name")
+        .get_config("vcs.author.name")
         .and_then(|v| {
             if let Value::Text(s) = v {
                 Some(s.to_string())
@@ -51,7 +51,7 @@ fn migration_author(rt: &RedDBRuntime) -> Author {
         })
         .unwrap_or_else(|| "reddb".to_string());
     let email = store
-        .get_config("red.vcs.author.email")
+        .get_config("vcs.author.email")
         .and_then(|v| {
             if let Value::Text(s) = v {
                 Some(s.to_string())

@@ -48,13 +48,13 @@ DROP SCHEMA reporting;
 DROP SCHEMA IF EXISTS staging CASCADE;  -- CASCADE accepted; tables untouched
 ```
 
-Schemas are persisted in `red_config.schema.{name}` and survive
+Schemas are persisted as `schema.{name}` keys in `red.config` and survive
 restart.
 
 ## Sequences
 
 Persistent monotonic counters. Values backed by atomic increments
-on `red_config`.
+on `red.config`.
 
 ```sql
 CREATE SEQUENCE order_id_seq START 1000 INCREMENT 1;

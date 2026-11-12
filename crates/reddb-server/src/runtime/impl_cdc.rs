@@ -435,6 +435,6 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn kv_watch_idle_timeout_ms(&self) -> u64 {
-        self.config_u64("red.config.kv.watch.idle_timeout_ms", 60_000)
+        self.config_u64("kv.watch.idle_timeout_ms", 60_000)
     }
 }

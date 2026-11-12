@@ -178,9 +178,9 @@ Field rules:
 | `admin:audit-read` | Admin | Read the audit log. |
 | `admin:reload` | Admin | Force or request a `SIGHUP`-equivalent reload of runtime secrets where supported. |
 | `admin:lease-promote` | Admin | Promote a follower lease in a replicated cluster. |
-| `config:read` | Config | Read a key from `red_config`. |
-| `config:write` | Config | Create or update a key in `red_config`. |
-| `config:delete` | Config | Delete a key from `red_config`. |
+| `config:read` | Config | Read a key from `red.config`. |
+| `config:write` | Config | Create or update a key in `red.config`. |
+| `config:delete` | Config | Delete a key from `red.config`. |
 | `config:*` | Wildcard | Every config verb. |
 | `vault:read_metadata` | Vault | List entries or read metadata (`VAULT LIST`, `VAULT GET`). Never returns the secret value. |
 | `vault:read` | Vault | Reveal the current decrypted value (`VAULT UNSEAL <key>` for latest version; also gates the internal `secret_ref` resolver used by config indirection and the AI credential resolver). |

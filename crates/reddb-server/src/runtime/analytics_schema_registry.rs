@@ -16,7 +16,7 @@
 //! incompatible change through the same one.
 //!
 //! Persistence shape: a single JSON document stored under
-//! `red.analytics.schema_registry.entries_json` as a Text value. It
+//! `analytics.schema_registry.entries_json` as a Text value. It
 //! contains an array of entries `{event_name, version, schema_json,
 //! registered_at_ms}`. `red.config` is append-only, so we read by
 //! scanning that collection and keeping the row with the largest
@@ -42,7 +42,7 @@ use reddb_types::Value;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const REGISTRY_KEY: &str = "red.analytics.schema_registry.entries_json";
+const REGISTRY_KEY: &str = "analytics.schema_registry.entries_json";
 
 /// One registered schema row.
 #[derive(Debug, Clone, PartialEq)]

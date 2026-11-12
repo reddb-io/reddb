@@ -60,7 +60,7 @@ declared column and `WITH (DESCRIPTION = 'text')` for the collection.
 forms such as `CREATE GRAPH name DESCRIPTION 'text'` accept a collection
 description as well.
 
-Set `red.config.ai.collection_descriptions.auto_enrich = true` to request
+Set `ai.collection_descriptions.auto_enrich = true` in `red.config` to request
 background suggestions after successful collection creation or alteration. The
 default is `false`; a configured inference provider supplies the AI call.
 Generated descriptions never replace manual ones and are marked by

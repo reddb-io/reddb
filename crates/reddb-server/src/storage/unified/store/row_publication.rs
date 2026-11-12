@@ -41,6 +41,7 @@ pub(super) struct RowPublicationQueue {
 impl UnifiedStore {
     pub(crate) fn publish_rows(&self, rows: RowPublication) -> Result<(), StoreError> {
         assert!(!Self::deferred_store_wal_capture_active());
+        Self::validate_row_publication(&rows)?;
         if self.commit.is_none()
             || self.config.durability_mode != DurabilityMode::WalDurableGrouped
             || self.vault_publication_lock.is_owned_by_current_thread()
@@ -98,6 +99,13 @@ impl UnifiedStore {
                     .map(|(name, _)| name.len() as u64 + 16)
                     .sum::<u64>(),
             )
+    }
+
+    fn validate_row_publication(rows: &RowPublication) -> Result<(), StoreError> {
+        for (collection, entity, _) in &rows.inserts {
+            super::config_keys::validate_config_entity(collection, entity)?;
+        }
+        Ok(())
     }
 
     fn enqueue_row_preparation(
@@ -216,6 +224,9 @@ impl UnifiedStore {
 
     fn publish_row_group(&self, rows: Vec<RowPublication>) -> Result<(), StoreError> {
         let _publication = self.vault_publication_lock.lock();
+        for request in &rows {
+            Self::validate_row_publication(request)?;
+        }
         if rows
             .iter()
             .all(|rows| rows.inserts.is_empty() && rows.deletes.is_empty())

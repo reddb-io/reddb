@@ -277,7 +277,7 @@ QUEUE READ jobs GROUP workers CONSUMER w1 COUNT 1 WAIT 30s
 -- Returns the job rows on wake, or zero rows on timeout.
 ```
 
-A wait that exceeds the server's `red.config.queue.max_wait_ms` cap is
+A wait that exceeds the server's `queue.max_wait_ms` cap in `red.config` is
 rejected immediately. Shutdown or connection cancellation returns an
 explicit cancellation error, not an empty result. See
 [Queue configuration](../data-models/queues.md#configuration) for the cap and

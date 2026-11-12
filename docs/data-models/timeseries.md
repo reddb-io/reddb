@@ -236,7 +236,7 @@ SELECT add_retention_policy('sensor_metrics', INTERVAL '365 days');
 Duration units accepted everywhere: `ms`, `s`, `m`, `h`, `d`.
 
 The retention daemon sweeps policies on a configurable interval
-(`red.config.retention.interval_ms`) and drops expired chunks in
+(`retention.interval_ms` in `red.config`) and drops expired chunks in
 constant time per chunk — no row-level scans. See
 [Partition TTL](./partition-ttl.md) for the full cost model and
 mixed-TTL / per-chunk override recipes.

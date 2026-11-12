@@ -215,6 +215,6 @@ Per ADR-0010 (`wire-adapters-translate-never-duplicate`), the orchestrator is th
 - Tracker: #392
 - ADR-0006 (Tiered Blob Cache) — backs `CACHE TTL` infrastructure
 - ADR-0010 (Wire adapters translate, never duplicate) — orchestrator is the single source of truth
-- ADR-319 (Umbrella system collections `red_config`, `red_vault`) — `red_*` naming convention used for `red_ask_audit`
+- ADR-319 (umbrella system collections, now `red.config` and `red.vault`) — system naming precedent used for the query-audit surface
 - Guide: `docs/guides/ask-your-database.md`
 - Capabilities matrix: `docs/guides/ai-providers.md`

@@ -86,13 +86,21 @@ impl RedDBServer {
 
     /// GET /config/{key} — get a single config value or subtree.
     pub(crate) fn handle_config_get_key(&self, key_path: &str) -> HttpResponse {
+        let prefix = key_path.trim_matches('.');
+        if prefix.starts_with("red.") {
+            return json_error(
+                400,
+                format!(
+                    "config key `{prefix}` is invalid inside red.config: omit the redundant `red.` prefix"
+                ),
+            );
+        }
         let store = self.runtime.db().store();
         let Some(manager) = store.get_collection(RED_CONFIG_COLLECTION) else {
             return json_error(404, format!("config key not found: {key_path}"));
         };
 
         let entities = manager.query_all(|_| true);
-        let prefix = key_path.trim_matches('.');
         let mut exact_match = None;
         let mut subtree = Map::new();
 
@@ -169,6 +177,14 @@ impl RedDBServer {
         if key.is_empty() {
             return json_error(400, "config key cannot be empty");
         }
+        if key.starts_with("red.") {
+            return json_error(
+                400,
+                format!(
+                    "config key `{key}` is invalid inside red.config: omit the redundant `red.` prefix"
+                ),
+            );
+        }
 
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(p) => p,
@@ -184,7 +200,10 @@ impl RedDBServer {
         // If value is an object, set as subtree
         if let JsonValue::Object(_) = &value {
             let store = self.runtime.db().store();
-            let count = store.set_config_tree(&key, &value);
+            let count = match store.try_set_config_tree(&key, &value) {
+                Ok(count) => count,
+                Err(err) => return json_error(400, err.to_string()),
+            };
             let mut obj = Map::new();
             obj.insert("ok".to_string(), JsonValue::Bool(true));
             obj.insert("key".to_string(), JsonValue::String(key));
@@ -230,6 +249,14 @@ impl RedDBServer {
     /// DELETE /config/{key} — delete a config key.
     pub(crate) fn handle_config_delete_key(&self, key_path: &str) -> HttpResponse {
         let key = key_path.trim_matches('.').to_string();
+        if key.starts_with("red.") {
+            return json_error(
+                400,
+                format!(
+                    "config key `{key}` is invalid inside red.config: omit the redundant `red.` prefix"
+                ),
+            );
+        }
         match self
             .entity_use_cases()
             .delete_kv(RED_CONFIG_COLLECTION, &key)
@@ -259,6 +286,15 @@ impl RedDBServer {
 
         let mut pairs = Vec::new();
         flatten_json("", &config, &mut pairs);
+
+        if let Some((key, _)) = pairs.iter().find(|(key, _)| key.starts_with("red.")) {
+            return json_error(
+                400,
+                format!(
+                    "config key `{key}` is invalid inside red.config: omit the redundant `red.` prefix"
+                ),
+            );
+        }
 
         if pairs
             .iter()
@@ -1286,11 +1322,11 @@ impl RedDBServer {
 
             for (key, value) in [
                 (
-                    format!("red.config.ai.providers.{}.credential", provider.token()),
+                    format!("ai.providers.{}.credential", provider.token()),
                     alias.to_string(),
                 ),
                 (
-                    "red.config.ai.inference.provider".to_string(),
+                    "ai.inference.provider".to_string(),
                     provider.token().to_string(),
                 ),
             ] {
@@ -1310,7 +1346,7 @@ impl RedDBServer {
 
             if provider.supports_embeddings() {
                 if let Err(err) = set_pointer(
-                    "red.config.ai.embeddings.provider".to_string(),
+                    "ai.embeddings.provider".to_string(),
                     provider.token().to_string(),
                 ) {
                     return json_error(400, format!("failed to store embeddings provider: {err}"));
@@ -1774,7 +1810,7 @@ impl RedDBServer {
     }
 }
 
-const AI_MODEL_KEY_PREFIX: &str = "red.config.ai.models.";
+const AI_MODEL_KEY_PREFIX: &str = "ai.models.";
 const AI_MODEL_TASK_EMBEDDING: &str = "embedding";
 const AI_MODEL_ENGINE_CANDLE: &str = "candle";
 const AI_MODEL_PROVIDER_LOCAL: &str = "local";
@@ -2425,6 +2461,48 @@ mod tests {
     }
 
     #[test]
+    fn config_http_surfaces_reject_redundant_red_prefixes() {
+        let (server, path) = make_server("config_key_namespace");
+
+        assert_eq!(server.handle_config_get_key("red.auth.enabled").status, 400);
+        assert_eq!(
+            server
+                .handle_config_set_key("red.auth.enabled", br#"{"value":true}"#.to_vec())
+                .status,
+            400
+        );
+        assert_eq!(
+            server.handle_config_delete_key("red.auth.enabled").status,
+            400
+        );
+        assert_eq!(
+            server
+                .handle_config_import(br#"{"red":{"auth":{"enabled":true}}}"#.to_vec())
+                .status,
+            400
+        );
+        assert_eq!(
+            server.runtime.db().store().get_config("auth.enabled"),
+            Some(Value::Boolean(false)),
+            "a rejected legacy key must not overwrite the canonical default"
+        );
+
+        assert_eq!(
+            server
+                .handle_config_set_key("red", br#"{"value":true}"#.to_vec())
+                .status,
+            200,
+            "the exact key `red` does not contain the redundant `red.` prefix"
+        );
+        assert_eq!(
+            server.runtime.db().store().get_config("red"),
+            Some(Value::Boolean(true))
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn gateway_credentials_require_key_and_endpoint_before_any_write() {
         let (server, path) = make_server("gateway_pair");
         for provider in ["openai-compat", "red-router"] {
@@ -2444,7 +2522,7 @@ mod tests {
                     .entity_use_cases()
                     .get_kv(
                         RED_CONFIG_COLLECTION,
-                        &format!("red.config.ai.providers.{provider}.base_url")
+                        &format!("ai.providers.{provider}.base_url")
                     )
                     .expect("read config")
                     .is_none());
@@ -2511,7 +2589,7 @@ mod tests {
             .0;
         assert_eq!(ref_value, Value::Text(secret_path.clone().into()));
 
-        let removed_legacy = format!("red.config.ai.openai.{alias}.key");
+        let removed_legacy = format!("ai.openai.{alias}.key");
         assert!(
             server
                 .entity_use_cases()
@@ -2610,7 +2688,7 @@ mod tests {
         // pull path (#679) writes the on-disk artifacts; this test
         // doesn't exercise pull, only the embeddings surface, so we
         // edit the registry KV in place.
-        let key = format!("red.config.ai.models.{name}");
+        let key = format!("ai.models.{name}");
         let entry = server
             .entity_use_cases()
             .get_kv(RED_CONFIG_COLLECTION, &key)
@@ -2991,7 +3069,7 @@ mod tests {
             "register failed: {}",
             String::from_utf8_lossy(&resp.body)
         );
-        let key = format!("red.config.ai.models.mini");
+        let key = format!("ai.models.mini");
         let (value, _) = server
             .entity_use_cases()
             .get_kv(RED_CONFIG_COLLECTION, &key)
@@ -3075,7 +3153,7 @@ mod tests {
     }
 
     fn stamp_policy_on_entry(server: &RedDBServer, name: &str, policy: &str) {
-        let key = format!("red.config.ai.models.{name}");
+        let key = format!("ai.models.{name}");
         let (value, _) = server
             .entity_use_cases()
             .get_kv(RED_CONFIG_COLLECTION, &key)
@@ -3282,7 +3360,7 @@ mod tests {
         );
         // And critically: the resolved token must not appear in the
         // model entry KV.
-        let key = format!("red.config.ai.models.mini");
+        let key = format!("ai.models.mini");
         let (value, _) = server
             .entity_use_cases()
             .get_kv(RED_CONFIG_COLLECTION, &key)

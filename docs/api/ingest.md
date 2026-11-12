@@ -291,8 +291,8 @@ case.
 The endpoints inherit auth from the standard HTTP stack:
 
 * API keys (`Authorization: Bearer ...`) with `insert` scope.
-* Rate limiting via `red.config.http.rate_limit_per_ip`.
-* Request body caps via `red.config.http.max_body_bytes`
+* Rate limiting via `http.rate_limit_per_ip` in `red.config`.
+* Request body caps via `http.max_body_bytes` in `red.config`.
   (default 64 MiB). NDJSON streams aren't subject to the cap
   because the parser doesn't materialise the full body.
 * RLS still applies — `INSERT` policies gate ingest rows the same

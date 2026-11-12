@@ -55,7 +55,7 @@ $env:REDDB_OPENAI_API_KEY = "..."
 ```
 
 Replace `OPENAI` with the selected provider token. Vault-backed credentials and
-the normal `red.config.ai.*` settings also apply. See
+the normal `ai.*` keys in `red.config` also apply. See
 [AI providers](../guides/ai-providers.md) and
 [configuration](../getting-started/configuration.md).
 
@@ -66,7 +66,7 @@ enable it in the database when you want visible-catalog discovery, exploratory
 queries, one final validation query, and an auditable reasoning trace:
 
 ```bash
-red query "SET CONFIG red.config.ai.ask.planner = true" --path /absolute/path/to/data.rdb
+red query "SET CONFIG ai.ask.planner = true" --path /absolute/path/to/data.rdb
 ```
 
 With the setting left at its default `false`, ACP still works, but ordinary

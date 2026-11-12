@@ -13,7 +13,7 @@ use reddb_types::Value;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const REGISTRY_KEY: &str = "red.analytics.slos.entries_json";
+const REGISTRY_KEY: &str = "analytics.slos.entries_json";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SloDescriptor {

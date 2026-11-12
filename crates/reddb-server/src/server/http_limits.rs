@@ -164,7 +164,7 @@ where
     let max_handlers = input
         .max_handlers_flag
         .or_else(|| {
-            config_lookup("red.http.max_handlers")
+            config_lookup("http.max_handlers")
                 .and_then(|raw| raw.parse::<usize>().ok())
                 .and_then(|v| validate_max_handlers(v).ok())
         })
@@ -174,7 +174,7 @@ where
     let execution_workers = input
         .execution_workers_flag
         .or_else(|| {
-            config_lookup("red.http.execution_workers")
+            config_lookup("http.execution_workers")
                 .and_then(|raw| raw.parse::<usize>().ok())
                 .and_then(|value| validate_execution_workers(value).ok())
         })
@@ -185,7 +185,7 @@ where
     let handler_timeout_ms = input
         .handler_timeout_ms_flag
         .or_else(|| {
-            config_lookup("red.http.handler_timeout_ms")
+            config_lookup("http.handler_timeout_ms")
                 .and_then(|raw| raw.parse::<u64>().ok())
                 .and_then(|v| validate_handler_timeout_ms(v).ok())
         })
@@ -195,7 +195,7 @@ where
     let retry_after_secs = input
         .retry_after_secs_flag
         .or_else(|| {
-            config_lookup("red.http.retry_after_secs")
+            config_lookup("http.retry_after_secs")
                 .and_then(|raw| raw.parse::<u64>().ok())
                 .and_then(|v| validate_retry_after_secs(v).ok())
         })
@@ -205,7 +205,7 @@ where
     let max_inflight_per_principal = input
         .max_inflight_per_principal_flag
         .or_else(|| {
-            config_lookup("red.http.max_inflight_per_principal")
+            config_lookup("http.max_inflight_per_principal")
                 .and_then(|raw| raw.parse::<usize>().ok())
                 .and_then(|v| validate_max_inflight_per_principal(v).ok())
         })
@@ -270,10 +270,10 @@ mod tests {
             ..Default::default()
         };
         let lookup = map_lookup(HashMap::from([
-            ("red.http.max_handlers", "64"),
-            ("red.http.execution_workers", "32"),
-            ("red.http.handler_timeout_ms", "9000"),
-            ("red.http.retry_after_secs", "9"),
+            ("http.max_handlers", "64"),
+            ("http.execution_workers", "32"),
+            ("http.handler_timeout_ms", "9000"),
+            ("http.retry_after_secs", "9"),
         ]));
         let resolved = resolve_http_limits(&input, lookup);
         assert_eq!(resolved.max_handlers, 16);
@@ -292,10 +292,10 @@ mod tests {
             ..Default::default()
         };
         let lookup = map_lookup(HashMap::from([
-            ("red.http.max_handlers", "64"),
-            ("red.http.execution_workers", "8"),
-            ("red.http.handler_timeout_ms", "9000"),
-            ("red.http.retry_after_secs", "9"),
+            ("http.max_handlers", "64"),
+            ("http.execution_workers", "8"),
+            ("http.handler_timeout_ms", "9000"),
+            ("http.retry_after_secs", "9"),
         ]));
         let resolved = resolve_http_limits(&input, lookup);
         assert_eq!(resolved.max_handlers, 64);
@@ -329,10 +329,10 @@ mod tests {
             ..Default::default()
         };
         let lookup = map_lookup(HashMap::from([
-            ("red.http.max_handlers", "0"),        // rejected by validate
-            ("red.http.execution_workers", "0"),   // rejected by validate
-            ("red.http.handler_timeout_ms", "5"),  // rejected by validate
-            ("red.http.retry_after_secs", "9999"), // rejected by validate
+            ("http.max_handlers", "0"),        // rejected by validate
+            ("http.execution_workers", "0"),   // rejected by validate
+            ("http.handler_timeout_ms", "5"),  // rejected by validate
+            ("http.retry_after_secs", "9999"), // rejected by validate
         ]));
         let resolved = resolve_http_limits(&input, lookup);
         // max_handlers: red.config invalid -> env (11)
@@ -423,10 +423,7 @@ mod tests {
             max_inflight_per_principal_env: Some(17),
             ..Default::default()
         };
-        let lookup = map_lookup(HashMap::from([(
-            "red.http.max_inflight_per_principal",
-            "9",
-        )]));
+        let lookup = map_lookup(HashMap::from([("http.max_inflight_per_principal", "9")]));
         assert_eq!(
             resolve_http_limits(&input, lookup).max_inflight_per_principal,
             9
@@ -438,10 +435,7 @@ mod tests {
             max_inflight_per_principal_env: Some(17),
             ..Default::default()
         };
-        let lookup = map_lookup(HashMap::from([(
-            "red.http.max_inflight_per_principal",
-            "9",
-        )]));
+        let lookup = map_lookup(HashMap::from([("http.max_inflight_per_principal", "9")]));
         assert_eq!(
             resolve_http_limits(&input, lookup).max_inflight_per_principal,
             3
@@ -452,10 +446,7 @@ mod tests {
     fn max_inflight_per_principal_zero_disables_and_is_honored() {
         // 0 is a legal value (disables the per-principal cap) and must
         // survive the resolve chain rather than being treated as unset.
-        let lookup = map_lookup(HashMap::from([(
-            "red.http.max_inflight_per_principal",
-            "0",
-        )]));
+        let lookup = map_lookup(HashMap::from([("http.max_inflight_per_principal", "0")]));
         assert_eq!(
             resolve_http_limits(&HttpLimitsCliInput::default(), lookup).max_inflight_per_principal,
             0

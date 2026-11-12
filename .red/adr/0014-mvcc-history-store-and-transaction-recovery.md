@@ -389,7 +389,7 @@ makes the VCS ("Git for Data") premise hold for every model.
 
 History retention for non-table models is **opt-in per collection via the
 `versioned` flag** (`runtime.vcs_is_versioned()`). Non-versioned collections —
-including the `red_config` KV and the secrets vault — keep last-writer-wins and
+including the `red.config` Config collection and the secrets vault — keep last-writer-wins and
 the zero-scan fast path unchanged. Table rows remain unconditionally versioned
 (the original baseline). The xmin/xmax stamping, `logical_id` version-selection
 (`resolve_read_candidate`), commit-time first-committer-wins

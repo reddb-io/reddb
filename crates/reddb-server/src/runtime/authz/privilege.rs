@@ -1656,7 +1656,7 @@ impl RedDBRuntime {
         let gate = crate::auth::managed_config::ManagedConfigGate::new(
             self.inner.config_registry.as_ref(),
         );
-        match gate.check_write(&auth_store, &principal, &ctx, key) {
+        match gate.check_red_config_write(&auth_store, &principal, &ctx, key) {
             crate::auth::managed_config::ManagedConfigDecision::PassThrough { .. }
             | crate::auth::managed_config::ManagedConfigDecision::Allow { .. } => Ok(()),
             crate::auth::managed_config::ManagedConfigDecision::Deny { reason, .. } => {
@@ -1701,7 +1701,7 @@ impl RedDBRuntime {
     /// Gate for `SET CONFIG key = value`. Under IAM the principal needs
     /// `config:write` on `config:<key>`; under legacy RBAC any write-role
     /// principal may set ordinary keys, but the AI provider namespace
-    /// (`red.config.ai.*`, which can redirect provider calls and select which
+    /// (`ai.*`, which can redirect provider calls and select which
     /// vault secret is sent as a bearer) is admin-only. Embedded callers with
     /// no identity pass, as everywhere else in this gate.
     pub(crate) fn check_config_write_privilege(&self, key: &str) -> RedDBResult<()> {
@@ -1746,13 +1746,13 @@ impl RedDBRuntime {
         // the backup head or switch secret decryption on.
         let lowered = key.to_ascii_lowercase();
         let admin_only = [
-            "red.config.ai.",
-            "red.config.backup.",
-            "red.config.wal.",
-            "red.config.secret.",
-            "red.config.iam.",
-            "red.config.acl.",
-            "red.config.replication.",
+            "ai.",
+            "backup.",
+            "wal.",
+            "secret.",
+            "iam.",
+            "acl.",
+            "replication.",
         ]
         .iter()
         .any(|prefix| lowered.starts_with(prefix));

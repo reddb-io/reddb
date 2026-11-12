@@ -4036,7 +4036,7 @@ fn cold_queue_group_and_wait_cap_survive_checkpoint() {
         .execute_query("QUEUE GROUP CREATE cold_queue_metadata workers")
         .expect("consumer group");
     runtime
-        .execute_query("SET CONFIG red.config.queue.max_wait_ms = 1")
+        .execute_query("SET CONFIG queue.max_wait_ms = 1")
         .expect("queue wait cap");
     runtime.checkpoint().expect("publish queue metadata");
 
