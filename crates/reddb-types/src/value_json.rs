@@ -95,6 +95,24 @@ impl Value {
             }
             Value::Lang5(code) => JsonValue::String(String::from_utf8_lossy(code).to_string()),
             Value::AssetCode(code) => JsonValue::String(code.clone()),
+            Value::Temperature(value) => JsonValue::Object(
+                [
+                    (
+                        "unit".to_string(),
+                        JsonValue::String(value.unit().as_str().into()),
+                    ),
+                    (
+                        "minor_units".to_string(),
+                        exact_i64_to_json(value.minor_units()),
+                    ),
+                    (
+                        "scale".to_string(),
+                        exact_i64_to_json(i64::from(value.scale())),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ),
             Value::Money {
                 asset_code,
                 minor_units,

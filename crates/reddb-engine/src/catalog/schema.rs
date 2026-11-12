@@ -129,6 +129,7 @@ fn data_type_name(data_type: DataType) -> &'static str {
         DataType::Currency => "currency",
         DataType::AssetCode => "asset_code",
         DataType::Money => "money",
+        DataType::Temperature => "temperature",
         DataType::ColorAlpha => "color_alpha",
         DataType::BigInt => "bigint",
         DataType::KeyRef => "keyref",

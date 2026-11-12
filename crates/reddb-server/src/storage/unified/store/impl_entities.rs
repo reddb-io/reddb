@@ -74,6 +74,10 @@ impl UnifiedStore {
         {
             return Ok(());
         }
+        let required_capabilities = entities.iter().fold(0, |required, entity| {
+            required | reddb_engine::storage::entity_codec::required_file_capabilities(entity)
+        });
+        self.fence_required_capabilities(required_capabilities)?;
         let fv = self.format_version();
         let manager = self
             .get_collection(collection)
@@ -163,6 +167,11 @@ impl UnifiedStore {
         {
             return Ok(());
         }
+
+        let required_capabilities = entities.iter().fold(0, |required, entity| {
+            required | reddb_engine::storage::entity_codec::required_file_capabilities(entity)
+        });
+        self.fence_required_capabilities(required_capabilities)?;
 
         let fv = self.format_version();
         let manager = self

@@ -373,7 +373,7 @@ pub fn value_to_canonical_key(value: &Value) -> Option<CanonicalKey> {
             CanonicalKeyFamily::Text,
             Arc::from(v.as_str()),
         )),
-        Value::Money { .. } => None,
+        Value::Money { .. } | Value::Temperature(_) => None,
         Value::ColorAlpha(v) => Some(CanonicalKey::Bytes(
             CanonicalKeyFamily::ColorAlpha,
             v.to_vec(),

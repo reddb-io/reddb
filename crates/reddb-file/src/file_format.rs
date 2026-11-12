@@ -27,10 +27,24 @@ pub const PAGE_RECOVERY_READ_ONLY_FILE_VERSION: u32 = 0x0001_0006;
 pub const PAGE_RESULT_CACHE_FILE_VERSION: u32 = 0x0001_0007;
 /// Result-cache epoch fencing for disk-resident paged stores.
 pub const PAGE_RESULT_CACHE_DISK_FILE_VERSION: u32 = 0x0001_0008;
-pub const PAGE_FILE_VERSION: u32 = PAGE_RESULT_CACHE_DISK_FILE_VERSION;
+/// The first version whose superblock declares mandatory reader capabilities.
+pub const PAGE_REQUIRED_CAPABILITIES_FILE_VERSION: u32 = 0x0001_0009;
+pub const PAGE_FILE_VERSION: u32 = PAGE_REQUIRED_CAPABILITIES_FILE_VERSION;
 
+/// Native measured-temperature values may appear in entity payloads.
+pub const FILE_CAPABILITY_TEMPERATURE: u64 = 1 << 0;
+/// The file's published trees require a disk-resident writer.
+pub const FILE_CAPABILITY_DISK_RESIDENCY: u64 = 1 << 1;
+/// Capabilities understood by this reader. Unknown mandatory bits are fatal.
+pub const FILE_CAPABILITIES_SUPPORTED: u64 =
+    FILE_CAPABILITY_TEMPERATURE | FILE_CAPABILITY_DISK_RESIDENCY;
+
+/// Whether a pre-capability format version implies disk residency.
+/// Capability-aware callers must use [`DatabaseHeader::requires_disk_residency`].
 pub fn page_format_is_disk_resident(version: u32) -> bool {
-    version >= PAGE_DISK_RESIDENCY_FILE_VERSION && version != PAGE_RESULT_CACHE_FILE_VERSION
+    version >= PAGE_DISK_RESIDENCY_FILE_VERSION
+        && version < PAGE_REQUIRED_CAPABILITIES_FILE_VERSION
+        && version != PAGE_RESULT_CACHE_FILE_VERSION
 }
 
 /// Paged database page size.
@@ -352,7 +366,8 @@ const DB_VECTOR_ARTIFACT_PAGE_OFFSET: usize = PAGED_PAGE_HEADER_SIZE + 180;
 const DB_VECTOR_ARTIFACT_CHECKSUM_OFFSET: usize = PAGED_PAGE_HEADER_SIZE + 184;
 const DB_CHECKPOINT_IN_PROGRESS_OFFSET: usize = PAGED_PAGE_HEADER_SIZE + 192;
 const DB_CHECKPOINT_TARGET_LSN_OFFSET: usize = PAGED_PAGE_HEADER_SIZE + 193;
-const DB_HEADER_MIN_LEN: usize = DB_CHECKPOINT_TARGET_LSN_OFFSET + 8;
+const DB_REQUIRED_CAPABILITIES_OFFSET: usize = PAGED_PAGE_HEADER_SIZE + 208;
+const DB_HEADER_MIN_LEN: usize = DB_REQUIRED_CAPABILITIES_OFFSET + 8;
 
 /// Double-write-buffer file magic: `RDDW`.
 pub const DWB_MAGIC: [u8; 4] = [0x52, 0x44, 0x44, 0x57];
@@ -489,7 +504,25 @@ pub struct DatabaseHeader {
     pub checkpoint_lsn: u64,
     pub checkpoint_in_progress: bool,
     pub checkpoint_target_lsn: u64,
+    /// Monotonic set of byte-level features required to decode this file.
+    pub required_capabilities: u64,
     pub physical: PhysicalFileHeader,
+}
+
+impl DatabaseHeader {
+    /// Whether the file requires a writer that participates in the bounded
+    /// disk-residency protocol.
+    ///
+    /// Versions before the capability bitmap encoded that requirement in the
+    /// monotonically increasing version number. Newer files declare it as an
+    /// independent capability so unrelated codecs can evolve the format.
+    pub fn requires_disk_residency(&self) -> bool {
+        if self.version < PAGE_REQUIRED_CAPABILITIES_FILE_VERSION {
+            page_format_is_disk_resident(self.version)
+        } else {
+            self.required_capabilities & FILE_CAPABILITY_DISK_RESIDENCY != 0
+        }
+    }
 }
 
 impl Default for DatabaseHeader {
@@ -504,6 +537,7 @@ impl Default for DatabaseHeader {
             checkpoint_lsn: 0,
             checkpoint_in_progress: false,
             checkpoint_target_lsn: 0,
+            required_capabilities: 0,
             physical: PhysicalFileHeader::default(),
         }
     }
@@ -551,6 +585,7 @@ pub enum DatabaseHeaderError {
     InvalidMagic,
     UnsupportedPageSize(u32),
     UnsupportedDatabaseVersion { file_version: u32, supported: u32 },
+    UnsupportedRequiredCapabilities(u64),
 }
 
 impl fmt::Display for DatabaseHeaderError {
@@ -567,6 +602,10 @@ impl fmt::Display for DatabaseHeaderError {
             } => write!(
                 f,
                 "Unsupported database version: file version {file_version} is newer than supported {supported}"
+            ),
+            Self::UnsupportedRequiredCapabilities(bits) => write!(
+                f,
+                "Unsupported required database capabilities: {bits:#018x}"
             ),
         }
     }
@@ -620,6 +659,13 @@ pub fn set_database_header_freelist_head(
     write_u32(page, DB_FREELIST_HEAD_OFFSET, page_id)
 }
 
+pub fn set_database_header_required_capabilities(
+    page: &mut [u8],
+    capabilities: u64,
+) -> Result<(), DatabaseHeaderError> {
+    write_u64(page, DB_REQUIRED_CAPABILITIES_OFFSET, capabilities)
+}
+
 pub fn database_header_page_size(page: &[u8]) -> Result<u32, DatabaseHeaderError> {
     read_u32(page, DB_PAGE_SIZE_OFFSET)
 }
@@ -641,6 +687,17 @@ pub fn decode_database_header(page: &[u8]) -> Result<DatabaseHeader, DatabaseHea
             supported: PAGE_FILE_VERSION,
         });
     }
+    let required_capabilities = if version >= PAGE_REQUIRED_CAPABILITIES_FILE_VERSION {
+        read_u64(page, DB_REQUIRED_CAPABILITIES_OFFSET)?
+    } else {
+        0
+    };
+    let unsupported_capabilities = required_capabilities & !FILE_CAPABILITIES_SUPPORTED;
+    if unsupported_capabilities != 0 {
+        return Err(DatabaseHeaderError::UnsupportedRequiredCapabilities(
+            unsupported_capabilities,
+        ));
+    }
 
     Ok(DatabaseHeader {
         version,
@@ -651,6 +708,7 @@ pub fn decode_database_header(page: &[u8]) -> Result<DatabaseHeader, DatabaseHea
         checkpoint_lsn: read_u64(page, DB_CHECKPOINT_LSN_OFFSET)?,
         checkpoint_in_progress: page[DB_CHECKPOINT_IN_PROGRESS_OFFSET] != 0,
         checkpoint_target_lsn: read_u64(page, DB_CHECKPOINT_TARGET_LSN_OFFSET)?,
+        required_capabilities,
         physical: PhysicalFileHeader {
             format_version: read_u32(page, DB_PHYSICAL_FORMAT_VERSION_OFFSET)?,
             sequence: read_u64(page, DB_PHYSICAL_SEQUENCE_OFFSET)?,
@@ -806,6 +864,11 @@ pub fn encode_database_header(
         page,
         DB_CHECKPOINT_TARGET_LSN_OFFSET,
         header.checkpoint_target_lsn,
+    )?;
+    write_u64(
+        page,
+        DB_REQUIRED_CAPABILITIES_OFFSET,
+        header.required_capabilities,
     )
 }
 
@@ -1210,6 +1273,81 @@ mod tests {
     }
 
     #[test]
+    fn required_capabilities_round_trip_and_unknown_bits_fail_before_page_reads() {
+        let mut page = vec![0u8; PAGED_SUPERBLOCK_SLOT_SIZE];
+        let header = DatabaseHeader {
+            version: PAGE_REQUIRED_CAPABILITIES_FILE_VERSION,
+            required_capabilities: FILE_CAPABILITY_TEMPERATURE,
+            ..DatabaseHeader::default()
+        };
+        encode_database_header(&mut page, &header).expect("encode capabilities");
+        assert_eq!(
+            decode_database_header(&page)
+                .expect("supported capabilities")
+                .required_capabilities,
+            FILE_CAPABILITY_TEMPERATURE
+        );
+
+        set_database_header_required_capabilities(&mut page, 1 << 63)
+            .expect("set unknown capability");
+        assert_eq!(
+            decode_database_header(&page),
+            Err(DatabaseHeaderError::UnsupportedRequiredCapabilities(
+                1 << 63
+            ))
+        );
+    }
+
+    #[test]
+    fn disk_residency_moves_from_legacy_version_to_explicit_capability() {
+        let legacy = DatabaseHeader {
+            version: PAGE_DISK_RESIDENCY_FILE_VERSION,
+            ..DatabaseHeader::default()
+        };
+        assert!(legacy.requires_disk_residency());
+
+        let resident_result_cache = DatabaseHeader {
+            version: PAGE_RESULT_CACHE_FILE_VERSION,
+            ..DatabaseHeader::default()
+        };
+        assert!(!resident_result_cache.requires_disk_residency());
+
+        let disk_result_cache = DatabaseHeader {
+            version: PAGE_RESULT_CACHE_DISK_FILE_VERSION,
+            ..DatabaseHeader::default()
+        };
+        assert!(disk_result_cache.requires_disk_residency());
+
+        let temperature_only = DatabaseHeader {
+            version: PAGE_REQUIRED_CAPABILITIES_FILE_VERSION,
+            required_capabilities: FILE_CAPABILITY_TEMPERATURE,
+            ..DatabaseHeader::default()
+        };
+        assert!(!temperature_only.requires_disk_residency());
+
+        let disk_resident = DatabaseHeader {
+            required_capabilities: FILE_CAPABILITY_DISK_RESIDENCY,
+            ..temperature_only
+        };
+        assert!(disk_resident.requires_disk_residency());
+    }
+
+    #[test]
+    fn legacy_headers_ignore_the_reserved_capability_bytes() {
+        let mut page = vec![0u8; PAGED_SUPERBLOCK_SLOT_SIZE];
+        init_database_header_page(&mut page, 7).expect("init header");
+        set_database_header_required_capabilities(&mut page, u64::MAX)
+            .expect("fill reserved bytes");
+
+        assert_eq!(
+            decode_database_header(&page)
+                .expect("legacy header")
+                .required_capabilities,
+            0
+        );
+    }
+
+    #[test]
     fn paged_dwb_frame_round_trips_entries_and_validates_checksum() {
         let mut page = [0u8; PAGED_PAGE_SIZE];
         page[0] = 7;
@@ -1257,6 +1395,7 @@ mod tests {
             checkpoint_lsn: 99,
             checkpoint_in_progress: true,
             checkpoint_target_lsn: 123,
+            required_capabilities: FILE_CAPABILITY_TEMPERATURE,
             physical: PhysicalFileHeader {
                 format_version: 11,
                 sequence: 12,

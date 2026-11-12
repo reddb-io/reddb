@@ -85,6 +85,42 @@ const fn prefix(name: &'static str, operand: DataType, ret: DataType) -> Operato
 /// Static catalog of built-in operators. Grouped by symbol
 /// family for readability.
 pub const OPERATOR_CATALOG: &[OperatorEntry] = &[
+    infix(
+        "=",
+        DataType::Temperature,
+        DataType::Temperature,
+        DataType::Boolean,
+    ),
+    infix(
+        "<>",
+        DataType::Temperature,
+        DataType::Temperature,
+        DataType::Boolean,
+    ),
+    infix(
+        "<",
+        DataType::Temperature,
+        DataType::Temperature,
+        DataType::Boolean,
+    ),
+    infix(
+        "<=",
+        DataType::Temperature,
+        DataType::Temperature,
+        DataType::Boolean,
+    ),
+    infix(
+        ">",
+        DataType::Temperature,
+        DataType::Temperature,
+        DataType::Boolean,
+    ),
+    infix(
+        ">=",
+        DataType::Temperature,
+        DataType::Temperature,
+        DataType::Boolean,
+    ),
     // ── Arithmetic: + ──
     infix("+", DataType::Integer, DataType::Integer, DataType::Integer),
     infix("+", DataType::Integer, DataType::Float, DataType::Float),

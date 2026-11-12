@@ -446,6 +446,7 @@ fn literal_type(v: &Value) -> DataType {
         Value::PageRef(_) => DataType::PageRef,
         Value::Secret(_) => DataType::Secret,
         Value::Password(_) => DataType::Password,
+        Value::Temperature(_) => DataType::Temperature,
     }
 }
 

@@ -595,6 +595,7 @@ fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         return Some(order);
     }
     match (a, b) {
+        (Value::Temperature(x), Value::Temperature(y)) => Some(x.cmp(y)),
         (Value::Integer(x), Value::Integer(y)) => Some(x.cmp(y)),
         (Value::BigInt(x), Value::BigInt(y)) => Some(x.cmp(y)),
         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y),
@@ -761,6 +762,14 @@ fn eval_function(
 
 fn dispatch_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
     match name {
+        "TEMPERATURE" | "TEMPERATURE_UNIT" | "TEMPERATURE_VALUE" => {
+            super::runtime::value_functions::temperature_function(name, args).ok_or_else(|| {
+                EvalError::UnknownFunction {
+                    name: name.into(),
+                    args: args.iter().map(Value::data_type).collect(),
+                }
+            })
+        }
         "UPPER" => match &args[0] {
             Value::Text(s) => Ok(Value::Text(Arc::from(s.to_uppercase()))),
             other => Err(EvalError::UnknownFunction {
