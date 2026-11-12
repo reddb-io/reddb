@@ -302,11 +302,10 @@ red vcs tag v1.0 main
 
 ## 13. What's still manual
 
-- **Data-level conflict resolution** — `vcs_conflict_resolve` in
-  Phase 6 deletes the conflict row; writing the resolved JSON
-  into the user collection is Phase 6.2. Until then, resolve
-  with a normal INSERT/UPDATE and then call `conflict_resolve`
-  to clear the marker.
+- **Data-level conflict resolution** — `vcs_conflict_resolve` cannot
+  yet apply a resolved value to the user collection. It returns an error
+  and retains the conflict; commits on that workset are rejected while a
+  merge remains pending.
 - **Hard reset** — Phase 6.2. Current workaround: `reset --soft`
   + manual DELETE of the unwanted rows.
 - **Remote push/pull** — Phase 7. Today the VCS is single-node;

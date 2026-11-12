@@ -656,6 +656,17 @@ fn upsert_workset(
     base_commit: Option<&str>,
     working_xid: Xid,
 ) -> RedDBResult<()> {
+    upsert_workset_with_merge(store, connection_id, branch, base_commit, working_xid, None)
+}
+
+fn upsert_workset_with_merge(
+    store: &UnifiedStore,
+    connection_id: u64,
+    branch: &str,
+    base_commit: Option<&str>,
+    working_xid: Xid,
+    merge_state_id: Option<&str>,
+) -> RedDBResult<()> {
     let conn_id = connection_id.to_string();
     // Delete old workset for this connection
     if let Some(manager) = store.get_collection(vc::WORKSETS) {
@@ -666,7 +677,9 @@ fn upsert_workset(
                 .is_some_and(|row| row_text(row, "id").as_deref() == Some(&conn_id))
         });
         for row in rows {
-            let _ = store.delete(vc::WORKSETS, row.id);
+            store
+                .delete(vc::WORKSETS, row.id)
+                .map_err(|error| RedDBError::Internal(error.to_string()))?;
         }
     }
     let mut fields: HashMap<String, Value> = HashMap::new();
@@ -674,6 +687,9 @@ fn upsert_workset(
     fields.insert("branch".to_string(), Value::text(branch));
     if let Some(base) = base_commit {
         fields.insert("base_commit".to_string(), Value::text(base));
+    }
+    if let Some(id) = merge_state_id {
+        fields.insert("merge_state_id".to_string(), Value::text(id));
     }
     fields.insert(
         "working_xid".to_string(),
@@ -684,6 +700,13 @@ fn upsert_workset(
 }
 
 fn load_workset(store: &UnifiedStore, connection_id: u64) -> Option<(RefName, Option<CommitHash>)> {
+    load_workset_state(store, connection_id).map(|(branch, base, _)| (branch, base))
+}
+
+fn load_workset_state(
+    store: &UnifiedStore,
+    connection_id: u64,
+) -> Option<(RefName, Option<CommitHash>, Option<String>)> {
     let manager = store.get_collection(vc::WORKSETS)?;
     let conn_id = connection_id.to_string();
     manager
@@ -699,8 +722,18 @@ fn load_workset(store: &UnifiedStore, connection_id: u64) -> Option<(RefName, Op
             Some((
                 row_text(row, "branch").unwrap_or_else(|| vc::DEFAULT_BRANCH_REF.to_string()),
                 row_text(row, "base_commit"),
+                row_text(row, "merge_state_id"),
             ))
         })
+}
+
+fn ensure_no_pending_merge(store: &UnifiedStore, connection_id: u64) -> RedDBResult<()> {
+    if let Some((_, _, Some(merge_state_id))) = load_workset_state(store, connection_id) {
+        return Err(RedDBError::InvalidOperation(format!(
+            "cannot change HEAD while merge `{merge_state_id}` is pending"
+        )));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -748,6 +781,8 @@ impl RedDBRuntime {
     pub fn vcs_commit(&self, input: CreateCommitInput) -> RedDBResult<Commit> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+
+        ensure_no_pending_merge(store, input.connection_id)?;
 
         // Resolve current HEAD for this connection: workset -> HEAD:<conn>
         // -> default branch.
@@ -933,6 +968,9 @@ impl RedDBRuntime {
     pub fn vcs_checkout(&self, input: CheckoutInput) -> RedDBResult<Ref> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        if !input.force {
+            ensure_no_pending_merge(store, input.connection_id)?;
+        }
         let (branch_ref, target_hash) = match &input.target {
             CheckoutTarget::Branch(name) => {
                 let full = normalize_branch_name(name);
@@ -1000,6 +1038,7 @@ impl RedDBRuntime {
     pub fn vcs_merge(&self, input: MergeInput) -> RedDBResult<MergeOutcome> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        ensure_no_pending_merge(store, input.connection_id)?;
 
         // Resolve source commit (the one being merged in).
         let from_hash = RedDBRuntime::vcs_resolve_commitish(self, &input.from)?;
@@ -1143,6 +1182,15 @@ impl RedDBRuntime {
         insert_meta_row(store, vc::MERGE_STATE, ms_fields)?;
 
         if !conflicts.is_empty() {
+            let head_xid = self.vcs_resolve_as_of(AsOfSpec::Commit(head_hash.clone()))?;
+            upsert_workset_with_merge(
+                store,
+                input.connection_id,
+                &head_branch,
+                Some(&head_hash),
+                head_xid,
+                Some(&merge_state_id),
+            )?;
             let horizon = snapshot
                 .in_progress
                 .iter()
@@ -1193,6 +1241,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<MergeOutcome> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        ensure_no_pending_merge(store, connection_id)?;
 
         // Resolve the commit being cherry-picked and its parent.
         let src_hash = RedDBRuntime::vcs_resolve_commitish(self, commit)?;
@@ -1314,6 +1363,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<Commit> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        ensure_no_pending_merge(store, connection_id)?;
 
         let src_hash = RedDBRuntime::vcs_resolve_commitish(self, commit)?;
         let src_commit = load_commit(store, &src_hash)
@@ -1408,6 +1458,7 @@ impl RedDBRuntime {
     pub fn vcs_reset(&self, input: ResetInput) -> RedDBResult<()> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        ensure_no_pending_merge(store, input.connection_id)?;
         let target_hash = RedDBRuntime::vcs_resolve_commitish(self, &input.target)?;
         let target_commit = load_commit(store, &target_hash).ok_or_else(|| {
             RedDBError::NotFound(format!("target commit `{target_hash}` not found"))
@@ -1552,18 +1603,22 @@ impl RedDBRuntime {
     pub fn vcs_status(&self, input: StatusInput) -> RedDBResult<Status> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
-        let workset = load_workset(store, input.connection_id);
-        let (head_ref, head_commit) = match workset {
-            Some((branch, base)) => {
+        let workset = load_workset_state(store, input.connection_id);
+        let (head_ref, head_commit, merge_state_id) = match workset {
+            Some((branch, base, merge_state_id)) => {
                 let base = base.or_else(|| load_ref(store, &branch).map(|r| r.target));
-                (Some(branch), base)
+                (Some(branch), base, merge_state_id)
             }
             None => {
                 let base = load_ref(store, vc::DEFAULT_BRANCH_REF).map(|r| r.target);
-                (Some(vc::DEFAULT_BRANCH_REF.to_string()), base)
+                (Some(vc::DEFAULT_BRANCH_REF.to_string()), base, None)
             }
         };
         let detached = matches!(&head_ref, Some(s) if s.is_empty());
+        let unresolved_conflicts = match &merge_state_id {
+            Some(id) => self.vcs_conflicts_list(id)?.len(),
+            None => 0,
+        };
         Ok(Status {
             connection_id: input.connection_id,
             head_ref: head_ref.filter(|s| !s.is_empty()),
@@ -1571,8 +1626,8 @@ impl RedDBRuntime {
             detached,
             staged_changes: 0,
             working_changes: 0,
-            unresolved_conflicts: 0,
-            merge_state_id: None,
+            unresolved_conflicts,
+            merge_state_id,
         })
     }
 
@@ -1654,28 +1709,20 @@ impl RedDBRuntime {
             )));
         };
         let cid = conflict_id.to_string();
-        let mut deleted = 0usize;
         let matches = manager.query_all(|entity| {
             entity
                 .data
                 .as_row()
                 .is_some_and(|row| row_text(row, "id").as_deref() == Some(&cid))
         });
-        for entity in matches {
-            store
-                .delete(vc::CONFLICTS, entity.id)
-                .map_err(|e| RedDBError::Internal(e.to_string()))?;
-            deleted += 1;
-        }
-        // NOTE: Phase 4 will also apply `_resolved` to the user
-        // collection under the current working set before deleting
-        // the conflict row. Here we only remove the marker.
-        if deleted == 0 {
+        if matches.is_empty() {
             return Err(RedDBError::NotFound(format!(
                 "conflict `{conflict_id}` not found"
             )));
         }
-        Ok(())
+        Err(RedDBError::InvalidOperation(
+            "vcs conflict resolution cannot apply data yet; conflict retained".to_string(),
+        ))
     }
 
     pub fn vcs_resolve_as_of(&self, spec: AsOfSpec) -> RedDBResult<Xid> {
@@ -1863,6 +1910,12 @@ fn materialize_merge_conflicts(
             let mut body = crate::entity_render::compact_entity_json(&entity);
             if let JsonValue::Object(ref mut fields) = body {
                 fields.insert("id".to_string(), JsonValue::Number(eid as f64));
+                if let EntityKind::GraphNode(node) = &entity.kind {
+                    fields.insert(
+                        "node_type".to_string(),
+                        JsonValue::String(node.node_type.clone()),
+                    );
+                }
             }
             if snapshot_sees_entity(&base_snap, &sm, &entity) {
                 at_base.insert(eid, body.clone());

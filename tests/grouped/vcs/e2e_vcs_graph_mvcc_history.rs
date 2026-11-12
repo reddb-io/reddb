@@ -300,6 +300,28 @@ fn graph_checkpoint_snapshot_survives_reopen() {
 }
 
 #[test]
+fn graph_as_of_branch_observes_ref_changes_with_result_cache_enabled() {
+    let rt = rt();
+    let conn = 70016;
+    set_current_connection_id(conn);
+    rt.execute_query("SET CONFIG runtime.result_cache.enabled = true")
+        .expect("enable result cache");
+    rt.execute_query("CREATE GRAPH graph_branch_cache")
+        .expect("create graph");
+    vcs(&rt).set_versioned("graph_branch_cache", true).unwrap();
+    insert_node(&rt, "graph_branch_cache", "alice", 1);
+    commit(&rt, conn, "base");
+    update_score(&rt, "graph_branch_cache", "alice", 2);
+
+    let query = "SELECT score FROM graph_branch_cache AS OF BRANCH 'main' WHERE label = 'alice'";
+    assert_eq!(read_single_score(&rt, query), Some(1));
+    assert_eq!(read_single_score(&rt, query), Some(1));
+    commit(&rt, conn, "advance main");
+    assert_eq!(read_single_score(&rt, query), Some(2));
+    clear_current_connection_id();
+}
+
+#[test]
 fn graph_diff_reports_node_update_as_one_modified_item() {
     let rt = rt();
     let conn = 70009;
@@ -393,6 +415,10 @@ fn graph_merge_detects_conflicting_updates_to_nodes_and_edges() {
         })
         .unwrap();
     update_score(&rt, "graph_merge_conflict", "alice", 2);
+    rt.execute_query(
+        "UPDATE graph_merge_conflict NODES SET node_type = 'engineer' WHERE label = 'alice'",
+    )
+    .expect("agent updates node type");
     rt.execute_query("UPDATE graph_merge_conflict EDGES SET weight = 2.0 WHERE label = 'knows'")
         .expect("agent updates edge");
     commit(&rt, conn, "agent update");
@@ -404,6 +430,10 @@ fn graph_merge_detects_conflicting_updates_to_nodes_and_edges() {
         })
         .unwrap();
     update_score(&rt, "graph_merge_conflict", "alice", 3);
+    rt.execute_query(
+        "UPDATE graph_merge_conflict NODES SET node_type = 'manager' WHERE label = 'alice'",
+    )
+    .expect("main updates node type");
     rt.execute_query("UPDATE graph_merge_conflict EDGES SET weight = 3.0 WHERE label = 'knows'")
         .expect("main updates edge");
     let main_head = commit(&rt, conn, "main update");
@@ -422,7 +452,15 @@ fn graph_merge_detects_conflicting_updates_to_nodes_and_edges() {
         .iter()
         .find(|c| c.entity_id == rid.to_string())
         .expect("node conflict");
-    assert_eq!(node_conflict.conflicting_paths, ["properties.score"]);
+    assert_eq!(node_conflict.conflicting_paths.len(), 2);
+    assert!(node_conflict
+        .conflicting_paths
+        .iter()
+        .any(|path| path == "properties.score"));
+    assert!(node_conflict
+        .conflicting_paths
+        .iter()
+        .any(|path| path == "node_type"));
     let edge_conflict = outcome
         .conflicts
         .iter()
@@ -439,6 +477,112 @@ fn graph_merge_detects_conflicting_updates_to_nodes_and_edges() {
         })
         .expect("status");
     assert_eq!(status.head_commit.as_deref(), Some(main_head.as_str()));
+    assert_eq!(status.merge_state_id, outcome.merge_state_id);
+    assert_eq!(status.unresolved_conflicts, 2);
+    let error = vcs(&rt)
+        .conflict_resolve(
+            &node_conflict.id,
+            reddb::json::Value::String("theirs".to_string()),
+        )
+        .expect_err("resolution must not discard a conflict without applying its data");
+    assert!(error.to_string().contains("conflict retained"), "{error}");
+    assert_eq!(
+        vcs(&rt)
+            .status(StatusInput {
+                connection_id: conn,
+            })
+            .expect("status after rejected resolution")
+            .unresolved_conflicts,
+        2
+    );
+    let error = vcs(&rt)
+        .commit(CreateCommitInput {
+            connection_id: conn,
+            message: "must not advance".to_string(),
+            author: author(),
+            committer: None,
+            amend: false,
+            allow_empty: true,
+        })
+        .expect_err("commit must not bypass the pending merge");
+    assert!(error.to_string().contains("pending"), "{error}");
+    let error = vcs(&rt)
+        .checkout(CheckoutInput {
+            connection_id: conn,
+            target: CheckoutTarget::Branch("agent".to_string()),
+            force: false,
+        })
+        .expect_err("checkout must not discard a pending merge");
+    assert!(error.to_string().contains("pending"), "{error}");
+    clear_current_connection_id();
+}
+
+#[test]
+fn pending_graph_merge_status_survives_reopen() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("graph-merge.rdb");
+    let merge_state_id;
+    let main_head;
+    let conn = 70017;
+    {
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime");
+        set_current_connection_id(conn);
+        rt.execute_query("CREATE GRAPH graph_pending_merge")
+            .expect("create graph");
+        vcs(&rt).set_versioned("graph_pending_merge", true).unwrap();
+        insert_node(&rt, "graph_pending_merge", "alice", 1);
+        commit(&rt, conn, "base");
+        vcs(&rt)
+            .branch_create(CreateBranchInput {
+                name: "agent".to_string(),
+                from: None,
+                connection_id: conn,
+            })
+            .unwrap();
+        vcs(&rt)
+            .checkout(CheckoutInput {
+                connection_id: conn,
+                target: CheckoutTarget::Branch("agent".to_string()),
+                force: false,
+            })
+            .unwrap();
+        update_score(&rt, "graph_pending_merge", "alice", 2);
+        commit(&rt, conn, "agent update");
+        vcs(&rt)
+            .checkout(CheckoutInput {
+                connection_id: conn,
+                target: CheckoutTarget::Branch("main".to_string()),
+                force: false,
+            })
+            .unwrap();
+        update_score(&rt, "graph_pending_merge", "alice", 3);
+        main_head = commit(&rt, conn, "main update");
+        let outcome = vcs(&rt)
+            .merge(MergeInput {
+                connection_id: conn,
+                from: "agent".to_string(),
+                opts: MergeOpts::default(),
+                author: author(),
+            })
+            .expect("merge");
+        assert_eq!(outcome.conflicts.len(), 1);
+        merge_state_id = outcome.merge_state_id.expect("merge state");
+        clear_current_connection_id();
+    }
+
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
+    set_current_connection_id(conn);
+    let status = vcs(&rt)
+        .status(StatusInput {
+            connection_id: conn,
+        })
+        .unwrap();
+    assert_eq!(status.head_commit.as_deref(), Some(main_head.as_str()));
+    assert_eq!(
+        status.merge_state_id.as_deref(),
+        Some(merge_state_id.as_str())
+    );
+    assert_eq!(status.unresolved_conflicts, 1);
     clear_current_connection_id();
 }
 

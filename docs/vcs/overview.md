@@ -2,8 +2,9 @@
 
 > **Current limitation:** checkout changes VCS metadata but does not isolate
 > reads or writes by branch. Non-fast-forward merge records metadata and
-> conflicts, but does not apply merged data, and conflict resolution does not
-> write the supplied resolution. Do not rely on these operations for isolated
+> conflicts, but does not apply merged data. Conflict resolution returns an
+> error and retains the conflict until data application is implemented.
+> Do not rely on these operations for isolated
 > agent changes or reviewed publication of graph data.
 
 RedDB ships a first-class version-control layer. Every mutation runs

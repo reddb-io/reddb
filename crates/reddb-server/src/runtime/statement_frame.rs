@@ -430,7 +430,9 @@ impl StatementExecutionFrame {
             // `should_cache_result` refuses regardless of the key.
             StatementIdentity::Expr(_) => (String::new(), true),
         };
-        let cache_safe = runtime.result_cache_safe(conn_id);
+        // Branch and tag references can move without changing the query text.
+        // The result cache key does not include the resolved snapshot.
+        let cache_safe = as_of_floor.is_none() && runtime.result_cache_safe(conn_id);
         // Capture identity + effective scope under the same
         // thread-local view that the cache key was built from, so
         // the Interface and the cache key agree on what "this

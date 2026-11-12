@@ -170,6 +170,9 @@ The guard restores the previous snapshot on every return path, so
 nested `SELECT` subqueries don't bleed time-travel context out of
 their declared scope.
 
+`AS OF` statements bypass the result cache because its key does not include
+the resolved snapshot and branch or tag references may move.
+
 Supported spec variants:
 
 | Spec | Resolution |
@@ -200,6 +203,7 @@ vcs_merge(input):
   save_merge_state(merge_state_id, kind = merge, base = lca,
                    ours, theirs, conflicts_count = conflicts.len())
   if conflicts are present:
+    attach merge_state_id to the current workset
     return MergeOutcome { merge_commit: None, conflicts, merge_state_id }
 
   merge_commit = new commit with parents = [ours, theirs]
@@ -207,6 +211,13 @@ vcs_merge(input):
   save_ref(branch, merge_commit)
   return MergeOutcome { merge_commit, conflicts, merge_state_id, ... }
 ```
+
+While a merge is pending on a workset, that connection's status reports its id
+and unresolved conflict count. Its HEAD-changing operations are refused, as is
+non-forced checkout. These checks do not lock the branch against other
+connections. Conflict resolution itself returns an error and leaves the marker
+intact until resolved data can be applied. Forced checkout clears the workset's
+pending pointer; it does not remove the recorded merge state or conflicts.
 
 ### materialize_merge_conflicts
 
