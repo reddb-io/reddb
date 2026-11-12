@@ -242,7 +242,7 @@ child has a 60-second progress deadline; file-backed child output avoids a block
 
 The expanded native round additionally removes one retired descriptor, then correctly re-seals the
 catalog and both header copies. Both native and offline readers must reject that structurally incomplete
-generation without altering the source. The patch release entry lives in
+generation without altering the source. The minor release entry lives in
 `.changeset/native-generation-authority.md`; no version number or release tag is edited manually.
 
 The complete native page-integrity round passed all ten cases in 291.11 seconds, including this

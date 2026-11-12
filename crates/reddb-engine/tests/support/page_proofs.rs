@@ -473,10 +473,7 @@ fn catalog_publication_fences_fallback_headers_and_failed_updates() {
         sibling_recovery[copy * reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE] ^= 1;
         let reopened = open(Some(sibling_recovery));
         assert_eq!(
-            reopened
-                .header()
-                .expect("fallback header")
-                .manifest_reference,
+            reopened.manifest_reference().expect("fallback header"),
             replacement
         );
         assert_eq!(
@@ -512,9 +509,8 @@ fn catalog_publication_fences_fallback_headers_and_failed_updates() {
             for image in crash_images {
                 let reopened = open(Some(image));
                 let reference = reopened
-                    .header()
-                    .expect("selected durable header")
-                    .manifest_reference;
+                    .manifest_reference()
+                    .expect("selected durable header");
                 assert!(
                     reference == previous || reference == replacement,
                     "no uncommitted root bytes"
@@ -530,10 +526,7 @@ fn catalog_publication_fences_fallback_headers_and_failed_updates() {
                     .publish_manifest_reference(replacement)
                     .expect("healthy publication makes progress");
                 assert_eq!(
-                    reopened
-                        .header()
-                        .expect("completed retry")
-                        .manifest_reference,
+                    reopened.manifest_reference().expect("completed retry"),
                     replacement
                 );
             }

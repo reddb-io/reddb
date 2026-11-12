@@ -413,7 +413,7 @@ pub fn dwb_frame_digest(bytes: &[u8]) -> [u8; 32] {
 
 pub fn database_header_dwb_publication(
     page: &[u8],
-) -> Result<Option<DwbPublication>, DatabaseHeaderError> {
+) -> Result<Option<DwbPublication>, HeaderPublicationError> {
     ensure_len(page, DB_DWB_PUBLICATION_END)?;
     let field = &page[DB_DWB_PUBLICATION_OFFSET..DB_DWB_PUBLICATION_END];
     if field == [0; 40] {
@@ -423,7 +423,7 @@ pub fn database_header_dwb_publication(
         1 => DwbPhase::Preparing,
         2 => DwbPhase::Ready,
         3 => DwbPhase::Consumed,
-        _ => return Err(DatabaseHeaderError::InvalidDwbPublication),
+        _ => return Err(HeaderPublicationError::InvalidDwbPublication),
     };
     let frame_bytes = read_u32(field, 4)?;
     let digest = field[8..40].try_into().expect("fixed digest field");
@@ -435,7 +435,7 @@ pub fn database_header_dwb_publication(
                 && frame_bytes as usize <= 64 * PAGED_PAGE_SIZE
         })
     {
-        return Err(DatabaseHeaderError::InvalidDwbPublication);
+        return Err(HeaderPublicationError::InvalidDwbPublication);
     }
     Ok(Some(DwbPublication {
         phase,
@@ -447,7 +447,7 @@ pub fn database_header_dwb_publication(
 pub fn set_database_header_dwb_publication(
     page: &mut [u8],
     publication: Option<DwbPublication>,
-) -> Result<(), DatabaseHeaderError> {
+) -> Result<(), HeaderPublicationError> {
     ensure_len(page, DB_DWB_PUBLICATION_END)?;
     let field = &mut page[DB_DWB_PUBLICATION_OFFSET..DB_DWB_PUBLICATION_END];
     field.fill(0);
@@ -612,9 +612,6 @@ pub struct DatabaseHeader {
     pub checkpoint_target_lsn: u64,
     /// Monotonic set of byte-level features required to decode this file.
     pub required_capabilities: u64,
-    /// Digest over the root page followed by every catalog continuation page.
-    /// The zero reference retains the legacy fixed page-1 bootstrap catalog.
-    pub manifest_reference: crate::page_proof::PageReference,
     pub physical: PhysicalFileHeader,
 }
 
@@ -624,13 +621,6 @@ impl DatabaseHeader {
             || self.required_capabilities & FILE_CAPABILITY_RECOVERY_READ_ONLY != 0
     }
 
-    pub fn manifest_page_id(&self) -> u32 {
-        if self.manifest_reference.page_id == 0 {
-            1
-        } else {
-            self.manifest_reference.page_id
-        }
-    }
     /// Whether the file requires a writer that participates in the bounded
     /// disk-residency protocol.
     ///
@@ -659,7 +649,6 @@ impl Default for DatabaseHeader {
             checkpoint_in_progress: false,
             checkpoint_target_lsn: 0,
             required_capabilities: 0,
-            manifest_reference: crate::page_proof::PageReference::default(),
             physical: PhysicalFileHeader::default(),
         }
     }
@@ -705,8 +694,6 @@ pub struct PhysicalFileHeader {
 pub enum DatabaseHeaderError {
     ShortPage { need: usize, got: usize },
     InvalidMagic,
-    InvalidManifestReference,
-    InvalidDwbPublication,
     UnsupportedPageSize(u32),
     UnsupportedDatabaseVersion { file_version: u32, supported: u32 },
     UnsupportedRequiredCapabilities(u64),
@@ -719,8 +706,6 @@ impl fmt::Display for DatabaseHeaderError {
                 write!(f, "database header page too short: need {need} bytes, got {got}")
             }
             Self::InvalidMagic => write!(f, "invalid database header magic"),
-            Self::InvalidManifestReference => write!(f, "invalid catalog generation reference"),
-            Self::InvalidDwbPublication => write!(f, "invalid DWB generation publication"),
             Self::UnsupportedPageSize(size) => write!(f, "Unsupported page size: {size}"),
             Self::UnsupportedDatabaseVersion {
                 file_version,
@@ -738,6 +723,41 @@ impl fmt::Display for DatabaseHeaderError {
 }
 
 impl std::error::Error for DatabaseHeaderError {}
+
+/// Errors in the independently published catalog and recovery extensions.
+/// Keeping these separate preserves exhaustive matches on `DatabaseHeaderError`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HeaderPublicationError {
+    Header(DatabaseHeaderError),
+    InvalidManifestReference,
+    InvalidDwbPublication,
+}
+
+impl From<DatabaseHeaderError> for HeaderPublicationError {
+    fn from(error: DatabaseHeaderError) -> Self {
+        Self::Header(error)
+    }
+}
+
+impl fmt::Display for HeaderPublicationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Header(error) => error.fmt(f),
+            Self::InvalidManifestReference => write!(f, "invalid catalog generation reference"),
+            Self::InvalidDwbPublication => write!(f, "invalid DWB generation publication"),
+        }
+    }
+}
+
+impl std::error::Error for HeaderPublicationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Header(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 pub fn database_header_magic_matches(page: &[u8]) -> bool {
     page.get(DB_MAGIC_OFFSET..DB_MAGIC_OFFSET + PAGE_FILE_MAGIC.len()) == Some(&PAGE_FILE_MAGIC)
@@ -795,16 +815,33 @@ pub fn set_database_header_required_capabilities(
 pub fn set_database_header_manifest_reference(
     page: &mut [u8],
     reference: crate::page_proof::PageReference,
-) -> Result<(), DatabaseHeaderError> {
+) -> Result<(), HeaderPublicationError> {
     ensure_len(page, DB_MANIFEST_REFERENCE_END)?;
     if (reference.page_id == 0) != (reference.digest == [0; 32]) {
-        return Err(DatabaseHeaderError::InvalidManifestReference);
+        return Err(HeaderPublicationError::InvalidManifestReference);
     }
     crate::page_proof::encode_reference(
         &mut page[DB_MANIFEST_REFERENCE_OFFSET..DB_MANIFEST_REFERENCE_END],
         reference,
     );
     Ok(())
+}
+
+/// Digest over the catalog root and all continuation pages. The zero reference
+/// retains the legacy fixed page-1 bootstrap catalog. Storage owners validate
+/// this extension before recovery can modify the file.
+pub fn database_header_manifest_reference(
+    page: &[u8],
+) -> Result<crate::page_proof::PageReference, HeaderPublicationError> {
+    let header = decode_database_header(page)?;
+    if header.required_capabilities & FILE_CAPABILITY_CATALOG_ROOT == 0 {
+        return Ok(crate::page_proof::PageReference::default());
+    }
+    ensure_len(page, DB_MANIFEST_REFERENCE_END)?;
+    crate::page_proof::decode_reference(
+        &page[DB_MANIFEST_REFERENCE_OFFSET..DB_MANIFEST_REFERENCE_END],
+    )
+    .ok_or(HeaderPublicationError::InvalidManifestReference)
 }
 
 pub fn database_header_page_size(page: &[u8]) -> Result<u32, DatabaseHeaderError> {
@@ -839,10 +876,6 @@ pub fn decode_database_header(page: &[u8]) -> Result<DatabaseHeader, DatabaseHea
             unsupported_capabilities,
         ));
     }
-    if required_capabilities & FILE_CAPABILITY_DWB_PUBLICATION != 0 {
-        database_header_dwb_publication(page)?;
-    }
-
     Ok(DatabaseHeader {
         version,
         page_size,
@@ -853,15 +886,6 @@ pub fn decode_database_header(page: &[u8]) -> Result<DatabaseHeader, DatabaseHea
         checkpoint_in_progress: page[DB_CHECKPOINT_IN_PROGRESS_OFFSET] != 0,
         checkpoint_target_lsn: read_u64(page, DB_CHECKPOINT_TARGET_LSN_OFFSET)?,
         required_capabilities,
-        manifest_reference: if required_capabilities & FILE_CAPABILITY_CATALOG_ROOT != 0 {
-            ensure_len(page, DB_MANIFEST_REFERENCE_END)?;
-            crate::page_proof::decode_reference(
-                &page[DB_MANIFEST_REFERENCE_OFFSET..DB_MANIFEST_REFERENCE_END],
-            )
-            .ok_or(DatabaseHeaderError::InvalidManifestReference)?
-        } else {
-            crate::page_proof::PageReference::default()
-        },
         physical: PhysicalFileHeader {
             format_version: read_u32(page, DB_PHYSICAL_FORMAT_VERSION_OFFSET)?,
             sequence: read_u64(page, DB_PHYSICAL_SEQUENCE_OFFSET)?,
@@ -1023,7 +1047,9 @@ pub fn encode_database_header(
         DB_REQUIRED_CAPABILITIES_OFFSET,
         header.required_capabilities,
     )?;
-    set_database_header_manifest_reference(page, header.manifest_reference)
+    // Independently published catalog and DWB authority carry forward from the
+    // newest slot; an ordinary header update must not replace either extension.
+    Ok(())
 }
 
 // ── Paged superblock zone (ADR 0038 §2 phase 1) ─────────────────────────
@@ -1550,10 +1576,6 @@ mod tests {
             checkpoint_in_progress: true,
             checkpoint_target_lsn: 123,
             required_capabilities: FILE_CAPABILITY_TEMPERATURE | FILE_CAPABILITY_CATALOG_ROOT,
-            manifest_reference: crate::page_proof::PageReference {
-                page_id: 39,
-                digest: [40; 32],
-            },
             physical: PhysicalFileHeader {
                 format_version: 11,
                 sequence: 12,

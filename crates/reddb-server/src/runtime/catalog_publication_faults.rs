@@ -9,11 +9,10 @@ fn reference(path: &Path) -> reddb_file::page_proof::PageReference {
     let bytes = std::fs::read(path).expect("inspect persisted superblocks");
     let selected = reddb_file::select_paged_superblock(&bytes).expect("valid superblock");
     let start = selected.copy_index * reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
-    reddb_file::decode_database_header(
+    reddb_file::file_format::database_header_manifest_reference(
         &bytes[start..start + reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE],
     )
     .expect("decode catalog authority")
-    .manifest_reference
 }
 
 fn run_child(path: &Path, phase: &str, expected: i32) {
@@ -99,9 +98,8 @@ pub(super) fn publish_one_slot(path: &Path) -> reddb_file::page_proof::PageRefer
     let start = selected.copy_index * reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
     let mut slot = [0; reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE];
     slot.copy_from_slice(&bytes[start..start + reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE]);
-    let mut header = reddb_file::decode_database_header(&slot).expect("current header");
-    header.manifest_reference = next;
-    reddb_file::encode_database_header(&mut slot, &header).expect("new catalog authority");
+    reddb_file::file_format::set_database_header_manifest_reference(&mut slot, next)
+        .expect("new catalog authority");
     let stale_copy = 1 - selected.copy_index;
     reddb_file::seal_paged_superblock_slot(
         &mut slot,
@@ -203,9 +201,8 @@ fn catalog_generation_publication_survives_crash_and_replays_confirmed_rows() {
                 let slot = &bytes[start..start + reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE];
                 assert!(reddb_file::paged_superblock_slot_generation(slot, copy).is_some());
                 assert_eq!(
-                    reddb_file::decode_database_header(slot)
-                        .expect("fenced recovery slot")
-                        .manifest_reference,
+                    reddb_file::file_format::database_header_manifest_reference(slot)
+                        .expect("fenced recovery slot"),
                     selected,
                     "old catalog must be unreachable before allocator release"
                 );

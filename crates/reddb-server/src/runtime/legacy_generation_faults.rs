@@ -185,11 +185,11 @@ fn assert_missing_retired_proof_is_rejected(path: &Path) {
     let mut bytes = original.clone();
     let selected = reddb_file::select_paged_superblock(&bytes).expect("selected superblock");
     let start = selected.copy_index * reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
-    let header = reddb_file::decode_database_header(
+    let reference = reddb_file::file_format::database_header_manifest_reference(
         &bytes[start..start + reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE],
     )
     .expect("published header");
-    let offset = header.manifest_reference.page_id as usize * PAGE_SIZE;
+    let offset = reference.page_id as usize * PAGE_SIZE;
     let mut page = Page::from_slice(&bytes[offset..offset + PAGE_SIZE]).expect("catalog page");
     assert!(
         reddb_file::decode_native_metadata_overflow_header(page.content())
@@ -235,9 +235,12 @@ fn assert_missing_retired_proof_is_rejected(path: &Path) {
     for copy in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
         let start = copy * reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
         let slot = &mut bytes[start..start + reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE];
-        let mut header = reddb_file::decode_database_header(slot).expect("header copy");
-        header.manifest_reference.digest = reddb_file::page_proof::page_digest(page.as_bytes());
-        reddb_file::encode_database_header(slot, &header).expect("new catalog digest");
+        let reference = reddb_file::page_proof::PageReference {
+            digest: reddb_file::page_proof::page_digest(page.as_bytes()),
+            ..reference
+        };
+        reddb_file::file_format::set_database_header_manifest_reference(slot, reference)
+            .expect("new catalog digest");
         reddb_file::seal_paged_superblock_slot(slot, copy, selected.generation + copy as u64 + 1)
             .expect("seal malformed generation");
     }

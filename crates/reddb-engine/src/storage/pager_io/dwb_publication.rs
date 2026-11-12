@@ -32,6 +32,10 @@ fn selected_slot<F: VfsFile>(
     let mut image = [0; PAGED_SUPERBLOCK_SLOT_SIZE];
     image.copy_from_slice(&zone[start..start + PAGED_SUPERBLOCK_SLOT_SIZE]);
     let header = f::decode_database_header(&image).map_err(|error| invalid(&error.to_string()))?;
+    f::database_header_manifest_reference(&image).map_err(|error| invalid(&error.to_string()))?;
+    if header.required_capabilities & f::FILE_CAPABILITY_DWB_PUBLICATION != 0 {
+        f::database_header_dwb_publication(&image).map_err(|error| invalid(&error.to_string()))?;
+    }
     Ok(
         (header.required_capabilities & f::FILE_CAPABILITY_DWB_PUBLICATION != 0)
             .then_some((selected, image)),

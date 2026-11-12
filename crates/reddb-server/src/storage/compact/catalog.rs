@@ -15,8 +15,12 @@ impl Catalog {
         !self.references.is_empty()
     }
     pub fn read(source: &Source) -> Result<Self> {
-        let reference = source.header.manifest_reference;
-        let root = source.header.manifest_page_id();
+        let reference = source.manifest_reference;
+        let root = if reference.page_id == 0 {
+            1
+        } else {
+            reference.page_id
+        };
         if root >= FIRST_ALLOCATABLE_PAGE {
             source.claim(root)?;
         }

@@ -7,6 +7,7 @@ use std::io::{Read, Seek, SeekFrom};
 pub(super) struct Source {
     file: parking_lot::Mutex<File>,
     pub header: f::DatabaseHeader,
+    pub manifest_reference: f::page_proof::PageReference,
     pub bytes: u64,
     pub pending_double_write: bool,
     // One byte per addressable page, capped at 64 MiB. No page payload cache.
@@ -66,6 +67,9 @@ impl Source {
         let start = selected.copy_index * f::PAGED_SUPERBLOCK_SLOT_SIZE;
         let header =
             f::decode_database_header(&zero[start..start + f::PAGED_SUPERBLOCK_SLOT_SIZE])?;
+        let manifest_reference = f::file_format::database_header_manifest_reference(
+            &zero[start..start + f::PAGED_SUPERBLOCK_SLOT_SIZE],
+        )?;
         ensure(
             allow_unified_wal || !header.checkpoint_in_progress,
             "source needs checkpoint recovery",
@@ -162,6 +166,7 @@ impl Source {
             bytes,
             pending_double_write,
             header,
+            manifest_reference,
             ownership: parking_lot::Mutex::new(ownership),
             tree_proofs: std::sync::OnceLock::new(),
         };
@@ -257,7 +262,11 @@ impl Source {
                 f::paged_superblock_slot_generation(slot, copy).is_some(),
                 "superblock damage requires separate recovery",
             )?;
-            f::decode_database_header(slot)?;
+            let header = f::decode_database_header(slot)?;
+            f::file_format::database_header_manifest_reference(slot)?;
+            if header.required_capabilities & f::file_format::FILE_CAPABILITY_DWB_PUBLICATION != 0 {
+                f::file_format::database_header_dwb_publication(slot)?;
+            }
         }
         Ok(())
     }

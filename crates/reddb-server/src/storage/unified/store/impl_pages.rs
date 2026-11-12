@@ -222,7 +222,7 @@ fn existing_overflow_chain(pager: &Pager) -> Result<Vec<u32>, PagerError> {
 }
 
 fn verify_catalog_digest(pager: &Pager, digest: [u8; 32]) -> Result<(), PagerError> {
-    let reference = pager.header()?.manifest_reference;
+    let reference = pager.manifest_reference()?;
     if reference.page_id != 0 && reference.digest != digest {
         return Err(PagerError::InvalidDatabase(format!(
             "catalog page {} generation proof does not match the superblock",
@@ -235,7 +235,7 @@ fn verify_catalog_digest(pager: &Pager, digest: [u8; 32]) -> Result<(), PagerErr
 fn publish_paged_metadata(pager: &Pager, meta_data: &[u8]) -> Result<(), PagerError> {
     let _ownership = pager.lock_ownership_mutations();
     let mut retired = existing_overflow_chain(pager)?;
-    let previous_root = pager.header()?.manifest_page_id();
+    let previous_root = pager.manifest_page_id()?;
     if previous_root >= reddb_engine::storage::pager_io::FIRST_ALLOCATABLE_PAGE {
         retired.push(previous_root);
     }
@@ -1841,7 +1841,11 @@ impl UnifiedStore {
                 && (header.required_capabilities
                     & reddb_file::file_format::FILE_CAPABILITY_TREE_PROOFS
                     == 0
-                    || header.manifest_reference.page_id == 0)
+                    || pager
+                        .manifest_reference()
+                        .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                        .page_id
+                        == 0)
             {
                 return Err(page_integrity(
                     1,

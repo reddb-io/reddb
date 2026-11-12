@@ -114,7 +114,7 @@ pub(crate) fn rewrite(source_path: &Path, destination: &Path) -> Result<()> {
     target.write_header_and_sync()?;
     let header = target.header()?;
     ensure(
-        header.manifest_reference.page_id == 0
+        target.manifest_reference()?.page_id == 0
             && header.required_capabilities == f::FILE_CAPABILITY_DISK_RESIDENCY,
         "fixture must retain the pre-proof bootstrap and reader contract",
     )?;

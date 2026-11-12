@@ -128,6 +128,66 @@ fn guarded_cold_open_rejects_truncation_before_serving_a_surviving_old_home() {
 }
 
 #[test]
+fn malformed_publication_extensions_are_rejected_before_ready_recovery_writes() {
+    let ready = ready_snapshot();
+    for (manifest, message) in [
+        (true, "invalid catalog generation reference"),
+        (false, "invalid DWB generation publication"),
+    ] {
+        let mut evidence = ready.clone();
+        for copy in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+            let start = copy * reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
+            let slot = &mut evidence[start..start + reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE];
+            if manifest {
+                let mut header = f::decode_database_header(slot).expect("ordinary header");
+                header.required_capabilities |= f::FILE_CAPABILITY_CATALOG_ROOT;
+                f::encode_database_header(slot, &header).expect("enable catalog capability");
+                slot[256..292].fill(0);
+                slot[256] = 70; // Nonzero root without its independent digest.
+            } else {
+                slot[296..300].copy_from_slice(&99u32.to_le_bytes());
+            }
+            f::seal_paged_superblock_slot(slot, copy, 100 + copy as u64)
+                .expect("checksum-valid malformed publication");
+        }
+        for read_only in [true, false] {
+            let mut raw = MemoryFile::from_bytes(evidence.clone());
+            let result = if read_only {
+                pager_io::read_dwb_pages(&mut raw).map(|_| ())
+            } else {
+                pager_io::recover_from_dwb(&mut raw)
+            };
+            assert!(
+                result.is_err(),
+                "raw recovery must reject malformed authority"
+            );
+            assert!(raw.operations.borrow().is_empty());
+            assert_eq!(raw.bytes.borrow().as_slice(), evidence);
+            let file = MemoryFile::from_bytes(evidence.clone());
+            let operations = file.operations.clone();
+            let bytes = file.bytes.clone();
+            let opened = Pager::open_owned(
+                file,
+                "malformed-publication.rdb".into(),
+                PagerConfig {
+                    read_only,
+                    ..PagerConfig::default()
+                },
+                NoWal,
+                false,
+            );
+            let error = opened.err().expect("owner must reject malformed authority");
+            assert!(error.to_string().contains(message), "{error}");
+            assert!(
+                operations.borrow().is_empty(),
+                "recovery must not consume evidence"
+            );
+            assert_eq!(bytes.borrow().as_slice(), evidence);
+        }
+    }
+}
+
+#[test]
 fn guarded_read_only_open_uses_the_ready_frame_without_consuming_the_source() {
     let evidence = ready_snapshot();
     let reader = Pager::open_owned(

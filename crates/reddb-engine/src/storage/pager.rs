@@ -468,6 +468,14 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         let (_, image) = self.newest_superblock()?;
         let header = reddb_file::decode_database_header(&image)
             .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
+        reddb_file::file_format::database_header_manifest_reference(&image)
+            .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
+        if header.required_capabilities & reddb_file::file_format::FILE_CAPABILITY_DWB_PUBLICATION
+            != 0
+        {
+            reddb_file::file_format::database_header_dwb_publication(&image)
+                .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
+        }
         if header.is_recovery_read_only() && !self.config.read_only {
             return Err(PagerError::InvalidDatabase(
                 "recovered database is read-only; export verified data into a new store".into(),
@@ -687,7 +695,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                     {
                         reddb_file::file_format::set_database_header_manifest_reference(
                             image,
-                            current.manifest_reference,
+                            reddb_file::page_proof::PageReference::default(),
                         )
                         .map_err(|error| PagerError::InvalidDatabase(error.to_string()))?;
                     }
@@ -1815,13 +1823,31 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         Ok(pager_io::clear_dwb_zone(&mut *file)?)
     }
 
+    /// Read catalog authority from the newest sealed slot, independently of the
+    /// cached ordinary header fields.
+    pub fn manifest_reference(&self) -> Result<reddb_file::page_proof::PageReference, PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        let (_, image) = self.newest_superblock()?;
+        reddb_file::file_format::database_header_manifest_reference(&image)
+            .map_err(|err| PagerError::InvalidDatabase(err.to_string()))
+    }
+
+    pub fn manifest_page_id(&self) -> Result<u32, PagerError> {
+        let reference = self.manifest_reference()?;
+        Ok(if reference.page_id == 0 {
+            1
+        } else {
+            reference.page_id
+        })
+    }
+
     /// Read the sealed catalog root, or page 1 for a legacy bootstrap header.
     ///
     /// ADR 0074 §2: manifest corruption fails the open didactically, naming the
     /// zone — it never falls back to a sidecar and never returns garbage.
     pub fn read_manifest_page(&self) -> Result<Page, PagerError> {
         let _ownership = self.lock_ownership_mutations();
-        let root = self.header_read()?.manifest_page_id();
+        let root = self.manifest_page_id()?;
         self.read_page(root)
             .map_err(|_| PagerError::ManifestZoneCorrupt(self.path.clone()))
     }
@@ -1847,12 +1873,23 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 "invalid catalog generation publication".into(),
             ));
         }
-        self.header_write()?.manifest_reference = reference;
+        let header = self.header_read()?.clone();
+        let _publication = self
+            .superblock_publication
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?;
         let result = (|| {
             for _ in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
-                // write_header already syncs its sealed slot before returning.
-                self.write_header()?;
+                self.commit_superblock_locked(|image| {
+                    reddb_file::encode_database_header(image, &header)
+                        .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
+                    reddb_file::file_format::set_database_header_manifest_reference(
+                        image, reference,
+                    )
+                    .map_err(|err| PagerError::InvalidDatabase(err.to_string()))
+                })?;
             }
+            *self.header_dirty_lock()? = false;
             Ok(())
         })();
         if result.is_err() {
