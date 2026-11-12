@@ -7,8 +7,9 @@ use tonic::Request;
 use crate::red_db_client::RedDbClient;
 use crate::{
     BulkEntityReply, DeleteEntityRequest, Empty, EntityReply, HealthReply, JsonBulkCreateRequest,
-    JsonCreateRequest, JsonPayloadRequest, OperationReply, PayloadReply, QueryReply, QueryRequest,
-    QueryValue, ScanReply, ScanRequest, StatsReply, TopologyRequest,
+    JsonCreateRequest, JsonPayloadRequest, MutationField, OperationReply, PayloadReply, QueryReply,
+    QueryRequest, QueryValue, ScanReply, ScanRequest, StatsReply, TopologyRequest,
+    TypedCreateRowRequest,
 };
 
 /// Thin authenticated client over the generated tonic stub.
@@ -124,6 +125,18 @@ impl RedDBClient {
             payload_json: json.to_string(),
         });
         Ok(self.inner.create_row(request).await?.into_inner())
+    }
+
+    pub async fn create_row_typed(
+        &mut self,
+        collection: &str,
+        fields: Vec<MutationField>,
+    ) -> Result<EntityReply, Box<dyn Error>> {
+        let request = self.auth_request(TypedCreateRowRequest {
+            collection: collection.to_string(),
+            fields,
+        });
+        Ok(self.inner.create_row_typed(request).await?.into_inner())
     }
 
     pub async fn bulk_create_rows(

@@ -24,7 +24,7 @@ use crate::wire::redwire::session::redwire_command_id;
 const STDIO_SOURCE: &str = include_str!("../rpc_stdio.rs");
 const REDWIRE_SESSION_SOURCE: &str = include_str!("../wire/redwire/session.rs");
 
-const REDWIRE_DISPATCH_KINDS: [MessageKind; 20] = [
+const REDWIRE_DISPATCH_KINDS: [MessageKind; 21] = [
     MessageKind::Topology,
     MessageKind::Bye,
     MessageKind::Ping,
@@ -33,6 +33,7 @@ const REDWIRE_DISPATCH_KINDS: [MessageKind; 20] = [
     MessageKind::QueryBinary,
     MessageKind::ExecutePrepared,
     MessageKind::BulkInsert,
+    MessageKind::TypedInsert,
     MessageKind::BulkInsertBinary,
     MessageKind::BulkInsertPrevalidated,
     MessageKind::BulkStreamStart,

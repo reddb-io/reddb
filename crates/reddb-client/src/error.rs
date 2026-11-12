@@ -41,6 +41,8 @@ pub enum ErrorCode {
     Overloaded,
     /// Server does not advertise support for parameterized transport frames.
     ParamsUnsupported,
+    /// Server does not advertise support for typed mutation frames.
+    TypedMutationsUnsupported,
     /// The selected transport cannot enforce the requested read consistency.
     ConsistencyUnsupported,
     /// Helper input failed local validation before contacting the server.
@@ -66,6 +68,7 @@ impl ErrorCode {
             ErrorCode::NotFound => "NOT_FOUND",
             ErrorCode::Overloaded => "OVERLOADED",
             ErrorCode::ParamsUnsupported => "PARAMS_UNSUPPORTED",
+            ErrorCode::TypedMutationsUnsupported => "TYPED_MUTATIONS_UNSUPPORTED",
             ErrorCode::ConsistencyUnsupported => "CONSISTENCY_UNSUPPORTED",
             ErrorCode::InvalidArgument => "INVALID_ARGUMENT",
             ErrorCode::InvalidResponse => "INVALID_RESPONSE",

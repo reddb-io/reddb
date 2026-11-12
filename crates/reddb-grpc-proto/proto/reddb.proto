@@ -97,6 +97,9 @@ service RedDb {
   rpc GraphCycles(JsonPayloadRequest) returns (PayloadReply);
   rpc GraphTopologicalSort(JsonPayloadRequest) returns (PayloadReply);
   rpc CreateRow(JsonCreateRequest) returns (EntityReply);
+  // Structured single-row insert. Values use the same typed vocabulary as
+  // parameterized queries; no SQL or JSON payload is assembled by the caller.
+  rpc CreateRowTyped(TypedCreateRowRequest) returns (EntityReply);
   rpc CreateNode(JsonCreateRequest) returns (EntityReply);
   rpc CreateEdge(JsonCreateRequest) returns (EntityReply);
   rpc CreateVector(JsonCreateRequest) returns (EntityReply);
@@ -312,6 +315,16 @@ message WalStreamChunk {
 message JsonCreateRequest {
   string collection = 1;
   string payload_json = 2;
+}
+
+message TypedCreateRowRequest {
+  string collection = 1;
+  repeated MutationField fields = 2;
+}
+
+message MutationField {
+  string name = 1;
+  QueryValue value = 2;
 }
 
 message JsonBulkCreateRequest {

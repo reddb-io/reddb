@@ -576,6 +576,98 @@ fn cold_mvcc_indexes_restore_visible_heads_before_and_after_vacuum() {
 }
 
 #[test]
+fn committed_mvcc_index_reads_survive_crash_during_checkpoint_publication() {
+    const CHILD_PATH: &str = "REDDB_MVCC_INDEX_CRASH_PATH";
+    const CHILD_HOOK: &str = "REDDB_MVCC_INDEX_CRASH_HOOK";
+    let options = |path: std::path::PathBuf| {
+        RedDBOptions::persistent(path)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile")
+    };
+    let open = |path| {
+        crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options(path))
+        })
+        .expect("open runtime")
+    };
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        let runtime = open(path.into());
+        for sql in [
+            "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+            "BEGIN",
+            "UPDATE crash_index_rows SET payload = 'committed' WHERE id = 'db-1'",
+            "COMMIT",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        // The crash hook is set only after opening and committing, so it
+        // cannot fire in an unrelated startup checkpoint.
+        let hook = std::env::var(CHILD_HOOK).expect("child crash hook");
+        std::env::set_var(hook, "1");
+        runtime.checkpoint().expect("checkpoint reaches crash hook");
+        panic!("checkpoint crash hook was not reached");
+    }
+
+    for (hook, exit_code) in [
+        ("REDDB_TEST_EXIT_AFTER_SECONDARY_INDEX_BUILD", 196),
+        ("REDDB_TEST_EXIT_AFTER_UNDO_CATALOG_PUBLICATION", 195),
+    ] {
+        let directory = tempfile::tempdir().expect("crash fixture");
+        let path = directory.path().join("index-crash.rdb");
+        {
+            let runtime = open(path.clone());
+            for sql in [
+                "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+                "CREATE TABLE crash_index_rows (id TEXT, org_id TEXT, payload TEXT)",
+                "CREATE UNIQUE INDEX crash_by_id ON crash_index_rows (id) USING HASH",
+                "CREATE INDEX crash_by_org ON crash_index_rows (org_id) USING BTREE",
+                "INSERT INTO crash_index_rows (id,org_id,payload) VALUES ('db-1','org-a','original')",
+            ] {
+                runtime.execute_query(sql).expect(sql);
+            }
+            runtime.checkpoint().expect("baseline checkpoint");
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "runtime::cold_keyed_models::committed_mvcc_index_reads_survive_crash_during_checkpoint_publication",
+                "--nocapture",
+            ])
+            .env(CHILD_PATH, &path)
+            .env(CHILD_HOOK, hook)
+            .output()
+            .expect("run crash child");
+        assert_eq!(
+            output.status.code(),
+            Some(exit_code),
+            "{hook}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for phase in ["recovery", "second reopen"] {
+            let runtime = open(path.clone());
+            // Query each index before the unindexed scan can warm it.
+            for sql in [
+                "SELECT payload FROM crash_index_rows WHERE id = 'db-1'",
+                "SELECT payload FROM crash_index_rows WHERE org_id >= 'org-a'",
+                "SELECT payload FROM crash_index_rows WHERE payload = 'committed'",
+            ] {
+                let result = runtime.execute_query(sql).expect(sql);
+                assert_eq!(result.result.records.len(), 1, "{hook}: {phase}: {sql}");
+                assert_eq!(
+                    result.result.records[0].get("payload"),
+                    Some(&Value::text("committed")),
+                    "{hook}: {phase}: {sql}"
+                );
+            }
+            runtime.checkpoint().expect("checkpoint recovered state");
+        }
+    }
+}
+
+#[test]
 fn repeated_cold_boot_reuses_published_index_pages() {
     let directory = tempfile::tempdir().expect("cold growth fixture");
     let path = directory.path().join("cold-growth.rdb");

@@ -2,7 +2,7 @@
 //!
 //! Dispatches the full RedWire frame set:
 //!   - Hello / AuthResponse (handshake only — once)
-//!   - Query / BulkInsert / Get / Delete (data plane)
+//!   - Query / BulkInsert / TypedInsert / Get / Delete (data plane)
 //!   - QueryBinary / BulkInsertBinary / BulkInsertPrevalidated
 //!     (binary fast paths)
 //!   - BulkStreamStart/Rows/Commit (streaming bulk)
@@ -32,6 +32,7 @@ use reddb_wire::redwire::operations::{
     encode_get_result_payload,
 };
 use reddb_wire::redwire::scram::{ScramServerHandshake, ScramServerInput, ScramServerOutput};
+use reddb_wire::redwire::{decode_typed_insert, FEATURE_TYPED_MUTATIONS};
 
 use super::auth::{build_auth_ok, pick_auth_method, validate_auth_response, AuthOutcome};
 use super::validate_minor_version;
@@ -163,6 +164,8 @@ pub(crate) const fn redwire_command_id(kind: MessageKind) -> Option<&'static str
         | MessageKind::QueueWaitTimeout
         | MessageKind::MovedRedirect
         | MessageKind::Compress => Some("query.execute"),
+
+        MessageKind::TypedInsert => Some("collections.rows.create"),
 
         MessageKind::BulkInsert
         | MessageKind::BulkOk
@@ -612,6 +615,21 @@ where
                 let result = redwire_spawn_blocking(runtime.as_ref(), move || {
                     execute_with_redwire_context(&operation_context, role, || {
                         run_insert_dispatch(&task_runtime, &frame)
+                    })
+                })
+                .await;
+                match result {
+                    Ok(response) => queue_send(&out_tx, response).await?,
+                    Err(error) => send_execution_error(&out_tx, correlation_id, error).await?,
+                }
+            }
+            MessageKind::TypedInsert => {
+                let task_runtime = Arc::clone(&runtime);
+                let role = session.role;
+                let correlation_id = frame.correlation_id;
+                let result = redwire_spawn_blocking(runtime.as_ref(), move || {
+                    execute_with_redwire_context(&operation_context, role, || {
+                        run_typed_insert(&task_runtime, &frame)
                     })
                 })
                 .await;
@@ -1324,7 +1342,8 @@ where
     // the correct payload for the bootstrap path. Authenticated
     // principals get the full replica list via the gRPC `Topology`
     // RPC after the connection is established.
-    let server_features = FEATURE_PARAMS | reddb_wire::routing::FEATURE_TOPOLOGY;
+    let server_features =
+        FEATURE_PARAMS | reddb_wire::routing::FEATURE_TOPOLOGY | FEATURE_TYPED_MUTATIONS;
     let topology = build_topology_for_hello_ack(runtime);
     let ack_frame = build_hello_ack_frame(
         hello.correlation_id,
@@ -1767,6 +1786,59 @@ fn param_to_request_value(value: RedWireParamValue) -> ParamValue {
         RedWireParamValue::Timestamp(value) => ParamValue::Timestamp(value),
         RedWireParamValue::Uuid(value) => ParamValue::Uuid(value),
     }
+}
+
+fn run_typed_insert(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
+    let request = match decode_typed_insert(&frame.payload) {
+        Ok(request) => request,
+        Err(error) => return build_error_frame_lossy(frame.correlation_id, &error.to_string()),
+    };
+    let mut fields = Vec::with_capacity(request.fields.len());
+    for field in request.fields {
+        if let RedWireParamValue::Json(bytes) = &field.value {
+            if let Err(error) = serde_json::from_slice::<JsonValue>(bytes) {
+                return build_error_frame_lossy(
+                    frame.correlation_id,
+                    &format!("field '{}' contains invalid JSON: {error}", field.name),
+                );
+            }
+        }
+        fields.push((
+            field.name,
+            reddb_types::Value::from(param_to_request_value(field.value)),
+        ));
+    }
+
+    let input = crate::application::CreateRowInput {
+        collection: request.collection,
+        fields,
+        metadata: Vec::new(),
+        node_links: Vec::new(),
+        vector_links: Vec::new(),
+    };
+    let output = match crate::application::EntityUseCases::new(runtime).create_row(input) {
+        Ok(output) => output,
+        Err(error) => {
+            return build_error_frame_lossy(
+                frame.correlation_id,
+                &crate::api::client_facing_message(&error),
+            )
+        }
+    };
+
+    // An explicit transaction is committed by the later COMMIT query. For
+    // autocommit inserts, mirror the other wire mutation paths and enforce
+    // the configured replication acknowledgement policy before replying.
+    if runtime.current_xid().is_none() {
+        let post_lsn = runtime.replication_commit_lsn();
+        if let Err(error) = runtime.enforce_commit_policy(post_lsn) {
+            return build_error_frame_lossy(frame.correlation_id, &error.to_string());
+        }
+    }
+
+    let id = format!("\"{}\"", output.id.raw());
+    let payload = encode_bulk_ok_payload_from_json_id_literals(1, [id]);
+    build_dispatch_reply_frame(frame.correlation_id, MessageKind::BulkOk, payload)
 }
 
 /// Insert dispatch — handles single-row, bulk, and the analytics
@@ -2288,6 +2360,139 @@ mod tests {
     fn bulk_insert_frame(correlation_id: u64, payload: Vec<u8>) -> Frame {
         reddb_wire::redwire::build_bulk_insert_frame(correlation_id, payload)
             .expect("build bulk insert frame")
+    }
+
+    fn typed_insert_frame(
+        correlation_id: u64,
+        collection: &str,
+        fields: Vec<(&str, RedWireParamValue)>,
+    ) -> Frame {
+        let request = reddb_wire::redwire::TypedInsertRequest {
+            collection: collection.to_string(),
+            fields: fields
+                .into_iter()
+                .map(|(name, value)| reddb_wire::redwire::TypedInsertField {
+                    name: name.to_string(),
+                    value,
+                })
+                .collect(),
+        };
+        let payload = reddb_wire::redwire::encode_typed_insert(&request).expect("typed payload");
+        reddb_wire::redwire::build_request_frame(correlation_id, MessageKind::TypedInsert, payload)
+            .expect("typed insert frame")
+    }
+
+    #[test]
+    fn redwire_typed_insert_preserves_types_and_contract_defaults() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query(
+                "CREATE TABLE redwire_typed_users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, active BOOLEAN DEFAULT = true)",
+            )
+            .expect("create typed table");
+        let frame = typed_insert_frame(
+            40,
+            "redwire_typed_users",
+            vec![
+                ("id", RedWireParamValue::Int(7)),
+                ("name", RedWireParamValue::Text("Ada".into())),
+            ],
+        );
+
+        let reply = run_typed_insert(&runtime, &frame);
+        assert_eq!(reply.kind, MessageKind::BulkOk);
+        let result = reddb_wire::redwire::decode_bulk_ok_payload(&reply.payload)
+            .expect("typed insert result");
+        assert_eq!(result.affected, 1);
+        assert_eq!(result.rids.len(), 1);
+
+        let selected = runtime
+            .execute_query("SELECT id, name, active FROM redwire_typed_users WHERE id = 7")
+            .expect("select typed row");
+        assert_eq!(selected.result.records.len(), 1);
+        assert_eq!(
+            selected.result.records[0].get("id"),
+            Some(&reddb_types::Value::Integer(7))
+        );
+        assert_eq!(
+            selected.result.records[0].get("name"),
+            Some(&reddb_types::Value::text("Ada"))
+        );
+        assert_eq!(
+            selected.result.records[0].get("active"),
+            Some(&reddb_types::Value::Boolean(true))
+        );
+    }
+
+    #[test]
+    fn redwire_typed_insert_rejects_invalid_json_before_write() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE redwire_typed_json (id INTEGER PRIMARY KEY, body JSON)")
+            .expect("create typed table");
+        let frame = typed_insert_frame(
+            41,
+            "redwire_typed_json",
+            vec![
+                ("id", RedWireParamValue::Int(1)),
+                ("body", RedWireParamValue::Json(b"{".to_vec())),
+            ],
+        );
+
+        let reply = run_typed_insert(&runtime, &frame);
+        assert_eq!(reply.kind, MessageKind::Error);
+        assert!(String::from_utf8_lossy(&reply.payload).contains("invalid JSON"));
+        let selected = runtime
+            .execute_query("SELECT id FROM redwire_typed_json")
+            .expect("select after rejected insert");
+        assert!(selected.result.records.is_empty());
+    }
+
+    #[test]
+    fn redwire_typed_insert_participates_in_connection_transaction() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let prepared = PreparedRegistry::new();
+        runtime
+            .execute_query("CREATE TABLE redwire_typed_tx (id INTEGER PRIMARY KEY)")
+            .expect("create typed table");
+        let ctx = OperationContextFactory::build(OperationContextInput {
+            request_id: Some("redwire-typed-tx".into()),
+            connection_id: Some(77),
+            principal: Some("anonymous".into()),
+            ..OperationContextInput::default()
+        });
+
+        let begin = reddb_wire::redwire::build_query_frame(42, "BEGIN").expect("begin frame");
+        let insert = typed_insert_frame(
+            43,
+            "redwire_typed_tx",
+            vec![("id", RedWireParamValue::Int(9))],
+        );
+        let rollback =
+            reddb_wire::redwire::build_query_frame(44, "ROLLBACK").expect("rollback frame");
+        execute_with_redwire_context(&ctx, Role::Read, || {
+            assert_eq!(
+                run_query(&runtime, &prepared, &begin).kind,
+                MessageKind::Result
+            );
+        });
+        execute_with_redwire_context(&ctx, Role::Read, || {
+            assert_eq!(
+                run_typed_insert(&runtime, &insert).kind,
+                MessageKind::BulkOk
+            );
+        });
+        execute_with_redwire_context(&ctx, Role::Read, || {
+            assert_eq!(
+                run_query(&runtime, &prepared, &rollback).kind,
+                MessageKind::Result
+            );
+        });
+
+        let selected = runtime
+            .execute_query("SELECT id FROM redwire_typed_tx")
+            .expect("select after rollback");
+        assert!(selected.result.records.is_empty());
     }
 
     fn create_graph_collection(runtime: &RedDBRuntime, name: &str) {

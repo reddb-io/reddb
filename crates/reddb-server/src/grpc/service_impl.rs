@@ -2574,6 +2574,19 @@ impl RedDb for GrpcRuntime {
         Ok(Response::new(reply))
     }
 
+    async fn create_row_typed(
+        &self,
+        request: Request<TypedCreateRowRequest>,
+    ) -> Result<Response<EntityReply>, Status> {
+        let request = request.into_inner();
+        let rt = self.clone();
+        let reply =
+            grpc_spawn_blocking(&self.runtime, move || create_row_typed_reply(&rt, request))
+                .await??;
+        self.enforce_commit_policy_after_write()?;
+        Ok(Response::new(reply))
+    }
+
     async fn create_node(
         &self,
         request: Request<JsonCreateRequest>,

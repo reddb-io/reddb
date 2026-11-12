@@ -392,6 +392,11 @@ const GRPC_COMMAND_BINDINGS: &[GrpcCommandBinding] = &[
     ),
     binding!("CreateRow", "collections.rows.create", GrpcAuthClass::Write),
     binding!(
+        "CreateRowTyped",
+        "collections.rows.create",
+        GrpcAuthClass::Write
+    ),
+    binding!(
         "CreateNode",
         "collections.nodes.create",
         GrpcAuthClass::Write
@@ -992,6 +997,7 @@ mod tests {
         guard!("GraphCycles", Read),
         guard!("GraphTopologicalSort", Read),
         guard!("CreateRow", Write),
+        guard!("CreateRowTyped", Write),
         guard!("CreateNode", Write),
         guard!("CreateEdge", Write),
         guard!("CreateVector", Write),

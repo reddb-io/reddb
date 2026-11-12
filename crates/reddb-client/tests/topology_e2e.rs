@@ -236,6 +236,8 @@ impl RedDb for MockServer {
         Ok(Response::new(ok_entity_reply(1)))
     }
 
+    stub_rpc!(create_row_typed, TypedCreateRowRequest, EntityReply);
+
     // ----- everything else: default-returning stubs -----
     stub_rpc!(bulk_create_rows, JsonBulkCreateRequest, BulkEntityReply);
     stub_rpc!(health, Empty, HealthReply);
