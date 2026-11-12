@@ -138,6 +138,11 @@ test-memory-regressions:
 	cargo test --locked -p reddb-io-server --lib artifact_memory_tests -- --test-threads=1
 	cargo test --locked -p reddb-io-server --lib trusted_wire_column_checks_recovered_row_shape_and_keeps_alias -- --test-threads=1
 
+.PHONY: test-recovery-io
+test-recovery-io:
+	cargo test --locked -p reddb-io-server --lib runtime::recovery_io_faults:: -- --test-threads=1
+	cargo test --locked -p reddb-io-server --lib overflow_checkpoint_undo_survives -- --test-threads=1
+
 test-dst-storage:
 	./scripts/cargo-fast.sh test --locked -p unreliable-libc --test sim_power_cut_recovery --test value_equivalence_recovery --test power_cut_recovery --test tm_commit_path_recovery --test store_fork_lifecycle_recovery --test superblock_manifest_zone_recovery
 
