@@ -227,6 +227,7 @@ impl LogicalWalSpoolState {
 /// This is not the storage-engine WAL; it is a structured replication/PITR log.
 pub struct LogicalWalSpool {
     path: PathBuf,
+    // File contents and seek offsets must cross the same publication boundary.
     state: Mutex<LogicalWalSpoolState>,
 }
 
@@ -304,21 +305,16 @@ impl LogicalWalSpool {
         timestamp_ms: u64,
         data: &[u8],
     ) -> io::Result<()> {
+        // Encode before taking the lock, then retain exclusive file/index
+        // ownership through the durability barrier. Open after locking: a
+        // concurrent prune must not replace the inode we are about to append.
+        let frame =
+            reddb_file::encode_logical_wal_v3(term, ownership_epoch, lsn, timestamp_ms, data)?;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?;
-        // Pre-build the record in memory so a single write_all keeps
-        // the on-disk record contiguous. Two side-effects:
-        //   (a) crash recovery sees either a complete record or a torn
-        //       header, never an interleaved partial frame from two
-        //       writers (the spool is not multi-writer today, but the
-        //       single-write semantics make that future-safe);
-        //   (b) crc32 is computed exactly once over the same bytes the
-        //       reader will checksum, with zero risk of header/payload
-        //       drift from a partial flush.
-        let frame =
-            reddb_file::encode_logical_wal_v3(term, ownership_epoch, lsn, timestamp_ms, data)?;
 
         file.write_all(&frame)?;
         // PLAN.md Phase 2 mandates `sync_all` for logical WAL durability.
@@ -327,7 +323,6 @@ impl LogicalWalSpool {
         // acknowledged write supposedly committed.
         file.sync_all()?;
 
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.current_lsn = state.current_lsn.max(lsn);
         // The record we just wrote starts at the prior end-of-file.
         // Checkpoint it into the seek index if it lands on an interval
@@ -346,11 +341,10 @@ impl LogicalWalSpool {
         // (issue #832). The file was already repaired on `open`, so the
         // forward scan from the checkpoint is non-repairing and simply
         // stops at the first torn tail (left for the next `open` to fix).
-        let start_offset = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.seek_floor_offset(since_lsn)
-        };
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let start_offset = state.seek_floor_offset(since_lsn);
         let entries = reddb_file::read_logical_wal_entries_from(&self.path, start_offset)?;
+        drop(state);
         Ok(entries
             .into_iter()
             .filter(|entry| entry.lsn > since_lsn)
@@ -365,20 +359,20 @@ impl LogicalWalSpool {
         max_count: usize,
         max_payload_bytes: usize,
     ) -> io::Result<Vec<(u64, Vec<u8>)>> {
-        let start_offset = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.seek_floor_offset(since_lsn)
-        };
-        Ok(reddb_file::read_logical_wal_entries_from_bounded(
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let start_offset = state.seek_floor_offset(since_lsn);
+        let entries = reddb_file::read_logical_wal_entries_from_bounded(
             &self.path,
             start_offset,
             since_lsn,
             max_count,
             max_payload_bytes,
-        )?
-        .into_iter()
-        .map(|entry| (entry.lsn, logical_wal_data_with_framing_term(&entry)))
-        .collect())
+        )?;
+        drop(state);
+        Ok(entries
+            .into_iter()
+            .map(|entry| (entry.lsn, logical_wal_data_with_framing_term(&entry)))
+            .collect())
     }
 
     /// Byte offset a resume at `since_lsn` would seek to before
@@ -400,6 +394,7 @@ impl LogicalWalSpool {
     }
 
     pub fn oldest_lsn(&self) -> io::Result<Option<u64>> {
+        let _state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         Ok(reddb_file::read_and_repair_logical_wal_entries(&self.path)?
             .into_iter()
             .next()
@@ -407,7 +402,8 @@ impl LogicalWalSpool {
     }
 
     pub fn prune_through(&self, upto_lsn: u64) -> io::Result<()> {
-        let previous_lsn = self.current_lsn();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let previous_lsn = state.current_lsn;
         let mut retained: Vec<_> = reddb_file::read_and_repair_logical_wal_entries(&self.path)?
             .into_iter()
             .filter(|entry| entry.lsn > upto_lsn)
@@ -441,7 +437,6 @@ impl LogicalWalSpool {
         // seek index is stale — rebuild it from the compacted file.
         let (seek_index, write_offset, record_count) =
             reddb_file::build_logical_wal_seek_index(&self.path)?;
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.current_lsn = previous_lsn.max(current_lsn).max(upto_lsn);
         state.seek_index = seek_index;
         state.write_offset = write_offset;
