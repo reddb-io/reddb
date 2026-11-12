@@ -125,6 +125,17 @@ impl StoreCommitCoordinator {
             return Ok(());
         }
 
+        #[cfg(test)]
+        if let Ok(fault) = std::env::var("REDDB_TEST_PAGE_UNDO_IO") {
+            use crate::storage::engine::pager;
+            match fault.as_str() {
+                "empty" => pager::test_fail_next_pager_write(None, 0),
+                "partial" => pager::test_fail_next_pager_write(None, 17),
+                "sync" => pager::test_fail_pager_sync_after(0),
+                _ => panic!("unknown undo recovery I/O fault {fault}"),
+            }
+        }
+
         for item in WalReader::open(wal_path)?.iter() {
             let (_, record) = item?;
             if let WalRecord::FullPageImage {
@@ -184,14 +195,7 @@ mod tests {
     fn overflow_checkpoint_undo_survives_interrupted_recovery_and_publication() {
         let config = || UnifiedStoreConfig::default().with_page_cache_slots(4);
         if let Some(path) = std::env::var_os(CHILD) {
-            if let Ok(fault) = std::env::var("REDDB_TEST_PAGE_UNDO_IO") {
-                use crate::storage::engine::pager;
-                match fault.as_str() {
-                    "empty" => pager::test_fail_next_pager_write(None, 0),
-                    "partial" => pager::test_fail_next_pager_write(None, 17),
-                    "sync" => pager::test_fail_pager_sync_after(0),
-                    _ => panic!("unknown undo recovery I/O fault {fault}"),
-                }
+            if std::env::var_os("REDDB_TEST_PAGE_UNDO_IO").is_some() {
                 let error = match UnifiedStore::open_with_config(path, config()) {
                     Ok(_) => panic!("undo recovery must propagate its I/O failure"),
                     Err(error) => error,
