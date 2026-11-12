@@ -3,7 +3,7 @@
 This standalone ESP-IDF project links `reddb-io-mcu` for the Nano's dual-core
 ESP32-S3. It mounts a wear-levelled FAT partition and preallocates one
 contiguous `data.rdb` before the RedDB pager starts. Preallocation is board
-policy; the bytes inside the file remain the canonical RedDB 1.33.3 `.rdb`
+policy; the bytes inside the file remain the canonical RedDB 1.33.5 `.rdb`
 format.
 
 The firmware creates or recovers the database, ingests 43,200 one-minute
@@ -32,8 +32,9 @@ length failures. For example in PowerShell:
 ```powershell
 $env:ESP_IDF_TOOLS_INSTALL_DIR = "custom:C:/.embuild/espressif"
 $clang = "$env:USERPROFILE\.rustup\toolchains\esp\xtensa-esp32-elf-clang\esp-clang\bin"
+$gcc = "$env:USERPROFILE\.rustup\toolchains\esp\xtensa-esp-elf\bin"
 $env:LIBCLANG_PATH = $clang
-$env:PATH = "$clang;$env:PATH"
+$env:PATH = "$clang;$gcc;$env:USERPROFILE\.cargo\bin;$env:PATH"
 cargo +esp build --release --target-dir C:\rdbt
 
 $elf = "C:\rdbt\xtensa-esp32s3-espidf\release\reddb-mcu-nano-esp32"
@@ -42,7 +43,7 @@ espflash save-image --chip esp32s3 --partition-table partitions.csv `
 Copy-Item $elf build\reddb-mcu-nano-esp32.elf
 ```
 
-The app occupies 3,826,960 of the 4,194,304-byte app partition (91.24%). The
+The app occupies 3,826,928 of the 4,194,304-byte app partition (91.24%). The
 remaining flash partition yields a 12,378,112-byte contiguous database file.
 The main task has a 256 KiB stack; the board exposes roughly 390 KiB of other
 internal RAM plus 8 MiB octal PSRAM to the allocator.

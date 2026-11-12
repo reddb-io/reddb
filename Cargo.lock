@@ -3038,7 +3038,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-mcu"
-version = "1.33.3"
+version = "1.33.5"
 dependencies = [
  "reddb-io-engine",
  "reddb-io-file",

@@ -846,7 +846,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "reddb-io-engine"
-version = "1.33.3"
+version = "1.33.5"
 dependencies = [
  "crc32fast",
  "hex",
@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-file"
-version = "1.33.3"
+version = "1.33.5"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-mcu"
-version = "1.33.3"
+version = "1.33.5"
 dependencies = [
  "reddb-io-engine",
  "reddb-io-file",
@@ -887,14 +887,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.33.3"
+version = "1.33.5"
 dependencies = [
  "reddb-io-types",
 ]
 
 [[package]]
 name = "reddb-io-types"
-version = "1.33.3"
+version = "1.33.5"
 dependencies = [
  "zstd",
 ]

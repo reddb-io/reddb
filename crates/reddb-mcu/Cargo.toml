@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-mcu"
-version = "1.33.3"
+version = "1.33.5"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
