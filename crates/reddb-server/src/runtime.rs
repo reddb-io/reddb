@@ -1246,7 +1246,7 @@ struct RuntimeInner {
     lock_manager: Arc<crate::runtime::lock_manager::LockManager>,
     /// Perf-parity env-var overrides (`REDDB_<UP_DOTTED_KEY>`).
     /// Populated once at boot, read by every config getter; takes
-    /// precedence over the persisted red_config value so operators
+    /// precedence over the persisted red.config value so operators
     /// can hot-fix a bad config by restarting with a different env
     /// var set. Keys are restricted to those declared in the matrix.
     env_config_overrides: HashMap<String, String>,
@@ -1334,7 +1334,7 @@ struct RuntimeInner {
     /// Maps `table_name → tenant_column`. DML auto-fill looks here to
     /// inject `CURRENT_TENANT()` on INSERTs that omit the column, and
     /// DDL keeps the in-memory registry in sync with the
-    /// `tenant_tables.*` keys in red_config. Read-side enforcement
+    /// `tenant_tables.*` keys in red.config. Read-side enforcement
     /// piggy-backs on the existing RLS infrastructure: every entry
     /// installs an implicit `col = CURRENT_TENANT()` policy.
     tenant_tables: parking_lot::RwLock<HashMap<String, String>>,
@@ -1447,7 +1447,7 @@ struct RuntimeInner {
     /// Issue #742 — consumer presence (heartbeat / lease / lifecycle
     /// state per (queue, group, consumer)). Process-local in this
     /// slice; durability across restart lands in the follow-up that
-    /// mirrors the registry into `red_queue_meta` rows. Independent
+    /// mirrors the registry into `red.queue.meta` rows. Independent
     /// of pending-delivery state by design — see
     /// `storage::queue::presence` for the contract.
     queue_presence: std::sync::Arc<crate::storage::queue::presence::ConsumerPresenceRegistry>,
@@ -1482,11 +1482,11 @@ struct RuntimeInner {
         parking_lot::Mutex<HashMap<String, crate::runtime::blockchain_kind::ChainTipFull>>,
     /// Issue #525 — in-memory mirror of the persisted `integrity` flag per
     /// chain collection.  `true` means INSERTs must be rejected with
-    /// `ChainIntegrityBroken`.  Loaded lazily from `red_config` on first
+    /// `ChainIntegrityBroken`.  Loaded lazily from `red.config` on first
     /// access so the flag survives restart.
     chain_integrity_broken: parking_lot::Mutex<HashMap<String, bool>>,
     /// Issue #765 / S6 — in-memory cache of input-stream integrity tombstone
-    /// RID ranges. Loaded lazily from `red_config` on first read so the set
+    /// RID ranges. Loaded lazily from `red.config` on first read so the set
     /// survives restart (the durable list lives under
     /// `stream.integrity.tombstones`). `integrity_tombstones_state` is the
     /// hot-path gate: `0` = unloaded, `1` = loaded-empty (reads skip

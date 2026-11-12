@@ -47,18 +47,11 @@ required for correctness.
 
 ### Join benchmark context
 
-The behavior and timing guard lives in `join_filter::tests` and covers numeric,
-boolean, text, identity/reference, null, missing-field, duplicate-key, outer,
-cross, and mixed numeric joins. It protects observable results rather than the
-private key representation.
-
-Baseline command from #1339:
-
-```sh
-CARGO_BUILD_JOBS=1 RUSTFLAGS="-C debuginfo=0" \
-  cargo nextest run -p reddb-io-server --lib \
-    -- join_filter::tests::benchmark_join_build_probe_timing --nocapture
-```
+The behavior guards in `join_filter::tests` cover numeric, boolean, text,
+identity/reference, null, missing-field, duplicate-key, outer, cross, and mixed
+numeric joins. They protect observable results rather than the private key
+representation. The timing-only harness used for the measurements below was
+retired in November 2026.
 
 Baseline on the 2026-06-25 guard host, debug profile:
 
@@ -69,12 +62,6 @@ Baseline on the 2026-06-25 guard host, debug profile:
 | 1,000 | 6,385 us | 432,443 us | hash join 68x faster |
 
 Current post-#1345/#1346 timing from this branch, run on 2026-06-27:
-
-```sh
-CARGO_BUILD_JOBS=1 RUSTFLAGS="-C debuginfo=0" \
-  cargo test -p reddb-io-server --lib \
-    join_filter::tests::benchmark_join_build_probe_timing -- --nocapture
-```
 
 | n | hash join | indexed join | nested loop | reading |
 |---:|----------:|-------------:|------------:|---------|
@@ -271,12 +258,6 @@ Docs-only change for #1347. The added page contains shell commands and source
 references but no doctests or code-adjacent examples, so `cargo check` is not
 required by the issue acceptance criteria.
 
-Additional confidence run performed while preparing this page:
-
-```sh
-CARGO_BUILD_JOBS=1 RUSTFLAGS="-C debuginfo=0" \
-  cargo test -p reddb-io-server --lib \
-    join_filter::tests::benchmark_join_build_probe_timing -- --nocapture
-```
-
-Result: passed, 1 test, 0 failures, 4,952 filtered out.
+An additional timing run performed while preparing this page passed with one
+test and no failures. The timing-only test was later retired; join correctness
+remains covered by the functional suite.

@@ -77,7 +77,7 @@ pub struct TelemetryConfig {
 
     /// Per-invocation intent flags — set by the CLI parser to record
     /// which fields the operator explicitly passed. The config merge
-    /// (red_config → CLI) uses these to decide whether a persisted
+    /// (red.config → CLI) uses these to decide whether a persisted
     /// `red.logging.*` value should be promoted.
     ///
     /// Not serialised; always recomputed per process start.

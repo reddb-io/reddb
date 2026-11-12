@@ -9,17 +9,17 @@
 use super::*;
 
 impl RedDBRuntime {
-    /// Replay `tenant_tables.*.column` keys from red_config at boot so
+    /// Replay `tenant_tables.*.column` keys from red.config at boot so
     /// `CREATE TABLE ... TENANT BY (col)` declarations persist across
-    /// restarts (Phase 2.5.4). Reads every row of the `red_config`
+    /// restarts (Phase 2.5.4). Reads every row of the `red.config`
     /// collection, picks the keys matching the tenant-marker shape,
     /// and calls `register_tenant_table` for each.
     ///
-    /// Safe no-op when `red_config` doesn't exist (first boot on a
+    /// Safe no-op when `red.config` doesn't exist (first boot on a
     /// fresh datadir).
     pub(crate) fn rehydrate_tenant_tables(&self) {
         let store = self.inner.db.store();
-        let Some(manager) = store.get_collection("red_config") else {
+        let Some(manager) = store.get_collection("red.config") else {
             return;
         };
         // Replay in insertion order (SegmentManager iteration). Multiple
@@ -45,7 +45,7 @@ impl RedDBRuntime {
                 // suffix, so reaching this branch means an upgrade
                 // with incompatible state or external tampering.
                 crate::telemetry::operator_event::OperatorEvent::SchemaCorruption {
-                    collection: "red_config".to_string(),
+                    collection: "red.config".to_string(),
                     detail: format!("malformed tenant_tables key: {key}"),
                 }
                 .emit_global();
@@ -53,7 +53,7 @@ impl RedDBRuntime {
             };
             if suffix != "column" {
                 crate::telemetry::operator_event::OperatorEvent::SchemaCorruption {
-                    collection: "red_config".to_string(),
+                    collection: "red.config".to_string(),
                     detail: format!("unexpected tenant_tables suffix: {key}"),
                 }
                 .emit_global();
@@ -73,7 +73,7 @@ impl RedDBRuntime {
     }
 
     /// Replay every persisted `MaterializedViewDescriptor` from the
-    /// `red_materialized_view_defs` system collection (issue #593
+    /// `red.materialized_view.definitions` system collection (issue #593
     /// slice 9a). For each descriptor, re-parse the original SQL,
     /// extract the `QueryExpr::CreateView` it produced, and populate
     /// the in-memory registries (`inner.views` and

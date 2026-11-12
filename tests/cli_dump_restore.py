@@ -42,8 +42,12 @@ class DumpRestore(unittest.TestCase):
         row = next(record["fields"] for record in records if record.get("collection") == "roundtrip")
         self.assertEqual(row, {"id": {"$int": "9223372036854775807"},
                                "payload": payload, "enabled": True, "absent": None})
-        self.assertFalse(any(record.get("collection", "").startswith(("red.", "__red_schema_"))
-                             or record.get("collection") == "red" for record in records))
+        self.assertFalse(any(
+            (record.get("collection", "").startswith("red.")
+             and record.get("collection") != "red.config")
+            or record.get("collection", "").startswith("__red_schema_")
+            or record.get("collection") == "red"
+            for record in records))
         target = self.root / "target.rdb"
         self.cli("restore", "--path", target, "-i", dump)
         _, restored = self.dump(target, "restored.jsonl")
@@ -90,12 +94,12 @@ class DumpRestore(unittest.TestCase):
         dump = self.root / "selected.jsonl"
         self.cli("dump", "--path", source, "--collection", "original", "-o", dump)
         records = [json.loads(line) for line in dump.read_text(encoding="utf-8").splitlines()]
-        self.assertEqual({r.get("collection") for r in records}, {"original", "red_config"})
+        self.assertEqual({r.get("collection") for r in records}, {"original", "red.config"})
         target = self.root / "config-target.rdb"
         self.cli("restore", "--path", target, "--collection", "renamed", "-i", dump)
         _, restored = self.dump(target, "config-restored.jsonl")
         def custom_config(records):
-            return [r for r in records if r.get("collection") == "red_config"
+            return [r for r in records if r.get("collection") == "red.config"
                     and r["fields"].get("key") == "red.config.demo.enabled"]
         self.assertEqual(custom_config(restored), custom_config(records))
         query = self.cli("query", "--path", target, "--json",
@@ -103,6 +107,23 @@ class DumpRestore(unittest.TestCase):
         self.assertFalse(json.loads(query.stdout)["data"]["rows"][0]["enabled"])
         self.assertEqual([r["fields"] for r in restored if r.get("collection") == "renamed"],
                          [{"id": 1}])
+
+    def test_restore_accepts_legacy_config_identity_and_republishes_canonical(self):
+        legacy = self.root / "legacy-config.jsonl"
+        legacy.write_text(json.dumps({
+            "collection": "red_config",
+            "fields": {"key": "red.config.legacy.enabled", "value": True},
+        }) + "\n", encoding="utf-8")
+        target = self.root / "legacy-config.rdb"
+        self.cli("restore", "--path", target, "-i", legacy)
+
+        _, restored = self.dump(target, "legacy-config-restored.jsonl")
+        rows = [r for r in restored
+                if r.get("collection") == "red.config"
+                and r["fields"].get("key") == "red.config.legacy.enabled"]
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["fields"]["value"])
+        self.assertFalse(any(r.get("collection") == "red_config" for r in restored))
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 //! The values are configurable through the standard precedence chain
 //! used elsewhere in the boot path:
 //!
-//!   flag > red_config > env > built-in default
+//!   flag > red.config > env > built-in default
 //!
 //! Built-in defaults preserve the existing request envelope and add a
 //! CPU-sized synchronous execution bound:
@@ -15,7 +15,7 @@
 //!     (issue #934; 0 disables; one slot is reserved when possible)
 //!
 //! Each knob is validated at parse time and at resolution time so a
-//! stale red_config value cannot corrupt the running server.
+//! stale red.config value cannot corrupt the running server.
 
 /// Lower bound for `handler_timeout_ms`. Anything below this is so
 /// short the deadline trips on healthy requests; we reject the value.
@@ -105,7 +105,7 @@ pub fn validate_retry_after_secs(value: u64) -> Result<u64, String> {
 
 /// CLI-layer input. Each pair holds the already-validated value coming
 /// from a flag and from an env var, respectively. The resolver applies
-/// the `flag > red_config > env > default` precedence using these
+/// the `flag > red.config > env > default` precedence using these
 /// inputs plus a config-store lookup.
 #[derive(Debug, Default, Clone)]
 pub struct HttpLimitsCliInput {
@@ -149,7 +149,7 @@ impl HttpLimitsResolved {
     }
 }
 
-/// Apply the `flag > red_config > env > default` chain.
+/// Apply the `flag > red.config > env > default` chain.
 ///
 /// `config_lookup` is a closure so this function is independent of the
 /// runtime/config-store type — keeps the resolver pure and testable.
@@ -261,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn flag_wins_over_red_config() {
+    fn flag_wins_over_canonical_config() {
         let input = HttpLimitsCliInput {
             max_handlers_flag: Some(16),
             execution_workers_flag: Some(4),
@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn red_config_wins_over_env() {
+    fn canonical_config_wins_over_env() {
         let input = HttpLimitsCliInput {
             max_handlers_env: Some(99),
             execution_workers_env: Some(12),
@@ -321,8 +321,8 @@ mod tests {
     }
 
     #[test]
-    fn invalid_red_config_is_ignored_in_favor_of_lower_layers() {
-        // Garbage in red_config — must not break boot. Env value wins;
+    fn invalid_canonical_config_is_ignored_in_favor_of_lower_layers() {
+        // Garbage in red.config — must not break boot. Env value wins;
         // if env is absent, default wins.
         let input = HttpLimitsCliInput {
             max_handlers_env: Some(11),
@@ -335,7 +335,7 @@ mod tests {
             ("red.http.retry_after_secs", "9999"), // rejected by validate
         ]));
         let resolved = resolve_http_limits(&input, lookup);
-        // max_handlers: red_config invalid -> env (11)
+        // max_handlers: red.config invalid -> env (11)
         assert_eq!(resolved.max_handlers, 11);
         assert_eq!(
             resolved.execution_workers,
@@ -343,9 +343,9 @@ mod tests {
                 .execution_workers
                 .min(11)
         );
-        // handler_timeout_ms: red_config invalid, no env -> default
+        // handler_timeout_ms: red.config invalid, no env -> default
         assert_eq!(resolved.handler_timeout_ms, DEFAULT_HANDLER_TIMEOUT_MS);
-        // retry_after_secs: red_config invalid, no env -> default
+        // retry_after_secs: red.config invalid, no env -> default
         assert_eq!(resolved.retry_after_secs, DEFAULT_RETRY_AFTER_SECS);
     }
 
@@ -418,7 +418,7 @@ mod tests {
             17
         );
 
-        // red_config over env
+        // red.config over env
         let input = HttpLimitsCliInput {
             max_inflight_per_principal_env: Some(17),
             ..Default::default()

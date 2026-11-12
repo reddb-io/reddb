@@ -3093,47 +3093,6 @@ mod tests {
         assert_eq!(keyed_probe(&adopted, "sealed"), None);
     }
 
-    #[test]
-    #[ignore = "diagnostic microbenchmark; no timing assertions"]
-    fn key_lookup_scaling_diagnostic() {
-        use std::{hint::black_box, time::Instant};
-        for count in [100, 10_000, 100_000] {
-            let mut segment = GrowingSegment::new(1, "keys");
-            segment
-                .bulk_insert(
-                    (1..=count)
-                        .map(|id| keyed_row(id, &format!("key-{id}"), 1, 0))
-                        .collect(),
-                )
-                .expect("rows");
-            let key = format!("key-{count}");
-            let started = Instant::now();
-            for _ in 0..1000 {
-                assert_eq!(
-                    keyed_probe(black_box(&segment), black_box(&key)),
-                    Some(EntityId::new(count))
-                );
-            }
-            let indexed = started.elapsed();
-            let started = Instant::now();
-            for _ in 0..1000 {
-                let mut found = None;
-                segment.for_each_fast(|entity| {
-                    if SegmentKeyLookup::key(entity) == Some(black_box(key.as_str())) {
-                        found = Some(entity.id);
-                        return false;
-                    }
-                    true
-                });
-                assert_eq!(black_box(found), Some(EntityId::new(count)));
-            }
-            eprintln!(
-                "rows={count} reads=1000 indexed={indexed:?} scan={:?}",
-                started.elapsed()
-            );
-        }
-    }
-
     fn pruning_node(id: u64) -> UnifiedEntity {
         UnifiedEntity::graph_node(EntityId::new(id), "mixed", "person", Default::default())
     }

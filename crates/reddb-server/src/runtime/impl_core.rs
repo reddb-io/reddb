@@ -1664,12 +1664,12 @@ impl RedDBRuntime {
             // Schema + Sequence DDL (Phase 1.3 PG parity).
             //
             // Schemas are lightweight logical namespaces: a CREATE SCHEMA call
-            // just registers the name in `red_config` under `schema.{name}`.
+            // just registers the name in `red.config` under `schema.{name}`.
             // Table lookups still happen by collection name; clients using
             // `schema.table` qualified names collapse to collection `schema.table`.
             //
             // Sequences persist a 64-bit counter + metadata (start, increment)
-            // in `red_config` under `sequence.{name}.*`. Scalar callers
+            // in `red.config` under `sequence.{name}.*`. Scalar callers
             // `nextval('name')` / `currval('name')` arrive with the MVCC phase
             // once we have a proper mutating-function dispatch path; for now the
             // DDL just establishes the catalog entry so clients don't error.
@@ -1706,7 +1706,7 @@ impl RedDBRuntime {
                         q.name
                     )));
                 }
-                // Remove marker from red_config via set to null.
+                // Remove marker from red.config via set to null.
                 store.set_config_tree(&key, &crate::serde_json::Value::Null);
                 let suffix = if q.cascade {
                     " (CASCADE accepted — tables untouched)"

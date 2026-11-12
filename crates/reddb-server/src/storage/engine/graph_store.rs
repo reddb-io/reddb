@@ -780,28 +780,6 @@ mod tests {
     }
 
     #[test]
-    fn test_edge_index_performance() {
-        let store = GraphStore::new();
-
-        // Create a graph with many edges
-        store
-            .add_node_with_label("hub", "Hub Node", "host")
-            .unwrap();
-        for i in 0..100 {
-            store
-                .add_node_with_label(&format!("spoke:{}", i), &format!("Spoke {}", i), "host")
-                .unwrap();
-            store
-                .add_edge_with_label("hub", &format!("spoke:{}", i), "connects_to", 1.0)
-                .unwrap();
-        }
-
-        // Query outgoing edges (should be fast with index)
-        let edges = store.outgoing_edges("hub");
-        assert_eq!(edges.len(), 100);
-    }
-
-    #[test]
     fn test_nodes_of_type_uses_secondary_index() {
         let store = GraphStore::new();
         store

@@ -14,7 +14,7 @@
 //! resume code path **in-process** by:
 //!
 //! 1. Setting up a target collection with N rows missing a column.
-//! 2. Manually writing a partial checkpoint into `red_migrations`
+//! 2. Manually writing a partial checkpoint into `red.migration.definitions`
 //!    (simulating "we crashed after batch K of N/batch").
 //! 3. Re-issuing `APPLY MIGRATION` and asserting the engine resumes
 //!    from the checkpoint without re-applying the first K batches.

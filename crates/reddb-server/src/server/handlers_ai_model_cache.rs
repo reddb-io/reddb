@@ -36,7 +36,7 @@ use reddb_file::{
 };
 use reddb_types::Value;
 
-const RED_CONFIG_COLLECTION: &str = "red_config";
+const RED_CONFIG_COLLECTION: &str = "red.config";
 const AI_MODEL_KEY_PREFIX: &str = "red.config.ai.models.";
 const AI_LOCAL_CACHE_DIR_KEY: &str = "red.config.ai.local.cache_dir";
 const AI_LOCAL_FIXTURE_DIR_KEY: &str = "red.config.ai.local.fixture_dir";

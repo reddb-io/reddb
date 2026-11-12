@@ -165,7 +165,7 @@ const OUTBOX_MAX_BYTES: u64 = 10 * (1 << 30);
 /// Running estimate of bytes pending in event queues (approximate; not decremented on consume).
 static OUTBOX_APPROX_BYTES: AtomicU64 = AtomicU64::new(0);
 
-pub(super) const QUEUE_META_COLLECTION: &str = "red_queue_meta";
+pub(super) const QUEUE_META_COLLECTION: &str = "red.queue.meta";
 pub(super) const KIND_QUEUE_PUSH_DEDUP: &str = "queue_push_dedup";
 const QUEUE_POSITION_CENTER: u64 = u64::MAX / 2;
 const WORK_DEFAULT_GROUP: &str = "_work_default";
@@ -3549,7 +3549,7 @@ fn delivered_message_json(
 
 /// Slice 10 of issue #527 — render-time scan of pending entries
 /// per (queue, group) for `queue_pending_gauge` exposition. Walks
-/// `red_queue_meta` live so the gauge cannot drift from the source
+/// `red.queue.meta` live so the gauge cannot drift from the source
 /// of truth.
 pub(crate) fn pending_counts_by_group(
     store: &UnifiedStore,

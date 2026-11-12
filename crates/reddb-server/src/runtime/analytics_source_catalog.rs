@@ -1,4 +1,4 @@
-//! Analytics source profile catalog persisted in `red_config`.
+//! Analytics source profile catalog persisted in `red.config`.
 //!
 //! Source profiles describe how ordinary table/document collections represent
 //! event-shaped facts. They do not create or redirect raw event storage.
@@ -264,7 +264,7 @@ fn take_ident(tokens: &[&str], cursor: &mut usize, label: &str) -> RedDBResult<S
 }
 
 fn read_latest_registry_json(store: &UnifiedStore) -> Option<String> {
-    let manager = store.get_collection("red_config")?;
+    let manager = store.get_collection("red.config")?;
     let mut all = manager.query_all(|_| true);
     all.sort_by_key(|entity| std::cmp::Reverse(entity.id.raw()));
     for entity in all {

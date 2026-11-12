@@ -5,23 +5,23 @@
 //!
 //! 1. `REDDB_<MATRIX_KEY_UPPERCASED_WITH_DOTS_AS_UNDERSCORES>` env vars
 //!    — in-memory only, re-read every boot, never persisted to
-//!    red_config. Designed for hot-fix ("restart with
+//!    red.config. Designed for hot-fix ("restart with
 //!    `REDDB_DURABILITY_MODE=async` to trade safety for speed").
 //!
 //! 2. Mounted config file at `/etc/reddb/config.json` (override via
 //!    `REDDB_CONFIG_FILE=<path>`) — parsed once on boot, values
-//!    written into red_config with write-if-absent semantics. Existing
+//!    written into red.config with write-if-absent semantics. Existing
 //!    rows from a prior boot, `SET CONFIG`, or boot defaults are not
 //!    overwritten.
 //!
-//! 3. Persisted `red_config` rows — values the user set via `SET
+//! 3. Persisted `red.config` rows — values the user set via `SET
 //!    CONFIG` in a previous session.
 //!
 //! 4. Hard-coded defaults from the `config_matrix::MATRIX`, some of
-//!    which are healed into red_config before the config file overlay
+//!    which are healed into red.config before the config file overlay
 //!    runs.
 //!
-//! Tiers 2, 3, 4 are all read through the same red_config collection.
+//! Tiers 2, 3, 4 are all read through the same red.config collection.
 //! Tier 1 sits in an in-memory map; readers must consult that map first.
 //!
 //! Env var mapping is restricted to keys declared in the matrix:
@@ -68,7 +68,7 @@ pub fn config_file_path() -> String {
 }
 
 /// Read the mounted config file (if present) and seed its keys into
-/// red_config with write-if-absent semantics. Returns `Ok(n)` with
+/// red.config with write-if-absent semantics. Returns `Ok(n)` with
 /// the number of keys written. Missing file = silent 0. Malformed
 /// file logs a warning and returns 0 — boot never fails on a bad
 /// overlay file.
@@ -130,7 +130,7 @@ pub fn apply_config_file(store: &UnifiedStore, path: &str) -> usize {
 }
 
 /// Single-pass presence check so `apply_config_file` doesn't rescan
-/// red_config for every key.
+/// red.config for every key.
 fn key_already_present(store: &UnifiedStore, key: &str) -> bool {
     match store.try_get_config(key) {
         Ok(value) => value.is_some(),

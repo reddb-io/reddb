@@ -47,16 +47,3 @@ impl std::fmt::Debug for SecureKey {
         write!(f, "SecureKey(***)")
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_secure_key_zeroing() {
-        let key = SecureKey::new(b"secret");
-        drop(key);
-        // Can't easily check memory after drop safely in Rust tests without UB,
-        // but we trust the implementation logic.
-    }
-}

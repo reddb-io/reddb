@@ -9,7 +9,7 @@
 //! callers.
 use super::*;
 
-const RUNTIME_INDEX_REGISTRY_COLLECTION: &str = "red_index_registry";
+const RUNTIME_INDEX_REGISTRY_COLLECTION: &str = "red.index.registry";
 
 /// Borrow one source row, projecting only indexed fields and document bodies.
 /// Neither callback may re-enter storage: the visitor holds publication locks.
@@ -622,6 +622,21 @@ mod tests {
     use super::*;
     use crate::storage::{EntityData, EntityId, RowData, UnifiedEntity};
     use reddb_types::Value;
+
+    #[test]
+    fn runtime_index_registry_uses_canonical_control_collection_name() {
+        assert_eq!(RUNTIME_INDEX_REGISTRY_COLLECTION, "red.index.registry");
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE registry_name_probe (id INTEGER)")
+            .expect("table");
+        runtime
+            .execute_query("CREATE INDEX registry_name_idx ON registry_name_probe (id)")
+            .expect("index");
+        let collections = runtime.db().store().list_collections();
+        assert!(collections.iter().any(|name| name == "red.index.registry"));
+        assert!(!collections.iter().any(|name| name == "red_index_registry"));
+    }
 
     #[test]
     fn resident_index_backfill_borrows_payloads_and_still_enforces_workspace_budget() {

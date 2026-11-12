@@ -2543,7 +2543,7 @@ mod tests {
             )
             .expect("persisted verification default");
         store.persist().expect("publish tombstones");
-        let manager = store.get_collection("red_config").expect("config");
+        let manager = store.get_collection("red.config").expect("config");
         let pager = Arc::clone(store.pager().expect("pager"));
         let data = Arc::new(crate::storage::engine::BTree::new(pager));
         manager
@@ -3262,7 +3262,7 @@ mod tests {
             .runtime
             .db()
             .store()
-            .get_collection("red_ask_audit")
+            .get_collection("red.ask.audit")
             .is_none());
 
         for _ in 0..5 {
@@ -3972,8 +3972,8 @@ mod tests {
             .runtime
             .db()
             .store()
-            .get_collection("red_ask_audit")
-            .expect("red_ask_audit collection");
+            .get_collection("red.ask.audit")
+            .expect("red.ask.audit collection");
         manager
             .query_all(|entity| entity.data.as_row().is_some())
             .into_iter()

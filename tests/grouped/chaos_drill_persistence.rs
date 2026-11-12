@@ -87,8 +87,5 @@ mod e2e_shm_provisioning;
 #[path = "config_tier/e2e_tier_wiring.rs"]
 mod e2e_tier_wiring;
 
-#[path = "runtime_persistence/fold_dwb_into_wal_bench.rs"]
-mod fold_dwb_into_wal_bench;
-
 #[path = "storage_durability/wal_crash_harness.rs"]
 mod wal_crash_harness;

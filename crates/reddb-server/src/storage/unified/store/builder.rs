@@ -157,57 +157,6 @@ mod tests {
         assert!(store.get_refs_to(vuln_id).is_empty());
     }
 
-    /// Manual perf check for the #113 fast path. Pollutes `reverse_refs`
-    /// with a large dictionary of unrelated entries, then deletes a fresh
-    /// batch of cross-ref-free rows. The pre-fix code paid O(|reverse_refs|)
-    /// in `values_mut()` per call; the fast path makes it O(|batch|).
-    /// `cargo test --release -p reddb-server -- --ignored unindex_cross_refs_batch_fast_path_perf --nocapture`.
-    #[test]
-    #[ignore]
-    fn unindex_cross_refs_batch_fast_path_perf() {
-        let store = UnifiedStore::new();
-
-        // Seed a fat reverse_refs dictionary by creating cross-refs in
-        // a *separate* set of entities. These entries will be untouched
-        // by the delete batch below.
-        const SEED: usize = 50_000;
-        let mut sources = Vec::with_capacity(SEED);
-        let mut targets = Vec::with_capacity(SEED);
-        for i in 0..SEED {
-            let s = UnifiedEntity::table_row(store.next_entity_id(), "src", (i + 1) as u64, vec![]);
-            sources.push(store.insert_auto("src", s).unwrap());
-            let t = UnifiedEntity::table_row(store.next_entity_id(), "tgt", (i + 1) as u64, vec![]);
-            targets.push(store.insert_auto("tgt", t).unwrap());
-        }
-        for (s, t) in sources.iter().zip(targets.iter()) {
-            store
-                .add_cross_ref("src", *s, "tgt", *t, RefType::RelatedTo, 1.0)
-                .unwrap();
-        }
-
-        // Now insert a fresh batch of plain rows (no cross-refs at all).
-        const BATCH: usize = 100;
-        let mut victims = Vec::with_capacity(BATCH);
-        for i in 0..BATCH {
-            let row =
-                UnifiedEntity::table_row(store.next_entity_id(), "rows", (i + 1) as u64, vec![]);
-            victims.push(store.insert_auto("rows", row).unwrap());
-        }
-
-        let before_hits = store.unindex_cross_refs_fast_path_hits();
-        let start = std::time::Instant::now();
-        store.delete_batch("rows", &victims).unwrap();
-        let elapsed = start.elapsed();
-        let after_hits = store.unindex_cross_refs_fast_path_hits();
-
-        eprintln!(
-            "delete_batch({BATCH}) over {SEED} unrelated reverse-refs: \
-             {elapsed:?}, fast_path_hits +{}",
-            after_hits - before_hits,
-        );
-        assert_eq!(after_hits - before_hits, 1);
-    }
-
     #[test]
     fn test_expand_refs() {
         let store = UnifiedStore::new();
@@ -476,7 +425,7 @@ mod tests {
             }),
         );
         let initial = store
-            .get_collection("red_config")
+            .get_collection("red.config")
             .map(|m| m.query_all(|_| true).len())
             .unwrap_or(0);
         assert!(initial >= 3);
@@ -484,7 +433,7 @@ mod tests {
 
         let reopened = UnifiedStore::open(&path).unwrap();
         let first_reopen = reopened
-            .get_collection("red_config")
+            .get_collection("red.config")
             .map(|m| m.query_all(|_| true).len())
             .unwrap_or(0);
         assert_eq!(first_reopen, initial);
@@ -492,7 +441,7 @@ mod tests {
 
         let reopened_again = UnifiedStore::open(&path).unwrap();
         let second_reopen = reopened_again
-            .get_collection("red_config")
+            .get_collection("red.config")
             .map(|m| m.query_all(|_| true).len())
             .unwrap_or(0);
         assert_eq!(second_reopen, initial);
@@ -503,7 +452,7 @@ mod tests {
         let store = UnifiedStore::new();
         let config_rows = |store: &UnifiedStore| {
             store
-                .get_collection("red_config")
+                .get_collection("red.config")
                 .map(|m| m.query_all(|_| true).len())
                 .unwrap_or(0)
         };
@@ -527,7 +476,7 @@ mod tests {
         store.set_config_tree("red.system", &crate::json!({ "os": "linux", "pid": 1_u64 }));
         let ids_of = |store: &UnifiedStore| {
             let mut ids: Vec<u64> = store
-                .get_collection("red_config")
+                .get_collection("red.config")
                 .map(|m| m.query_all(|_| true).iter().map(|e| e.id.raw()).collect())
                 .unwrap_or_default();
             ids.sort_unstable();
@@ -557,12 +506,12 @@ mod tests {
     }
 
     fn add_duplicate_system_value(store: &UnifiedStore) {
-        let mut row = UnifiedEntity::table_row(EntityId::new(0), "red_config", 0, vec![]);
+        let mut row = UnifiedEntity::table_row(EntityId::new(0), "red.config", 0, vec![]);
         row.data = EntityData::Row(RowData::with_names(
             vec![Value::text("red.system.value"), Value::text("duplicate")],
             vec!["key".into(), "value".into()],
         ));
-        store.insert_auto("red_config", row).unwrap();
+        store.insert_auto("red.config", row).unwrap();
     }
 
     #[test]
@@ -599,7 +548,7 @@ mod tests {
             );
             assert_eq!(
                 replay
-                    .get_collection("red_config")
+                    .get_collection("red.config")
                     .unwrap()
                     .query_all(|_| true)
                     .len(),
@@ -633,7 +582,7 @@ mod tests {
             );
             assert_eq!(
                 store
-                    .get_collection("red_config")
+                    .get_collection("red.config")
                     .unwrap()
                     .query_all(|_| true)
                     .len(),
@@ -722,7 +671,7 @@ mod tests {
                 );
                 assert_eq!(
                     recovered
-                        .get_collection("red_config")
+                        .get_collection("red.config")
                         .unwrap()
                         .query_all(|_| true)
                         .len(),

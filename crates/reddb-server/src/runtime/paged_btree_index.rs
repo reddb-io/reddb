@@ -54,7 +54,7 @@ impl SecondaryIndexProjector for BtreeProjection {
         entity: &UnifiedEntity,
         output: &mut [u8; SECONDARY_KEY_BYTES_MAX],
     ) -> Result<Option<usize>, StoreError> {
-        if !matches!(entity.kind, EntityKind::TableRow { .. }) {
+        if entity.xmax != 0 || !matches!(entity.kind, EntityKind::TableRow { .. }) {
             return Ok(None);
         }
         let EntityData::Row(row) = &entity.data else {
@@ -617,7 +617,7 @@ impl RuntimeBtreeIndex {
                 }
             }
         }
-        let mut needs_scan = false;
+        let needs_scan = std::cell::Cell::new(false);
         let mut accept = |entity: &UnifiedEntity| -> Result<(), StoreError> {
             let required_bytes = crate::storage::unified::memory_size::entity_bytes(entity);
             if required_bytes > read_bytes_max {
@@ -634,7 +634,7 @@ impl RuntimeBtreeIndex {
                     return Ok(());
                 }
                 if key.get(scope.prefix.len()) != Some(&scope.family) {
-                    needs_scan = true;
+                    needs_scan.set(true);
                     return Ok(());
                 }
             }
@@ -718,9 +718,13 @@ impl RuntimeBtreeIndex {
             };
             if let Some(entity) = manager.try_get(entity_id, read_bytes_max)? {
                 accept(&entity)?;
+            } else {
+                // A persisted posting without its physical row cannot prove
+                // that the indexed range is empty or complete.
+                needs_scan.set(true);
             }
         }
-        if needs_scan {
+        if needs_scan.get() {
             return Ok(None);
         }
         if !preserve_index_order {
@@ -868,7 +872,7 @@ impl RedDBRuntime {
             schema,
         });
         let mut digest = Sha256::new();
-        digest.update(b"runtime-btree-ordered-v1");
+        digest.update(b"runtime-btree-current-ordered-v2");
         digest.update([
             u8::from(index.unique),
             u8::from(projection.schema.is_some()),
@@ -888,7 +892,7 @@ impl RedDBRuntime {
             }
         }
         let identity = SecondaryIndexIdentity {
-            codec_version: 1,
+            codec_version: 2,
             definition: digest.finalize().into(),
         };
         self.db().store().register_secondary_index(
@@ -936,6 +940,7 @@ mod tests {
     use reddb_engine::storage::collection_read::{
         CollectionCursor, CollectionRead, EncodedRecord, PagedCollection,
     };
+    use reddb_rql::ast::{FieldRef, Filter};
     use reddb_types::Value;
     use std::sync::Arc;
 
@@ -1215,6 +1220,39 @@ mod tests {
                 "SELECT id FROM ordered_rows WHERE id BETWEEN 9 AND 12 ORDER BY id"
             ),
             [9, 10, 11, 12]
+        );
+    }
+
+    #[test]
+    fn paged_btree_dangling_posting_requires_authoritative_scan() {
+        let (_directory, runtime, _options) = fixture();
+        let filter = Filter::Between {
+            field: FieldRef::column("ordered_rows", "id"),
+            low: Value::Integer(9),
+            high: Value::Integer(9),
+        };
+        let candidates = runtime
+            .index_store_ref()
+            .paged_btree_lookup("ordered_rows", &filter)
+            .expect("initial lookup")
+            .expect("paged provider");
+        assert_eq!(candidates.len(), 1);
+        let physical_id = candidates[0];
+        runtime
+            .db()
+            .store()
+            .get_collection("ordered_rows")
+            .expect("ordered rows")
+            .delete(physical_id)
+            .expect("remove indexed physical row");
+
+        assert!(
+            runtime
+                .index_store_ref()
+                .paged_btree_lookup("ordered_rows", &filter)
+                .expect("dangling lookup")
+                .is_none(),
+            "a posting without its physical entity cannot prove an empty result"
         );
     }
 

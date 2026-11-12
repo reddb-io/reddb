@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.33.5
+
+### Patch Changes
+
+- [#2795](https://github.com/reddb-io/reddb/pull/2795) [`f82ac20`](https://github.com/reddb-io/reddb/commit/f82ac208f409779eb34bc6c3005e187cfab7a4f4) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Use canonical `red.*` names for runtime-owned collections and new CLI dumps while continuing to accept legacy collection names during migration, WAL recovery, authorization, and restore.
+
+- [#2794](https://github.com/reddb-io/reddb/pull/2794) [`437dd32`](https://github.com/reddb-io/reddb/commit/437dd3229903b9191612dcdc4f8835f7a43a8443) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Canonicalize legacy internal collection aliases before IAM policy matching and system-schema DDL protection, preventing `red_*` aliases from bypassing `red.*` prefix rules.
+
+- [#2793](https://github.com/reddb-io/reddb/pull/2793) [`802996c`](https://github.com/reddb-io/reddb/commit/802996c21f1569dc28cb7a37659e0879c10d7841) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Prevent stale or reclaimed secondary-index postings from hiding live MVCC rows after restart, and publish the runtime index registry under its canonical `red.index.registry` name.
+
+## 1.33.4
+
+### Patch Changes
+
+- [#2791](https://github.com/reddb-io/reddb/pull/2791) [`09aa50f`](https://github.com/reddb-io/reddb/commit/09aa50f299f6fff5d02d892262497de2909b3cad) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Rebuild paged HASH and BTREE artifacts as current-state indexes so MVCC updates and deletes remain discoverable after checkpoint and cold reopen, and store runtime index metadata under the canonical `red.index.registry` control collection.
+
 ## 1.33.3
 
 ### Patch Changes

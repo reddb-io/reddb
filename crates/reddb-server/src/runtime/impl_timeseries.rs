@@ -970,7 +970,7 @@ fn timeseries_max_series_per_collection(
 }
 
 fn latest_usize_config(store: &crate::storage::unified::UnifiedStore, key: &str) -> Option<usize> {
-    let manager = store.get_collection("red_config")?;
+    let manager = store.get_collection("red.config")?;
     let mut newest: Option<(u64, usize)> = None;
     manager.for_each_entity(|entity| {
         let Some(row) = entity.data.as_row() else {
