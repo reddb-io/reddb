@@ -1722,6 +1722,7 @@ impl UnifiedStore {
         if actions.actions.is_empty() {
             return Ok(());
         }
+        self.ensure_pager_writeback_available()?;
         #[cfg(test)]
         if self
             .test_require_deferred_publication_fence
@@ -1823,6 +1824,7 @@ impl UnifiedStore {
         if self.is_read_only() {
             return Ok(());
         }
+        self.ensure_pager_writeback_available()?;
         let actions: Vec<StoreWalAction> = actions.into_iter().collect();
         if deferred_store_wal_capture_active() {
             let captured = capture_deferred_store_wal_actions(actions);

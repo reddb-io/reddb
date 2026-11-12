@@ -56,6 +56,31 @@ const DEFAULT_CACHE_SIZE: usize = 10_000;
 #[cfg(test)]
 static COW_ATOMIC_WRITE_TEST_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct PagerWriteFault {
+    offset: Option<u64>,
+    prefix_bytes: usize,
+}
+
+#[cfg(test)]
+fn pager_write_fault() -> &'static Mutex<Option<PagerWriteFault>> {
+    static FAULT: std::sync::OnceLock<Mutex<Option<PagerWriteFault>>> = std::sync::OnceLock::new();
+    FAULT.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) fn test_fail_next_pager_write(offset: Option<u64>, prefix_bytes: usize) {
+    let mut fault = pager_write_fault()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(fault.is_none(), "pager write fault is already armed");
+    *fault = Some(PagerWriteFault {
+        offset,
+        prefix_bytes,
+    });
+}
+
 /// Pager configuration
 #[derive(Debug, Clone)]
 pub struct PagerConfig {
@@ -151,6 +176,28 @@ impl reddb_file::VfsFile for NativePagerFile {
         self.0.set_len(len)
     }
     fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        #[cfg(test)]
+        {
+            let offset = std::io::Seek::stream_position(&mut self.0)?;
+            let fault = {
+                let mut fault = pager_write_fault()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if fault.is_some_and(|fault| fault.offset.is_none_or(|target| target == offset)) {
+                    fault.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(fault) = fault {
+                let prefix_bytes = fault.prefix_bytes.min(bytes.len().saturating_sub(1));
+                std::io::Write::write_all(&mut self.0, &bytes[..prefix_bytes])?;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "injected pager disk full",
+                ));
+            }
+        }
         std::io::Write::write_all(&mut self.0, bytes)
     }
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
