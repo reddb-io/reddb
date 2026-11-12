@@ -197,21 +197,34 @@ impl<P: PageStore> BTree<P> {
         let _writer = self.writer.lock();
         let root_id = self.root_page_id();
 
-        // Empty tree - create root leaf
+        // Dispatch before reserving the existing-tree page buffers. A bulk
+        // checkpoint can create proof pages on the same worker stack.
         if root_id == 0 {
-            let mut page = self.pager.allocate_page(PageType::BTreeLeaf)?;
-            clear_leaf_cells(&mut page);
-            insert_into_leaf(&mut page, key, value)?;
-            init_leaf_links(&mut page, 0, 0);
-            page.update_checksum();
-            let new_root = page.page_id();
-            self.pager.write_page(new_root, page)?;
-            *self.root_page_id.write().map_err(|e| {
-                BTreeError::LockPoisoned(format!("insert: root_page_id write lock: {e}"))
-            })? = new_root;
-            return Ok(());
+            return self.insert_encoded_new_root(key, value);
         }
+        self.insert_encoded_existing_root(root_id, key, value)
+    }
 
+    fn insert_encoded_new_root(&self, key: &[u8], value: &[u8]) -> BTreeResult<()> {
+        let mut page = self.pager.allocate_page(PageType::BTreeLeaf)?;
+        clear_leaf_cells(&mut page);
+        insert_into_leaf(&mut page, key, value)?;
+        init_leaf_links(&mut page, 0, 0);
+        page.update_checksum();
+        let new_root = page.page_id();
+        self.pager.write_page(new_root, page)?;
+        *self.root_page_id.write().map_err(|e| {
+            BTreeError::LockPoisoned(format!("insert: root_page_id write lock: {e}"))
+        })? = new_root;
+        Ok(())
+    }
+
+    fn insert_encoded_existing_root(
+        &self,
+        root_id: u32,
+        key: &[u8],
+        value: &[u8],
+    ) -> BTreeResult<()> {
         // D2 fastpath: if key > cached rightmost high_key, go directly to
         // the cached leaf without descending from the root. This cuts
         // tree descent entirely for monotonic append workloads (timeseries,

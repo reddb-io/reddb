@@ -7,3 +7,5 @@ Bind native paged data, indexes, retired generations and double-write recovery t
 Guarded readers and writers also reject a truncated reserved double-write area before serving surviving stale home pages, without consuming recovery evidence.
 
 Preserve streaming MCU recovery for legacy files, and reject prepared batches or incompatible read budgets before they can bypass guarded recovery.
+
+Keep initial tree insertion separate from the existing-tree buffers so cold multimodel checkpoints can allocate generation proofs on ordinary worker stacks.

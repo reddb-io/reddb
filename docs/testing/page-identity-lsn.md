@@ -283,3 +283,17 @@ changing source bytes. The tests require a normal guarded write after the reject
 successful legacy commit after the rejected upgrade, followed by cold reads of exact values.
 All five prepared-batch cases passed in 1.02 seconds. All four MCU SQL cases passed in 20.39 seconds,
 including 43,200 streamed rows after reboot and reader/writer rejection of an insufficient budget.
+
+The integrated head `40367df51` passed all 59 portable cases in 264.75 seconds, 365 file-codec
+cases in 9.63 seconds and ten native integrity journeys in 342.03 seconds. The repeated DWB I/O
+matrix passed in 67.31 seconds, and the overflow before-image undo/republication journey passed
+in 78.67 seconds. The minimal-feature MCU compile check and engine/file/server formatting passed.
+
+Offline recovery passed 55 of 56 cases: the existing repeated multimodel checkpoint/reopen journey
+overflowed its child thread's stack on a cold `DROP HLL`. A debugger trace identified checkpoint
+bulk insertion entering the general insertion frame while creating a new root and its proof pages.
+The new-root and existing-root insertion paths now run in separate frames under the same writer
+lock; data writes, root publication and split behavior retain their previous ordering. The unchanged
+journey then passed in 23.37 seconds, using the default worker stack. No stack limit was increased.
+An explicit readonly control also checks private replay of an authorized `Ready` frame, unchanged
+source bytes, later writer consumption and another durable write/cold recovery.

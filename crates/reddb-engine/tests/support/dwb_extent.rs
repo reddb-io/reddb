@@ -128,6 +128,51 @@ fn guarded_cold_open_rejects_truncation_before_serving_a_surviving_old_home() {
 }
 
 #[test]
+fn guarded_read_only_open_uses_the_ready_frame_without_consuming_the_source() {
+    let evidence = ready_snapshot();
+    let reader = Pager::open_owned(
+        MemoryFile::from_bytes(evidence.clone()),
+        "ready-reader.rdb".into(),
+        PagerConfig {
+            read_only: true,
+            ..PagerConfig::default()
+        },
+        NoWal,
+        false,
+    )
+    .expect("authorized private recovery view");
+    let home = reader.read_page(2).expect("private recovered home");
+    assert_eq!(home.read_cell(0).expect("recovered cell").1, b"committed");
+    assert!(reader.write_page(2, vault(b"forbidden")).is_err());
+    assert!(reader
+        .with_file(|file| file.bytes.borrow().as_slice() == evidence
+            && file.operations.borrow().is_empty())
+        .expect("reader preserves source evidence"));
+    let mut source = reader.into_inner();
+    let old = pager_io::read_page(&mut source, 2, true).expect("source home remains old");
+    assert_eq!(old.read_cell(0).expect("old cell").1, b"before");
+
+    let writer = Pager::open_owned(
+        source,
+        "ready-reader.rdb".into(),
+        PagerConfig::default(),
+        NoWal,
+        false,
+    )
+    .expect("writer can still consume the original frame");
+    let home = writer.read_page(2).expect("durably recovered home");
+    assert_eq!(home.read_cell(0).expect("recovered cell").1, b"committed");
+    writer
+        .write_page(2, vault(b"progress"))
+        .expect("subsequent write");
+    writer.sync().expect("durable progress");
+    let mut cold = MemoryFile::from_bytes(writer.into_inner().durable.into_inner());
+    pager_io::recover_from_dwb(&mut cold).expect("repeat recovery after progress");
+    let home = pager_io::read_page(&mut cold, 2, true).expect("cold current home");
+    assert_eq!(home.read_cell(0).expect("current cell").1, b"progress");
+}
+
+#[test]
 fn unguarded_short_bootstrap_preserves_legacy_recovery_behavior() {
     let pager = Pager::open_owned(
         MemoryFile::default(),
