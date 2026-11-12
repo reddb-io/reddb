@@ -6,11 +6,12 @@ The `CREATE TABLE` statement defines a new collection with a typed schema.
 
 ```sql
 CREATE TABLE table_name (
-  column_name DataType [NOT NULL] [DEFAULT value] [UNIQUE],
+  column_name DataType [NOT NULL] [DEFAULT value] [UNIQUE] [DESCRIPTION 'text'],
   ...
   [ [CONSTRAINT constraint_name] UNIQUE (column [, ...]) ]
 ) [WITH TTL duration]
   [WITH CONTEXT INDEX ON (column [, ...])]
+  [WITH (DESCRIPTION = 'text')]
 ```
 
 ## Example
@@ -27,6 +28,12 @@ CREATE TABLE hosts (
   last_seen Timestamp
 )
 ```
+
+Descriptions are stored with the collection contract and surfaced through
+`red.collections` and `red.columns`. A native type such as `EMAIL`, `MONEY`, or
+`IP` gives the agent more precise schema context. Descriptions can be edited
+later with `ALTER COLLECTION hosts SET DESCRIPTION '...'` or
+`ALTER COLLECTION hosts ALTER COLUMN ip SET DESCRIPTION '...'`.
 
 ## Uniqueness
 

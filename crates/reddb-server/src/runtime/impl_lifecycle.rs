@@ -73,6 +73,8 @@ fn system_keyed_collection_contract(
     let now = crate::utils::now_unix_millis() as u128;
     crate::physical::CollectionContract {
         name: name.to_string(),
+        description: None,
+        description_generated: false,
         declared_model: model,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
         origin: crate::physical::ContractOrigin::Implicit,
@@ -546,6 +548,7 @@ impl RedDBRuntime {
                 schema_vocabulary: parking_lot::RwLock::new(
                     crate::runtime::schema_vocabulary::SchemaVocabulary::new(),
                 ),
+                description_enrichment: parking_lot::Mutex::new(Default::default()),
                 slow_query_logger: {
                     // Issue #205 — slow-query sink lives in the same
                     // directory the audit log uses, so backup/restore
@@ -1471,7 +1474,29 @@ impl RedDBRuntime {
         &self,
         event: crate::runtime::schema_vocabulary::DdlEvent,
     ) {
-        self.inner.schema_vocabulary.write().on_ddl(event);
+        self.inner.schema_vocabulary.write().on_ddl(event.clone());
+        self.schedule_collection_description_enrichment(&event);
+    }
+
+    pub(crate) fn schema_vocabulary_sync_descriptions(&self, collection: &str) {
+        let Some(contract) = self.inner.db.collection_contract(collection) else {
+            return;
+        };
+        let columns = contract
+            .declared_columns
+            .iter()
+            .filter_map(|column| {
+                column
+                    .description
+                    .as_ref()
+                    .map(|description| (column.name.clone(), description.clone()))
+            })
+            .collect::<Vec<_>>();
+        self.inner.schema_vocabulary.write().update_descriptions(
+            collection,
+            contract.description.as_deref(),
+            &columns,
+        );
     }
 
     /// Lookup `token` in the schema-vocabulary reverse index. Returns

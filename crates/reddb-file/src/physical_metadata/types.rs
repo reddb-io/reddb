@@ -281,6 +281,8 @@ pub struct PhysicalAnalyticsViewDescriptor {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PhysicalDeclaredColumnContract {
     pub name: String,
+    pub description: Option<String>,
+    pub description_generated: bool,
     pub data_type: String,
     pub sql_type: Option<PhysicalSqlTypeName>,
     pub not_null: bool,
@@ -345,6 +347,8 @@ pub struct PhysicalAiPolicy {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PhysicalCollectionContract {
     pub name: String,
+    pub description: Option<String>,
+    pub description_generated: bool,
     pub declared_model: String,
     pub schema_mode: String,
     pub origin: String,

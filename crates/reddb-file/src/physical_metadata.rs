@@ -1046,6 +1046,14 @@ fn declared_column_contract_json_value(
         serde_json::Value::String(column.name.clone()),
     );
     object.insert(
+        "description".to_string(),
+        optional_string_json(column.description.as_ref()),
+    );
+    object.insert(
+        "description_generated".to_string(),
+        serde_json::Value::Bool(column.description_generated),
+    );
+    object.insert(
         "data_type".to_string(),
         serde_json::Value::String(column.data_type.clone()),
     );
@@ -1105,6 +1113,11 @@ fn declared_column_contract_from_json_value(
     let object = expect_object(value, "physical declared column contract")?;
     Ok(PhysicalDeclaredColumnContract {
         name: json_string_required(object, "name")?,
+        description: optional_string_field(object, "description")?,
+        description_generated: object
+            .get("description_generated")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         data_type: json_string_required(object, "data_type")?,
         sql_type: optional_sql_type_name_from_json_value(object.get("sql_type"))?,
         not_null: json_bool_required(object, "not_null")?,
@@ -1125,6 +1138,14 @@ fn collection_contract_json_value(contract: &PhysicalCollectionContract) -> serd
     object.insert(
         "name".to_string(),
         serde_json::Value::String(contract.name.clone()),
+    );
+    object.insert(
+        "description".to_string(),
+        optional_string_json(contract.description.as_ref()),
+    );
+    object.insert(
+        "description_generated".to_string(),
+        serde_json::Value::Bool(contract.description_generated),
     );
     object.insert(
         "declared_model".to_string(),
@@ -1265,6 +1286,11 @@ fn collection_contract_from_json_value(
     let object = expect_object(value, "physical collection contract")?;
     Ok(PhysicalCollectionContract {
         name: json_string_required(object, "name")?,
+        description: optional_string_field(object, "description")?,
+        description_generated: object
+            .get("description_generated")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         declared_model: json_string_required(object, "declared_model")?,
         schema_mode: json_string_required(object, "schema_mode")?,
         origin: json_string_required(object, "origin")?,
