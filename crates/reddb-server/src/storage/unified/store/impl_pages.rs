@@ -4,6 +4,28 @@ use parking_lot::RwLock;
 const CHECKPOINT_BATCH_BYTES: usize = 1024 * 1024;
 const CHECKPOINT_BATCH_ROWS: usize = 512;
 
+fn restore_published_tree(
+    pager: &Arc<Pager>,
+    root: u32,
+    proofs: Option<&reddb_file::page_proof::CatalogProofs>,
+    required: bool,
+) -> Result<BTree, StoreError> {
+    let proof = proofs.and_then(|proofs| proofs.get(&root)).copied();
+    let tree = match (root, proof) {
+        (0, _) if proofs.is_some() => BTree::new_verified(Arc::clone(pager)),
+        (_, Some(proof)) => BTree::with_verified_root(Arc::clone(pager), root, proof),
+        (_, None) if required && proofs.is_some() => {
+            return Err(page_integrity(
+                root,
+                None,
+                "missing published tree generation proof",
+            ));
+        }
+        _ => return Ok(BTree::with_root(Arc::clone(pager), root)),
+    };
+    tree.map_err(|error| page_integrity(root, None, error.to_string()))
+}
+
 #[derive(Debug)]
 struct SystemCollectionCollision {
     survivor: String,
@@ -62,12 +84,15 @@ struct CheckpointTreeBuilder {
 }
 
 impl CheckpointTreeBuilder {
-    fn new(pager: &Arc<Pager>) -> Self {
-        Self {
-            tree: Arc::new(BTree::new(Arc::clone(pager))),
+    fn new(pager: &Arc<Pager>) -> Result<Self, StoreError> {
+        pager
+            .fence_required_capabilities(reddb_file::file_format::FILE_CAPABILITY_TREE_PROOFS)
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        Ok(Self {
+            tree: UnifiedStore::new_derived_btree(pager)?,
             records: Vec::new(),
             bytes: 0,
-        }
+        })
     }
 
     fn push(&mut self, record: (Vec<u8>, Vec<u8>)) -> Result<(), StoreError> {
@@ -476,6 +501,38 @@ fn read_meta_payload(pager: &Pager) -> Result<Option<Vec<u8>>, StoreError> {
 }
 
 impl UnifiedStore {
+    pub(super) fn new_derived_btree(pager: &Arc<Pager>) -> Result<Arc<BTree>, StoreError> {
+        let header = pager
+            .header()
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        let tree = if header.required_capabilities
+            & reddb_file::file_format::FILE_CAPABILITY_TREE_PROOFS
+            != 0
+        {
+            BTree::new_verified(Arc::clone(pager))
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+        } else {
+            BTree::new(Arc::clone(pager))
+        };
+        Ok(Arc::new(tree))
+    }
+
+    pub(super) fn immutable_paged_base(&self) -> Result<bool, StoreError> {
+        if self.config.resident_memory_bytes_max.is_some() {
+            return Ok(true);
+        }
+        let Some(pager) = &self.pager else {
+            return Ok(false);
+        };
+        let header = pager
+            .header()
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        Ok(
+            header.required_capabilities & reddb_file::file_format::FILE_CAPABILITY_TREE_PROOFS
+                != 0,
+        )
+    }
+
     /// Offline reconstruction uses the same catalog-chain proof and publication
     /// ordering as the live store, with an exclusively owned destination pager.
     pub(crate) fn publish_native_catalog(pager: &Pager, metadata: &[u8]) -> Result<(), PagerError> {
@@ -504,11 +561,12 @@ impl UnifiedStore {
         previous: Option<&Arc<BTree>>,
         mut encode: impl FnMut(&UnifiedEntity, Option<Metadata>) -> Option<Vec<u8>>,
     ) -> Result<Arc<BTree>, StoreError> {
+        let previous = previous.filter(|tree| tree.has_page_proofs());
         if let Some((base, overlay)) = manager.backing_overlay(&mut encode) {
             use reddb_engine::storage::collection_read::{CollectionRead, MergedCollection};
             let merged = MergedCollection::new(base.as_ref(), overlay);
             let mut cursor = merged.cursor()?;
-            let mut builder = CheckpointTreeBuilder::new(pager);
+            let mut builder = CheckpointTreeBuilder::new(pager)?;
             while let Some(record) = cursor.next_record(
                 usize::try_from(self.config.resident_memory_bytes_max.unwrap_or(u64::MAX))
                     .unwrap_or(usize::MAX),
@@ -543,7 +601,7 @@ impl UnifiedStore {
                             return Ok(());
                         }
                     }
-                    let mut replacement = CheckpointTreeBuilder::new(pager);
+                    let mut replacement = CheckpointTreeBuilder::new(pager)?;
                     if let Some(previous) = previous {
                         replacement.copy_prefix(previous, matched)?;
                     }
@@ -573,7 +631,7 @@ impl UnifiedStore {
                     return Ok(Arc::clone(previous));
                 }
             }
-            let mut replacement = CheckpointTreeBuilder::new(pager);
+            let mut replacement = CheckpointTreeBuilder::new(pager)?;
             if let Some(previous) = previous {
                 replacement.copy_prefix(previous, matched)?;
             }
@@ -661,6 +719,50 @@ impl UnifiedStore {
         if catalog_epoch != 0 {
             reddb_file::native_store::encode_native_paged_ownership_epoch(metadata, catalog_epoch)
                 .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        }
+        if pager
+            .header()
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+            .required_capabilities
+            & reddb_file::file_format::FILE_CAPABILITY_TREE_PROOFS
+            != 0
+        {
+            let mut proofs = reddb_file::page_proof::CatalogProofs::new();
+            for tree in live
+                .values()
+                .chain(keys.values().flat_map(PublishedKeyIndex::trees))
+                .chain(
+                    retired
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| !remove.contains(index))
+                        .map(|(_, entry)| &entry.tree),
+                )
+            {
+                if let Some((root, proof)) = tree
+                    .seal_page_proofs()
+                    .map_err(|error| page_integrity(tree.root_page_id(), None, error.to_string()))?
+                {
+                    if root != 0 {
+                        if proofs.insert(root, proof).is_some_and(|old| old != proof) {
+                            return Err(page_integrity(
+                                root,
+                                None,
+                                "conflicting tree generation proofs",
+                            ));
+                        }
+                    }
+                }
+            }
+            if live
+                .values()
+                .chain(keys.values().flat_map(PublishedKeyIndex::trees))
+                .any(|tree| tree.root_page_id() != 0 && !proofs.contains_key(&tree.root_page_id()))
+            {
+                return Err(page_integrity(1, None, "live tree has no generation proof"));
+            }
+            reddb_file::page_proof::encode_catalog(metadata, &proofs)
+                .map_err(|error| StoreError::Serialization(error.to_string()))?;
         }
         if self.config.resident_memory_bytes_max.is_some() {
             pager
@@ -1522,9 +1624,10 @@ impl UnifiedStore {
         for (name, manager) in collections.iter() {
             let mut reusable = None;
             if raw_replay {
-                if let (Some(previous), Some(tree)) =
-                    (previous_versions.get(name), indices.get(name))
-                {
+                if let (Some(previous), Some(tree)) = (
+                    previous_versions.get(name),
+                    indices.get(name).filter(|tree| tree.has_page_proofs()),
+                ) {
                     let mut current = CheckpointVersion {
                         manager: Arc::downgrade(manager),
                         segments: manager.checkpoint_revisions(),
@@ -1717,6 +1820,31 @@ impl UnifiedStore {
                 .header()
                 .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
             let prepared = header.requires_disk_residency();
+            let proofs = reddb_file::native_store::decode_native_paged_catalog_tree_proofs(content)
+                .map_err(|error| StoreError::Serialization(error.to_string()))?;
+            if proofs.is_some()
+                && (header.required_capabilities
+                    & reddb_file::file_format::FILE_CAPABILITY_TREE_PROOFS
+                    == 0
+                    || header.manifest_reference.page_id == 0)
+            {
+                return Err(page_integrity(
+                    1,
+                    None,
+                    "tree proofs require an independently sealed catalog and reader capability",
+                ));
+            }
+            if proofs.as_ref().is_some_and(|proofs| {
+                proofs.iter().any(|(&root, proof)| {
+                    root >= header.page_count || proof.reference.page_id >= header.page_count
+                })
+            }) {
+                return Err(page_integrity(
+                    1,
+                    None,
+                    "tree proof points outside allocation",
+                ));
+            }
             let resume = if prepared {
                 reddb_file::native_resume::decode_catalog_resume(content)
                     .map_err(|error| StoreError::Serialization(error.to_string()))?
@@ -2110,7 +2238,8 @@ impl UnifiedStore {
                     }
                     // Load B-tree with root page if it exists
                     if root_page > 0 || counters.is_some() {
-                        let btree = BTree::with_root(Arc::clone(pager), root_page);
+                        let btree =
+                            restore_published_tree(pager, root_page, proofs.as_ref(), true)?;
 
                         // Load all entities from B-tree into the collection
                         let mut cursor = btree.cursor_first().map_err(|err| {
@@ -2233,25 +2362,27 @@ impl UnifiedStore {
                         }
                         let key_tree = counters
                             .and_then(|state| state.key_index_root)
-                            .map(|root| Arc::new(BTree::with_root(Arc::clone(pager), root)));
+                            .map(|root| {
+                                restore_published_tree(pager, root, proofs.as_ref(), true)
+                                    .map(Arc::new)
+                            })
+                            .transpose()?;
                         if let Some(counters) = counters {
                             self.key_indices.write().insert(
                                 name.clone(),
                                 PublishedKeyIndex {
                                     indexed: key_tree.is_some(),
                                     secondary: counters.secondary_indices.iter().map(|(name, index)| {
-                                        (name.clone(), super::secondary_index::PublishedSecondaryIndex {
+                                        Ok((name.clone(), super::secondary_index::PublishedSecondaryIndex {
                                             identity: super::secondary_index::SecondaryIndexIdentity {
                                                 codec_version: index.codec_version,
                                                 definition: index.definition,
                                             },
-                                            tree: Arc::new(BTree::with_root(Arc::clone(pager), index.root_page)),
-                                        })
-                                    }).collect(),
+                                            tree: Arc::new(restore_published_tree(pager, index.root_page, proofs.as_ref(), true)?),
+                                        }))
+                                    }).collect::<Result<_, StoreError>>()?,
                                     source: Arc::downgrade(&btree),
-                                    tree: key_tree.clone().unwrap_or_else(|| {
-                                        Arc::new(BTree::with_root(Arc::clone(pager), 0))
-                                    }),
+                                    tree: match &key_tree { Some(tree) => Arc::clone(tree), None => Arc::new(restore_published_tree(pager, 0, proofs.as_ref(), true)?) },
                                 },
                             );
                         }
@@ -2404,7 +2535,12 @@ impl UnifiedStore {
                         ));
                     }
                     self.retired_btrees.lock().push(RetiredBTree {
-                        tree: Arc::new(BTree::with_root(Arc::clone(pager), root)),
+                        tree: Arc::new(restore_published_tree(
+                            pager,
+                            root,
+                            proofs.as_ref(),
+                            false,
+                        )?),
                         published: true,
                     });
                 }
@@ -2413,7 +2549,12 @@ impl UnifiedStore {
                     .copied()
                     .filter(|root| !already_retired.contains(root))
                 {
-                    self.retire_btree(Arc::new(BTree::with_root(Arc::clone(pager), root)));
+                    self.retire_btree(Arc::new(restore_published_tree(
+                        pager,
+                        root,
+                        proofs.as_ref(),
+                        false,
+                    )?));
                 }
                 let deferred = reddb_file::decode_native_paged_deferred_pages(content, &mut pos)
                     .map_err(|e| StoreError::Serialization(e.to_string()))?;
@@ -2619,9 +2760,12 @@ impl UnifiedStore {
                 deferred_rows: Some(Arc::default()),
                 has_unprojected_rows: false,
             };
-            if let (Some(previous), Some(tree)) =
-                (previous_versions.get(name), btree_indices.get(name))
-            {
+            if let (Some(previous), Some(tree)) = (
+                previous_versions.get(name),
+                btree_indices
+                    .get(name)
+                    .filter(|tree| tree.has_page_proofs()),
+            ) {
                 if previous.manager.ptr_eq(&version.manager)
                     && previous.segments == version.segments
                     && previous.format_version == version.format_version
@@ -2635,9 +2779,12 @@ impl UnifiedStore {
                     continue;
                 }
             }
-            if let (Some(previous), Some(tree)) =
-                (previous_versions.get(name), btree_indices.get(name))
-            {
+            if let (Some(previous), Some(tree)) = (
+                previous_versions.get(name),
+                btree_indices
+                    .get(name)
+                    .filter(|tree| tree.has_page_proofs()),
+            ) {
                 if previous.manager.ptr_eq(&version.manager)
                     && previous.format_version == version.format_version
                 {

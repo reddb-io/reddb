@@ -207,6 +207,10 @@ impl ProofState {
 }
 
 impl<P: PageStore> TreePageStore<P> {
+    pub(super) fn has_page_proofs(&self) -> bool {
+        self.proof.is_some()
+    }
+
     pub(super) fn legacy(inner: Arc<P>) -> Self {
         Self {
             inner,

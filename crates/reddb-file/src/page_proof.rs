@@ -26,6 +26,92 @@ pub struct PageProofRoot {
     pub generation: u64,
 }
 
+pub type CatalogProofs = std::collections::BTreeMap<u32, PageProofRoot>;
+const CATALOG_MAGIC: &[u8; 4] = b"RDTP";
+const CATALOG_ENTRY_BYTES: usize = 4 + PROOF_REFERENCE_BYTES + 8;
+
+fn invalid_catalog() -> crate::RdbFileError {
+    crate::RdbFileError::InvalidOperation("invalid catalog tree generation proofs".into())
+}
+
+fn validate_catalog(proofs: &CatalogProofs) -> crate::RdbFileResult<()> {
+    let mut nodes = std::collections::BTreeSet::new();
+    for (&data, proof) in proofs {
+        if data == 0
+            || proof.reference.page_id == 0
+            || proof.reference.digest == [0; 32]
+            || proof.generation == 0
+            || proofs.contains_key(&proof.reference.page_id)
+            || !nodes.insert(proof.reference.page_id)
+        {
+            return Err(invalid_catalog());
+        }
+    }
+    Ok(())
+}
+
+/// The enclosing independently sealed catalog binds each data root to its proof.
+pub fn encode_catalog(out: &mut Vec<u8>, proofs: &CatalogProofs) -> crate::RdbFileResult<()> {
+    validate_catalog(proofs)?;
+    let count = u32::try_from(proofs.len()).map_err(|_| invalid_catalog())?;
+    out.extend_from_slice(CATALOG_MAGIC);
+    out.extend_from_slice(&1_u32.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    let mut reference = [0; PROOF_REFERENCE_BYTES];
+    for (&data, proof) in proofs {
+        out.extend_from_slice(&data.to_le_bytes());
+        encode_reference(&mut reference, proof.reference);
+        out.extend_from_slice(&reference);
+        out.extend_from_slice(&proof.generation.to_le_bytes());
+    }
+    Ok(())
+}
+
+pub fn decode_catalog(
+    data: &[u8],
+    position: &mut usize,
+) -> crate::RdbFileResult<Option<CatalogProofs>> {
+    if data.get(*position..position.saturating_add(4)) != Some(CATALOG_MAGIC.as_slice()) {
+        return Ok(None);
+    }
+    let header = data
+        .get(*position..position.saturating_add(12))
+        .ok_or_else(invalid_catalog)?;
+    if header[4..8] != 1_u32.to_le_bytes() {
+        return Err(invalid_catalog());
+    }
+    let count = u32::from_le_bytes(header[8..12].try_into().expect("proof count"));
+    *position += 12;
+    if u64::from(count) > (data.len().saturating_sub(*position) / CATALOG_ENTRY_BYTES) as u64 {
+        return Err(invalid_catalog());
+    }
+    let mut proofs = CatalogProofs::new();
+    let mut previous = 0;
+    for _ in 0..count {
+        let entry = &data[*position..*position + CATALOG_ENTRY_BYTES];
+        *position += CATALOG_ENTRY_BYTES;
+        let root = u32::from_le_bytes(entry[..4].try_into().expect("data root"));
+        if root <= previous {
+            return Err(invalid_catalog());
+        }
+        previous = root;
+        proofs.insert(
+            root,
+            PageProofRoot {
+                reference: decode_reference(&entry[4..4 + PROOF_REFERENCE_BYTES])
+                    .ok_or_else(invalid_catalog)?,
+                generation: u64::from_le_bytes(
+                    entry[4 + PROOF_REFERENCE_BYTES..]
+                        .try_into()
+                        .expect("generation"),
+                ),
+            },
+        );
+    }
+    validate_catalog(&proofs)?;
+    Ok(Some(proofs))
+}
+
 pub fn page_digest(bytes: &[u8; crate::PAGED_PAGE_SIZE]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
 }

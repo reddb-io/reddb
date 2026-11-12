@@ -184,6 +184,7 @@ pub fn decode_catalog_resume(data: &[u8]) -> RdbFileResult<Option<CatalogResume>
     decode_native_paged_retired_trees(data, &mut position)?;
     decode_native_paged_deferred_pages(data, &mut position)?;
     decode_native_paged_ownership_epoch(data, &mut position)?;
+    crate::page_proof::decode_catalog(data, &mut position)?;
     if data.get(position..position.saturating_add(4)) != Some(MAGIC.as_slice()) {
         return Ok(None);
     }

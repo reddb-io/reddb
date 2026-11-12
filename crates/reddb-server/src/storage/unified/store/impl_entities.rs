@@ -66,7 +66,7 @@ impl UnifiedStore {
         skip_btree: bool,
     ) -> Result<(), StoreError> {
         let collection = Self::canonical_collection(collection);
-        let skip_btree = skip_btree || self.config.resident_memory_bytes_max.is_some();
+        let skip_btree = skip_btree || self.immutable_paged_base()?;
         if entities.is_empty() {
             return Ok(());
         }
@@ -96,7 +96,7 @@ impl UnifiedStore {
 
         if !skip_btree
             && !Self::deferred_store_wal_capture_active()
-            && self.config.resident_memory_bytes_max.is_none()
+            && !self.immutable_paged_base()?
         {
             let Some(pager) = &self.pager else {
                 let records: Vec<Vec<u8>> =
@@ -158,7 +158,7 @@ impl UnifiedStore {
         skip_btree: bool,
     ) -> Result<(), StoreError> {
         let collection = Self::canonical_collection(collection);
-        let skip_btree = skip_btree || self.config.resident_memory_bytes_max.is_some();
+        let skip_btree = skip_btree || self.immutable_paged_base()?;
         if entities.is_empty() {
             return Ok(());
         }
@@ -192,7 +192,7 @@ impl UnifiedStore {
 
         if !skip_btree
             && !Self::deferred_store_wal_capture_active()
-            && self.config.resident_memory_bytes_max.is_none()
+            && !self.immutable_paged_base()?
         {
             let Some(pager) = &self.pager else {
                 let records: Vec<Vec<u8>> =
@@ -678,10 +678,12 @@ impl UnifiedStore {
         // Captured transactions stay WAL-only until commit; pager flushes must
         // never make an unfinished row durable.
         let mut registry_dirty = false;
-        if let Some(pager) = self.pager.as_ref().filter(|_| {
-            !Self::deferred_store_wal_capture_active()
-                && self.config.resident_memory_bytes_max.is_none()
-        }) {
+        let immutable = self.immutable_paged_base()?;
+        if let Some(pager) = self
+            .pager
+            .as_ref()
+            .filter(|_| !Self::deferred_store_wal_capture_active() && !immutable)
+        {
             if let Some(entity) = manager.get(id) {
                 let mut btree_indices = self.btree_indices.write();
                 let btree = btree_indices
@@ -919,7 +921,7 @@ impl UnifiedStore {
         let mut t_flush = std::time::Duration::ZERO;
         if !skip_btree
             && !Self::deferred_store_wal_capture_active()
-            && self.config.resident_memory_bytes_max.is_none()
+            && !self.immutable_paged_base()?
         {
             if let (Some(pager), Some(batch)) = (&self.pager, serialized.as_ref()) {
                 let t0 = std::time::Instant::now();
@@ -1046,7 +1048,7 @@ impl UnifiedStore {
         // or lands mid-rebuild and tears the tree.
         let paged_btree = if persist_record
             && !Self::deferred_store_wal_capture_active()
-            && self.config.resident_memory_bytes_max.is_none()
+            && !self.immutable_paged_base()?
         {
             self.get_or_create_btree(collection)
         } else {
@@ -1461,10 +1463,7 @@ impl UnifiedStore {
 
         // Remove from B-tree index if active
         let mut registry_dirty = false;
-        if self.pager.is_some()
-            && !self.is_read_only()
-            && self.config.resident_memory_bytes_max.is_none()
-        {
+        if self.pager.is_some() && !self.is_read_only() && !self.immutable_paged_base()? {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
                 let root_before = btree.root_page_id();
@@ -1530,10 +1529,7 @@ impl UnifiedStore {
 
         let mut registry_dirty = false;
         let mut updated_tree = false;
-        if self.pager.is_some()
-            && !self.is_read_only()
-            && self.config.resident_memory_bytes_max.is_none()
-        {
+        if self.pager.is_some() && !self.is_read_only() && !self.immutable_paged_base()? {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
                 updated_tree = true;

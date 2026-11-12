@@ -36,12 +36,11 @@ when its LSN is zero. A functional counterexample reproduces an older value afte
 MVCC update: checkpoint until the allocator reuses a recorded collection-page address, replace
 the current page with that address's old checksummed image, then read at cold boot.
 
-The current resume catalog stores root addresses, counts and index definitions; it does not seal
+The original resume catalog stored root addresses, counts and index definitions without sealing
 every expected page image independently. A stamp read from the suspect page itself is not an
-independent generation proof. This case remains unfinished under scenario 2, with its rejecting
-regression retained on the follow-up branch. Resolving it requires generation evidence anchored
-outside the suspect page, including interior/leaf and overflow ownership; an extra local CRC
-comparison alone must not be presented as complete lost-write detection.
+independent generation proof. The follow-up now binds tree-image maps to the independent catalog
+root; the original SQL counterexample passes. Scenario 2 still requires qualification of recovery
+source authority, legacy retirement and offline rewrites before merge.
 
 Reference fault patterns: [MariaDB's future-LSN test recalculates the page CRC](https://github.com/MariaDB/server/blob/11.8/mysql-test/suite/innodb/t/corrupted_during_recovery.test).
 [PostgreSQL's amcheck documentation](https://www.postgresql.org/docs/current/amcheck.html) distinguishes
@@ -111,18 +110,23 @@ deep salvage journey must recover every readable row without increasing the work
 cargo test --locked -p reddb-io-engine --test portable page_proofs_cover -- --test-threads=1
 ```
 
-The SQL runtime still constructs legacy trees. The reproduced SQL counterexample therefore remains
-unfixed until integration completes. Required publication work remains:
+The SQL runtime now builds verified checkpoint replacement trees and restores their descriptors at
+cold boot, including data, key and secondary roots. The `RDTP` catalog extension precedes resume
+counters and stores sorted data-root, proof-reference and generation tuples. Its required reader
+capability is fenced in both superblocks before proof-dependent pages. Once enabled, the published
+base is immutable between checkpoints: embedded writes use their existing resident/WAL path instead
+of changing a sealed base in place. Legacy trees are replaced at checkpoint rather than scanning the
+database to create proofs during ordinary startup.
 
-- Persist and restore the exact proof descriptor for every live data, key and secondary tree,
-  together with retained retired trees; empty trees must not orphan their proof nodes.
-- Fence the tree-proof required reader capability in both superblocks before dependent bytes, while
-  preserving legacy compatibility and bounded startup/preparation.
+Required publication work remains:
+
+- Qualify live/retired proof descriptors, empty trees, legacy preparation and offline rewrites.
 - Resolve interrupted proof/catalog publication through the existing WAL ownership and before-image
   protocol. Validate the recovery source before consuming evidence; an old complete DWB frame must
   not acquire authority from its own CRC.
-- Make the existing SQL rejection test pass, retain positive HASH/BTREE/scan and UNIQUE behavior,
-  and qualify crash, I/O-failure, retirement and reopen boundaries before merge.
+- Retain positive HASH/BTREE/scan and UNIQUE behavior and qualify crash, I/O-failure, retirement
+  and reopen boundaries before merge. The original reused-page SQL test passed locally after the
+  runtime integration (one selected test, 13.31 seconds); this is not the full scenario qualification.
 
 Resource sketch for the new map: at most four proof-page reads plus the requested data page, all
 using the existing bounded pager cache; no resident page-to-hash inventory. The four compact path

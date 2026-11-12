@@ -57,6 +57,10 @@ impl<P: PageStore> BTree<P> {
         Self::with_verified_root(pager, 0, reddb_file::page_proof::PageProofRoot::default())
     }
 
+    pub fn has_page_proofs(&self) -> bool {
+        self.pager.has_page_proofs()
+    }
+
     /// Restore independently sealed page-image authority without scanning data.
     pub fn with_verified_root(
         pager: Arc<P>,
