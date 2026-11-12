@@ -62,6 +62,78 @@ impl PublishedKeyIndex {
 }
 
 impl UnifiedStore {
+    /// Check a registered index against its immutable checkpoint source. This
+    /// is an operator pass: O(rows * log(postings)), one bounded row at a time.
+    /// Source read failures propagate; only derived-tree failures are findings.
+    pub(crate) fn verify_persisted_secondary_index(
+        &self,
+        collection: &str,
+        name: &str,
+        limit_bytes: usize,
+    ) -> Result<Option<String>, StoreError> {
+        use reddb_engine::storage::collection_read::{CollectionCursor, PagedCollection};
+        let _publication = self.vault_publication_lock.lock();
+        let specs = self.secondary_index_specs.read();
+        let spec = specs
+            .get(collection)
+            .and_then(|indices| indices.get(name))
+            .ok_or_else(|| StoreError::Serialization("index has no persisted projection".into()))?;
+        let trees = self.btree_indices.read();
+        let Some(data) = trees.get(collection) else {
+            return Ok(Some("collection has no checkpoint generation".into()));
+        };
+        let keys = self.key_indices.read();
+        let index = keys
+            .get(collection)
+            .filter(|generation| generation.source.ptr_eq(&Arc::downgrade(data)))
+            .and_then(|generation| generation.secondary.get(name))
+            .filter(|index| index.identity == spec.identity);
+        let Some(index) = index else {
+            return Ok(Some("missing or incompatible persisted index".into()));
+        };
+        let source = PagedCollection::new(Arc::clone(data));
+        let mut cursor = source.scan()?;
+        let mut key = [0; SECONDARY_KEY_BYTES_MAX];
+        let mut expected = 0u64;
+        while let Some(record) = cursor.next_record(limit_bytes)? {
+            let (entity, _) = record.decode_with_budget(self.format_version(), limit_bytes)?;
+            let Some(length) = spec.projector.project(&entity, &mut key)? else {
+                continue;
+            };
+            if length > key.len() {
+                return Err(StoreError::Serialization(
+                    "secondary key exceeds its bounded buffer".into(),
+                ));
+            }
+            let mut posting = [0; SECONDARY_KEY_BYTES_MAX + 8];
+            posting[..length].copy_from_slice(&key[..length]);
+            posting[length..length + 8].copy_from_slice(&entity.id.raw().to_be_bytes());
+            match index
+                .tree
+                .get_with_budget(&posting[..length + 8], limit_bytes)
+            {
+                Ok(Some(value)) if value.is_empty() => expected += 1,
+                Ok(_) => {
+                    return Ok(Some(format!(
+                        "missing or invalid posting for physical entity {}",
+                        entity.id.raw()
+                    )))
+                }
+                Err(error) => return Ok(Some(format!("index read failed: {error}"))),
+            }
+        }
+        let handle = SecondaryIndexRead::with_source(Arc::clone(&index.tree), Arc::clone(data));
+        let mut actual = 0u64;
+        if let Err(error) = handle.try_for_each(|_, _| {
+            actual += 1;
+            Ok(())
+        }) {
+            return Ok(Some(format!("index inventory failed: {error}")));
+        }
+        Ok((actual != expected)
+            .then(|| format!("posting count mismatch: expected {expected}, found {actual}")))
+    }
+
     /// Register a projection for subsequent checkpoints. The definition must
     /// include method, ordered columns, uniqueness and any collation options.
     /// A changed fingerprint is never allowed to reuse the previous tree.
