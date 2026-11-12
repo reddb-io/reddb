@@ -1170,6 +1170,14 @@ impl StoreCommitCoordinator {
                 // Readers validate ownership but never reclaim or finish an epoch.
                 return Ok(());
             };
+            if !plan.release.is_empty() && header.manifest_reference.page_id != 0 {
+                // A crash can leave only one header naming the selected catalog.
+                // Retiring its predecessor must first fence that same authority
+                // into both fallback copies, before any allocator writeback.
+                pager
+                    .publish_manifest_reference(header.manifest_reference)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+            }
             pager
                 .recover_unowned_pages(&plan.release)
                 .map_err(|error| io::Error::other(error.to_string()))?;
