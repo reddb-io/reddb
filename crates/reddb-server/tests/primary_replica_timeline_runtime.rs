@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
+use reddb_server::serde_json;
 use reddb_server::{RedDBOptions, RedDBRuntime, ReplicationConfig, StorageDeployPreset};
 
 #[path = "support/primary_replica_file.rs"]
