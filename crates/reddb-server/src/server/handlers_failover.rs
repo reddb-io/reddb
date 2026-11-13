@@ -316,11 +316,13 @@ mod tests {
     use crate::replication::ReplicationConfig;
     use crate::runtime::RedDBRuntime;
     use crate::storage::backend::LocalBackend;
-    use crate::RedDBOptions;
+    use crate::{RedDBOptions, StorageDeployPreset};
     use std::path::{Path, PathBuf};
     use std::process::{Command, ExitCode};
-    use std::sync::Arc;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn promote_request() -> Vec<u8> {
         reddb_wire::replication::FailoverPromotionRequest {
@@ -452,6 +454,167 @@ mod tests {
         assert_eq!(response.status, 409, "{body}");
         assert!(body.contains("applied LSN 41"), "{body}");
         assert!(body.contains("primary LSN 42"), "{body}");
+        cleanup(&data_path, &database_key);
+    }
+
+    #[test]
+    fn admin_failover_promotion_waits_for_an_in_flight_checkpoint() {
+        let data_path = temp_data_path("checkpoint_race");
+        let database_key = format!("admin-promote-{}", crate::utils::now_unix_nanos());
+        cleanup(&data_path, &database_key);
+
+        {
+            let seed = RedDBRuntime::with_options(
+                RedDBOptions::persistent(&data_path)
+                    .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+                    .expect("native replication profile"),
+            )
+            .expect("seed runtime");
+            let payload = "x".repeat(128 * 1024);
+            for table in 0..8 {
+                seed.execute_query(&format!(
+                    "CREATE TABLE checkpoint_pad_{table} (id INTEGER, payload TEXT)"
+                ))
+                .expect("create checkpoint padding table");
+                for id in 0..16 {
+                    seed.execute_query(&format!(
+                        "INSERT INTO checkpoint_pad_{table} (id, payload) VALUES ({id}, '{payload}')"
+                    ))
+                    .expect("insert checkpoint padding row");
+                }
+            }
+            seed.checkpoint().expect("seed checkpoint");
+        }
+
+        let backend = Arc::new(LocalBackend);
+        let mut options = RedDBOptions::persistent(&data_path)
+            .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("native replica profile")
+            .with_replication(ReplicationConfig::replica("http://primary:5050"))
+            .with_replica_loop_enabled(false)
+            .with_atomic_remote_backend(backend);
+        options.remote_key = Some(database_key.clone());
+        let runtime = Arc::new(RedDBRuntime::with_options(options).expect("replica runtime"));
+        runtime.db().store().set_config_tree(
+            "replication",
+            &crate::json!({
+                "replica_id": "replica-a",
+                "state": "healthy",
+                "last_applied_lsn": 42,
+            }),
+        );
+        for table in 0..8 {
+            let manager = runtime
+                .db()
+                .store()
+                .get_collection(&format!("checkpoint_pad_{table}"))
+                .expect("checkpoint padding collection");
+            for mut entity in manager.query_all(|_| true) {
+                entity.updated_at = entity.updated_at.saturating_add(1);
+                manager.update(entity).expect("dirty checkpoint page");
+            }
+        }
+
+        let pager = Arc::clone(runtime.db().store().pager().expect("paged store"));
+        let pages_before = pager.page_count().expect("page count before checkpoint");
+        let free_before = pager
+            .free_page_count()
+            .expect("free pages before checkpoint");
+        let checkpoint_finished = Arc::new(AtomicBool::new(false));
+        let completion_order = Arc::new(AtomicUsize::new(0));
+        let checkpoint = {
+            let runtime = Arc::clone(&runtime);
+            let checkpoint_finished = Arc::clone(&checkpoint_finished);
+            let completion_order = Arc::clone(&completion_order);
+            thread::spawn(move || {
+                runtime.checkpoint().expect("concurrent checkpoint");
+                completion_order
+                    .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .expect("checkpoint completes first");
+                checkpoint_finished.store(true, Ordering::SeqCst);
+            })
+        };
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while pager.page_count().expect("checkpoint page progress") <= pages_before
+            && pager
+                .free_page_count()
+                .expect("checkpoint free-page progress")
+                == free_before
+        {
+            assert!(
+                !checkpoint_finished.load(Ordering::SeqCst),
+                "checkpoint finished before exposing an in-flight publication window"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "checkpoint did not reach page publication"
+            );
+            thread::yield_now();
+        }
+
+        let (promotion_tx, promotion_rx) = mpsc::channel();
+        let promotion = {
+            let runtime = Arc::clone(&runtime);
+            let completion_order = Arc::clone(&completion_order);
+            thread::spawn(move || {
+                let response = RedDBServer::new((*runtime).clone())
+                    .handle_admin_failover_promote(promote_request());
+                let order = completion_order.fetch_add(1, Ordering::SeqCst) + 1;
+                promotion_tx
+                    .send((response.status, response.body.to_vec(), order))
+                    .expect("report promotion result");
+            })
+        };
+
+        assert!(
+            promotion_rx
+                .recv_timeout(Duration::from_millis(10))
+                .is_err(),
+            "promotion returned while checkpoint publication was still in flight"
+        );
+        checkpoint.join().expect("checkpoint thread");
+        let (status, body, promotion_order) = promotion_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("promotion completes after checkpoint");
+        promotion.join().expect("promotion thread");
+        let body = String::from_utf8(body).expect("promotion response body");
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            promotion_order, 2,
+            "checkpoint must publish before promotion"
+        );
+
+        let history = runtime
+            .primary_replica_timeline_history()
+            .expect("read promoted timeline")
+            .expect("promoted timeline");
+        assert_eq!(history.current(), Some(reddb_file::TimelineId(2)));
+        assert_eq!(history.ancestor_lsn(reddb_file::TimelineId(2)), Some(42));
+        drop(pager);
+        drop(runtime);
+
+        let reopened = RedDBRuntime::with_options(
+            RedDBOptions::persistent(&data_path)
+                .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+                .expect("cold native profile")
+                .with_read_only(true),
+        )
+        .expect("cold open after checkpoint and promotion");
+        for table in 0..8 {
+            let rows = reopened
+                .execute_query(&format!(
+                    "SELECT id FROM checkpoint_pad_{table} ORDER BY id"
+                ))
+                .expect("cold checkpoint rows");
+            assert_eq!(rows.result.records.len(), 16, "checkpoint_pad_{table}");
+        }
+        let history = reopened
+            .primary_replica_timeline_history()
+            .expect("cold promoted timeline")
+            .expect("cold timeline");
+        assert_eq!(history.current(), Some(reddb_file::TimelineId(2)));
+        drop(reopened);
         cleanup(&data_path, &database_key);
     }
 
