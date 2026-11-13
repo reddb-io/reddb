@@ -1,5 +1,10 @@
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static ALLOW_LEGACY_CONFIG_KEYS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn canonical_key(legacy: &str) -> Option<&str> {
     legacy
         .strip_prefix("red.config.")
@@ -8,6 +13,10 @@ fn canonical_key(legacy: &str) -> Option<&str> {
 }
 
 pub(super) fn validate_config_key(key: &str) -> Result<(), StoreError> {
+    #[cfg(test)]
+    if ALLOW_LEGACY_CONFIG_KEYS.with(std::cell::Cell::get) {
+        return Ok(());
+    }
     if key.starts_with("red.") {
         return Err(StoreError::Internal(format!(
             "config key `{key}` is invalid inside red.config: omit the redundant `red.` prefix"
@@ -345,6 +354,18 @@ mod tests {
         )
     }
 
+    fn insert_persisted_legacy_config(store: &UnifiedStore, key: &str, value: Value) {
+        ALLOW_LEGACY_CONFIG_KEYS.with(|allow| {
+            assert!(
+                !allow.replace(true),
+                "legacy config test bypass cannot nest"
+            );
+            let result = store.insert_auto("red.config", config_entity(key, value));
+            allow.set(false);
+            result.expect("insert legacy config through the durable write path");
+        });
+    }
+
     fn insert_config_version(
         store: &UnifiedStore,
         key: &str,
@@ -400,20 +421,22 @@ mod tests {
     }
 
     fn stored_config_keys(store: &UnifiedStore) -> Vec<String> {
-        let mut keys: Vec<String> = store
+        let mut keys = Vec::new();
+        store
             .get_collection("red.config")
             .expect("red.config")
-            .query_all(|_| true)
-            .into_iter()
-            .filter_map(|entity| {
-                entity
+            .try_for_each_entity(usize::MAX, |entity| {
+                if let Some(key) = entity
                     .data
-                    .as_row()?
-                    .get_field("key")?
-                    .as_text()
-                    .map(ToOwned::to_owned)
+                    .as_row()
+                    .and_then(|row| row.get_field("key"))
+                    .and_then(Value::as_text)
+                {
+                    keys.push(key.to_owned());
+                }
+                true
             })
-            .collect();
+            .expect("scan every persisted config key");
         keys.sort();
         keys
     }
@@ -900,6 +923,72 @@ mod tests {
             reopened.get_config("auth.require_auth"),
             Some(Value::Boolean(false))
         );
+    }
+
+    #[test]
+    fn bounded_runtime_boot_normalization_survives_a_second_cold_reopen() {
+        let directory = tempfile::tempdir().expect("bounded config migration fixture");
+        let path = directory.path().join("legacy-bounded-runtime.rdb");
+        {
+            let mut config = UnifiedStoreConfig::default();
+            config.resident_memory_bytes_max = Some(64 * 1024 * 1024);
+            let store =
+                UnifiedStore::open_with_config(&path, config).expect("open legacy bounded store");
+            for key in REPORTED_DATABASE_KEYS {
+                insert_persisted_legacy_config(&store, key, Value::text(*key));
+            }
+            assert_eq!(
+                stored_config_keys(&store).len(),
+                REPORTED_DATABASE_KEYS.len()
+            );
+            store.persist().expect("persist legacy bounded fixture");
+            assert_eq!(
+                stored_config_keys(&store).len(),
+                REPORTED_DATABASE_KEYS.len()
+            );
+        }
+
+        let options = || crate::RedDBOptions::persistent(&path).with_bounded_disk_residency(true);
+        let expected_provider = {
+            let runtime = crate::RedDBRuntime::with_options(options())
+                .expect("bounded runtime boots and migrates every legacy config key");
+            let store = runtime.db().store();
+            assert_eq!(store.legacy_red_config_key_count().unwrap(), 0);
+            assert!(stored_config_keys(&store).len() >= REPORTED_DATABASE_KEYS.len());
+            for legacy in REPORTED_DATABASE_KEYS {
+                let canonical = canonical_key(legacy).unwrap_or(legacy);
+                assert!(
+                    store.get_config(canonical).is_some(),
+                    "first bounded boot lost {legacy} as {canonical}"
+                );
+            }
+            store
+                .get_config("ai.inference.provider")
+                .expect("migrated provider remains configured")
+        };
+
+        for reopen in 1..=2 {
+            let runtime = crate::RedDBRuntime::with_options(options())
+                .unwrap_or_else(|error| panic!("bounded cold reopen {reopen}: {error}"));
+            let store = runtime.db().store();
+            assert_eq!(store.legacy_red_config_key_count().unwrap(), 0);
+            assert!(
+                stored_config_keys(&store).len() >= REPORTED_DATABASE_KEYS.len(),
+                "cold reopen {reopen} lost migrated config rows"
+            );
+            for legacy in REPORTED_DATABASE_KEYS {
+                let canonical = canonical_key(legacy).unwrap_or(legacy);
+                assert!(
+                    store.get_config(canonical).is_some(),
+                    "cold reopen {reopen} lost {legacy} as {canonical}"
+                );
+            }
+            assert_eq!(
+                store.get_config("ai.inference.provider"),
+                Some(expected_provider.clone()),
+                "cold reopen {reopen} changed the migrated provider"
+            );
+        }
     }
 
     #[test]

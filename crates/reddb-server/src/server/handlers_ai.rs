@@ -41,10 +41,9 @@ impl RedDBServer {
             return json_response(200, JsonValue::Object(Map::new()));
         };
 
-        let entities = manager.query_all(|_| true);
         let mut root = Map::new();
 
-        for entity in entities {
+        let scan = manager.try_for_each_entity(usize::MAX, |entity| {
             if let EntityData::Row(ref row) = entity.data {
                 let (key, value) = match row.named.as_ref() {
                     Some(named) => {
@@ -58,10 +57,10 @@ impl RedDBServer {
                         let v = named.get("value").cloned().unwrap_or(Value::Null);
                         (k.to_string(), v)
                     }
-                    None => continue,
+                    None => return true,
                 };
                 if key.is_empty() || key == crate::runtime::function_catalog::REGISTRY_KEY {
-                    continue;
+                    return true;
                 }
 
                 let json_val = match &value {
@@ -76,6 +75,10 @@ impl RedDBServer {
                 let parts: Vec<&str> = key.split('.').collect();
                 insert_nested(&mut root, &parts, json_val);
             }
+            true
+        });
+        if let Err(error) = scan {
+            return json_error(500, format!("failed to read red.config: {error}"));
         }
 
         let mut wrapper = Map::new();
@@ -100,14 +103,13 @@ impl RedDBServer {
             return json_error(404, format!("config key not found: {key_path}"));
         };
 
-        let entities = manager.query_all(|_| true);
         let mut exact_match = None;
         let mut subtree = Map::new();
 
-        for entity in entities {
+        let scan = manager.try_for_each_entity(usize::MAX, |entity| {
             if let EntityData::Row(ref row) = entity.data {
                 let Some(named) = row.named.as_ref() else {
-                    continue;
+                    return true;
                 };
                 let key = named
                     .get("key")
@@ -117,7 +119,7 @@ impl RedDBServer {
                     })
                     .unwrap_or("");
                 if key.is_empty() {
-                    continue;
+                    return true;
                 }
                 let value = named.get("value").cloned().unwrap_or(Value::Null);
                 let json_val = match &value {
@@ -143,6 +145,10 @@ impl RedDBServer {
                     }
                 }
             }
+            true
+        });
+        if let Err(error) = scan {
+            return json_error(500, format!("failed to read red.config: {error}"));
         }
 
         if subtree.is_empty() {
@@ -2500,6 +2506,58 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn config_http_reads_persisted_keys_after_cold_reopen() {
+        let directory = tempfile::tempdir().expect("cold config HTTP fixture");
+        let path = directory.path().join("config-http-cold.rdb");
+        let options = RedDBOptions::persistent(&path)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true);
+        {
+            let runtime =
+                RedDBRuntime::with_options(options.clone()).expect("create config fixture");
+            assert_eq!(
+                runtime
+                    .db()
+                    .store()
+                    .set_config_tree("incident.cold_probe", &crate::serde_json::json!("survives")),
+                1
+            );
+            runtime
+                .db()
+                .store()
+                .persist()
+                .expect("publish config fixture");
+        }
+
+        for reopen in 1..=2 {
+            let runtime = RedDBRuntime::with_options(options.clone())
+                .unwrap_or_else(|error| panic!("cold reopen {reopen}: {error}"));
+            let server = RedDBServer::new(runtime);
+
+            let response = server.handle_config_get_key("incident.cold_probe");
+            assert_eq!(
+                response.status,
+                200,
+                "cold reopen {reopen}: {}",
+                String::from_utf8_lossy(&response.body)
+            );
+            assert!(
+                String::from_utf8_lossy(&response.body).contains("survives"),
+                "cold reopen {reopen}: {}",
+                String::from_utf8_lossy(&response.body)
+            );
+
+            let response = server.handle_config_export();
+            assert_eq!(response.status, 200);
+            assert!(
+                String::from_utf8_lossy(&response.body).contains("cold_probe"),
+                "cold reopen {reopen}: {}",
+                String::from_utf8_lossy(&response.body)
+            );
+        }
     }
 
     #[test]
