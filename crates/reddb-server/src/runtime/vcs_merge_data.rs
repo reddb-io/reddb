@@ -265,6 +265,48 @@ pub(super) fn plan(
         runtime.vcs_commit_read_context(ours)?,
         runtime.vcs_commit_read_context(theirs)?,
     ];
+    plan_contexts(runtime, contexts, state, true)
+}
+
+pub(super) fn read_conflicts(runtime: &RedDBRuntime, state: &str) -> RedDBResult<Vec<Conflict>> {
+    let Some(row) = metadata_row(&runtime.db().store(), vc::MERGE_STATE, state)? else {
+        return Ok(Vec::new());
+    };
+    let hash = |name| {
+        row_text(&row, name)
+            .ok_or_else(|| RedDBError::Internal(format!("merge state missing {name}")))
+    };
+    let contexts = [
+        runtime.vcs_commit_read_context(&hash("base")?)?,
+        runtime.vcs_commit_read_context(&hash("ours")?)?,
+        runtime.vcs_commit_read_context(&hash("theirs")?)?,
+    ];
+    Ok(plan_contexts(runtime, contexts, state, false)?.conflicts)
+}
+
+pub(super) fn validate_head_change(
+    runtime: &RedDBRuntime,
+    connection: u64,
+    target: &str,
+) -> RedDBResult<()> {
+    let target = runtime.vcs_commit_read_context(target)?;
+    let mut live = target.clone();
+    live.snapshot = runtime.snapshot_manager().fresh_read_snapshot();
+    live.branch = Some(Arc::new(branches::live_view(
+        runtime,
+        connection,
+        &live.snapshot,
+    )?));
+    plan_contexts(runtime, [live.clone(), live, target], "head-change", true)?;
+    Ok(())
+}
+
+fn plan_contexts(
+    runtime: &RedDBRuntime,
+    contexts: [reddb_engine::transaction::read::SnapshotContext; 3],
+    state: &str,
+    authorize_changes: bool,
+) -> RedDBResult<Plan> {
     let store = runtime.db().store();
     let mut plan = Plan {
         changes: Vec::new(),
@@ -413,17 +455,40 @@ pub(super) fn plan(
                 merged
             };
             match merged {
-                Ok(after) if after != o => plan.changes.push(Change {
-                    collection: collection.clone(),
-                    before: o,
-                    after,
-                }),
+                Ok(after) if after != o => {
+                    use reddb_rql::ast::PolicyAction;
+                    let action = if !authorize_changes {
+                        PolicyAction::Select
+                    } else {
+                        match (&o, &after) {
+                            (None, _) => PolicyAction::Insert,
+                            (_, None) => PolicyAction::Delete,
+                            _ => PolicyAction::Update,
+                        }
+                    };
+                    for image in o.iter().chain(after.iter()) {
+                        ensure_vcs_entity_access(runtime, &collection, &image.entity, action)?;
+                    }
+                    plan.changes.push(Change {
+                        collection: collection.clone(),
+                        before: o,
+                        after,
+                    });
+                }
                 Ok(_) => {}
                 Err(path) => {
+                    for image in b.iter().chain(o.iter()).chain(t.iter()) {
+                        ensure_vcs_entity_access(
+                            runtime,
+                            &collection,
+                            &image.entity,
+                            reddb_rql::ast::PolicyAction::Select,
+                        )?;
+                    }
                     let body = |image: &Option<Image>| {
                         image
                             .as_ref()
-                            .map(|image| vcs_entity_body(&image.entity))
+                            .map(|image| vcs_entity_body(runtime, &collection, &image.entity))
                             .unwrap_or(JsonValue::Null)
                     };
                     let (base_body, ours_body, theirs_body) = (body(&b), body(&o), body(&t));

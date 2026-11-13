@@ -667,6 +667,7 @@ pub(super) fn ensure_entity_history_supported(runtime: &RedDBRuntime) -> RedDBRe
                         | crate::catalog::CollectionModel::Sketch
                         | crate::catalog::CollectionModel::Filter
                         | crate::catalog::CollectionModel::Metrics
+                        | crate::catalog::CollectionModel::Vault
                 )
             })
         {

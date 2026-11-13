@@ -1363,7 +1363,7 @@ impl RedDBRuntime {
         }
     }
 
-    fn check_config_capability(
+    pub(crate) fn check_config_capability(
         &self,
         action: &str,
         collection: &str,

@@ -503,3 +503,239 @@ fn independently_created_keys_conflict_instead_of_duplicating_state() {
         clear_current_connection_id();
     }
 }
+
+#[test]
+fn vault_rotations_keep_branch_history_and_sealed_merge_payloads() {
+    for operational in [false, true] {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("vault.rdb");
+        let open = || {
+            let profile = if operational {
+                reddb::storage::StorageProfileSelection {
+                    deploy_profile: reddb::storage::DeployProfile::Embedded,
+                    packaging: reddb::storage::StoragePackaging::OperationalDirectory,
+                    replica_count: 0,
+                    managed_backup: false,
+                    wal_retention: false,
+                }
+            } else {
+                reddb::StorageDeployPreset::Serverless.selection()
+            };
+            let rt = RedDBRuntime::with_options(
+                RedDBOptions::persistent(&path)
+                    .with_storage_profile(profile)
+                    .expect("profile"),
+            )
+            .expect("runtime");
+            let auth = reddb::auth::AuthStore::with_vault_certificate(
+                reddb::auth::AuthConfig::default(),
+                rt.db().store().pager().expect("pager").clone(),
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            )
+            .expect("synthetic certificate");
+            auth.ensure_vault_secret_key();
+            rt.set_auth_store(std::sync::Arc::new(auth));
+            rt
+        };
+        set_current_connection_id(9101);
+        let (base, source);
+        {
+            let rt = open();
+            rt.execute_query("CREATE VAULT items").expect("vault");
+            rt.vcs_set_versioned("items", true).expect("versioned");
+            rt.execute_query("VAULT PUT items.token = 'synthetic-base'")
+                .expect("base secret");
+            base = commit(&rt);
+            rt.vcs_branch_create(CreateBranchInput {
+                connection_id: 9101,
+                name: "agent".into(),
+                from: None,
+            })
+            .expect("fork");
+            checkout(&rt, "agent");
+            rt.execute_query("VAULT ROTATE items.token = 'synthetic-agent'")
+                .expect("rotate");
+            source = commit(&rt);
+            assert_eq!(
+                value(&rt, "VAULT REVEAL items.token", "value"),
+                Value::text("synthetic-agent")
+            );
+            assert_eq!(
+                value(&rt, "VAULT REVEAL items.token VERSION 1", "value"),
+                Value::text("synthetic-base")
+            );
+            checkout(&rt, "main");
+            assert_eq!(
+                value(&rt, "VAULT REVEAL items.token", "value"),
+                Value::text("synthetic-base")
+            );
+            rt.execute_query("BEGIN").expect("begin");
+            rt.execute_query("VAULT ROTATE items.token = 'synthetic-discard'")
+                .expect("pending rotate");
+            rt.execute_query("ROLLBACK").expect("rollback");
+            assert_eq!(
+                value(&rt, "VAULT REVEAL items.token", "value"),
+                Value::text("synthetic-base")
+            );
+            rt.execute_query("VAULT PUT items.second = 'synthetic-second'")
+                .expect("target secret");
+            commit(&rt);
+            let diff = rt
+                .vcs_diff(reddb::application::DiffInput {
+                    from: base.clone(),
+                    to: source.clone(),
+                    collection: Some("items".into()),
+                    summary_only: false,
+                })
+                .expect("sealed diff");
+            let rendered = format!("{diff:?}");
+            assert!(!rendered.contains("synthetic-base") && !rendered.contains("synthetic-agent"));
+            assert_eq!(diff.modified, 1);
+            assert!(rt
+                .vcs_merge(MergeInput {
+                    connection_id: 9101,
+                    from: "agent".into(),
+                    opts: MergeOpts::default(),
+                    author: author()
+                })
+                .expect("merge")
+                .is_clean());
+            assert_eq!(
+                value(&rt, "VAULT REVEAL items.token", "value"),
+                Value::text("synthetic-agent")
+            );
+            assert_eq!(
+                value(&rt, "VAULT REVEAL items.second", "value"),
+                Value::text("synthetic-second")
+            );
+            rt.execute_query("BEGIN").expect("begin rotations");
+            rt.execute_query("VAULT ROTATE items.token = 'synthetic-third'")
+                .expect("first staged rotation");
+            rt.execute_query("VAULT ROTATE items.token = 'synthetic-fourth'")
+                .expect("second staged rotation");
+            rt.execute_query("COMMIT").expect("commit rotations");
+            commit(&rt);
+            assert_eq!(
+                value(&rt, "VAULT REVEAL items.token", "value"),
+                Value::text("synthetic-fourth")
+            );
+            let error = rt
+                .execute_query("VAULT PURGE items.token")
+                .expect_err("retained history");
+            assert!(error.to_string().contains("retained by VCS"), "{error}");
+            rt.checkpoint().expect("checkpoint");
+        }
+        let rt = open();
+        checkout(&rt, "main");
+        assert_eq!(
+            value(&rt, "VAULT REVEAL items.token", "value"),
+            Value::text("synthetic-fourth")
+        );
+        checkout(&rt, "agent");
+        assert_eq!(
+            value(&rt, "VAULT REVEAL items.token", "value"),
+            Value::text("synthetic-agent")
+        );
+        assert_eq!(
+            value(&rt, "VAULT REVEAL items.token VERSION 1", "value"),
+            Value::text("synthetic-base")
+        );
+        clear_current_connection_id();
+    }
+}
+
+#[test]
+fn history_opt_in_refuses_pending_writers() {
+    let rt = RedDBRuntime::in_memory().expect("runtime");
+    set_current_connection_id(9101);
+    rt.execute_query("CREATE TABLE items (value INT)")
+        .expect("table");
+    rt.execute_query("BEGIN").expect("begin");
+    rt.execute_query("INSERT INTO items (value) VALUES (1)")
+        .expect("pending insert");
+    set_current_connection_id(9102);
+    assert!(rt
+        .vcs_set_versioned("items", true)
+        .expect_err("active writer")
+        .to_string()
+        .contains("active transactions"));
+    assert!(!rt.vcs_is_versioned("items").expect("unchanged setting"));
+    set_current_connection_id(9101);
+    rt.execute_query("ROLLBACK").expect("rollback");
+    rt.vcs_set_versioned("items", true)
+        .expect("enable after writer finishes");
+    clear_current_connection_id();
+}
+
+#[test]
+fn merge_reset_and_diff_enforce_tenant_policies() {
+    use reddb::runtime::mvcc::{
+        clear_current_auth_identity, clear_current_tenant, set_current_auth_identity,
+        set_current_tenant,
+    };
+    for divergent in [false, true] {
+        let rt = RedDBRuntime::in_memory().expect("runtime");
+        set_current_connection_id(9101);
+        rt.execute_query("CREATE TABLE items (value INT, tenant_id TEXT) TENANT BY (tenant_id)")
+            .expect("tenant table");
+        rt.vcs_set_versioned("items", true).expect("versioned");
+        let base = commit(&rt);
+        rt.vcs_branch_create(CreateBranchInput {
+            connection_id: 9101,
+            name: "agent".into(),
+            from: None,
+        })
+        .expect("fork");
+        checkout(&rt, "agent");
+        rt.execute_query("INSERT INTO items (value, tenant_id) VALUES (1, 'globex')")
+            .expect("foreign change");
+        let source = commit(&rt);
+        checkout(&rt, "main");
+        let head = if divergent {
+            rt.execute_query("INSERT INTO items (value, tenant_id) VALUES (2, 'acme')")
+                .expect("local change");
+            commit(&rt)
+        } else {
+            base.clone()
+        };
+        set_current_tenant("acme".into());
+        set_current_auth_identity("alice".into(), reddb::auth::Role::Write);
+        let error = rt
+            .vcs_merge(MergeInput {
+                connection_id: 9101,
+                from: "agent".into(),
+                opts: MergeOpts::default(),
+                author: author(),
+            })
+            .expect_err("foreign merge denied");
+        assert!(error.to_string().contains("row-level security"), "{error}");
+        assert!(rt
+            .vcs_reset(reddb::application::ResetInput {
+                connection_id: 9101,
+                target: source.clone(),
+                mode: reddb::application::ResetMode::Hard
+            })
+            .is_err());
+        assert!(rt
+            .vcs_diff(reddb::application::DiffInput {
+                from: base,
+                to: source,
+                collection: Some("items".into()),
+                summary_only: false
+            })
+            .is_err());
+        clear_current_auth_identity();
+        clear_current_tenant();
+        assert_eq!(
+            rt.vcs_resolve_commitish("main").expect("unchanged head"),
+            head
+        );
+        assert_eq!(
+            rt.scan_collection("items", None, 10)
+                .expect("unchanged data")
+                .total,
+            usize::from(divergent)
+        );
+        clear_current_connection_id();
+    }
+}

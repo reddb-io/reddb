@@ -1123,6 +1123,7 @@ impl RedDBRuntime {
             }
             branches::ensure_entity_history_supported(self)?;
             branches::ensure_clean(self, input.connection_id, &head_hash)?;
+            merge_data::plan(self, &head_hash, &head_hash, &from_hash, "head-change")?;
             branches::publish_head(
                 store,
                 input.connection_id,
@@ -1350,9 +1351,7 @@ impl RedDBRuntime {
             .map(|(b, _)| b.clone())
             .unwrap_or_else(|| vc::DEFAULT_BRANCH_REF.to_string());
 
-        // Soft and Mixed both move the branch ref + workset base.
-        // Hard would additionally revert entity data — deferred to
-        // Phase 4 because it requires selective MVCC rewind.
+        // Soft and Mixed retain working data; Hard installs the target view.
         match input.mode {
             ResetMode::Soft | ResetMode::Mixed => {
                 if !branch.is_empty() {
@@ -1387,6 +1386,7 @@ impl RedDBRuntime {
                         "finish active transactions before hard reset".into(),
                     ));
                 }
+                merge_data::validate_head_change(self, input.connection_id, &target_hash)?;
                 branches::publish_head(
                     store,
                     input.connection_id,
@@ -1446,7 +1446,12 @@ impl RedDBRuntime {
             let Some(manager) = store.get_collection(&coll) else {
                 continue;
             };
-            let entities = manager.query_all(|_| true);
+            self.check_collection_privilege(reddb_rql::ast::PolicyAction::Select, &coll)?;
+            let mut entities = Vec::new();
+            manager.try_for_each_entity(usize::MAX, |entity| {
+                entities.push(entity.clone());
+                true
+            })?;
             // Compare physical versions under the stable logical identity.
             for entity in &entities {
                 let in_from = snapshot_sees_entity(&from_snap, entity);
@@ -1454,11 +1459,17 @@ impl RedDBRuntime {
                 if in_from == in_to {
                     continue;
                 }
+                ensure_vcs_entity_access(
+                    self,
+                    &coll,
+                    entity,
+                    reddb_rql::ast::PolicyAction::Select,
+                )?;
                 let entity_id = entity.logical_id().raw().to_string();
                 let payload = if input.summary_only {
                     JsonValue::Null
                 } else {
-                    vcs_entity_body(entity)
+                    vcs_entity_body(self, &coll, entity)
                 };
                 let change = match (in_from, in_to) {
                     (false, true) => {
@@ -1564,35 +1575,9 @@ impl RedDBRuntime {
     }
 
     pub fn vcs_conflicts_list(&self, merge_state_id: &str) -> RedDBResult<Vec<Conflict>> {
-        let store_arc = self.inner.db.store();
-        let store: &UnifiedStore = &store_arc;
-        let Some(manager) = store.get_collection(vc::CONFLICTS) else {
-            return Ok(Vec::new());
-        };
-        let msid = merge_state_id.to_string();
-        let out = manager
-            .query_all(|entity| {
-                entity.data.as_row().is_some_and(|row| {
-                    row_text(row, "merge_state_id").as_deref() == Some(&msid)
-                        && row.get_field("resolution").is_none()
-                })
-            })
-            .into_iter()
-            .filter_map(|entity| {
-                let row = entity.data.as_row()?;
-                Some(Conflict {
-                    id: row_text(row, "id")?,
-                    collection: row_text(row, "collection")?,
-                    entity_id: row_text(row, "entity_id").unwrap_or_default(),
-                    base: row_json(row, "base_json"),
-                    ours: row_json(row, "ours_json"),
-                    theirs: row_json(row, "theirs_json"),
-                    conflicting_paths: row_string_list(row, "conflicting_paths"),
-                    merge_state_id: row_text(row, "merge_state_id").unwrap_or_default(),
-                })
-            })
-            .collect();
-        Ok(out)
+        let store = self.db().store();
+        let _publication = store.vault_publication_lock.lock();
+        merge_data::read_conflicts(self, merge_state_id)
     }
 
     pub fn vcs_conflict_resolve(&self, conflict_id: &str, resolved: JsonValue) -> RedDBResult<()> {
@@ -1722,6 +1707,11 @@ impl RedDBRuntime {
         }
         if is_versioned(store, collection)? == enabled {
             return Ok(());
+        }
+        if self.snapshot_manager().oldest_active_xid().is_some() {
+            return Err(RedDBError::InvalidOperation(
+                "finish active transactions before changing version history".into(),
+            ));
         }
         if !enabled
             && self
@@ -1933,7 +1923,81 @@ fn stage_merge_conflicts(
     Ok(())
 }
 
-fn vcs_entity_body(entity: &UnifiedEntity) -> JsonValue {
+fn ensure_vcs_entity_access(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    entity: &UnifiedEntity,
+    action: reddb_rql::ast::PolicyAction,
+) -> RedDBResult<()> {
+    use reddb_rql::ast::PolicyAction;
+    runtime.check_collection_privilege(action, collection)?;
+    if !crate::runtime::rls_injection::entity_passes_rls_action(runtime, collection, action, entity)
+    {
+        return Err(RedDBError::Query(format!(
+            "VCS access to collection '{collection}' denied by row-level security"
+        )));
+    }
+    if let Some(row) = entity.data.as_row() {
+        if let Some(key) = row_text(row, "key") {
+            match runtime
+                .db()
+                .collection_contract(collection)
+                .map(|c| c.declared_model)
+            {
+                Some(crate::catalog::CollectionModel::Vault) => {
+                    let capability = if action == PolicyAction::Select {
+                        "vault:read_metadata"
+                    } else {
+                        "vault:write"
+                    };
+                    runtime
+                        .check_vault_capability_in_tenant(
+                            capability,
+                            collection,
+                            &key,
+                            row_text(row, "_vault_tenant").as_deref(),
+                        )
+                        .map_err(RedDBError::Query)?;
+                }
+                Some(crate::catalog::CollectionModel::Config) => {
+                    let capability = if action == PolicyAction::Select {
+                        "config:read"
+                    } else {
+                        "config:write"
+                    };
+                    runtime
+                        .check_config_capability(capability, collection, &key)
+                        .map_err(RedDBError::Query)?;
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+fn vcs_entity_body(runtime: &RedDBRuntime, collection: &str, entity: &UnifiedEntity) -> JsonValue {
+    if runtime
+        .db()
+        .collection_contract(collection)
+        .is_some_and(|contract| contract.declared_model == crate::catalog::CollectionModel::Vault)
+    {
+        // VCS exposes secret metadata, never the encrypted envelope. Native
+        // merge images retain the original sealed bytes without rendering them.
+        let mut fields = Map::new();
+        fields.insert(
+            "id".into(),
+            JsonValue::String(entity.logical_id().raw().to_string()),
+        );
+        if let Some(row) = entity.data.as_row() {
+            for name in ["key", "version", "tombstone"] {
+                if let Some(value) = row.get_field(name) {
+                    fields.insert(name.into(), value.to_json());
+                }
+            }
+        }
+        return JsonValue::Object(fields);
+    }
     let mut body = crate::entity_render::compact_entity_json(entity);
     if let JsonValue::Object(fields) = &mut body {
         fields.insert(

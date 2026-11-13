@@ -20,10 +20,10 @@ specific scenario, not a guarantee that the model supports every VCS operation.
 | Sketch | Native frequency estimates, branches, rollback, conflicting merge resolution, AS OF and embedded/paged recovery | More multi-source merges and failure combinations |
 | Filter | Native membership, insert/delete rollback, branches, conflicting merge resolution, AS OF and embedded/paged recovery | More capacity and failure combinations |
 | Config | Native rotation/history, branches, rollback, deletion, merge, independently created key conflicts and embedded/paged recovery | More authorization and legacy-history combinations |
-| Vault | No dedicated model-specific VCS test in this directory | Secret-bearing state, access controls, branch isolation, merge and recovery using synthetic test values |
+| Vault | Sealed rotations, branch-local history, rollback, merge, multiple writes in one transaction, purge protection and embedded/paged recovery | More cross-tenant capability and failure combinations |
 
 The catalog exposes all of these models. The opt-in flag alone does not
-establish complete VCS support for Queue and Vault. Versioned HLL, Sketch
+establish complete VCS support for Queue. Versioned HLL, Sketch
 and Filter now persist their native state in public collection versions;
 their reads and writes bypass the shared legacy caches. Enabling history
 publishes initial state, provenance and the setting in one WAL batch.
@@ -53,3 +53,8 @@ and failures before and after durable publication. Include result caches,
 indexes, tenancy and RLS where the model exposes them. Tests for queues,
 metrics and probabilistic structures must assert their actual state and side
 effects rather than substituting a table-shaped example.
+
+Tenant regressions exercise denied fast-forward and divergent merges, hard
+reset and diff, with unchanged HEAD and data after rejection. Vault presentation
+excludes sealed envelopes as well as plaintext. Native Vault regressions cover
+metadata-only reads, reveal capabilities, auditing and file recovery.

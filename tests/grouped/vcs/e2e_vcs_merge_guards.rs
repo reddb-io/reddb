@@ -193,6 +193,7 @@ fn check_merge_guard(model: CollectionModel, create: &str, mutation: Option<&str
                 | CollectionModel::Sketch
                 | CollectionModel::Filter
                 | CollectionModel::Metrics
+                | CollectionModel::Vault
         ) {
             let outcome = result.expect("fast-forward applies source data");
             assert_eq!(outcome.fast_forward, strategy == MergeStrategy::Auto);
@@ -229,6 +230,7 @@ fn check_merge_guard(model: CollectionModel, create: &str, mutation: Option<&str
             | CollectionModel::Sketch
             | CollectionModel::Filter
             | CollectionModel::Metrics
+            | CollectionModel::Vault
     ) {
         let picked = runtime
             .vcs_cherry_pick(8201, &source.hash, author())

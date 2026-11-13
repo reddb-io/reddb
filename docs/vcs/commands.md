@@ -355,8 +355,8 @@ data unchanged until every conflict has a persisted `ours`, `theirs`,
 and reopen preserve pending merges and choices.
 
 Data application is currently enabled for Table, Document, Graph, Vector,
-KV, Mixed, TimeSeries, Config, HLL, Sketch, Filter and Metrics. Queue and
-Vault reject application before changing HEAD; their opt-in flag alone
+KV, Mixed, TimeSeries, Config, HLL, Sketch, Filter, Metrics and Vault. Queue
+rejects application before changing HEAD; its opt-in flag alone
 does not establish complete VCS support.
 See the [model validation matrix](./model-validation.md).
 
@@ -364,3 +364,8 @@ Probabilistic collections retain native state snapshots. Concurrent changes
 to the same state require a conflict choice; merging does not implicitly add
 sketch counters twice. Versioned metrics use retained raw samples for reads
 instead of shared rollups, and raw retention cannot reclaim pinned history.
+
+Vault merge retains sealed payloads, while diff and conflict output expose only
+metadata. VCS data changes recheck collection privileges, RLS and keyed
+Config/Vault capabilities, including fast-forward and hard reset. Changing
+the history setting requires active transactions to finish first.
