@@ -3992,6 +3992,45 @@ mod checkpoint_work_tests {
         )
     }
 
+    fn authorize_fixture_dwb(path: &Path, frame: &[u8]) {
+        use reddb_file::{file_format as f, PAGED_SUPERBLOCK_SLOT_SIZE};
+        use std::io::{Seek, SeekFrom, Write};
+
+        let bytes = std::fs::read(path).expect("fixture headers");
+        let selected = reddb_file::select_paged_superblock(&bytes).expect("valid superblock");
+        let start = selected.copy_index * PAGED_SUPERBLOCK_SLOT_SIZE;
+        let mut image = [0; PAGED_SUPERBLOCK_SLOT_SIZE];
+        image.copy_from_slice(&bytes[start..start + PAGED_SUPERBLOCK_SLOT_SIZE]);
+        f::set_database_header_dwb_publication(
+            &mut image,
+            Some(f::DwbPublication {
+                phase: f::DwbPhase::Ready,
+                frame_bytes: u32::try_from(frame.len()).expect("bounded fixture frame"),
+                digest: f::dwb_frame_digest(frame),
+            }),
+        )
+        .expect("known-current DWB authority");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("fixture header writer");
+        for step in 1..=reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+            let copy = (selected.copy_index + step) % reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT;
+            reddb_file::seal_paged_superblock_slot(
+                &mut image,
+                copy,
+                selected.generation + step as u64,
+            )
+            .expect("fixture header seal");
+            file.seek(SeekFrom::Start(reddb_file::paged_superblock_slot_offset(
+                copy,
+            )))
+            .expect("fixture header offset");
+            file.write_all(&image).expect("persist DWB authority");
+            file.sync_all().expect("durable DWB authority");
+        }
+    }
+
     fn duplicate_system_catalog_fixture_with_key(
         legacy_populated: bool,
         canonical_populated: bool,
@@ -3999,12 +4038,29 @@ mod checkpoint_work_tests {
         cross_reference_legacy: bool,
         config_key: Option<&str>,
     ) -> DuplicateSystemCatalogFixture {
+        let config_keys = config_key.into_iter().collect::<Vec<_>>();
+        duplicate_system_catalog_fixture_with_keys(
+            legacy_populated,
+            canonical_populated,
+            index_legacy,
+            cross_reference_legacy,
+            &config_keys,
+        )
+    }
+
+    fn duplicate_system_catalog_fixture_with_keys(
+        legacy_populated: bool,
+        canonical_populated: bool,
+        index_legacy: bool,
+        cross_reference_legacy: bool,
+        config_keys: &[&str],
+    ) -> DuplicateSystemCatalogFixture {
         duplicate_system_catalog_fixture_with_aliases(
             legacy_populated,
             canonical_populated,
             index_legacy,
             cross_reference_legacy,
-            config_key,
+            config_keys,
             None,
         )
     }
@@ -4014,7 +4070,7 @@ mod checkpoint_work_tests {
         canonical_populated: bool,
         index_legacy: bool,
         cross_reference_legacy: bool,
-        config_key: Option<&str>,
+        config_keys: &[&str],
         alias_case: Option<&str>,
     ) -> DuplicateSystemCatalogFixture {
         let directory = tempfile::tempdir().expect("temporary store");
@@ -4035,43 +4091,58 @@ mod checkpoint_work_tests {
                 .create_collection("cfg_legacy")
                 .expect("legacy source collection");
             if legacy_populated {
-                store
-                    .insert_auto(
-                        "cfg_legacy",
-                        config_key.map_or_else(
-                            || {
-                                UnifiedEntity::table_row(
-                                    EntityId::new(1),
-                                    "red_config",
-                                    1,
-                                    vec![Value::text("legacy")],
-                                )
-                            },
-                            |key| config_recovery_row(1, key, 1),
-                        ),
-                    )
-                    .expect("legacy row");
+                if config_keys.is_empty() {
+                    store
+                        .insert_auto(
+                            "cfg_legacy",
+                            UnifiedEntity::table_row(
+                                EntityId::new(1),
+                                "red_config",
+                                1,
+                                vec![Value::text("legacy")],
+                            ),
+                        )
+                        .expect("legacy row");
+                } else {
+                    for (offset, key) in config_keys.iter().enumerate() {
+                        let id = u64::try_from(offset).unwrap() + 1;
+                        store
+                            .insert_auto(
+                                "cfg_legacy",
+                                config_recovery_row(id, key, i64::try_from(id).unwrap()),
+                            )
+                            .expect("legacy config row");
+                    }
+                }
             }
             store
                 .create_collection("cfg.canon_")
                 .expect("canonical source collection");
             if canonical_populated {
-                store
-                    .insert_auto(
-                        "cfg.canon_",
-                        config_key.map_or_else(
-                            || {
-                                UnifiedEntity::table_row(
-                                    EntityId::new(2),
-                                    "red.config",
-                                    2,
-                                    vec![Value::text("canonical")],
-                                )
-                            },
-                            |key| config_recovery_row(2, key, 2),
-                        ),
-                    )
-                    .expect("canonical row");
+                if config_keys.is_empty() {
+                    store
+                        .insert_auto(
+                            "cfg.canon_",
+                            UnifiedEntity::table_row(
+                                EntityId::new(2),
+                                "red.config",
+                                2,
+                                vec![Value::text("canonical")],
+                            ),
+                        )
+                        .expect("canonical row");
+                } else {
+                    let base = u64::try_from(config_keys.len()).unwrap() + 1;
+                    for (offset, key) in config_keys.iter().enumerate() {
+                        let id = base + u64::try_from(offset).unwrap();
+                        store
+                            .insert_auto(
+                                "cfg.canon_",
+                                config_recovery_row(id, key, i64::try_from(id).unwrap()),
+                            )
+                            .expect("canonical config row");
+                    }
+                }
             }
             if cross_reference_legacy {
                 store
@@ -4231,8 +4302,10 @@ mod checkpoint_work_tests {
                 },
             )
             .expect("open pager");
-            let mut page = pager.read_page(1).expect("catalog page");
-            let bytes = page.as_bytes_mut();
+            let mut metadata = read_meta_payload(&pager)
+                .expect("read catalog payload")
+                .expect("published catalog payload");
+            let bytes = metadata.as_mut_slice();
             let mut names = vec![("cfg_legacy", "red_config"), ("cfg.canon_", "red.config")];
             if alias_case.is_some() {
                 names.extend([
@@ -4260,7 +4333,7 @@ mod checkpoint_work_tests {
                 }
                 assert!(replacements >= 1, "catalog must contain the source name");
             }
-            pager.write_page(1, page).expect("write duplicate catalog");
+            publish_paged_metadata(&pager, &metadata).expect("write duplicate catalog");
             pager.sync().expect("sync duplicate catalog");
             if alias_case.is_some() {
                 let mut metadata = read_meta_payload(&pager).unwrap().unwrap();
@@ -4564,8 +4637,10 @@ mod checkpoint_work_tests {
     }
 
     #[test]
-    fn explicit_compaction_retires_populated_legacy_system_config() {
-        let fixture = duplicate_system_catalog_fixture(true, true, false);
+    fn explicit_compaction_promotes_populated_legacy_system_config() {
+        let reported_keys = super::super::config_keys::tests::REPORTED_DATABASE_KEYS;
+        let fixture =
+            duplicate_system_catalog_fixture_with_keys(true, false, false, false, reported_keys);
         let destination = fixture._directory.path().join("canonical-system-config");
 
         let report = crate::storage::compact::compact_paged_canonical_system_config(
@@ -4574,40 +4649,67 @@ mod checkpoint_work_tests {
         )
         .expect("rewrite duplicate system config");
         assert!(report.records > 0);
+        assert_eq!(report.reconciled_system_collections, 1);
+        assert_eq!(report.imported_system_records, reported_keys.len());
 
         let rewritten_path = destination.join("data.rdb");
         let rewritten = UnifiedStore::open_with_config(&rewritten_path, fixture.config.clone())
             .expect("open canonical rewrite");
         assert_eq!(rewritten.list_collections(), vec!["red.config".to_string()]);
-        assert!(
-            rewritten.get("red.config", EntityId::new(1)).is_none(),
-            "the obsolete legacy tree must not leak into the canonical collection"
-        );
-        assert_eq!(
-            rewritten
-                .get("red.config", EntityId::new(2))
-                .expect("canonical row survives")
-                .kind
-                .collection(),
-            "red.config"
-        );
+        for (offset, legacy) in reported_keys.iter().enumerate() {
+            let canonical = legacy
+                .strip_prefix("red.config.")
+                .or_else(|| legacy.strip_prefix("red."))
+                .unwrap_or(legacy);
+            assert_eq!(
+                rewritten.get_config(canonical),
+                Some(Value::Integer(i64::try_from(offset).unwrap() + 1)),
+                "the legacy config value must survive as {canonical}"
+            );
+        }
+        assert_eq!(rewritten.legacy_red_config_key_count().unwrap(), 0);
         drop(rewritten);
 
         let cold = UnifiedStore::open_with_config(&rewritten_path, fixture.config)
             .expect("cold reopen canonical rewrite");
         assert_eq!(cold.list_collections(), vec!["red.config".to_string()]);
-        assert_eq!(
+        assert!(
             cold.get_collection("red.config")
                 .expect("canonical collection")
-                .count(),
-            1
+                .count()
+                >= reported_keys.len()
         );
+        for (offset, legacy) in reported_keys.iter().enumerate() {
+            let canonical = legacy
+                .strip_prefix("red.config.")
+                .or_else(|| legacy.strip_prefix("red."))
+                .unwrap_or(legacy);
+            assert_eq!(
+                cold.get_config(canonical),
+                Some(Value::Integer(i64::try_from(offset).unwrap() + 1)),
+                "cold reopen lost {canonical}"
+            );
+        }
         assert!(
             crate::storage::operational_manifest::OperationalManifest::for_db_path(&rewritten_path)
                 .recover_or_bootstrap(&["red.config".to_string()])
                 .expect("canonical operational manifest")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn explicit_compaction_refuses_two_populated_system_config_trees() {
+        let fixture = duplicate_system_catalog_fixture(true, true, false);
+        let destination = fixture._directory.path().join("ambiguous-system-config");
+
+        let error = crate::storage::compact::compact_paged_canonical_system_config(
+            &fixture.path,
+            &destination,
+        )
+        .expect_err("two populated config trees must not be discarded");
+        assert!(error.to_string().contains("refusing lossy migration"));
+        assert!(!destination.exists());
     }
 
     #[test]
@@ -4695,7 +4797,7 @@ mod checkpoint_work_tests {
                 true,
                 true,
                 false,
-                Some("system.pid"),
+                &["system.pid"],
                 Some(case),
             );
             let wal = reddb_file::unified_wal_path(&fixture.path);
@@ -4900,6 +5002,7 @@ mod checkpoint_work_tests {
                 file.seek(SeekFrom::Start(offset as u64)).unwrap();
                 file.write_all(&[0u8; PAGE_SIZE]).unwrap();
                 file.sync_all().unwrap();
+                authorize_fixture_dwb(&fixture.path, &frame);
             }
             let original = std::fs::read(&fixture.path).unwrap();
             let original_wal = std::fs::read(&wal).unwrap();

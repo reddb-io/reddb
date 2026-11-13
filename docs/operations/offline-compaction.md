@@ -160,9 +160,9 @@ historical physical allocation:
 red compact --source /preserved/data.rdb --destination-dir /new/compacted --json
 ```
 
-If a historical store contains both populated physical system-config identities
-and normal open fails closed on that ambiguity, an operator may explicitly retain
-the canonical `red.config` identity while performing the rewrite:
+If a historical store contains its populated system config under the obsolete
+physical `red_config` identity plus an empty `red.config` bootstrap identity, an
+operator may explicitly migrate the populated tree while performing the rewrite:
 
 ```sh
 red compact --source /preserved/data.rdb --destination-dir /new/compacted \
@@ -170,11 +170,14 @@ red compact --source /preserved/data.rdb --destination-dir /new/compacted \
 ```
 
 This repair requires exactly one `red_config` and one `red.config` catalog entry
-with complete resume state. It copies only `red.config`; it neither merges nor
-guesses between divergent values. References to `red_config`, missing identities,
-and other catalog shapes are refused. The original store remains unchanged, and
-ordinary compaction never enables this behavior implicitly. Scrub and validate
-the new store before any serving cutover.
+with complete resume state. It promotes the entire populated legacy tree — data,
+history, key index and secondary indexes — to `red.config`, retires the empty
+duplicate, and reports the migrated record count. A subsequent RedDB boot
+normalizes legacy `red.*` content keys before config consumers run. Two populated
+trees, references to `red_config`, missing identities and other catalog shapes are
+refused instead of discarding or guessing between values. The original store
+remains unchanged, and ordinary compaction never enables this behavior implicitly.
+Scrub and validate the new store before any serving cutover.
 
 The source must be closed and fully checkpointed. The command takes a shared
 read lock that excludes the writer's exclusive lock, opens the source without

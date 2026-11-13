@@ -186,10 +186,10 @@ impl UnifiedStore {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    const REPORTED_DATABASE_KEYS: &[&str] = &[
+    pub(crate) const REPORTED_DATABASE_KEYS: &[&str] = &[
         "cache.blob.l1_bytes_max",
         "cache.blob.l2_bytes_max",
         "cache.blob.max_namespaces",
