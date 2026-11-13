@@ -503,7 +503,24 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    let legacy_payload = backend_root.join("manual-promotion");
+    let legacy_payload_bytes = b"a replica must not publish over this backend object";
+    std::fs::write(&legacy_payload, legacy_payload_bytes).expect("backend payload sentinel");
+    let (status, checkpoint) = http_request(replica_http, "POST", "/checkpoint", None);
+    assert_eq!(status, 200, "replica local checkpoint failed: {checkpoint}");
+    assert_eq!(
+        std::fs::read(&legacy_payload).expect("backend payload after replica checkpoint"),
+        legacy_payload_bytes
+    );
+
     let _ = primary.stop_and_read_output();
+    // Older lease-only boots could leave serverless control objects behind.
+    // This profile must recover its local replica without consulting them.
+    let foreign_head = backend_root.join("manual-promotion.serverless/HEAD.json");
+    std::fs::create_dir_all(foreign_head.parent().expect("head directory"))
+        .expect("create unrelated serverless directory");
+    let foreign_head_bytes = b"unrelated serverless publication must remain untouched";
+    std::fs::write(&foreign_head, foreign_head_bytes).expect("old serverless control object");
     let request = FailoverPromotionRequest {
         holder_id: Some("replica-b".to_string()),
         ttl_ms: Some(30_000),
@@ -577,6 +594,10 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         "before={before:?}"
     );
     assert!(contains_text(&after, "after-promotion"), "after={after:?}");
+    assert_eq!(
+        std::fs::read(&foreign_head).expect("unrelated head after promotion"),
+        foreign_head_bytes
+    );
 
     let mut stale_primary = spawn_primary_with_failover(
         &primary_path,
@@ -590,5 +611,71 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
             .to_ascii_lowercase()
             .contains("fenced lease op"),
         "stale primary did not report term fencing:\n{stale_output}"
+    );
+
+    let _ = promoted.stop_and_read_output();
+    let mut reopened = spawn_primary_with_failover(
+        &replica_path,
+        replica_http,
+        replica_grpc,
+        Some(&promoted_failover),
+    );
+    wait_for_health(&mut reopened, replica_http, "restarted promoted primary");
+    let client = runtime
+        .block_on(Reddb::connect(&format!("grpc://127.0.0.1:{replica_grpc}")))
+        .expect("reconnect after a second crash");
+    for (id, expected) in [(1, "before-promotion"), (2, "after-promotion")] {
+        let result = runtime
+            .block_on(client.query_with_options(
+                &format!("SELECT name FROM failover_probe WHERE id = {id}"),
+                QueryOptions::strong(),
+            ))
+            .expect("cold acknowledged row");
+        assert_eq!(result.rows.len(), 1, "row {id}: {result:?}");
+        assert!(contains_text(&result, expected), "row {id}: {result:?}");
+    }
+    runtime
+        .block_on(client.query("INSERT INTO failover_probe (id, name) VALUES (3, 'after-restart')"))
+        .expect("writer makes progress after restart");
+    let scan = runtime
+        .block_on(client.query_with_options(
+            "SELECT id, name FROM failover_probe ORDER BY id",
+            QueryOptions::strong(),
+        ))
+        .expect("scan agrees with cold points and new write");
+    assert_eq!(scan.rows.len(), 3, "scan={scan:?}");
+    for expected in ["before-promotion", "after-promotion", "after-restart"] {
+        assert!(contains_text(&scan, expected), "scan={scan:?}");
+    }
+    let (status, checkpoint) = http_request(replica_http, "POST", "/checkpoint", None);
+    assert_eq!(status, 200, "promoted checkpoint failed: {checkpoint}");
+    let backup = reddb::RedDBRuntime::with_options(
+        reddb::RedDBOptions::persistent(backend_root.join("manual-promotion"))
+            .with_storage_profile(reddb::StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("native backup reader profile")
+            .with_read_only(true),
+    )
+    .expect("open the checkpoint's remote backup independently");
+    let restored = backup
+        .execute_query("SELECT id, name FROM failover_probe ORDER BY id")
+        .expect("read all acknowledged rows from the backup");
+    assert_eq!(restored.result.records.len(), 3);
+    let names: Vec<_> = restored
+        .result
+        .records
+        .iter()
+        .map(|row| {
+            row.get("name")
+                .and_then(|value| value.as_text())
+                .expect("backup name")
+        })
+        .collect();
+    assert_eq!(
+        names,
+        ["before-promotion", "after-promotion", "after-restart"]
+    );
+    assert_eq!(
+        std::fs::read(&foreign_head).expect("unrelated head after restart"),
+        foreign_head_bytes
     );
 }

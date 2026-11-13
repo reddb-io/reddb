@@ -464,6 +464,83 @@ fn successor_epoch_fences_an_old_upload_that_resumes_after_takeover() {
 }
 
 #[test]
+fn lease_only_profiles_preserve_native_files() {
+    let root = tempfile::tempdir().expect("lease-only boot directory");
+    let mut child = spawn_child("lease_only_native_boot_child", root.path())
+        .env("RED_LEASE_REQUIRED", "true")
+        .env("REDDB_LOCAL_BACKEND_ROOT", root.path())
+        .spawn()
+        .expect("run lease-only preparation child");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("lease-only child status") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("stop stalled lease-only preparation");
+            child.wait().expect("join stopped lease-only child");
+            panic!("lease-only preparation exceeded 60 seconds");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success(), "lease-only preparation failed: {status}");
+}
+
+#[test]
+fn lease_only_native_boot_child() -> ExitCode {
+    if std::env::var(CHILD_MODE_ENV).ok().as_deref() != Some("1") {
+        return ExitCode::SUCCESS;
+    }
+    use reddb_server::runtime::lease_loop::prepare_lease_loop_if_required;
+    use reddb_server::storage::engine::{page::PageType, pager::Pager};
+    use reddb_server::StorageDeployPreset;
+
+    let root = PathBuf::from(std::env::var(ROOT_ENV).expect("root env"));
+    for preset in [
+        StorageDeployPreset::PrimaryReplicaDev,
+        StorageDeployPreset::Cluster,
+    ] {
+        let local = root.join(format!("{}.rdb", preset.as_str()));
+        let pager = Pager::open_default(&local).expect("native authoritative file");
+        let mut page = pager.allocate_page(PageType::BTreeLeaf).expect("data page");
+        let page_id = page.page_id();
+        page.insert_cell(b"owned", b"local-authority")
+            .expect("native data");
+        pager.write_page(page_id, page).expect("write data");
+        pager.sync().expect("durable native data");
+        drop(pager);
+        let original = fs::read(&local).expect("preserved native image");
+
+        let remote_key = format!("{}/remote.rdb", preset.as_str());
+        let head = root.join(reddb_file::serverless_snapshot_head_key(&remote_key));
+        fs::create_dir_all(head.parent().expect("head directory")).expect("remote directory");
+        let unrelated = b"lease-only preparation must not decode this serverless head";
+        fs::write(&head, unrelated).expect("unrelated serverless head");
+        let mut options = RedDBOptions::persistent(&local)
+            .with_storage_profile(preset.selection())
+            .expect("valid local profile")
+            .with_remote_backend(Arc::new(LocalBackend), remote_key)
+            .with_atomic_remote_backend(Arc::new(LocalBackend));
+        let boot = prepare_lease_loop_if_required(&mut options).expect("lease-only boot plan");
+        assert!(boot.is_some(), "ownership fencing remains required");
+        assert_eq!(options.data_path.as_ref(), Some(&local));
+        assert!(options.remote_bootstrap_key.is_none());
+        assert_eq!(
+            fs::read(&local).expect("local image after preparation"),
+            original
+        );
+        assert_eq!(fs::read(&head).expect("unrelated head remains"), unrelated);
+        let pager = Pager::open_default(&local).expect("cold native reopen");
+        let page = pager.read_page(page_id).expect("cold native data");
+        assert_eq!(
+            page.read_cell(0).expect("owned cell"),
+            (b"owned".to_vec(), b"local-authority".to_vec())
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+#[test]
 fn operational_serverless_boot_recovers_canonical_snapshots() {
     let root = tempfile::tempdir().expect("operational boot directory");
     let status = spawn_child("operational_serverless_boot_child", root.path())

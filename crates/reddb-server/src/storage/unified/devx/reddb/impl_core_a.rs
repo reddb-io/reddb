@@ -940,6 +940,13 @@ impl RedDB {
         let Some(path) = &self.path else {
             return Ok(());
         };
+        self.upload_checkpoint_to_remote_backend(path)
+    }
+
+    pub(crate) fn upload_checkpoint_to_remote_backend(
+        &self,
+        path: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if let (Some(backend), Some(key)) = (&self.remote_backend, &self.remote_key) {
             backend
                 .upload(path, key)
