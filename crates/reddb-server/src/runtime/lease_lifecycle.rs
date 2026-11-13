@@ -193,7 +193,7 @@ impl LeaseLifecycle {
     }
 
     /// Publish a checkpoint through the generation-fenced immutable-snapshot
-    /// protocol. Returns `Ok(false)` for legacy/test lifecycles that have no
+    /// protocol. Returns `Ok(false)` for lease-only lifecycles that have no
     /// publication store attached.
     pub fn publish_snapshot(
         &self,

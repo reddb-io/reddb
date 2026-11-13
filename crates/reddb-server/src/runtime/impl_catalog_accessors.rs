@@ -125,12 +125,10 @@ impl RedDBRuntime {
         Ok(())
     }
 
-    /// Guard remote-mutating operations on the writer lease.
-    /// Returns `Ok(())` when no remote backend is configured (the
-    /// lease is irrelevant) or the lease state is `NotRequired` /
-    /// `Held`. Returns `RedDBError::ReadOnly` when the lease is
-    /// `NotHeld`, with an audit-friendly action label so the caller
-    /// can record the rejection.
+    /// Guard remote mutations on replication role and writer lease.
+    /// With a backend configured, replicas cannot publish and other nodes
+    /// require a `NotRequired` or `Held` lease state. Local checkpoints can
+    /// still finish when this guard returns `RedDBError::ReadOnly`.
     pub(crate) fn assert_remote_write_allowed(&self, action: &str) -> RedDBResult<()> {
         if self.inner.db.remote_backend.is_none() {
             return Ok(());
