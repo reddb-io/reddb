@@ -427,6 +427,8 @@ impl RedDBRuntime {
         )?;
         let prepared = super::index_store::IndexStore::new();
         let mut resident = false;
+        #[cfg(test)]
+        let mut rebuilt_unique_indexes = 0usize;
         for index in registered {
             if index.method == super::index_store::IndexMethodKind::BTree
                 && !index.columns.is_empty()
@@ -468,7 +470,20 @@ impl RedDBRuntime {
                     &[],
                 )
                 .map_err(RedDBError::Internal)?;
+            #[cfg(test)]
+            let crash_after_build = index.unique
+                && std::env::var("REDDB_TEST_EXIT_DURING_UNIQUE_INDEX_REBUILD")
+                    .ok()
+                    .as_deref()
+                    == Some(collection);
             prepared.register(index);
+            #[cfg(test)]
+            if crash_after_build {
+                rebuilt_unique_indexes += 1;
+                if rebuilt_unique_indexes == 1 {
+                    std::process::exit(215);
+                }
+            }
         }
         if !resident {
             self.inner
