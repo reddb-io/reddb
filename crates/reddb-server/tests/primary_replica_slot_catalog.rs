@@ -635,11 +635,25 @@ fn runtime_prunes_primary_replica_redwal_segments_after_replica_ack() {
     let plan = runtime
         .primary_replica_file_plan()
         .expect("primary-replica file plan");
+    let mut segment_bytes = Vec::new();
     for index in 0..=18 {
-        let path = plan.wal_segment_path(index * plan.segment_bytes);
-        fs::create_dir_all(path.parent().expect("wal parent")).expect("create wal dir");
-        fs::write(&path, [index as u8]).expect("write fake redwal segment");
+        let lsn = index * plan.segment_bytes;
+        let payload = format!("committed-segment-{index}");
+        let path = plan
+            .append_wal_record(lsn, payload.as_bytes())
+            .expect("append valid redwal record");
+        segment_bytes.push(fs::metadata(path).expect("redwal metadata").len());
     }
+    let retained_before: u64 = segment_bytes.iter().sum();
+
+    let pinned = runtime
+        .ack_primary_replica_lsn_and_prune("replica-a", 0, 0, 0, 0)
+        .expect("pin replica slot")
+        .expect("pinned retention result");
+    assert_eq!(pinned.oldest_required_lsn, Some(0));
+    assert_eq!(pinned.retained_bytes_before_prune, retained_before);
+    assert_eq!(pinned.retained_bytes_after_prune, retained_before);
+    assert!(pinned.removed_segments.is_empty());
 
     let ack_lsn = 18 * plan.segment_bytes;
     let pruned = runtime
@@ -648,8 +662,11 @@ fn runtime_prunes_primary_replica_redwal_segments_after_replica_ack() {
         .expect("prune result");
 
     assert_eq!(pruned.oldest_required_lsn, Some(ack_lsn));
-    assert_eq!(pruned.retained_bytes_before_prune, 19);
-    assert_eq!(pruned.retained_bytes_after_prune, 16);
+    assert_eq!(pruned.retained_bytes_before_prune, retained_before);
+    assert_eq!(
+        pruned.retained_bytes_after_prune,
+        segment_bytes[3..].iter().sum::<u64>()
+    );
     assert_eq!(pruned.removed_segments.len(), 3);
     for index in 0..3 {
         assert!(
@@ -658,9 +675,20 @@ fn runtime_prunes_primary_replica_redwal_segments_after_replica_ack() {
         );
     }
     for index in 3..=18 {
+        let lsn = index * plan.segment_bytes;
+        let path = plan.wal_segment_path(lsn);
         assert!(
-            plan.wal_segment_path(index * plan.segment_bytes).exists(),
+            path.exists(),
             "segment {index} should remain inside the minimum retention window"
+        );
+        let segment = reddb_file::PrimaryReplicaWalSegment::read_from_path(path)
+            .expect("retained redwal remains decodable");
+        assert_eq!(segment.timeline, reddb_file::TimelineId::initial());
+        assert_eq!(segment.records.len(), 1);
+        assert_eq!(segment.records[0].lsn, lsn);
+        assert_eq!(
+            segment.records[0].payload,
+            format!("committed-segment-{index}").as_bytes()
         );
     }
 }
