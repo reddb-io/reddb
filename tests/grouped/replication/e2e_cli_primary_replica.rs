@@ -849,6 +849,34 @@ fn cli_manual_promotion_recovers_a_replica_below_the_fork_and_fences_the_old_pri
         foreign_head_bytes
     );
 
+    let _ = promoted.stop_and_read_output();
+    let lease_path = backend_root.join(reddb_file::serverless_writer_lease_key(
+        "leases/",
+        "manual-promotion",
+    ));
+    let expired_lease_bytes = std::fs::read(&lease_path).expect("read promoted writer lease");
+    let expired_lease = reddb_file::decode_serverless_writer_lease_json(&expired_lease_bytes)
+        .expect("decode promoted writer lease");
+    assert_eq!(expired_lease.term, promotion.term);
+    let lease_expiry_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let now_ms = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time after epoch")
+                .as_millis(),
+        )
+        .expect("current epoch milliseconds fit u64");
+        if expired_lease.is_expired(now_ms) {
+            break;
+        }
+        assert!(
+            Instant::now() < lease_expiry_deadline,
+            "promoted writer lease did not expire after shutdown: {expired_lease:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
     let mut stale_primary = spawn_primary_with_failover(
         &primary_path,
         stale_http,
@@ -862,8 +890,12 @@ fn cli_manual_promotion_recovers_a_replica_below_the_fork_and_fences_the_old_pri
             .contains("fenced lease op"),
         "stale primary did not report term fencing:\n{stale_output}"
     );
+    assert_eq!(
+        std::fs::read(&lease_path).expect("lease after stale primary restart"),
+        expired_lease_bytes,
+        "a stale term must not mutate or reacquire an expired newer-term lease"
+    );
 
-    let _ = promoted.stop_and_read_output();
     let mut reopened = spawn_primary_with_failover(
         &replica_path,
         replica_http,
