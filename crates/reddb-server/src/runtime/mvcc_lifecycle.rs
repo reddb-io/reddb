@@ -110,6 +110,82 @@ impl Drop for DmlWalCapture {
 }
 
 impl RedDBRuntime {
+    /// Refresh an autocommit state mutation after acquiring its publication
+    /// fence. Explicit transactions retain their original read snapshot.
+    pub(super) fn vcs_state_write_snapshot(
+        &self,
+        collection: &str,
+    ) -> RedDBResult<(
+        super::execution_context::SnapshotContext,
+        crate::storage::transaction::snapshot::SnapshotRetentionGuard,
+    )> {
+        self.vcs_writer_epoch(collection)?;
+        let (mut context, retention) = self.native_read_snapshot()?;
+        if self.current_xid().is_none() {
+            context.snapshot = self.snapshot_manager().fresh_read_snapshot();
+            context.branch = self.vcs_branch_read_view(&context.snapshot, None)?;
+        }
+        Ok((context, retention))
+    }
+
+    /// Append one native state version. The caller serializes its logical key
+    /// before taking the publication fence and owns the enclosing WAL capture.
+    pub(crate) fn insert_vcs_state_version(
+        &self,
+        collection: &str,
+        mut entity: UnifiedEntity,
+        previous: Option<EntityId>,
+    ) -> RedDBResult<EntityId> {
+        let store = self.db().store();
+        let epoch = self.vcs_writer_epoch(collection)?.ok_or_else(|| {
+            RedDBError::InvalidOperation("state version requires a versioned collection".into())
+        })?;
+        let xid = self
+            .current_xid()
+            .or_else(|| self.graph_insert_xid())
+            .ok_or_else(|| {
+                RedDBError::InvalidOperation("state version requires a WAL writer".into())
+            })?;
+        entity.id = store.next_entity_id();
+        entity.set_xmin(xid);
+        entity.set_xmax(0);
+        entity.clear_branch_version();
+        entity.set_branch_origin(epoch);
+        let id = entity.id;
+        if let Some(previous) = previous {
+            let mut old = store
+                .try_get(collection, previous, usize::MAX)?
+                .ok_or_else(|| RedDBError::NotFound(previous.to_string()))?;
+            entity.set_logical_id(old.logical_id());
+            if let (
+                crate::storage::EntityKind::TableRow {
+                    row_id: destination,
+                    ..
+                },
+                crate::storage::EntityKind::TableRow { row_id: source, .. },
+            ) = (&mut entity.kind, &old.kind)
+            {
+                *destination = *source;
+            }
+            let previous_xmax = old.branch_xmax(epoch);
+            old.set_branch_xmax(epoch, xid);
+            store.install_versioned_table_row_update(collection, old, entity, None)?;
+            if self.current_xid().is_some() {
+                self.record_pending_versioned_update(
+                    current_connection_id(),
+                    collection,
+                    previous,
+                    id,
+                    xid,
+                    previous_xmax,
+                );
+            }
+        } else {
+            store.insert_auto(collection, entity)?;
+        }
+        Ok(id)
+    }
+
     pub(crate) fn graph_insert_xid(&self) -> Option<u64> {
         let identity = std::sync::Arc::as_ptr(&self.inner) as usize;
         GRAPH_INSERT_WRITER.with(|slot| {

@@ -322,6 +322,65 @@ pub(super) fn plan(
                 }
             }
         }
+        if runtime
+            .db()
+            .collection_contract(&collection)
+            .is_some_and(|contract| {
+                matches!(
+                    contract.declared_model,
+                    crate::catalog::CollectionModel::Kv
+                        | crate::catalog::CollectionModel::Config
+                        | crate::catalog::CollectionModel::Vault
+                )
+            })
+        {
+            // Independently created keys have different physical/logical IDs.
+            // They still address the same user key and must conflict together.
+            let key = |image: &Image| {
+                image.entity.data.as_row().and_then(|row| {
+                    Some((
+                        row_text(row, "_vault_tenant").unwrap_or_default(),
+                        row_text(row, "key")?,
+                    ))
+                })
+            };
+            let mut identities = HashMap::new();
+            for image in images.iter().flat_map(|images| images.values()) {
+                if let Some(key) = key(image) {
+                    identities
+                        .entry(key)
+                        .and_modify(|id: &mut u64| *id = (*id).min(image.entity.logical_id().raw()))
+                        .or_insert(image.entity.logical_id().raw());
+                }
+            }
+            for images in &mut images {
+                let mut keyed: HashMap<u64, Image> = HashMap::new();
+                for (id, image) in std::mem::take(images) {
+                    let id = key(&image)
+                        .and_then(|key| identities.get(&key).copied())
+                        .unwrap_or(id);
+                    let rank = |image: &Image| {
+                        (
+                            image.entity.xmin,
+                            image
+                                .entity
+                                .data
+                                .as_row()
+                                .and_then(|row| row_i64(row, "version"))
+                                .unwrap_or(0),
+                            image.entity.id,
+                        )
+                    };
+                    if keyed
+                        .get(&id)
+                        .is_none_or(|previous| rank(&image) > rank(previous))
+                    {
+                        keyed.insert(id, image);
+                    }
+                }
+                *images = keyed;
+            }
+        }
         let [base, ours, theirs] = images;
         let ids: BTreeSet<_> = base
             .keys()

@@ -362,10 +362,7 @@ impl RedDBServer {
             .record_metrics_tenant_activity(&scope.tenant, &scope.namespace, "ingest");
         if !batch.entities.is_empty() {
             self.runtime
-                .db()
-                .store()
-                .bulk_insert(&collection, batch.entities)
-                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                .insert_metrics_samples(&collection, batch.entities)?;
             materialize_metrics_rollups(&self.runtime, &collection, &contract)?;
         }
         self.runtime.record_metrics_ingest(
@@ -389,7 +386,6 @@ impl RedDBServer {
     ) -> RedDBResult<Vec<PromVectorSample>> {
         let mut latest_by_series: BTreeMap<Vec<(String, String)>, PromVectorSample> =
             BTreeMap::new();
-        let store = self.runtime.db().store();
         for contract in self
             .runtime
             .db()
@@ -397,11 +393,7 @@ impl RedDBServer {
             .into_iter()
             .filter(|contract| contract.declared_model == CollectionModel::Metrics)
         {
-            let Some(manager) = store.get_collection(&contract.name) else {
-                continue;
-            };
-            let entities =
-                manager.query_all(|entity| matches!(entity.data, EntityData::TimeSeries(_)));
+            let entities = visible_metrics_points(&self.runtime, &contract.name)?;
             for entity in entities {
                 let EntityData::TimeSeries(point) = entity.data else {
                     continue;
@@ -453,12 +445,17 @@ impl RedDBServer {
             .into_iter()
             .filter(|contract| contract.declared_model == CollectionModel::Metrics)
         {
-            for source in metrics_range_sources(store.as_ref(), &contract, range) {
-                let Some(manager) = store.get_collection(&source.collection) else {
-                    continue;
-                };
-                let entities =
-                    manager.query_all(|entity| matches!(entity.data, EntityData::TimeSeries(_)));
+            let sources = if self.runtime.vcs_is_versioned(&contract.name)? {
+                vec![MetricsRangeSource {
+                    collection: contract.name.clone(),
+                    min_inclusive_ns: None,
+                    max_exclusive_ns: None,
+                }]
+            } else {
+                metrics_range_sources(store.as_ref(), &contract, range)
+            };
+            for source in sources {
+                let entities = visible_metrics_points(&self.runtime, &source.collection)?;
                 for entity in entities {
                     let EntityData::TimeSeries(point) = entity.data else {
                         continue;
@@ -714,7 +711,6 @@ impl RedDBServer {
     ) -> RedDBResult<BTreeMap<Vec<(String, String)>, PromRangeSeries>> {
         let mut samples_by_series: BTreeMap<Vec<(String, String)>, PromRangeSeries> =
             BTreeMap::new();
-        let store = self.runtime.db().store();
         for contract in self
             .runtime
             .db()
@@ -722,11 +718,7 @@ impl RedDBServer {
             .into_iter()
             .filter(|contract| contract.declared_model == CollectionModel::Metrics)
         {
-            let Some(manager) = store.get_collection(&contract.name) else {
-                continue;
-            };
-            let entities =
-                manager.query_all(|entity| matches!(entity.data, EntityData::TimeSeries(_)));
+            let entities = visible_metrics_points(&self.runtime, &contract.name)?;
             for entity in entities {
                 let EntityData::TimeSeries(point) = entity.data else {
                     continue;
@@ -2034,7 +2026,7 @@ fn decode_metric_batch(
     let mut cardinality_budget_rejected_series = 0_u64;
     let series_budget = metrics_series_budget_per_metric();
     let mut admitted_counts: HashMap<String, usize> = HashMap::new();
-    let mut known_series = existing_metrics_series_keys(runtime, collection);
+    let mut known_series = existing_metrics_series_keys(runtime, collection)?;
 
     for series in request.timeseries {
         if !series.histograms.is_empty() {
@@ -2143,18 +2135,71 @@ fn metrics_series_budget_per_metric() -> Option<usize> {
         .filter(|value| *value > 0)
 }
 
-fn existing_metrics_series_keys(runtime: &RedDBRuntime, collection: &str) -> HashSet<String> {
-    let Some(manager) = runtime.db().store().get_collection(collection) else {
-        return HashSet::new();
+impl RedDBRuntime {
+    pub(crate) fn insert_metrics_samples(
+        &self,
+        collection: &str,
+        mut entities: Vec<UnifiedEntity>,
+    ) -> RedDBResult<()> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let store = self.db().store();
+        if self.vcs_is_versioned(collection)? {
+            let _publication = store.vault_publication_lock.lock();
+            self.with_versioned_graph_insert(|| {
+                let xid = self
+                    .current_xid()
+                    .or_else(|| self.graph_insert_xid())
+                    .expect("versioned writer");
+                for entity in &mut entities {
+                    entity.set_xmin(xid);
+                    self.stamp_vcs_creation(collection, entity)?;
+                }
+                store.bulk_insert(collection, entities)?;
+                Ok(())
+            })?;
+        } else {
+            store.bulk_insert(collection, entities)?;
+        }
+        self.invalidate_result_cache();
+        Ok(())
+    }
+}
+
+fn visible_metrics_points(
+    runtime: &RedDBRuntime,
+    collection: &str,
+) -> RedDBResult<Vec<UnifiedEntity>> {
+    let store = runtime.db().store();
+    let Some(manager) = store.get_collection(collection) else {
+        return Ok(Vec::new());
     };
-    manager
-        .query_all(|entity| matches!(entity.data, EntityData::TimeSeries(_)))
+    let (snapshot, _retention) = runtime.native_read_snapshot()?;
+    let mut points = Vec::new();
+    manager.try_for_each_entity(usize::MAX, |entity| {
+        if matches!(entity.data, EntityData::TimeSeries(_))
+            && crate::runtime::execution_context::entity_visible_with_context(
+                Some(&snapshot),
+                entity,
+            )
+        {
+            points.push(entity.clone());
+        }
+        true
+    })?;
+    Ok(points)
+}
+
+fn existing_metrics_series_keys(
+    runtime: &RedDBRuntime,
+    collection: &str,
+) -> RedDBResult<HashSet<String>> {
+    Ok(visible_metrics_points(runtime, collection)?
         .into_iter()
         .filter_map(|entity| match entity.data {
             EntityData::TimeSeries(point) => Some(metrics_series_key(&point.metric, &point.tags)),
             _ => None,
         })
-        .collect()
+        .collect())
 }
 
 #[derive(Debug, Clone)]
@@ -2212,6 +2257,11 @@ fn materialize_metrics_rollups(
     raw_collection: &str,
     contract: &crate::physical::CollectionContract,
 ) -> RedDBResult<()> {
+    // Shared rollups cannot represent independent branch snapshots. Versioned
+    // reads use retained raw samples, including after a merge or hard reset.
+    if runtime.vcs_is_versioned(raw_collection)? {
+        return Ok(());
+    }
     let policies = metrics_rollup_policies(contract);
     if policies.is_empty() {
         return Ok(());

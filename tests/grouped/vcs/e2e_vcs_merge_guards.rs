@@ -1,5 +1,5 @@
-//! Regression for unsupported data application. These cases assert rejection
-//! and unchanged HEAD, not successful merge support for any model.
+//! Apply supported models' native state and reject incomplete adapters without
+//! advancing HEAD. Dedicated model tests cover divergent branches and recovery.
 
 #[path = "../../support/prometheus.rs"]
 #[allow(dead_code)]
@@ -93,6 +93,13 @@ fn check_merge_guard(model: CollectionModel, create: &str, mutation: Option<&str
         runtime.execute_query(mutation).expect("model mutation");
     }
     if model == CollectionModel::Metrics {
+        runtime
+            .vcs_checkout(CheckoutInput {
+                connection_id: 0,
+                target: CheckoutTarget::Branch("agent".into()),
+                force: false,
+            })
+            .expect("HTTP branch");
         let request = prometheus::WriteRequest {
             timeseries: vec![prometheus::TimeSeries {
                 labels: vec![prometheus::label("__name__", "requests_total")],
@@ -101,6 +108,13 @@ fn check_merge_guard(model: CollectionModel, create: &str, mutation: Option<&str
         };
         let (status, body) = prometheus::post_remote_write(runtime.clone(), "items", &request);
         assert_eq!(status, 204, "metrics sample: {body}");
+        runtime
+            .vcs_checkout(CheckoutInput {
+                connection_id: 0,
+                target: CheckoutTarget::Branch("main".into()),
+                force: false,
+            })
+            .expect("restore HTTP branch");
         let samples = runtime
             .execute_query("SELECT value FROM items WHERE metric = 'requests_total'")
             .expect("stored metric sample");
@@ -108,6 +122,37 @@ fn check_merge_guard(model: CollectionModel, create: &str, mutation: Option<&str
     }
     let source = commit("source");
     checkout("main");
+    let read_state = || {
+        let query = match model {
+            CollectionModel::Hll => Some("SELECT CARDINALITY FROM items"),
+            CollectionModel::Sketch => Some("SELECT FREQ('agent') FROM items"),
+            CollectionModel::Filter => Some("SELECT CONTAINS('agent') FROM items"),
+            _ => None,
+        };
+        if let Some(query) = query {
+            let result = runtime.execute_query(query).expect("probabilistic read");
+            let field = match model {
+                CollectionModel::Hll => "cardinality",
+                CollectionModel::Sketch => "freq",
+                _ => "contains",
+            };
+            match result.result.records[0].get(field).expect("state") {
+                reddb_types::Value::UnsignedInteger(value) => *value as usize,
+                reddb_types::Value::Boolean(value) => usize::from(*value),
+                value => panic!("unexpected state {value:?}"),
+            }
+        } else {
+            runtime
+                .scan_collection("items", None, 10)
+                .expect("data scan")
+                .total
+        }
+    };
+    let source_value = if model == CollectionModel::Sketch {
+        3
+    } else {
+        1
+    };
     let assert_head = || {
         let status = runtime
             .vcs_status(StatusInput {
@@ -143,16 +188,15 @@ fn check_merge_guard(model: CollectionModel, create: &str, mutation: Option<&str
                 | CollectionModel::Kv
                 | CollectionModel::Mixed
                 | CollectionModel::TimeSeries
+                | CollectionModel::Config
+                | CollectionModel::Hll
+                | CollectionModel::Sketch
+                | CollectionModel::Filter
+                | CollectionModel::Metrics
         ) {
             let outcome = result.expect("fast-forward applies source data");
             assert_eq!(outcome.fast_forward, strategy == MergeStrategy::Auto);
-            assert_eq!(
-                runtime
-                    .scan_collection("items", None, 10)
-                    .expect("merged scan")
-                    .total,
-                1
-            );
+            assert_eq!(read_state(), source_value);
             runtime
                 .vcs_reset(ResetInput {
                     connection_id: 8201,
@@ -160,13 +204,7 @@ fn check_merge_guard(model: CollectionModel, create: &str, mutation: Option<&str
                     mode: ResetMode::Hard,
                 })
                 .expect("hard reset restores base data");
-            assert_eq!(
-                runtime
-                    .scan_collection("items", None, 10)
-                    .expect("reset scan")
-                    .total,
-                0
-            );
+            assert_eq!(read_state(), 0);
             assert_head();
             continue;
         }
@@ -186,29 +224,22 @@ fn check_merge_guard(model: CollectionModel, create: &str, mutation: Option<&str
             | CollectionModel::Kv
             | CollectionModel::Mixed
             | CollectionModel::TimeSeries
+            | CollectionModel::Config
+            | CollectionModel::Hll
+            | CollectionModel::Sketch
+            | CollectionModel::Filter
+            | CollectionModel::Metrics
     ) {
         let picked = runtime
             .vcs_cherry_pick(8201, &source.hash, author())
             .expect("cherry-pick applies data")
             .merge_commit
             .expect("pick commit");
-        assert_eq!(
-            runtime
-                .scan_collection("items", None, 10)
-                .expect("picked data")
-                .total,
-            1
-        );
+        assert_eq!(read_state(), source_value);
         runtime
             .vcs_revert(8201, &picked.hash, author())
             .expect("revert applies inverse delta");
-        assert_eq!(
-            runtime
-                .scan_collection("items", None, 10)
-                .expect("reverted data")
-                .total,
-            0
-        );
+        assert_eq!(read_state(), 0);
         clear_current_connection_id();
         return;
     }

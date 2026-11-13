@@ -489,47 +489,6 @@ fn versioned_collections(store: &UnifiedStore) -> RedDBResult<Vec<String>> {
     Ok(collections)
 }
 
-/// Upsert / delete the `red_vcs_settings` row for `name`. `true`
-/// opts the collection into VCS; `false` opts it out (subsequent
-/// merges / diffs / AS OF queries stop seeing it). Does NOT touch
-/// existing row versions — you control whether history is retained
-/// by deciding *when* to opt out.
-fn set_versioned_flag(store: &UnifiedStore, name: &str, enabled: bool) -> RedDBResult<()> {
-    if name.starts_with("red_") || name.starts_with("red.") {
-        return Err(RedDBError::InvalidConfig(format!(
-            "cannot version internal collection `{name}`"
-        )));
-    }
-    let _publication = store.vault_publication_lock.lock();
-    let mut previous = Vec::new();
-    if let Some(manager) = store.get_collection(vc::SETTINGS) {
-        super::function_budget::try_scan(
-            |visit| manager.try_for_each_entity(usize::MAX, visit),
-            |entity| {
-                if entity.data.as_row().is_some_and(|row| {
-                    matches!(row.get_field("id"), Some(Value::Text(stored)) if stored.as_ref() == name)
-                }) {
-                    previous.push(entity.id);
-                }
-                true
-            },
-        )?;
-    }
-    if enabled {
-        let mut fields: HashMap<String, Value> = HashMap::new();
-        fields.insert("id".to_string(), Value::text(name));
-        fields.insert("versioned".to_string(), Value::Boolean(true));
-        fields.insert("ts_ms".to_string(), Value::TimestampMs(now_ms()));
-        // Publish the replacement first. A failed insert must not erase the
-        // existing history setting; a failed deletion remains an explicit error.
-        insert_meta_row(store, vc::SETTINGS, fields)?;
-    }
-    for id in previous {
-        store.delete(vc::SETTINGS, id)?;
-    }
-    Ok(())
-}
-
 fn list_refs_by_prefix(store: &UnifiedStore, prefix: Option<&str>) -> Vec<Ref> {
     let Some(manager) = store.get_collection(vc::REFS) else {
         return Vec::new();
@@ -1757,7 +1716,29 @@ impl RedDBRuntime {
         let store: &UnifiedStore = &store_arc;
         let _publication = store.vault_publication_lock.lock();
         if collection.starts_with("red_") || collection.starts_with("red.") {
-            return set_versioned_flag(store, collection, enabled);
+            return Err(RedDBError::InvalidConfig(format!(
+                "cannot version internal collection `{collection}`"
+            )));
+        }
+        if is_versioned(store, collection)? == enabled {
+            return Ok(());
+        }
+        if !enabled
+            && self
+                .db()
+                .collection_contract(collection)
+                .is_some_and(|contract| {
+                    matches!(
+                        contract.declared_model,
+                        crate::catalog::CollectionModel::Hll
+                            | crate::catalog::CollectionModel::Sketch
+                            | crate::catalog::CollectionModel::Filter
+                    )
+                })
+        {
+            return Err(RedDBError::InvalidOperation(
+                "export probabilistic state before discarding its version history".into(),
+            ));
         }
         if !enabled && list_refs_by_prefix(store, Some(vc::BRANCH_REF_PREFIX)).len() > 1 {
             return Err(RedDBError::InvalidOperation(
@@ -1772,6 +1753,13 @@ impl RedDBRuntime {
                     store.set_format_version(previous_format);
                     return Err(RedDBError::Internal(error.to_string()));
                 }
+            }
+        }
+        let mut publication = crate::storage::unified::store::RowPublication::default();
+        if enabled {
+            if let Some(mut entity) = self.vcs_initial_probabilistic_state(collection)? {
+                entity.id = store.next_entity_id();
+                publication.inserts.push((collection.into(), entity, None));
             }
         }
         if let Some(manager) = store.get_collection(collection) {
@@ -1803,15 +1791,27 @@ impl RedDBRuntime {
                 } else {
                     entity.clear_branch_version();
                 }
-                manager
-                    .update(entity.clone())
-                    .map_err(|error| RedDBError::Internal(error.to_string()))?;
-                store
-                    .persist_entities_to_pager(collection, &[entity])
-                    .map_err(|error| RedDBError::Internal(error.to_string()))?;
+                let metadata = store.try_get_metadata(collection, id, usize::MAX)?;
+                publication
+                    .replacements
+                    .push((collection.into(), entity, metadata));
             }
         }
-        set_versioned_flag(store, collection, enabled)
+        branches::stage_metadata(
+            store,
+            &mut publication,
+            vc::SETTINGS,
+            "id",
+            collection,
+            HashMap::from([
+                ("id".into(), Value::text(collection)),
+                ("versioned".into(), Value::Boolean(enabled)),
+                ("ts_ms".into(), Value::TimestampMs(now_ms())),
+            ]),
+        )?;
+        store.publish_rows(publication)?;
+        self.invalidate_result_cache();
+        Ok(())
     }
 
     pub fn vcs_list_versioned(&self) -> RedDBResult<Vec<String>> {

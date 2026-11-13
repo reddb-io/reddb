@@ -355,6 +355,12 @@ data unchanged until every conflict has a persisted `ours`, `theirs`,
 and reopen preserve pending merges and choices.
 
 Data application is currently enabled for Table, Document, Graph, Vector,
-KV, Mixed and TimeSeries. Other models reject application before changing
-HEAD; their opt-in flag alone does not establish complete VCS support.
+KV, Mixed, TimeSeries, Config, HLL, Sketch, Filter and Metrics. Queue and
+Vault reject application before changing HEAD; their opt-in flag alone
+does not establish complete VCS support.
 See the [model validation matrix](./model-validation.md).
+
+Probabilistic collections retain native state snapshots. Concurrent changes
+to the same state require a conflict choice; merging does not implicitly add
+sketch counters twice. Versioned metrics use retained raw samples for reads
+instead of shared rollups, and raw retention cannot reclaim pinned history.

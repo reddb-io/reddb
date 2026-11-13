@@ -255,7 +255,7 @@ impl RedDBRuntime {
         }))
     }
 
-    pub(super) fn native_read_snapshot(
+    pub(crate) fn native_read_snapshot(
         &self,
     ) -> RedDBResult<(
         super::impl_core::SnapshotContext,

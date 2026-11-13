@@ -48,6 +48,107 @@ mod tests {
     }
 
     #[test]
+    fn failed_opt_in_restores_rows_and_setting() {
+        for create in ["CREATE HLL items", "CREATE TABLE items (value INT)"] {
+            let runtime = RedDBRuntime::in_memory().expect("runtime");
+            runtime.execute_query(create).expect("collection");
+            if create.contains("TABLE") {
+                runtime
+                    .execute_query("INSERT INTO items (value) VALUES (1)")
+                    .expect("legacy row");
+            }
+            let store = runtime.db().store();
+            store
+                .test_fail_deferred_wal_append
+                .store(true, std::sync::atomic::Ordering::Release);
+            assert!(runtime.vcs_set_versioned("items", true).is_err());
+            assert!(!runtime
+                .vcs_is_versioned("items")
+                .expect("unchanged setting"));
+            let manager = store.get_collection("items").unwrap();
+            manager
+                .try_for_each_entity(usize::MAX, |entity| {
+                    assert!(entity.branch_version().is_none());
+                    true
+                })
+                .expect("restored provenance");
+            runtime.vcs_set_versioned("items", true).expect("retry");
+            assert_eq!(
+                runtime
+                    .scan_collection("items", None, 10)
+                    .expect("single state")
+                    .total,
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn failed_state_write_preserves_visible_and_recovered_history() {
+        for (create, seed, mutation, query, field) in [
+            (
+                "CREATE CONFIG items",
+                "PUT CONFIG items key = 1",
+                "PUT CONFIG items key = 2",
+                "GET CONFIG items key",
+                "value",
+            ),
+            (
+                "CREATE HLL items",
+                "HLL ADD items 'base'",
+                "HLL ADD items 'failed'",
+                "HLL COUNT items",
+                "count",
+            ),
+            (
+                "CREATE SKETCH items",
+                "SKETCH ADD items 'base' 1",
+                "SKETCH ADD items 'base' 2",
+                "SKETCH COUNT items 'base'",
+                "estimate",
+            ),
+            (
+                "CREATE FILTER items",
+                "FILTER ADD items 'base'",
+                "FILTER DELETE items 'base'",
+                "FILTER CHECK items 'base'",
+                "exists",
+            ),
+        ] {
+            let directory = tempfile::tempdir().expect("directory");
+            let path = directory.path().join("state.rdb");
+            let options = || crate::RedDBOptions::persistent(&path);
+            let before;
+            {
+                let runtime = RedDBRuntime::with_options(options()).expect("runtime");
+                runtime.execute_query(create).expect("create");
+                runtime.vcs_set_versioned("items", true).expect("versioned");
+                runtime.execute_query(seed).expect("seed");
+                before = runtime.execute_query(query).unwrap().result.records[0]
+                    .get(field)
+                    .unwrap()
+                    .clone();
+                runtime
+                    .db()
+                    .store()
+                    .test_fail_deferred_wal_append
+                    .store(true, std::sync::atomic::Ordering::Release);
+                assert!(runtime.execute_query(mutation).is_err(), "{mutation}");
+                assert_eq!(
+                    runtime.execute_query(query).unwrap().result.records[0].get(field),
+                    Some(&before)
+                );
+                runtime.checkpoint().expect("checkpoint");
+            }
+            let runtime = RedDBRuntime::with_options(options()).expect("reopen");
+            assert_eq!(
+                runtime.execute_query(query).unwrap().result.records[0].get(field),
+                Some(&before)
+            );
+        }
+    }
+
+    #[test]
     fn failed_head_publication_restores_branch_view_and_reference() {
         let runtime = RedDBRuntime::in_memory().expect("runtime");
         let connection = 8401;
@@ -561,6 +662,11 @@ pub(super) fn ensure_entity_history_supported(runtime: &RedDBRuntime) -> RedDBRe
                         | crate::catalog::CollectionModel::Kv
                         | crate::catalog::CollectionModel::Mixed
                         | crate::catalog::CollectionModel::TimeSeries
+                        | crate::catalog::CollectionModel::Config
+                        | crate::catalog::CollectionModel::Hll
+                        | crate::catalog::CollectionModel::Sketch
+                        | crate::catalog::CollectionModel::Filter
+                        | crate::catalog::CollectionModel::Metrics
                 )
             })
         {
