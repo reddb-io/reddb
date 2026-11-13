@@ -576,9 +576,10 @@ fn cold_mvcc_indexes_restore_visible_heads_before_and_after_vacuum() {
 }
 
 #[test]
-fn committed_mvcc_index_reads_survive_crash_during_checkpoint_publication() {
-    const CHILD_PATH: &str = "REDDB_MVCC_INDEX_CRASH_PATH";
-    const CHILD_HOOK: &str = "REDDB_MVCC_INDEX_CRASH_HOOK";
+fn long_engine_rollout_id_survives_crash_during_checkpoint_publication() {
+    const CHILD_PATH: &str = "REDDB_LONG_INDEX_CRASH_PATH";
+    const CHILD_HOOK: &str = "REDDB_LONG_INDEX_CRASH_HOOK";
+    const AFFECTED_ID: &str = "er_68bcf520c3287be18076c5cd39a1572c680005faa6b290cb43c6f3db94e33dcd";
     let options = |path: std::path::PathBuf| {
         RedDBOptions::persistent(path)
             .with_memory_budget(64 * 1024 * 1024)
@@ -598,11 +599,16 @@ fn committed_mvcc_index_reads_survive_crash_during_checkpoint_publication() {
         for sql in [
             "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
             "BEGIN",
-            "UPDATE crash_index_rows SET payload = 'committed' WHERE id = 'db-1'",
-            "COMMIT",
         ] {
             runtime.execute_query(sql).expect(sql);
         }
+        runtime
+            .execute_query_with_params(
+                "UPDATE database_engine_rollouts SET status = 'failed' WHERE id = $1",
+                &[Value::text(AFFECTED_ID)],
+            )
+            .expect("update affected rollout");
+        runtime.execute_query("COMMIT").expect("commit update");
         // The crash hook is set only after opening and committing, so it
         // cannot fire in an unrelated startup checkpoint.
         let hook = std::env::var(CHILD_HOOK).expect("child crash hook");
@@ -621,19 +627,38 @@ fn committed_mvcc_index_reads_survive_crash_during_checkpoint_publication() {
             let runtime = open(path.clone());
             for sql in [
                 "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
-                "CREATE TABLE crash_index_rows (id TEXT, org_id TEXT, payload TEXT)",
-                "CREATE UNIQUE INDEX crash_by_id ON crash_index_rows (id) USING HASH",
-                "CREATE INDEX crash_by_org ON crash_index_rows (org_id) USING BTREE",
-                "INSERT INTO crash_index_rows (id,org_id,payload) VALUES ('db-1','org-a','original')",
+                "CREATE TABLE database_engine_rollouts (id TEXT, status TEXT, org_id TEXT, hash_key TEXT)",
+                "CREATE UNIQUE INDEX database_engine_rollouts_id ON database_engine_rollouts (id)",
+                "CREATE UNIQUE INDEX database_engine_rollouts_hash ON database_engine_rollouts (hash_key) USING HASH",
+                "CREATE INDEX database_engine_rollouts_org ON database_engine_rollouts (org_id) USING BTREE",
             ] {
                 runtime.execute_query(sql).expect(sql);
             }
+            for ordinal in 0..9 {
+                runtime
+                    .execute_query_with_params(
+                        "INSERT INTO database_engine_rollouts (id,status,org_id,hash_key) \
+                         VALUES ($1,'complete','org-other',$2)",
+                        &[
+                            Value::text(format!("er_{ordinal:064x}")),
+                            Value::text(format!("hash-{ordinal}")),
+                        ],
+                    )
+                    .expect("insert neighboring rollout");
+            }
+            runtime
+                .execute_query_with_params(
+                    "INSERT INTO database_engine_rollouts (id,status,org_id,hash_key) \
+                     VALUES ($1,'running','org-a','hash-affected')",
+                    &[Value::text(AFFECTED_ID)],
+                )
+                .expect("insert affected rollout");
             runtime.checkpoint().expect("baseline checkpoint");
         }
         let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args([
                 "--exact",
-                "runtime::cold_keyed_models::committed_mvcc_index_reads_survive_crash_during_checkpoint_publication",
+                "runtime::cold_keyed_models::long_engine_rollout_id_survives_crash_during_checkpoint_publication",
                 "--nocapture",
             ])
             .env(CHILD_PATH, &path)
@@ -648,20 +673,67 @@ fn committed_mvcc_index_reads_survive_crash_during_checkpoint_publication() {
         );
         for phase in ["recovery", "second reopen"] {
             let runtime = open(path.clone());
-            // Query each index before the unindexed scan can warm it.
-            for sql in [
-                "SELECT payload FROM crash_index_rows WHERE id = 'db-1'",
-                "SELECT payload FROM crash_index_rows WHERE org_id >= 'org-a'",
-                "SELECT payload FROM crash_index_rows WHERE payload = 'committed'",
-            ] {
-                let result = runtime.execute_query(sql).expect(sql);
-                assert_eq!(result.result.records.len(), 1, "{hook}: {phase}: {sql}");
-                assert_eq!(
-                    result.result.records[0].get("payload"),
-                    Some(&Value::text("committed")),
-                    "{hook}: {phase}: {sql}"
-                );
-            }
+            // Probe the index before the authoritative scan can warm stale
+            // postings left by recovery of the interrupted checkpoint.
+            let range = runtime
+                .execute_query(
+                    "SELECT id,status FROM database_engine_rollouts \
+                     WHERE id >= 'er_' AND id < 'es_' ORDER BY id",
+                )
+                .expect("indexed rollout range");
+            assert_eq!(range.result.records.len(), 10, "{hook}: {phase}: range");
+
+            let org_range = runtime
+                .execute_query(
+                    "SELECT id,status FROM database_engine_rollouts WHERE org_id >= 'org-a' AND org_id < 'org-b'",
+                )
+                .expect("secondary BTREE rollout range");
+            assert_eq!(
+                org_range.result.records.len(),
+                1,
+                "{hook}: {phase}: secondary BTREE"
+            );
+
+            let hash = runtime
+                .execute_query(
+                    "SELECT id,status FROM database_engine_rollouts WHERE hash_key = 'hash-affected'",
+                )
+                .expect("HASH rollout lookup");
+            assert_eq!(hash.result.records.len(), 1, "{hook}: {phase}: HASH");
+
+            let literal = runtime
+                .execute_query(&format!(
+                    "SELECT id,status FROM database_engine_rollouts WHERE id = '{AFFECTED_ID}'"
+                ))
+                .expect("literal rollout lookup");
+            assert_eq!(literal.result.records.len(), 1, "{hook}: {phase}: literal");
+            assert_eq!(
+                literal.result.records[0].get("status"),
+                Some(&Value::text("failed")),
+                "{hook}: {phase}: literal"
+            );
+
+            let parameterized = runtime
+                .execute_query_with_params(
+                    "SELECT id,status FROM database_engine_rollouts WHERE id = $1",
+                    &[Value::text(AFFECTED_ID)],
+                )
+                .expect("parameterized rollout lookup");
+            assert_eq!(
+                parameterized.result.records.len(),
+                1,
+                "{hook}: {phase}: parameterized"
+            );
+            assert_eq!(
+                parameterized.result.records[0].get("status"),
+                Some(&Value::text("failed")),
+                "{hook}: {phase}: parameterized"
+            );
+
+            let scan = runtime
+                .execute_query("SELECT id,status FROM database_engine_rollouts")
+                .expect("authoritative rollout scan");
+            assert_eq!(scan.result.records.len(), 10, "{hook}: {phase}: scan");
             runtime.checkpoint().expect("checkpoint recovered state");
         }
     }
