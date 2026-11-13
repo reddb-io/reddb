@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.36.2
+
+### Patch Changes
+
+- [#2836](https://github.com/reddb-io/reddb/pull/2836) [`dad1ced`](https://github.com/reddb-io/reddb/commit/dad1cedec6d7ab5961fa9298f255f6e0f93963e3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve all configuration records when offline compaction retires the obsolete physical `red_config` collection: promote the complete populated tree into an empty `red.config` identity, report the migrated records, and fail closed when both identities contain data.
+
 ## 1.36.0
 
 ## 1.35.0

@@ -1,5 +1,7 @@
 # @reddb-io/sdk
 
+## 1.36.2
+
 ## 1.36.0
 
 ### Minor Changes
