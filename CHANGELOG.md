@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.36.4
+
+### Patch Changes
+
+- [#2840](https://github.com/reddb-io/reddb/pull/2840) [`2d08274`](https://github.com/reddb-io/reddb/commit/2d08274519767111f173a4ab037a5af8478b92af) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve literal, parameterized, HASH, and BTREE lookups for long text identifiers after recovery from an interrupted MVCC checkpoint publication.
+
 ## 1.36.3
 
 ### Patch Changes
