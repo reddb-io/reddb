@@ -81,8 +81,9 @@ pub fn compact_paged(source: &Path, destination: &Path) -> Result<CompactionRepo
 }
 
 /// Rewrite a closed store while explicitly retiring the obsolete physical
-/// `red_config` identity. The canonical `red.config` tree is preserved as-is;
-/// the source remains unchanged and ordinary compaction never enables this.
+/// `red_config` identity. A populated legacy tree is promoted when the
+/// canonical tree is empty; two populated trees fail closed. The source
+/// remains unchanged and ordinary compaction never enables this.
 pub fn compact_paged_canonical_system_config(
     source: &Path,
     destination: &Path,
@@ -749,9 +750,11 @@ fn compact_paged_inner(
     }
     let source = Arc::new(Source::open(&source_path)?);
     let mut catalog = Catalog::read(&source)?;
-    if retain_canonical_system_config {
-        catalog.retain_canonical_system_config()?;
-    }
+    let migrated_system_config_records = if retain_canonical_system_config {
+        catalog.migrate_legacy_system_config()?
+    } else {
+        0
+    };
     ensure(
         !source.header.requires_disk_residency() || catalog.resume.is_some(),
         "prepared disk-resident file has no resume catalog",
@@ -1089,8 +1092,8 @@ fn compact_paged_inner(
     }
     let report = CompactionReport {
         retired_boot_system_wal_actions: 0,
-        reconciled_system_collections: 0,
-        imported_system_records: 0,
+        reconciled_system_collections: usize::from(migrated_system_config_records > 0),
+        imported_system_records: migrated_system_config_records,
         source_bytes: source.bytes,
         destination_bytes: reopened.bytes,
         source_allocated_bytes: allocated_bytes(&source_path)?,
