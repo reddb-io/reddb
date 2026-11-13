@@ -533,6 +533,23 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
             .any(|(_, value)| matches!(value, ValueOut::String(value) if value == expected))
     }
 
+    fn wait_for_follower_row(port: u16, id: u64, expected: &str) {
+        let deadline = Instant::now() + REPLICATION_TIMEOUT;
+        let query = format!(r#"{{"query":"SELECT name FROM failover_probe WHERE id = {id}"}}"#);
+        loop {
+            let (status, row) = http_request(port, "POST", "/query", Some(&query));
+            let (_, health) = http_request(port, "GET", "/replication/status", None);
+            if status == 200 && row.contains(expected) && health.contains(r#""state":"healthy""#) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "replica missed row {id}: row={row}; replication={health}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     let temp = support::temp_data_dir("cli-manual-promotion");
     let backend_root = temp.join("lease-backend");
     std::fs::create_dir_all(&backend_root).expect("create lease backend root");
@@ -618,14 +635,7 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         Some(&follower_failover),
     );
     wait_for_health(&mut follower, follower_http, "second promotion-era replica");
-    let (status, row) = http_request(
-        follower_http,
-        "POST",
-        "/query",
-        Some(r#"{"query":"SELECT name FROM failover_probe WHERE id = 1"}"#),
-    );
-    assert_eq!(status, 200, "second replica bootstrap: {row}");
-    assert!(row.contains("before-promotion"), "second replica: {row}");
+    wait_for_follower_row(follower_http, 1, "before-promotion");
     let _ = follower.stop_and_read_output();
 
     // Seed the negative upload sentinel after both fresh replicas bootstrap.
@@ -742,27 +752,7 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         "before={before:?}"
     );
     assert!(contains_text(&after, "after-promotion"), "after={after:?}");
-    let replay_deadline = Instant::now() + REPLICATION_TIMEOUT;
-    loop {
-        let (status, row) = http_request(
-            follower_http,
-            "POST",
-            "/query",
-            Some(r#"{"query":"SELECT name FROM failover_probe WHERE id = 2"}"#),
-        );
-        let (_, health) = http_request(follower_http, "GET", "/replication/status", None);
-        if status == 200
-            && row.contains("after-promotion")
-            && health.contains(r#""state":"healthy""#)
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < replay_deadline,
-            "old replica missed the new primary's write: row={row}; replication={health}"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_for_follower_row(follower_http, 2, "after-promotion");
     assert_eq!(
         std::fs::read(&foreign_head).expect("unrelated head after promotion"),
         foreign_head_bytes
@@ -806,6 +796,7 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
     runtime
         .block_on(client.query("INSERT INTO failover_probe (id, name) VALUES (3, 'after-restart')"))
         .expect("writer makes progress after restart");
+    wait_for_follower_row(follower_http, 3, "after-restart");
     let scan = runtime
         .block_on(client.query_with_options(
             "SELECT id, name FROM failover_probe ORDER BY id",

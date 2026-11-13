@@ -12,6 +12,64 @@ const TIMELINE_CRASH_DATA_PATH_ENV: &str = "REDDB_PRIMARY_REPLICA_TIMELINE_RUNTI
 const PRIMARY_REPLICA_CRASH_ENV: &str = "REDDB_PRIMARY_REPLICA_CRASH_AT";
 
 #[test]
+fn cold_primary_rejects_unrelated_slot_history_without_overwriting_it() {
+    let directory = tempfile::tempdir().expect("foreign catalog fixture directory");
+    let path = directory.path().join("database.rdb");
+    let options = || {
+        RedDBOptions::persistent(&path)
+            .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("native replication profile")
+    };
+    let mut foreign = reddb_file::ReplicationSlotCatalog::new(reddb_file::TimelineId(99));
+    foreign
+        .upsert(reddb_file::ReplicationSlot::new(
+            "foreign",
+            foreign.timeline,
+            0,
+        ))
+        .expect("foreign slot");
+    let encoded = hex::encode(foreign.encode().expect("valid catalog checksum"));
+    {
+        let runtime = RedDBRuntime::with_options(options()).expect("fixture writer");
+        runtime
+            .execute_query("INSERT INTO preserved_items (id, name) VALUES (1, 'preserved')")
+            .expect("fixture row");
+        runtime
+            .db()
+            .store()
+            .try_set_storage_metadata(
+                "replication.slots",
+                &serde_json::Value::String(encoded.clone()),
+            )
+            .expect("inject an unrelated checksummed catalog");
+        runtime.flush().expect("persist fixture");
+    }
+    let error =
+        RedDBRuntime::with_options(options().with_replication(ReplicationConfig::primary()))
+            .err()
+            .expect("unrelated history must reject primary startup");
+    assert!(
+        error
+            .to_string()
+            .contains("outside the current timeline history"),
+        "{error}"
+    );
+    let reader = RedDBRuntime::with_options(options().with_read_only(true))
+        .expect("inspect retained authority");
+    let catalog = reader
+        .db()
+        .store()
+        .try_get_storage_metadata("replication.slots")
+        .expect("read unmodified catalog")
+        .expect("catalog retained");
+    assert_eq!(catalog.as_text(), Some(encoded.as_str()));
+    let row = reader
+        .execute_query("SELECT name FROM preserved_items WHERE id = 1")
+        .expect("read retained row");
+    assert_eq!(row.result.len(), 1);
+}
+
+#[test]
 fn promoted_checkpoint_preserves_shared_slots_and_invalidates_divergent_acks() {
     let directory = tempfile::tempdir().expect("promotion fixture directory");
     let source_path = directory.path().join("source.rdb");
