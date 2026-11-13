@@ -564,6 +564,101 @@ pub enum ResumeMode {
     },
 }
 
+const REBOOTSTRAP_PROOF_TOKEN_BYTES_MAX: usize = 1024;
+
+#[derive(Debug)]
+struct ReplicaRebootstrapProof {
+    replica_id: String,
+    timeline: u64,
+    checkpoint_lsn: u64,
+    token: String,
+}
+
+impl ReplicaRebootstrapProof {
+    const MAGIC: &'static [u8; 5] = b"RBRP1";
+
+    fn encode(&self) -> io::Result<Vec<u8>> {
+        let replica_id_bytes = self.replica_id.as_bytes();
+        let token_bytes = self.token.as_bytes();
+        let replica_id_len = u16::try_from(replica_id_bytes.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "replica identity is too long")
+        })?;
+        let token_len = u16::try_from(token_bytes.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "snapshot token is too long")
+        })?;
+        let mut bytes = Vec::with_capacity(25 + replica_id_bytes.len() + token_bytes.len());
+        bytes.extend_from_slice(Self::MAGIC);
+        bytes.extend_from_slice(&self.timeline.to_le_bytes());
+        bytes.extend_from_slice(&self.checkpoint_lsn.to_le_bytes());
+        bytes.extend_from_slice(&replica_id_len.to_le_bytes());
+        bytes.extend_from_slice(&token_len.to_le_bytes());
+        bytes.extend_from_slice(replica_id_bytes);
+        bytes.extend_from_slice(token_bytes);
+        Ok(bytes)
+    }
+
+    fn decode(bytes: &[u8]) -> io::Result<Self> {
+        if bytes.len() < 25 || &bytes[..5] != Self::MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid replica rebootstrap proof header",
+            ));
+        }
+        let timeline = u64::from_le_bytes(
+            bytes[5..13]
+                .try_into()
+                .expect("invariant: proof timeline slice has eight bytes"),
+        );
+        let checkpoint_lsn = u64::from_le_bytes(
+            bytes[13..21]
+                .try_into()
+                .expect("invariant: proof checkpoint slice has eight bytes"),
+        );
+        let replica_id_len = usize::from(u16::from_le_bytes(
+            bytes[21..23]
+                .try_into()
+                .expect("invariant: proof identity length slice has two bytes"),
+        ));
+        let token_len = usize::from(u16::from_le_bytes(
+            bytes[23..25]
+                .try_into()
+                .expect("invariant: proof token length slice has two bytes"),
+        ));
+        let expected_len = 25usize
+            .checked_add(replica_id_len)
+            .and_then(|len| len.checked_add(token_len))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "rebootstrap proof length overflow",
+                )
+            })?;
+        if bytes.len() != expected_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid replica rebootstrap proof length",
+            ));
+        }
+        let replica_id_end = 25 + replica_id_len;
+        let replica_id = std::str::from_utf8(&bytes[25..replica_id_end])
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+            .to_string();
+        let token = std::str::from_utf8(&bytes[replica_id_end..expected_len])
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+            .to_string();
+        Ok(Self {
+            replica_id,
+            timeline,
+            checkpoint_lsn,
+            token,
+        })
+    }
+}
+
+fn replica_rebootstrap_proof_key(replica_id: &str) -> String {
+    format!("replication.rebootstrap.proof.{}", hex::encode(replica_id))
+}
+
 impl PrimaryReplication {
     pub fn slot_path_for(data_path: &Path) -> PathBuf {
         reddb_file::layout::legacy_logical_slots_path(data_path)
@@ -1222,6 +1317,171 @@ impl PrimaryReplication {
             return Some(ReplicationSlotInvalidationCause::WalRemoved);
         }
         None
+    }
+
+    pub fn record_replica_rebootstrap_snapshot(
+        &self,
+        replica_id: &str,
+        token: &str,
+        timeline: reddb_file::TimelineId,
+        checkpoint_lsn: u64,
+        resumed_transfer: bool,
+    ) -> io::Result<bool> {
+        if token.is_empty() || token.len() > REBOOTSTRAP_PROOF_TOKEN_BYTES_MAX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid replica rebootstrap snapshot token",
+            ));
+        }
+        if timeline != self.slot_timeline || checkpoint_lsn > self.current_logical_lsn() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "replica rebootstrap snapshot is outside the primary frontier",
+            ));
+        }
+        let _publication = self
+            .metadata_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
+        let slots = self.slots.read().unwrap_or_else(|error| error.into_inner());
+        let Some(slot) = slots.get(replica_id) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "replica rebootstrap slot is not registered",
+            ));
+        };
+        if slot.invalidation_reason.is_none() {
+            return Ok(false);
+        }
+        let store = self.metadata_store.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "replica rebootstrap proof requires native metadata",
+            )
+        })?;
+        let key = replica_rebootstrap_proof_key(replica_id);
+        let proof = ReplicaRebootstrapProof {
+            replica_id: replica_id.to_string(),
+            timeline: timeline.0,
+            checkpoint_lsn,
+            token: token.to_string(),
+        };
+        if resumed_transfer {
+            let bytes = super::metadata::read(store, &key)?
+                .filter(|bytes| !bytes.is_empty())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "replica rebootstrap snapshot token is no longer active",
+                    )
+                })?;
+            let recorded = ReplicaRebootstrapProof::decode(&bytes)?;
+            if recorded.replica_id != proof.replica_id
+                || recorded.timeline != proof.timeline
+                || recorded.checkpoint_lsn != proof.checkpoint_lsn
+                || !crate::crypto::constant_time_eq(
+                    recorded.token.as_bytes(),
+                    proof.token.as_bytes(),
+                )
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "replica rebootstrap snapshot token does not match the issued snapshot",
+                ));
+            }
+            return Ok(true);
+        }
+        let bytes = proof.encode()?;
+        super::metadata::write(store, &key, &bytes)?;
+        Ok(true)
+    }
+
+    pub fn accept_replica_rebootstrap_snapshot(
+        &self,
+        replica_id: &str,
+        token: Option<&str>,
+        installed_lsn: u64,
+    ) -> io::Result<bool> {
+        let Some(token) = token else {
+            return Ok(false);
+        };
+        if token.is_empty() || token.len() > REBOOTSTRAP_PROOF_TOKEN_BYTES_MAX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid installed replica snapshot token",
+            ));
+        }
+        let current_lsn = self.current_logical_lsn();
+        let _publication = self
+            .metadata_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
+        let mut slots = self
+            .slots
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(slot) = slots.get(replica_id) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "installed replica snapshot has no registered slot",
+            ));
+        };
+        if slot.invalidation_reason.is_none() {
+            return Ok(false);
+        }
+        let store = self.metadata_store.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "installed replica snapshot proof requires native metadata",
+            )
+        })?;
+        let key = replica_rebootstrap_proof_key(replica_id);
+        let Some(bytes) = super::metadata::read(store, &key)?.filter(|bytes| !bytes.is_empty())
+        else {
+            // The proof is consumed before the repaired slot is published. If
+            // the primary crashed in that interval, keep the slot invalidated
+            // and let resume planning issue a new snapshot.
+            return Ok(false);
+        };
+        let proof = ReplicaRebootstrapProof::decode(&bytes)?;
+        if proof.replica_id != replica_id
+            || proof.timeline != self.slot_timeline.0
+            || slot.timeline != self.slot_timeline
+            || proof.checkpoint_lsn != installed_lsn
+            || installed_lsn > current_lsn
+            || !crate::crypto::constant_time_eq(proof.token.as_bytes(), token.as_bytes())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "installed replica snapshot does not match the issued checkpoint",
+            ));
+        }
+
+        // Consume the proof before publishing the repaired slot. A crash in
+        // between forces another snapshot instead of admitting an unproved
+        // cursor on the next boot.
+        super::metadata::write(store, &key, &[])?;
+        let mut repaired = slots.clone();
+        let repaired_slot = repaired
+            .get_mut(replica_id)
+            .expect("invariant: repaired slot was cloned from the registered slot map");
+        repaired_slot.timeline = self.slot_timeline;
+        repaired_slot.restart_lsn = installed_lsn;
+        repaired_slot.confirmed_write_lsn = installed_lsn;
+        repaired_slot.confirmed_flush_lsn = installed_lsn;
+        repaired_slot.confirmed_apply_lsn = installed_lsn;
+        repaired_slot.active = true;
+        repaired_slot.last_seen_at_unix_ms = crate::utils::now_unix_millis() as u128;
+        repaired_slot.invalidation_reason = None;
+        repaired_slot.invalidated_at_unix_ms = None;
+        let bytes = slots::slot_catalog_from_map(&repaired, self.slot_timeline)
+            .and_then(|catalog| catalog.encode())
+            .map_err(io::Error::other)?;
+        super::metadata::write(store, super::metadata::SLOTS, &bytes)?;
+        *slots = repaired;
+        drop(slots);
+        self.set_replica_rebootstrapping(replica_id, false);
+        Ok(true)
     }
 
     /// Decide how a reconnecting replica's pull should be served

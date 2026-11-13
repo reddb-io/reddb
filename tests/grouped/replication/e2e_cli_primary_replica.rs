@@ -202,6 +202,14 @@ fn http_request(port: u16, method: &str, path: &str, body: Option<&str>) -> (u16
 }
 
 fn wait_for_health(child: &mut ServerChild, port: u16, name: &str) {
+    wait_for_probe(child, port, name, "/health");
+}
+
+fn wait_for_liveness(child: &mut ServerChild, port: u16, name: &str) {
+    wait_for_probe(child, port, name, "/health/live");
+}
+
+fn wait_for_probe(child: &mut ServerChild, port: u16, name: &str, path: &str) {
     let deadline = Instant::now() + PROCESS_READY_TIMEOUT;
     let mut last_status_line = String::new();
     while Instant::now() < deadline {
@@ -212,8 +220,9 @@ fn wait_for_health(child: &mut ServerChild, port: u16, name: &str) {
         if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
             let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-            let _ = stream
-                .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            let request =
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(request.as_bytes());
             let mut status_line = String::new();
             let _ = BufReader::new(stream).read_line(&mut status_line);
             if status_line.starts_with("HTTP/1.1 200") {
@@ -521,7 +530,7 @@ fn cli_replication_snapshots_preserve_independent_native_generations() {
 
 #[cfg(feature = "grpc")]
 #[test]
-fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
+fn cli_manual_promotion_recovers_a_replica_below_the_fork_and_fences_the_old_primary() {
     use reddb_client::{QueryOptions, Reddb, ValueOut};
     use reddb_wire::replication::{FailoverPromotionReply, FailoverPromotionRequest};
 
@@ -621,19 +630,9 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // The candidate must advance beyond the canonical outbox in its initial
-    // snapshot. Promotion must restore this later, genuinely applied WAL LSN.
-    let (status, update) = http_request(
-        primary_http,
-        "POST",
-        "/query",
-        Some(r#"{"query":"UPDATE failover_probe SET name = 'before-promotion' WHERE id = 1"}"#),
-    );
-    assert_eq!(status, 200, "post-bootstrap source update: {update}");
-    wait_for_follower_row(replica_http, 1, "before-promotion");
-
-    // Keep another durable replica at the old primary's applied frontier.
-    // Reconnecting it after failover must deliver the next write via WAL.
+    // Stop another durable replica at the initial frontier. After failover it
+    // must recover the source update below the fork before it can consume new
+    // writes from the promoted primary.
     let follower_failover = FailoverConfig {
         holder_id: "follower-c",
         ..replica_failover
@@ -645,9 +644,36 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         primary_grpc,
         Some(&follower_failover),
     );
-    wait_for_health(&mut follower, follower_http, "second promotion-era replica");
-    wait_for_follower_row(follower_http, 1, "before-promotion");
+    wait_for_health(
+        &mut follower,
+        follower_http,
+        "lagging promotion-era replica",
+    );
+    wait_for_follower_row(follower_http, 1, "initial-snapshot");
     let _ = follower.stop_and_read_output();
+    let follower_replica_id = {
+        let reader = reddb::RedDBRuntime::with_options(
+            reddb::RedDBOptions::persistent(&follower_path)
+                .with_storage_profile(reddb::StorageDeployPreset::PrimaryReplicaDev.selection())
+                .expect("lagging replica identity reader")
+                .with_read_only(true),
+        )
+        .expect("cold open lagging replica identity");
+        let replica_id = reader.replication_replica_id();
+        assert!(!replica_id.is_empty(), "replica identity must be durable");
+        replica_id
+    };
+
+    // The candidate must advance beyond the canonical outbox in its initial
+    // snapshot. Promotion must restore this later, genuinely applied WAL LSN.
+    let (status, update) = http_request(
+        primary_http,
+        "POST",
+        "/query",
+        Some(r#"{"query":"UPDATE failover_probe SET name = 'before-promotion' WHERE id = 1"}"#),
+    );
+    assert_eq!(status, 200, "post-bootstrap source update: {update}");
+    wait_for_follower_row(replica_http, 1, "before-promotion");
 
     // Seed the negative upload sentinel after both fresh replicas bootstrap.
     let legacy_payload = backend_root.join("manual-promotion");
@@ -763,6 +789,60 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         "before={before:?}"
     );
     assert!(contains_text(&after, "after-promotion"), "after={after:?}");
+    let rebootstrap_deadline = Instant::now() + REPLICATION_TIMEOUT;
+    loop {
+        let (status, row) = http_request(
+            follower_http,
+            "POST",
+            "/query",
+            Some(r#"{"query":"SELECT name FROM failover_probe WHERE id = 2"}"#),
+        );
+        let (_, replication) = http_request(follower_http, "GET", "/replication/status", None);
+        if replication.contains(r#""state":"rebootstrap_ready""#) {
+            break;
+        }
+        assert!(
+            !(status == 200 && row.contains("after-promotion")),
+            "fixture must exercise the bounded basebackup recovery path: {replication}"
+        );
+        assert!(
+            Instant::now() < rebootstrap_deadline,
+            "lagging replica did not stage recovery: row={row}; replication={replication}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let rebootstrap_marker = reddb_file::layout::rebootstrap_ready_marker_path(&follower_path);
+    let rebootstrap_pending = reddb_file::layout::rebootstrap_pending_path(&follower_path);
+    assert!(
+        rebootstrap_marker.exists(),
+        "ready state must follow durable marker publication"
+    );
+    assert!(
+        rebootstrap_pending.exists(),
+        "ready state must retain the complete pending database"
+    );
+    let _ = follower.stop_and_read_output();
+    follower = spawn_replica_with_failover(
+        &follower_path,
+        follower_http,
+        follower_grpc,
+        replica_grpc,
+        Some(&follower_failover),
+    );
+    wait_for_liveness(
+        &mut follower,
+        follower_http,
+        "replica after one explicit rebootstrap reopen",
+    );
+    assert!(
+        !rebootstrap_marker.exists(),
+        "reopen must consume the ready marker"
+    );
+    assert!(
+        !rebootstrap_pending.exists(),
+        "reopen must promote the pending database"
+    );
+    wait_for_follower_row(follower_http, 1, "before-promotion");
     wait_for_follower_row(follower_http, 2, "after-promotion");
     assert_eq!(
         std::fs::read(&foreign_head).expect("unrelated head after promotion"),
@@ -808,6 +888,20 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         .block_on(client.query("INSERT INTO failover_probe (id, name) VALUES (3, 'after-restart')"))
         .expect("writer makes progress after restart");
     wait_for_follower_row(follower_http, 3, "after-restart");
+    let _ = follower.stop_and_read_output();
+    let recovered_follower = reddb::RedDBRuntime::with_options(
+        reddb::RedDBOptions::persistent(&follower_path)
+            .with_storage_profile(reddb::StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("recovered replica identity reader")
+            .with_read_only(true),
+    )
+    .expect("cold open recovered replica");
+    assert_eq!(
+        recovered_follower.replication_replica_id(),
+        follower_replica_id,
+        "basebackup recovery must preserve the target replica identity"
+    );
+    drop(recovered_follower);
     let scan = runtime
         .block_on(client.query_with_options(
             "SELECT id, name FROM failover_probe ORDER BY id",
@@ -841,6 +935,7 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         1,
         "the promoted node must not retain its own former upstream slot: {catalog:?}"
     );
+    assert_eq!(catalog.slots[0].replica_id, follower_replica_id);
     assert!(catalog.slots.iter().all(|slot| slot.timeline.0 == 2));
     backup
         .primary_replica_wal_retention_plan()

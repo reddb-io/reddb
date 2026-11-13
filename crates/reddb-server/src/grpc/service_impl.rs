@@ -325,16 +325,21 @@ async fn prepare_wal_pull(
         .as_ref()
         .and_then(|spool| spool.oldest_lsn().ok().flatten())
         .or_else(|| primary.wal_buffer.oldest_lsn());
+    let installed_snapshot_token = open.installed_snapshot_token;
     let replica_id = open.replica_id;
     let mut partial_resync = false;
 
     if let Some(id) = &replica_id {
         primary.ensure_replica_registered(id, since_lsn);
+        primary
+            .accept_replica_rebootstrap_snapshot(id, installed_snapshot_token.as_deref(), since_lsn)
+            .map_err(|error| Status::failed_precondition(error.to_string()))?;
         if let Some(endpoints) = routing_endpoints {
             grpc.runtime.register_routing_endpoints(id, endpoints);
         }
         match primary.plan_replica_resume(id, since_lsn, oldest_available_lsn) {
             crate::replication::primary::ResumeMode::FullRebootstrap { cause } => {
+                primary.set_replica_rebootstrapping(id, true);
                 let available_from_lsn = oldest_available_lsn.unwrap_or(current_lsn);
                 let partial_resync_count = primary.partial_resync_count();
                 let catchup = grpc
@@ -3179,9 +3184,7 @@ impl RedDb for GrpcRuntime {
                 map.insert(
                     "last_applied_lsn".into(),
                     JsonValue::Number(
-                        self.runtime
-                            .config_u64("replication.last_applied_lsn", 0)
-                            as f64,
+                        self.runtime.config_u64("replication.last_applied_lsn", 0) as f64
                     ),
                 );
                 map.insert(
@@ -3249,6 +3252,9 @@ impl RedDb for GrpcRuntime {
             since_lsn: request.since_lsn,
             max_count,
             replica_id: request.replica_id.filter(|id| !id.is_empty()),
+            installed_snapshot_token: request
+                .installed_snapshot_token
+                .filter(|token| !token.is_empty()),
             term: request.term,
             await_data: request.await_data,
             await_timeout_ms: request.await_timeout_ms,
@@ -3409,6 +3415,7 @@ impl RedDb for GrpcRuntime {
             .or_else(|| repl.wal_buffer.oldest_lsn());
         // PLAN.md Phase 11.4 — caller may identify itself so primary can
         // track per-replica `last_sent_lsn` and `last_seen_at_unix_ms`.
+        let installed_snapshot_token = open.installed_snapshot_token;
         let replica_id = open.replica_id;
 
         // A replica that fell behind within the retention window resumes
@@ -3417,11 +3424,18 @@ impl RedDb for GrpcRuntime {
         let mut partial_resync = false;
         if let Some(id) = &replica_id {
             repl.ensure_replica_registered(id, since_lsn);
+            repl.accept_replica_rebootstrap_snapshot(
+                id,
+                installed_snapshot_token.as_deref(),
+                since_lsn,
+            )
+            .map_err(|error| Status::failed_precondition(error.to_string()))?;
             if let Some(endpoints) = routing_endpoints {
                 self.runtime.register_routing_endpoints(id, endpoints);
             }
             match repl.plan_replica_resume(id, since_lsn, oldest_available_lsn) {
                 crate::replication::primary::ResumeMode::FullRebootstrap { cause } => {
+                    repl.set_replica_rebootstrapping(id, true);
                     let available_from_lsn = oldest_available_lsn.unwrap_or(current_lsn);
                     let catchup = self
                         .runtime
@@ -3628,6 +3642,7 @@ impl RedDb for GrpcRuntime {
             snapshot_metadata_usize(request.metadata(), "x-reddb-snapshot-offset")?.unwrap_or(0);
         let requested_snapshot_token =
             snapshot_metadata_string(request.metadata(), "x-reddb-snapshot-token")?;
+        let resumed_snapshot_transfer = requested_snapshot_token.is_some();
         let db = self.runtime.db();
 
         let repl = db.replication.as_ref().ok_or_else(|| {
@@ -3643,7 +3658,10 @@ impl RedDb for GrpcRuntime {
         // cannot read that live file on Windows.
         let store = db.store();
         let publication = store.vault_publication_lock.lock();
-        let snapshot = self.runtime.capture_serverless_snapshot().map_err(to_status)?;
+        let snapshot = self
+            .runtime
+            .capture_serverless_snapshot()
+            .map_err(to_status)?;
 
         let snapshot_lsn = repl
             .logical_wal_spool
@@ -3699,8 +3717,27 @@ impl RedDb for GrpcRuntime {
             // A resumable snapshot token is keyed to the replica, the pinned
             // snapshot LSN, and the total size so a resuming caller is matched
             // to the same byte stream it started.
-            let snapshot_token = requested_snapshot_token
-                .unwrap_or_else(|| format!("snapshot:{replica_id}:{snapshot_lsn}:{}", bytes.len()));
+            let token_lsn = basebackup_manifest
+                .as_ref()
+                .map(|manifest| manifest.checkpoint_lsn)
+                .unwrap_or(snapshot_lsn);
+            let snapshot_token = requested_snapshot_token.unwrap_or_else(|| {
+                format!(
+                    "snapshot:{replica_id}:{token_lsn}:{}:{}",
+                    bytes.len(),
+                    crate::crypto::uuid::Uuid::new_v4()
+                )
+            });
+            if let Some(manifest) = &basebackup_manifest {
+                repl.record_replica_rebootstrap_snapshot(
+                    &replica_id,
+                    &snapshot_token,
+                    manifest.timeline,
+                    manifest.checkpoint_lsn,
+                    resumed_snapshot_transfer,
+                )
+                .map_err(|error| Status::failed_precondition(error.to_string()))?;
+            }
             chunk.snapshot_token = Some(snapshot_token);
             chunk.snapshot_total_bytes = Some(bytes.len() as u64);
             chunk.snapshot_path = Some(path.display().to_string());
@@ -4315,6 +4352,7 @@ mod tests {
             await_timeout_ms: 1,
             routing_endpoints: Default::default(),
             max_chunk_bytes,
+            installed_snapshot_token: None,
         }
     }
 

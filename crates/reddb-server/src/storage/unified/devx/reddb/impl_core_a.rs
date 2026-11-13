@@ -394,15 +394,13 @@ impl RedDB {
             }
         }
 
-        if embedded_single_file_selected(options) {
-            let local_path = options.resolved_path(reddb_file::default_database_path());
-            if promote_ready_replica_rebootstrap(&local_path, options.read_only)? {
-                tracing::info!(
-                    target: "reddb::replication::rebootstrap",
-                    path = %local_path.display(),
-                    "promoted staged replica rebootstrap before opening database"
-                );
-            }
+        let local_path = options.resolved_path(reddb_file::default_database_path());
+        if promote_ready_replica_rebootstrap(&local_path, options.read_only)? {
+            tracing::info!(
+                target: "reddb::replication::rebootstrap",
+                path = %local_path.display(),
+                "promoted staged replica rebootstrap before opening database"
+            );
         }
 
         let mut replica_bootstrap = None;
