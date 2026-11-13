@@ -255,20 +255,41 @@ impl RedDBRuntime {
         let read_bytes = usize::try_from(self.memory_budget().resolved_bytes / 16)
             .unwrap_or(usize::MAX)
             .clamp(1, 16 * 1024 * 1024);
-        let (total, items) = if crate::runtime::execution_context::current_auth_identity().is_some()
-            && crate::runtime::rls_injection::rls_is_enabled(self, collection)
-        {
-            manager.try_page_in_id_order_where(offset, limit, read_bytes, |entity| {
-                crate::runtime::rls_injection::entity_passes_rls_action(
-                    self,
-                    collection,
-                    PolicyAction::Select,
-                    entity,
-                )
-            })?
-        } else {
-            manager.try_page_in_id_order(offset, limit, read_bytes)?
-        };
+        let snapshot = crate::runtime::execution_context::capture_current_snapshot()
+            .unwrap_or_else(|| {
+                let context = self
+                    .inner
+                    .transaction_state
+                    .context(crate::runtime::execution_context::current_connection_id());
+                let serializable_reader = context.as_ref().and_then(|context| {
+                    (context.isolation == crate::storage::transaction::IsolationLevel::Serializable)
+                        .then_some(context.xid)
+                });
+                crate::runtime::execution_context::SnapshotContext {
+                    snapshot: self.current_snapshot(),
+                    manager: self.snapshot_manager(),
+                    own_xids: self.own_transaction_xids(),
+                    requires_index_fallback: true,
+                    serializable_reader,
+                }
+            });
+        let apply_rls = crate::runtime::execution_context::current_auth_identity().is_some()
+            && crate::runtime::rls_injection::rls_is_enabled(self, collection);
+        let (total, items) = manager.try_page_in_id_order_where_at_snapshot(
+            Some(&snapshot),
+            offset,
+            limit,
+            read_bytes,
+            |entity| {
+                !apply_rls
+                    || crate::runtime::rls_injection::entity_passes_rls_action(
+                        self,
+                        collection,
+                        PolicyAction::Select,
+                        entity,
+                    )
+            },
+        )?;
         let end = total.min(offset.saturating_add(limit));
         let next = (end < total).then_some(ScanCursor { offset: end });
 
@@ -524,6 +545,36 @@ mod security_boundary_tests {
         });
 
         assert!(runtime.db().store().get("docs", foreign_id).is_some());
+    }
+
+    #[test]
+    fn scan_collection_pages_the_mvcc_view_across_rollback() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE docs (id INT, body TEXT)")
+            .expect("table");
+        runtime
+            .execute_query("INSERT INTO docs (id, body) VALUES (1, 'kept')")
+            .expect("seed row");
+
+        runtime.execute_query("BEGIN").expect("begin");
+        runtime
+            .execute_query("DELETE FROM docs WHERE id = 1")
+            .expect("delete in transaction");
+        let deleted = runtime
+            .scan_collection("docs", None, 1)
+            .expect("scan own transaction");
+        assert_eq!(deleted.total, 0);
+        assert!(deleted.items.is_empty());
+
+        runtime.execute_query("ROLLBACK").expect("rollback");
+        let restored = runtime
+            .scan_collection("docs", None, 1)
+            .expect("scan after rollback");
+        assert_eq!(restored.total, 1);
+        assert_eq!(restored.items.len(), 1);
+        assert_eq!(text_field(&restored.items[0], "body"), Some("kept"));
+        assert_eq!(restored.next, None);
     }
 
     #[test]
