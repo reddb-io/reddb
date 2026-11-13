@@ -566,6 +566,33 @@ impl RedDBRuntime {
         let promoted = history
             .promotion_history(&candidate, parent.next(), now_ms)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        if let Some(mut catalog) = self.primary_replica_slot_catalog()? {
+            if !history
+                .entries
+                .iter()
+                .any(|entry| entry.timeline == catalog.timeline)
+            {
+                return Err(RedDBError::Internal(format!(
+                    "slot catalog timeline {} is outside the promotion history",
+                    catalog.timeline.0
+                )));
+            }
+            let previous_count = catalog.slots.len();
+            catalog.slots.retain(|slot| slot.replica_id != replica_id);
+            if catalog.slots.len() != previous_count {
+                // The candidate is becoming the writer, not a downstream
+                // consumer of itself. Retire its old slot durably before
+                // publishing the timeline so a crash cannot resurrect the pin.
+                crate::replication::metadata::write(
+                    &store,
+                    crate::replication::metadata::SLOTS,
+                    &catalog
+                        .encode()
+                        .map_err(|err| RedDBError::Internal(err.to_string()))?,
+                )
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            }
+        }
         crate::replication::metadata::write(
             &self.inner.db.store(),
             crate::replication::metadata::TIMELINE,

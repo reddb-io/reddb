@@ -533,14 +533,33 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
             .any(|(_, value)| matches!(value, ValueOut::String(value) if value == expected))
     }
 
+    fn wait_for_follower_row(port: u16, id: u64, expected: &str) {
+        let deadline = Instant::now() + REPLICATION_TIMEOUT;
+        let query = format!(r#"{{"query":"SELECT name FROM failover_probe WHERE id = {id}"}}"#);
+        loop {
+            let (status, row) = http_request(port, "POST", "/query", Some(&query));
+            let (_, health) = http_request(port, "GET", "/replication/status", None);
+            if status == 200 && row.contains(expected) && health.contains(r#""state":"healthy""#) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "replica missed row {id}: row={row}; replication={health}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     let temp = support::temp_data_dir("cli-manual-promotion");
     let backend_root = temp.join("lease-backend");
     std::fs::create_dir_all(&backend_root).expect("create lease backend root");
     let primary_path = temp.join("primary.rdb");
     let replica_path = temp.join("replica.rdb");
-    let ports = free_ports(6);
+    let follower_path = temp.join("follower.rdb");
+    let ports = free_ports(8);
     let (primary_http, primary_grpc, replica_http, replica_grpc, stale_http, stale_grpc) =
         (ports[0], ports[1], ports[2], ports[3], ports[4], ports[5]);
+    let (follower_http, follower_grpc) = (ports[6], ports[7]);
     let primary_failover = FailoverConfig {
         backend_root: &backend_root,
         remote_key: "manual-promotion",
@@ -565,7 +584,7 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
     wait_for_health(&mut primary, primary_http, "leased primary");
     for query in [
         "CREATE TABLE failover_probe (id INTEGER, name TEXT)",
-        "INSERT INTO failover_probe (id, name) VALUES (1, 'before-promotion')",
+        "INSERT INTO failover_probe (id, name) VALUES (1, 'initial-snapshot')",
     ] {
         let body = format!(r#"{{"query":"{query}"}}"#);
         let (status, response) = http_request(primary_http, "POST", "/query", Some(&body));
@@ -590,7 +609,7 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         );
         let (_, replication) = http_request(replica_http, "GET", "/replication/status", None);
         if status == 200
-            && body.contains("before-promotion")
+            && body.contains("initial-snapshot")
             && replication.contains("\"state\":\"healthy\"")
         {
             break;
@@ -602,6 +621,35 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    // The candidate must advance beyond the canonical outbox in its initial
+    // snapshot. Promotion must restore this later, genuinely applied WAL LSN.
+    let (status, update) = http_request(
+        primary_http,
+        "POST",
+        "/query",
+        Some(r#"{"query":"UPDATE failover_probe SET name = 'before-promotion' WHERE id = 1"}"#),
+    );
+    assert_eq!(status, 200, "post-bootstrap source update: {update}");
+    wait_for_follower_row(replica_http, 1, "before-promotion");
+
+    // Keep another durable replica at the old primary's applied frontier.
+    // Reconnecting it after failover must deliver the next write via WAL.
+    let follower_failover = FailoverConfig {
+        holder_id: "follower-c",
+        ..replica_failover
+    };
+    let mut follower = spawn_replica_with_failover(
+        &follower_path,
+        follower_http,
+        follower_grpc,
+        primary_grpc,
+        Some(&follower_failover),
+    );
+    wait_for_health(&mut follower, follower_http, "second promotion-era replica");
+    wait_for_follower_row(follower_http, 1, "before-promotion");
+    let _ = follower.stop_and_read_output();
+
+    // Seed the negative upload sentinel after both fresh replicas bootstrap.
     let legacy_payload = backend_root.join("manual-promotion");
     let legacy_payload_bytes = b"a replica must not publish over this backend object";
     std::fs::write(&legacy_payload, legacy_payload_bytes).expect("backend payload sentinel");
@@ -663,6 +711,28 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         Some(&promoted_failover),
     );
     wait_for_health(&mut promoted, replica_http, "promoted primary");
+    let (status, retention) = http_request(replica_http, "GET", "/replication/status", None);
+    assert_eq!(status, 200, "promoted replication status: {retention}");
+    assert!(
+        retention.contains(r#""wal_retention_error":false"#),
+        "promoted primary must calculate WAL retention: {retention}"
+    );
+    let follower_failover = FailoverConfig {
+        term: promotion.term,
+        ..follower_failover
+    };
+    let mut follower = spawn_replica_with_failover(
+        &follower_path,
+        follower_http,
+        follower_grpc,
+        replica_grpc,
+        Some(&follower_failover),
+    );
+    wait_for_health(
+        &mut follower,
+        follower_http,
+        "replica following the new primary",
+    );
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -693,6 +763,7 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         "before={before:?}"
     );
     assert!(contains_text(&after, "after-promotion"), "after={after:?}");
+    wait_for_follower_row(follower_http, 2, "after-promotion");
     assert_eq!(
         std::fs::read(&foreign_head).expect("unrelated head after promotion"),
         foreign_head_bytes
@@ -736,6 +807,7 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
     runtime
         .block_on(client.query("INSERT INTO failover_probe (id, name) VALUES (3, 'after-restart')"))
         .expect("writer makes progress after restart");
+    wait_for_follower_row(follower_http, 3, "after-restart");
     let scan = runtime
         .block_on(client.query_with_options(
             "SELECT id, name FROM failover_probe ORDER BY id",
@@ -755,6 +827,25 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
             .with_read_only(true),
     )
     .expect("open the checkpoint's remote backup independently");
+    let catalog = backup
+        .primary_replica_slot_catalog()
+        .expect("read persisted promoted slots")
+        .expect("promoted slot catalog");
+    assert_eq!(catalog.timeline.0, 2);
+    assert!(
+        !catalog.slots.is_empty(),
+        "real follower must persist its slot"
+    );
+    assert_eq!(
+        catalog.slots.len(),
+        1,
+        "the promoted node must not retain its own former upstream slot: {catalog:?}"
+    );
+    assert!(catalog.slots.iter().all(|slot| slot.timeline.0 == 2));
+    backup
+        .primary_replica_wal_retention_plan()
+        .expect("promoted backup retains a usable retention catalog")
+        .expect("backup retention plan");
     let restored = backup
         .execute_query("SELECT id, name FROM failover_probe ORDER BY id")
         .expect("read all acknowledged rows from the backup");
