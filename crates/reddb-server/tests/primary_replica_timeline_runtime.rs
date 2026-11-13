@@ -13,6 +13,57 @@ const TIMELINE_CRASH_DATA_PATH_ENV: &str = "REDDB_PRIMARY_REPLICA_TIMELINE_RUNTI
 const PRIMARY_REPLICA_CRASH_ENV: &str = "REDDB_PRIMARY_REPLICA_CRASH_AT";
 
 #[test]
+fn corrupt_replication_timeline_preserves_standalone_cold_reads() {
+    let directory = tempfile::tempdir().expect("corrupt timeline fixture directory");
+    let path = directory.path().join("database.rdb");
+    let options = || {
+        RedDBOptions::persistent(&path)
+            .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("native replication profile")
+    };
+    let corrupt = hex::encode(b"invalid replication timeline");
+    {
+        let writer = RedDBRuntime::with_options(options()).expect("fixture writer");
+        writer
+            .execute_query("INSERT INTO inspection_items (id, name) VALUES (1, 'preserved')")
+            .expect("fixture row");
+        writer
+            .db()
+            .store()
+            .try_set_storage_metadata(
+                "replication.timeline",
+                &serde_json::Value::String(corrupt.clone()),
+            )
+            .expect("inject corrupt control metadata");
+        writer.flush().expect("persist fixture");
+    }
+    assert!(
+        RedDBRuntime::with_options(options().with_replication(ReplicationConfig::primary()))
+            .is_err(),
+        "a primary must reject untrusted timeline authority"
+    );
+    let reader = RedDBRuntime::with_options(options().with_read_only(true))
+        .expect("standalone inspection must not require unrelated replication metadata");
+    let row = reader
+        .execute_query("SELECT name FROM inspection_items WHERE id = 1")
+        .expect("cold inspection read");
+    assert_eq!(row.result.len(), 1);
+    assert_eq!(
+        row.result.records[0]
+            .get("name")
+            .and_then(|value| value.as_text()),
+        Some("preserved")
+    );
+    let retained = reader
+        .db()
+        .store()
+        .try_get_storage_metadata("replication.timeline")
+        .expect("read retained evidence")
+        .expect("timeline retained");
+    assert_eq!(retained.as_text(), Some(corrupt.as_str()));
+}
+
+#[test]
 fn cold_primary_rejects_unrelated_slot_history_without_overwriting_it() {
     let directory = tempfile::tempdir().expect("foreign catalog fixture directory");
     let path = directory.path().join("database.rdb");
