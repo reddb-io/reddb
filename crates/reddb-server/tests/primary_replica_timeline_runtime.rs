@@ -44,6 +44,22 @@ fn cold_primary_rejects_unrelated_slot_history_without_overwriting_it() {
             )
             .expect("inject an unrelated checksummed catalog");
         runtime.flush().expect("persist fixture");
+        let before = runtime
+            .primary_replica_timeline_history()
+            .expect("original timeline");
+        let error = runtime
+            .record_failover_timeline_promotion("candidate", 0)
+            .expect_err("foreign slots must also refuse promotion");
+        assert!(
+            error.to_string().contains("outside the promotion history"),
+            "{error}"
+        );
+        assert_eq!(
+            runtime
+                .primary_replica_timeline_history()
+                .expect("timeline after refused promotion"),
+            before
+        );
     }
     let error =
         RedDBRuntime::with_options(options().with_replication(ReplicationConfig::primary()))
