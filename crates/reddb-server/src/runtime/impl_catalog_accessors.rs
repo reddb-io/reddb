@@ -189,7 +189,7 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Engine(err.to_string()))
     }
 
-    pub(super) fn capture_serverless_snapshot(
+    pub(crate) fn capture_serverless_snapshot(
         &self,
     ) -> RedDBResult<reddb_file::ServerlessWriterLeaseTempFile> {
         use reddb_file::VfsFile;
