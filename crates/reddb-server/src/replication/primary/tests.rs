@@ -416,6 +416,114 @@ fn retention_cap_invalidates_slow_slot_and_releases_wal_floor() {
 }
 
 #[test]
+fn invalidated_slot_only_accepts_its_durable_snapshot_proof_across_reopen() {
+    use crate::storage::unified::UnifiedStore;
+
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("data.rdb");
+    let config =
+        crate::replication::ReplicationConfig::primary().with_slot_retention_max_lag_lsn(1);
+    let replica_id = "replica-a";
+    let snapshot_lsn = 2;
+    let snapshot_token = "snapshot:replica-a:2:fixture:nonce";
+    let replacement_token = "snapshot:replica-a:2:fixture:replacement";
+
+    {
+        let store = Arc::new(UnifiedStore::open(&path).expect("store"));
+        let primary = PrimaryReplication::new_with_store(Some(&path), &config, Arc::clone(&store))
+            .expect("primary");
+        primary.register_replica(replica_id.into());
+        primary.append_logical_record(1, vec![1]);
+        primary.append_logical_record(snapshot_lsn, vec![2]);
+        primary.enforce_retention_limits(0);
+        assert_eq!(
+            primary.slot_snapshots()[0].invalidation_reason,
+            Some(ReplicationSlotInvalidationCause::Horizon)
+        );
+        assert!(primary
+            .record_replica_rebootstrap_snapshot(
+                replica_id,
+                snapshot_token,
+                reddb_file::TimelineId::initial(),
+                snapshot_lsn,
+                false,
+            )
+            .expect("record issued snapshot proof"));
+        assert!(
+            primary
+                .accept_replica_rebootstrap_snapshot(
+                    replica_id,
+                    Some("snapshot:replica-a:2:fixture:forged"),
+                    snapshot_lsn,
+                )
+                .is_err(),
+            "a forged proof must not repair an invalidated slot"
+        );
+        assert!(primary.slot_snapshots()[0].invalidation_reason.is_some());
+    }
+
+    {
+        let store = Arc::new(UnifiedStore::open(&path).expect("reopen store"));
+        let primary = PrimaryReplication::new_with_store(Some(&path), &config, Arc::clone(&store))
+            .expect("reopen primary");
+        let invalidated = primary
+            .slot_snapshots()
+            .into_iter()
+            .find(|slot| slot.replica_id == replica_id)
+            .expect("invalidated slot after reopen");
+        assert_eq!(
+            invalidated.invalidation_reason,
+            Some(ReplicationSlotInvalidationCause::Horizon),
+            "failed proof must not become a valid cursor after reopen"
+        );
+        crate::replication::metadata::write(
+            &store,
+            &replica_rebootstrap_proof_key(replica_id),
+            &[],
+        )
+        .expect("simulate crash after proof consumption");
+        assert!(
+            !primary
+                .accept_replica_rebootstrap_snapshot(
+                    replica_id,
+                    Some(snapshot_token),
+                    snapshot_lsn,
+                )
+                .expect("missing proof requests a fresh snapshot"),
+            "a consumed proof must not repair the slot"
+        );
+        assert!(primary.slot_snapshots()[0].invalidation_reason.is_some());
+        assert!(primary
+            .record_replica_rebootstrap_snapshot(
+                replica_id,
+                replacement_token,
+                reddb_file::TimelineId::initial(),
+                snapshot_lsn,
+                false,
+            )
+            .expect("record replacement snapshot proof"));
+        assert!(primary
+            .accept_replica_rebootstrap_snapshot(replica_id, Some(replacement_token), snapshot_lsn,)
+            .expect("accept installed snapshot proof"));
+    }
+
+    let store = Arc::new(UnifiedStore::open(&path).expect("verify repaired store"));
+    let primary = PrimaryReplication::new_with_store(Some(&path), &config, store)
+        .expect("verify repaired primary");
+    let repaired = primary
+        .slot_snapshots()
+        .into_iter()
+        .find(|slot| slot.replica_id == replica_id)
+        .expect("repaired slot after reopen");
+    assert_eq!(repaired.invalidation_reason, None);
+    assert!(repaired.active);
+    assert_eq!(repaired.restart_lsn, snapshot_lsn);
+    assert_eq!(repaired.confirmed_write_lsn, snapshot_lsn);
+    assert_eq!(repaired.confirmed_flush_lsn, snapshot_lsn);
+    assert_eq!(repaired.confirmed_apply_lsn, snapshot_lsn);
+}
+
+#[test]
 fn slot_invalidation_cause_codes_cover_wal_removed_horizon_and_idle_timeout() {
     let wal_removed = PrimaryReplication::new_with_config(
         None,

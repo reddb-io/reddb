@@ -119,6 +119,7 @@ fn binary_pull_request(
         await_timeout_ms: 5_000,
         routing_endpoints: Default::default(),
         max_chunk_bytes: 1024 * 1024,
+        installed_snapshot_token: None,
     });
     let value: MetadataValue<_> = format!("Bearer {token}")
         .parse()

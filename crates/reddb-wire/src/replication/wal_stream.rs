@@ -11,6 +11,7 @@ pub struct WalStreamOpen {
     pub since_lsn: u64,
     pub max_count: usize,
     pub replica_id: Option<String>,
+    pub installed_snapshot_token: Option<String>,
     pub term: u64,
     pub await_data: bool,
     pub await_timeout_ms: u64,
@@ -40,6 +41,12 @@ impl WalStreamOpen {
                 JsonValue::String(replica_id.clone()),
             );
         }
+        if let Some(token) = &self.installed_snapshot_token {
+            obj.insert(
+                "installed_snapshot_token".to_string(),
+                JsonValue::String(token.clone()),
+            );
+        }
         obj.insert("term".to_string(), JsonValue::Number(self.term.into()));
         obj.insert("await_data".to_string(), JsonValue::Bool(self.await_data));
         obj.insert(
@@ -67,6 +74,7 @@ impl WalStreamOpen {
             max_count: usize::try_from(max_count)
                 .map_err(|_| ReplicationPayloadError::InvalidField("max_count"))?,
             replica_id: get_opt_string(&obj, "replica_id"),
+            installed_snapshot_token: get_opt_string(&obj, "installed_snapshot_token"),
             term: get_opt_u64(&obj, "term").unwrap_or(DEFAULT_REPLICATION_TERM),
             await_data: get_bool_default(&obj, "await_data", false),
             await_timeout_ms: get_opt_u64(&obj, "await_timeout_ms").unwrap_or(30_000),
@@ -327,6 +335,7 @@ mod tests {
             since_lsn: 10,
             max_count: 128,
             replica_id: Some("replica-a".to_string()),
+            installed_snapshot_token: Some("snapshot-proof".to_string()),
             term: 7,
             await_data: true,
             await_timeout_ms: 5000,
@@ -363,6 +372,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(open.term, DEFAULT_REPLICATION_TERM);
+        assert_eq!(open.installed_snapshot_token, None);
     }
 
     #[test]

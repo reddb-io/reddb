@@ -96,6 +96,23 @@ impl RedDBRuntime {
         parts_root: impl AsRef<std::path::Path>,
         destination: impl AsRef<std::path::Path>,
     ) -> RedDBResult<u64> {
+        self.materialize_primary_replica_basebackup_snapshot_for_replica(
+            manifest,
+            parts_root,
+            destination,
+            None,
+            None,
+        )
+    }
+
+    fn materialize_primary_replica_basebackup_snapshot_for_replica(
+        &self,
+        manifest: &reddb_file::PrimaryReplicaBaseBackupManifest,
+        parts_root: impl AsRef<std::path::Path>,
+        destination: impl AsRef<std::path::Path>,
+        replica_id: Option<&str>,
+        snapshot_token: Option<&str>,
+    ) -> RedDBResult<u64> {
         let snapshot = manifest
             .read_snapshot_parts(parts_root)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
@@ -115,6 +132,22 @@ impl RedDBRuntime {
                 "last_error": "",
             }),
         );
+        if let Some(replica_id) = replica_id {
+            loaded.set_config_tree(
+                "replication",
+                &crate::json!({
+                    "replica_id": replica_id,
+                }),
+            );
+        }
+        if let Some(snapshot_token) = snapshot_token {
+            loaded.set_config_tree(
+                "replication",
+                &crate::json!({
+                    "rebootstrap_snapshot_token": snapshot_token,
+                }),
+            );
+        }
         let snapshot = loaded.to_binary_dump_bytes();
         let destination = destination.as_ref();
         if let Some(parent) = destination.parent() {
@@ -264,20 +297,19 @@ impl RedDBRuntime {
                 current
                     .verify_snapshot_parts(&parts_root)
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
-                let checkpoint_lsn = self.materialize_primary_replica_basebackup_snapshot(
-                    current,
-                    &parts_root,
-                    &pending_path,
-                )?;
-                self.inner.db.store().set_config_tree(
-                    "replication",
-                    &crate::json!({
-                        "state": "rebootstrap_ready",
-                        "rebootstrap_pending_path": pending_path.display().to_string(),
-                        "rebootstrap_checkpoint_lsn": checkpoint_lsn,
-                        "rebootstrap_timeline": current.timeline.0,
-                    }),
-                );
+                let snapshot_token = token.as_deref().ok_or_else(|| {
+                    RedDBError::Internal(
+                        "replication snapshot omitted its installation token".into(),
+                    )
+                })?;
+                let checkpoint_lsn = self
+                    .materialize_primary_replica_basebackup_snapshot_for_replica(
+                        current,
+                        &parts_root,
+                        &pending_path,
+                        Some(&replica_id),
+                        Some(snapshot_token),
+                    )?;
                 let data_path =
                     self.inner.db.options().data_path.as_ref().ok_or_else(|| {
                         RedDBError::Internal("replica data path unavailable".into())
@@ -291,6 +323,15 @@ impl RedDBRuntime {
                     },
                 )
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                self.inner.db.store().set_config_tree(
+                    "replication",
+                    &crate::json!({
+                        "state": "rebootstrap_ready",
+                        "rebootstrap_pending_path": pending_path.display().to_string(),
+                        "rebootstrap_checkpoint_lsn": checkpoint_lsn,
+                        "rebootstrap_timeline": current.timeline.0,
+                    }),
+                );
                 bootstrap_handle
                     .complete(current.chunks.len() as u64, 0)
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;

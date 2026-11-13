@@ -106,6 +106,7 @@ async fn pull_wal_chunk(
                 .map(|(protocol, address)| (protocol.clone(), address.clone()))
                 .collect(),
             max_chunk_bytes: 1024 * 1024,
+            installed_snapshot_token: open.installed_snapshot_token.clone(),
         };
         match client
             .stream_wal_records(request_auth.request(request))
@@ -650,6 +651,10 @@ impl RedDBRuntime {
         } else {
             self.resolve_replica_id()
         };
+        let installed_snapshot_token =
+            self.config_string("replication.rebootstrap_snapshot_token", "");
+        let mut installed_snapshot_token =
+            (!installed_snapshot_token.is_empty()).then_some(installed_snapshot_token);
 
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -745,6 +750,7 @@ impl RedDBRuntime {
                     since_lsn,
                     max_count,
                     replica_id: Some(replica_id.clone()),
+                    installed_snapshot_token: installed_snapshot_token.clone(),
                     term: self.current_replication_term(),
                     await_data: await_data && pending_ack_lsn.is_none(),
                     await_timeout_ms: 30_000,
@@ -772,6 +778,26 @@ impl RedDBRuntime {
                         self.cache_routing_primary_endpoints(endpoints);
                         let current_lsn = Some(chunk.current_lsn);
                         let oldest_available_lsn = chunk.oldest_available_lsn;
+                        if !chunk.needs_rebootstrap && installed_snapshot_token.is_some() {
+                            if let Err(error) = self.inner.db.store().try_set_config_tree(
+                                "replication",
+                                &crate::json!({
+                                    "rebootstrap_snapshot_token": "",
+                                }),
+                            ) {
+                                self.persist_replication_health(
+                                    "cursor_error",
+                                    &format!(
+                                        "failed to retire installed snapshot proof: {error}"
+                                    ),
+                                    current_lsn,
+                                    oldest_available_lsn,
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(poll_ms));
+                                continue;
+                            }
+                            installed_snapshot_token = None;
+                        }
                         if chunk.needs_rebootstrap {
                             let reason = chunk.invalidation_reason.as_deref().unwrap_or("unknown");
                             let catchup_mode = catchup_mode_from_wire(chunk.catchup.as_ref());

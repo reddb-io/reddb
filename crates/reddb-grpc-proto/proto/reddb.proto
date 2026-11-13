@@ -285,6 +285,7 @@ message WalStreamRequest {
   uint64 await_timeout_ms = 7;
   map<string, string> routing_endpoints = 8;
   uint32 max_chunk_bytes = 9;
+  optional string installed_snapshot_token = 10;
 }
 
 message WalStreamRecord {

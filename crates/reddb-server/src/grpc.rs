@@ -1132,6 +1132,7 @@ mod grpc_query_value_tests {
             since_lsn: 0,
             max_count: 1,
             replica_id: Some("replica-a".to_string()),
+            installed_snapshot_token: None,
             term: 5,
             await_data: false,
             await_timeout_ms: 1,
