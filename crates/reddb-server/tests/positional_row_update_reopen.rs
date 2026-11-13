@@ -118,6 +118,121 @@ fn assert_platform_row_is_indexed(runtime: &RedDBRuntime, expected_status: &str)
     }
 }
 
+const LONG_ENGINE_ROLLOUT_ID: &str =
+    "er_68bcf520c3287be18076c5cd39a1572c680005faa6b290cb43c6f3db94e33dcd";
+
+fn assert_long_engine_rollout_lookups(runtime: &RedDBRuntime, expected_status: &str) {
+    let scan = runtime
+        .execute_query("SELECT id,status FROM database_engine_rollouts ORDER BY id")
+        .expect("engine rollout table scan");
+    assert_eq!(scan.result.records.len(), 10, "table scan lost a rollout");
+    assert!(scan.result.records.iter().any(|row| {
+        row.get("id").and_then(|value| value.as_text()) == Some(LONG_ENGINE_ROLLOUT_ID)
+            && row.get("status").and_then(|value| value.as_text()) == Some(expected_status)
+    }));
+
+    let equality = runtime
+        .execute_query_with_params(
+            "SELECT id,status FROM database_engine_rollouts WHERE id = $1",
+            &[reddb_types::Value::text(LONG_ENGINE_ROLLOUT_ID)],
+        )
+        .expect("parameterized unique-index lookup");
+    assert_eq!(
+        equality.result.records.len(),
+        1,
+        "unique-index lookup lost the table-scan-visible 67-byte ID"
+    );
+    assert_eq!(
+        equality.result.records[0]
+            .get("status")
+            .and_then(|value| value.as_text()),
+        Some(expected_status)
+    );
+
+    let literal = runtime
+        .execute_query(&format!(
+            "SELECT id,status FROM database_engine_rollouts WHERE id = '{LONG_ENGINE_ROLLOUT_ID}'"
+        ))
+        .expect("literal unique-index lookup");
+    assert_eq!(
+        literal.result.records.len(),
+        1,
+        "literal unique-index lookup lost the table-scan-visible 67-byte ID"
+    );
+    assert_eq!(
+        literal.result.records[0]
+            .get("status")
+            .and_then(|value| value.as_text()),
+        Some(expected_status)
+    );
+
+    let range = runtime
+        .execute_query(
+            "SELECT id,status FROM database_engine_rollouts \
+             WHERE id >= 'er_' AND id < 'es_' ORDER BY id",
+        )
+        .expect("engine rollout range lookup");
+    assert_eq!(
+        range.result.records.len(),
+        10,
+        "BTREE range lost the table-scan-visible 67-byte ID"
+    );
+    assert!(range.result.records.iter().any(|row| {
+        row.get("id").and_then(|value| value.as_text()) == Some(LONG_ENGINE_ROLLOUT_ID)
+    }));
+}
+
+#[test]
+fn cold_long_unique_text_key_remains_queryable_by_equality_and_range() {
+    let directory = tempfile::tempdir().expect("engine rollout fixture");
+    let path = directory.path().join("platform.rdb");
+
+    {
+        let runtime = open(&path, true);
+        runtime.checkpoint().expect("initialize paged file");
+    }
+    {
+        let runtime = open(&path, false);
+        for sql in [
+            "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+            "CREATE TABLE database_engine_rollouts (id TEXT, status TEXT)",
+            "CREATE UNIQUE INDEX database_engine_rollouts_id ON database_engine_rollouts (id)",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        for ordinal in 0..9 {
+            runtime
+                .execute_query_with_params(
+                    "INSERT INTO database_engine_rollouts (id,status) VALUES ($1,'complete')",
+                    &[reddb_types::Value::text(format!("er_{ordinal:064x}"))],
+                )
+                .expect("insert neighboring rollout");
+        }
+        runtime
+            .execute_query_with_params(
+                "INSERT INTO database_engine_rollouts (id,status) VALUES ($1,'running')",
+                &[reddb_types::Value::text(LONG_ENGINE_ROLLOUT_ID)],
+            )
+            .expect("insert affected rollout");
+        assert_long_engine_rollout_lookups(&runtime, "running");
+        runtime.checkpoint().expect("checkpoint rollout rows");
+    }
+    {
+        let runtime = open(&path, false);
+        assert_long_engine_rollout_lookups(&runtime, "running");
+        runtime
+            .execute_query_with_params(
+                "UPDATE database_engine_rollouts SET status = 'failed' WHERE id = $1",
+                &[reddb_types::Value::text(LONG_ENGINE_ROLLOUT_ID)],
+            )
+            .expect("update affected rollout");
+        assert_long_engine_rollout_lookups(&runtime, "failed");
+        runtime.checkpoint().expect("checkpoint updated rollout");
+    }
+    let reopened = open(&path, false);
+    assert_long_engine_rollout_lookups(&reopened, "failed");
+}
+
 #[test]
 fn cold_non_indexed_update_preserves_platform_btree_lookups() {
     let directory = tempfile::tempdir().expect("fixture directory");
