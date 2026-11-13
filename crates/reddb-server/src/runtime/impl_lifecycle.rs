@@ -681,6 +681,10 @@ impl RedDBRuntime {
             .lifecycle
             .set_wal_replay_ready_at_ms(storage_ready_ms);
 
+        let promotion_lsn = runtime
+            .primary_replica_timeline_history()?
+            .and_then(|history| history.entries.last().map(|entry| entry.fork_lsn))
+            .unwrap_or(0);
         let restored_cdc_lsn = runtime
             .inner
             .db
@@ -693,7 +697,9 @@ impl RedDBRuntime {
                     .unwrap_or(0)
             })
             .unwrap_or(0)
-            .max(runtime.config_u64("timeline.last_archived_lsn", 0));
+            .max(runtime.config_u64("timeline.last_archived_lsn", 0))
+            .max(runtime.config_u64("replication.last_applied_lsn", 0))
+            .max(promotion_lsn);
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
         runtime
             .inner
@@ -754,6 +760,9 @@ impl RedDBRuntime {
         runtime.recover_store_forks()?;
         if let Some(repl) = &runtime.inner.db.replication {
             repl.wal_buffer.set_current_lsn(restored_cdc_lsn);
+            if let Some(spool) = &repl.logical_wal_spool {
+                spool.restore_lsn_floor(restored_cdc_lsn);
+            }
         }
         runtime.recover_transactional_replication()?;
 

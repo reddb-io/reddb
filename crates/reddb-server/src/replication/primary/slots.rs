@@ -75,11 +75,12 @@ pub(super) fn load_replication_slot_catalog(
 pub(super) fn persist_replication_slots(
     path: Option<&Path>,
     slots: &BTreeMap<String, ReplicationSlot>,
+    timeline: reddb_file::TimelineId,
 ) -> io::Result<()> {
     let Some(path) = path else {
         return Ok(());
     };
-    slot_catalog_from_map(slots)
+    slot_catalog_from_map(slots, timeline)
         .and_then(|catalog| catalog.write_legacy_json_to_path(path))
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
 }
@@ -87,11 +88,12 @@ pub(super) fn persist_replication_slots(
 pub(super) fn persist_replication_slot_catalog(
     path: Option<&Path>,
     slots: &BTreeMap<String, ReplicationSlot>,
+    timeline: reddb_file::TimelineId,
 ) -> io::Result<()> {
     let Some(path) = path else {
         return Ok(());
     };
-    slot_catalog_from_map(slots)
+    slot_catalog_from_map(slots, timeline)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?
         .write_to_path(path)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
@@ -99,10 +101,39 @@ pub(super) fn persist_replication_slot_catalog(
 
 pub(super) fn slot_catalog_from_map(
     slots: &BTreeMap<String, ReplicationSlot>,
+    timeline: reddb_file::TimelineId,
 ) -> reddb_file::RdbFileResult<reddb_file::ReplicationSlotCatalog> {
-    let mut catalog = reddb_file::ReplicationSlotCatalog::new(reddb_file::TimelineId::initial());
+    let mut catalog = reddb_file::ReplicationSlotCatalog::new(timeline);
     for slot in slots.values() {
         catalog.upsert(slot.clone())?;
     }
     Ok(catalog)
+}
+
+pub(super) fn align_slots_with_timeline(
+    slots: &mut BTreeMap<String, ReplicationSlot>,
+    history: &reddb_file::TimelineHistory,
+    now_ms: u128,
+) -> io::Result<reddb_file::TimelineId> {
+    let timeline = history
+        .current()
+        .ok_or_else(|| io::Error::other("empty timeline history"))?;
+    for slot in slots.values_mut() {
+        if slot.timeline == timeline {
+            continue;
+        }
+        let fork_lsn = history
+            .descendant_chain_from(slot.timeline)
+            .and_then(|chain| chain.iter().map(|entry| entry.fork_lsn).min())
+            .ok_or_else(|| {
+                io::Error::other("replication slot is outside the current timeline history")
+            })?;
+        // Only the ancestor's shared prefix belongs to the promoted branch.
+        // Never carry a divergent ACK into retention or incremental resume.
+        if slot.confirmed_lsn().max(slot.restart_lsn) > fork_lsn {
+            slot.mark_invalidated(ReplicationSlotInvalidationCause::WalRemoved, now_ms);
+        }
+        slot.timeline = timeline;
+    }
+    Ok(timeline)
 }

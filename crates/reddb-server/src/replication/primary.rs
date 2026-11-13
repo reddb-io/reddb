@@ -393,6 +393,13 @@ impl LogicalWalSpool {
             .current_lsn
     }
 
+    /// Restore the committed prefix already materialized in a promoted replica.
+    /// This advances the allocation frontier without inventing spool records.
+    pub(crate) fn restore_lsn_floor(&self, lsn: u64) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.current_lsn = state.current_lsn.max(lsn);
+    }
+
     pub fn oldest_lsn(&self) -> io::Result<Option<u64>> {
         let _state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         Ok(reddb_file::read_and_repair_logical_wal_entries(&self.path)?
@@ -514,6 +521,7 @@ pub struct PrimaryReplication {
     primary_replica_file_plan: Option<reddb_file::PrimaryReplicaFilePlan>,
     primary_replica_wal_lock: Mutex<()>,
     slots: RwLock<BTreeMap<String, ReplicationSlot>>,
+    slot_timeline: reddb_file::TimelineId,
     slot_retention_max_lag_lsn: u64,
     slot_idle_timeout_ms: u64,
     /// PLAN.md Phase 11.4 — ack-driven commit synchronization. Always
@@ -613,6 +621,10 @@ impl PrimaryReplication {
         let slot_path = data_path.map(Self::slot_path_for);
         let slot_catalog_path = data_path.map(Self::slot_catalog_path_for);
         let primary_replica_file_plan = data_path.map(Self::primary_replica_file_plan_for);
+        let slot_timeline = primary_replica_file_plan
+            .as_ref()
+            .map(|plan| plan.timeline)
+            .unwrap_or_else(reddb_file::TimelineId::initial);
         let mut slots = load_replication_slot_catalog(slot_catalog_path.as_deref(), now_ms);
         slots.extend(load_replication_slots(slot_path.as_deref(), now_ms));
         let logical_wal_spool = data_path
@@ -635,6 +647,7 @@ impl PrimaryReplication {
             primary_replica_file_plan,
             primary_replica_wal_lock: Mutex::new(()),
             slots: RwLock::new(slots),
+            slot_timeline,
             slot_retention_max_lag_lsn: config.slot_retention_max_lag_lsn,
             slot_idle_timeout_ms: config.slot_idle_timeout_ms,
             commit_waiter: Arc::new(crate::replication::commit_waiter::CommitWaiter::new()),
@@ -655,7 +668,8 @@ impl PrimaryReplication {
             // stream when its durable spool cannot be opened.
             primary.logical_wal_spool = Some(Arc::new(LogicalWalSpool::open(path)?));
         }
-        if let Some(bytes) = super::metadata::read(&store, super::metadata::SLOTS)? {
+        let stored_catalog = super::metadata::read(&store, super::metadata::SLOTS)?;
+        if let Some(bytes) = &stored_catalog {
             let catalog =
                 reddb_file::ReplicationSlotCatalog::decode(&bytes).map_err(io::Error::other)?;
             primary.slots = RwLock::new(
@@ -694,14 +708,25 @@ impl PrimaryReplication {
                     return Err(io::Error::other(error));
                 }
             }
-            let slots = primary
+        }
+        {
+            let now_ms = crate::utils::now_unix_millis();
+            let history = match &primary.primary_replica_file_plan {
+                Some(plan) => super::metadata::timeline(&store, &plan.timeline_history_path())?,
+                None => reddb_file::TimelineHistory::new(now_ms),
+            };
+            let mut slots = primary
                 .slots
-                .read()
+                .write()
                 .unwrap_or_else(|error| error.into_inner());
-            let bytes = slots::slot_catalog_from_map(&slots)
+            primary.slot_timeline =
+                slots::align_slots_with_timeline(&mut slots, &history, u128::from(now_ms))?;
+            let bytes = slots::slot_catalog_from_map(&slots, primary.slot_timeline)
                 .and_then(|catalog| catalog.encode())
                 .map_err(io::Error::other)?;
-            super::metadata::write(&store, super::metadata::SLOTS, &bytes)?;
+            if stored_catalog.as_deref() != Some(bytes.as_slice()) {
+                super::metadata::write(&store, super::metadata::SLOTS, &bytes)?;
+            }
         }
         for path in [&primary.slot_catalog_path, &primary.slot_path]
             .into_iter()
@@ -1085,11 +1110,7 @@ impl PrimaryReplication {
             self.persist_slots_locked(&slots);
             return restart_lsn;
         }
-        let mut slot = ReplicationSlot::new(
-            id.to_string(),
-            reddb_file::TimelineId::initial(),
-            initial_lsn,
-        );
+        let mut slot = ReplicationSlot::new(id.to_string(), self.slot_timeline, initial_lsn);
         slot.last_seen_at_unix_ms = now_ms;
         slots.insert(id.to_string(), slot);
         let restart_lsn = initial_lsn;
@@ -1104,8 +1125,7 @@ impl PrimaryReplication {
             .map(|store| store.vault_publication_lock.lock());
         let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
         let slot = slots.entry(id.to_string()).or_insert_with(|| {
-            let mut slot =
-                ReplicationSlot::new(id.to_string(), reddb_file::TimelineId::initial(), 0);
+            let mut slot = ReplicationSlot::new(id.to_string(), self.slot_timeline, 0);
             slot.last_seen_at_unix_ms = now_ms;
             slot
         });
@@ -1255,7 +1275,7 @@ impl PrimaryReplication {
 
     fn persist_slots_locked(&self, slots: &BTreeMap<String, ReplicationSlot>) {
         if let Some(store) = &self.metadata_store {
-            let result = slots::slot_catalog_from_map(slots)
+            let result = slots::slot_catalog_from_map(slots, self.slot_timeline)
                 .and_then(|catalog| catalog.encode())
                 .map_err(io::Error::other)
                 .and_then(|bytes| super::metadata::write(store, super::metadata::SLOTS, &bytes));
@@ -1272,15 +1292,20 @@ impl PrimaryReplication {
             }
             return;
         }
-        if let Err(err) = persist_replication_slots(self.slot_path.as_deref(), slots) {
+        if let Err(err) =
+            persist_replication_slots(self.slot_path.as_deref(), slots, self.slot_timeline)
+        {
             warn!(
                 target: "reddb::replication::slots",
                 error = %err,
                 "failed to persist replication slots"
             );
         }
-        if let Err(err) = persist_replication_slot_catalog(self.slot_catalog_path.as_deref(), slots)
-        {
+        if let Err(err) = persist_replication_slot_catalog(
+            self.slot_catalog_path.as_deref(),
+            slots,
+            self.slot_timeline,
+        ) {
             warn!(
                 target: "reddb::replication::slots",
                 error = %err,

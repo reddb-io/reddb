@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
-use reddb_server::{RedDBOptions, RedDBRuntime};
+use reddb_server::{RedDBOptions, RedDBRuntime, ReplicationConfig, StorageDeployPreset};
 
 #[path = "support/primary_replica_file.rs"]
 mod primary_replica_file;
@@ -10,6 +10,131 @@ mod primary_replica_file;
 const TIMELINE_CRASH_CHILD_ENV: &str = "REDDB_PRIMARY_REPLICA_TIMELINE_RUNTIME_CRASH_CHILD";
 const TIMELINE_CRASH_DATA_PATH_ENV: &str = "REDDB_PRIMARY_REPLICA_TIMELINE_RUNTIME_CRASH_DATA_PATH";
 const PRIMARY_REPLICA_CRASH_ENV: &str = "REDDB_PRIMARY_REPLICA_CRASH_AT";
+
+#[test]
+fn promoted_checkpoint_preserves_shared_slots_and_invalidates_divergent_acks() {
+    let directory = tempfile::tempdir().expect("promotion fixture directory");
+    let source_path = directory.path().join("source.rdb");
+    let promoted_path = directory.path().join("promoted.rdb");
+    let options = |path: &std::path::Path| {
+        RedDBOptions::persistent(path)
+            .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("native replication profile")
+    };
+    let source = RedDBRuntime::with_options(
+        options(&source_path).with_replication(ReplicationConfig::primary()),
+    )
+    .expect("source primary");
+    source
+        .execute_query("INSERT INTO promotion_items (id, name) VALUES (1, 'shared-first')")
+        .expect("first committed row");
+    let shared_slot_lsn = source.primary_logical_head_lsn();
+    source
+        .execute_query("INSERT INTO promotion_items (id, name) VALUES (2, 'shared-second')")
+        .expect("second committed row");
+    let manifest = source
+        .create_primary_replica_basebackup(64 * 1024)
+        .expect("checkpoint at the promotion boundary")
+        .expect("checkpoint manifest");
+    let source_plan = source
+        .primary_replica_file_plan()
+        .expect("source file plan");
+    let fork_lsn = source
+        .materialize_primary_replica_basebackup_snapshot(
+            &manifest,
+            source_plan.basebackup_dir(),
+            &promoted_path,
+        )
+        .expect("materialize the future promoted replica");
+    source
+        .execute_query("INSERT INTO promotion_items (id, name) VALUES (3, 'old-branch-only')")
+        .expect("old primary extends its divergent branch");
+    let divergent_lsn = source.primary_logical_head_lsn();
+    assert!(shared_slot_lsn < fork_lsn && fork_lsn < divergent_lsn);
+    source.flush().expect("persist old branch");
+    drop(source);
+
+    // Restore an ancestor catalog. Both positions belong to real source
+    // commits, but only one is inside this checkpoint's common ancestry.
+    let mut inherited = reddb_file::ReplicationSlotCatalog::new(reddb_file::TimelineId(1));
+    for (id, lsn) in [("shared", shared_slot_lsn), ("divergent", divergent_lsn)] {
+        inherited
+            .upsert(reddb_file::ReplicationSlot::new(
+                id,
+                inherited.timeline,
+                lsn,
+            ))
+            .expect("ancestor slot fixture");
+    }
+    let catalog_path =
+        reddb_server::replication::primary::PrimaryReplication::slot_catalog_path_for(
+            &promoted_path,
+        );
+    let candidate = RedDBRuntime::with_options(options(&promoted_path)).expect("candidate");
+    candidate
+        .record_failover_timeline_promotion("candidate", fork_lsn)
+        .expect("persist promoted timeline");
+    candidate
+        .db()
+        .store()
+        .try_set_storage_metadata(
+            "replication.slots",
+            &serde_json::Value::String(hex::encode(inherited.encode().expect("ancestor catalog"))),
+        )
+        .expect("restore the source catalog at the promotion boundary");
+    candidate.flush().expect("persist promotion");
+    drop(candidate);
+
+    for _ in 0..2 {
+        let promoted = RedDBRuntime::with_options(
+            options(&promoted_path).with_replication(ReplicationConfig::primary().with_term(2)),
+        )
+        .expect("cold promoted primary");
+        let catalog = promoted
+            .primary_replica_slot_catalog()
+            .expect("durable promoted catalog")
+            .expect("slot catalog");
+        assert_eq!(catalog.timeline, reddb_file::TimelineId(2));
+        let shared = catalog
+            .slots
+            .iter()
+            .find(|slot| slot.replica_id == "shared")
+            .expect("shared slot");
+        assert!(shared.active);
+        assert_eq!(shared.restart_lsn, shared_slot_lsn);
+        assert_eq!(shared.confirmed_lsn(), shared_slot_lsn);
+        let divergent = catalog
+            .slots
+            .iter()
+            .find(|slot| slot.replica_id == "divergent")
+            .expect("divergent slot");
+        assert!(!divergent.active);
+        assert_eq!(
+            divergent.invalidation_reason,
+            Some(reddb_file::ReplicationSlotInvalidationCause::WalRemoved)
+        );
+        assert!(catalog
+            .slots
+            .iter()
+            .all(|slot| slot.timeline == catalog.timeline));
+        let retention = promoted
+            .primary_replica_wal_retention_plan()
+            .expect("retention remains available")
+            .expect("retention plan");
+        assert_eq!(retention.oldest_required_lsn, Some(shared_slot_lsn));
+        for id in [1, 2, 3] {
+            let row = promoted
+                .execute_query(&format!("SELECT name FROM promotion_items WHERE id = {id}"))
+                .expect("cold point read before scan");
+            assert_eq!(row.result.len(), usize::from(id != 3));
+        }
+        promoted.flush().expect("persist imported slots");
+    }
+    assert!(
+        !catalog_path.exists(),
+        "canonical slots must remain inside the database"
+    );
+}
 
 #[test]
 fn runtime_persists_timeline_history_for_failover_promotion() {
