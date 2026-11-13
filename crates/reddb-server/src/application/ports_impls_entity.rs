@@ -2394,24 +2394,42 @@ impl RuntimeEntityPort for RedDBRuntime {
             // own.
             state.ensure_populated(&db.store(), &input.collection)?;
             // Issue #694 — named crash boundaries for #673.
-            use crate::runtime::turbo_crash_inject::{fire, InjectionPoint};
+            use crate::runtime::turbo_crash_inject::{fire, injected_io_error, InjectionPoint};
             fire(InjectionPoint::BeforeWalFsync);
-            let _ = db
-                .store()
-                .append_vector_insert_record(&input.collection, id.raw(), &dense);
+            let wal_result = injected_io_error(InjectionPoint::BeforeWalFsync).map_or_else(
+                || {
+                    db.store()
+                        .append_vector_insert_record(&input.collection, id.raw(), &dense)
+                },
+                Err,
+            );
             fire(InjectionPoint::BeforeIndexCommit);
             let mut index = state.index.lock();
             index.insert(id, dense.clone());
+            if let Err(error) = wal_result {
+                return Err(error.into());
+            }
             // Mirror the encoded codes into the per-collection
             // TurboExtent when one is available. The bytes are the
             // 4-bit-packed code groups (`n_byte_groups`) plus the
             // little-endian L2 norm — same shape `BlockedCodeStorage`
-            // appends in-memory. Failures are non-fatal in this
-            // slice; durability of the extent is owned by #673.
+            // appends in-memory. The extent is derived state: on an
+            // uncertain append, discard it and recover from the entity.
             fire(InjectionPoint::BeforeExtentFsync);
-            if let Some(extent) = state.extent.lock().as_mut() {
+            let mut extent_guard = state.extent.lock();
+            if let Some(extent) = extent_guard.as_mut() {
                 let packed = index.encode_for_extent(&dense);
-                let _ = extent.append(&packed);
+                let extent_result = injected_io_error(InjectionPoint::BeforeExtentFsync)
+                    .map_or_else(|| extent.append(&packed), |error| Err(error.into()));
+                if let Err(error) = extent_result {
+                    *extent_guard = None;
+                    return Err(match error {
+                        crate::storage::engine::pager::PagerError::Io(error) => error.into(),
+                        error => crate::RedDBError::Internal(format!(
+                            "vector.turbo extent append failed: {error}"
+                        )),
+                    });
+                }
             }
         }
         self.cdc_emit(
