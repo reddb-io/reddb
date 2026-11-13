@@ -1849,7 +1849,7 @@ fn run_typed_insert(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
 ///       "batch": true? }` → analytics `BatchInsertEndpoint`
 ///     (issue #587) — all-or-nothing commit with
 ///     `AnalyticsSchemaRegistry` validation up front and replay served
-///     from the process-wide cache shared with the HTTP (#582) and
+///     from the durable receipt shared with the HTTP (#582) and
 ///     gRPC (#585) mirrors. Either an `idempotency_key` OR `batch:
 ///     true` flips the dispatch — the literal idempotency key in the
 ///     frame is the canonical signal in the brief, the boolean lets a
@@ -3065,7 +3065,7 @@ mod tests {
     // `BulkInsert` (0x04) frame: the presence of `idempotency_key` in
     // the JSON payload flips the dispatch onto the analytics batch
     // path (all-or-nothing commit, AnalyticsSchemaRegistry validation,
-    // process-wide cache shared with HTTP #582 and gRPC #585). Each
+    // durable receipt shared with HTTP #582 and gRPC #585). Each
     // test below maps to one acceptance bullet.
 
     /// Bullet 1 — wire form: `BulkInsert` payload with
@@ -3173,14 +3173,14 @@ mod tests {
     }
 
     /// Bullet 2 — `idempotency_key` carried in the frame; the
-    /// process-wide cache (shared with HTTP slice 4) replays a
+    /// durable receipt (shared with HTTP slice 4) replays a
     /// previous success byte-for-byte even when the retry's body
     /// differs from the original. The HTTP slice 4 already pins the
     /// cross-call behaviour at its boundary; this test pins the
     /// RedWire boundary plus the cross-transport sharing (a retry on
     /// the same key via HTTP returns the body RedWire just produced).
     #[test]
-    fn redwire_batch_insert_idempotency_key_replays_cached_result() {
+    fn redwire_batch_insert_idempotency_key_replays_committed_result() {
         let runtime = RedDBRuntime::in_memory().expect("runtime");
         runtime
             .execute_query("CREATE TABLE events_587_dedup (id INTEGER, name TEXT)")
@@ -3230,7 +3230,7 @@ mod tests {
         assert_eq!(reply2.kind, MessageKind::BulkOk);
         assert_eq!(
             reply2.payload, body1,
-            "replay must return cached body byte-for-byte"
+            "replay must return committed body byte-for-byte"
         );
 
         let qr = runtime
@@ -3241,50 +3241,6 @@ mod tests {
             1,
             "replay re-executed and committed the second row"
         );
-    }
-
-    /// Bullet 2 (cont.) — the cache is *shared with HTTP slice 4*: a
-    /// RedWire submission populates the cache, and a same-key HTTP
-    /// retry returns the cached body verbatim.
-    #[test]
-    fn redwire_batch_insert_cache_shared_with_http_transport() {
-        use crate::runtime::batch_insert::global_cache;
-
-        let runtime = RedDBRuntime::in_memory().expect("runtime");
-        runtime
-            .execute_query("CREATE TABLE events_587_shared (id INTEGER, name TEXT)")
-            .expect("create table");
-
-        let key = format!(
-            "shared-cache-587-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-
-        let frame = bulk_insert_frame(
-            300,
-            format!(
-                r#"{{
-                    "collection":"events_587_shared",
-                    "idempotency_key":"{key}",
-                    "payloads":[{{"fields":{{"id":1,"name":"x"}}}}]
-                }}"#
-            )
-            .into_bytes(),
-        );
-        let reply = run_insert_dispatch(&runtime, &frame);
-        assert_eq!(reply.kind, MessageKind::BulkOk);
-
-        // Look the entry up directly via the process-wide cache that
-        // both HTTP and RedWire share. A hit here is the entire
-        // "shared with HTTP slice 4" contract.
-        let hit = global_cache()
-            .lookup("events_587_shared", &key, std::time::Instant::now())
-            .expect("shared cache must serve the RedWire write to HTTP");
-        assert_eq!(hit.status, 200);
-        assert_eq!(hit.body, reply.payload);
     }
 
     /// Bullet 4 — schema-validation failure mirrors the other

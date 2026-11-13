@@ -2683,8 +2683,8 @@ impl RedDb for GrpcRuntime {
     /// `BatchInsertEndpoint` (slice 4 / #582). The shared
     /// `process_batch_insert` pipeline holds the all-or-nothing commit,
     /// `AnalyticsSchemaRegistry` validation, and the process-wide
-    /// idempotency cache that this RPC shares with the HTTP (#582) and
-    /// RedWire (#587) transports.
+    /// durable idempotency receipts that this RPC shares with the HTTP
+    /// (#582) and RedWire (#587) transports.
     ///
     /// Streaming contract:
     /// * First chunk MUST set `collection`. Subsequent chunks MAY omit it.
