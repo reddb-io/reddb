@@ -3638,9 +3638,12 @@ impl RedDb for GrpcRuntime {
         // kills the initial-sync-vs-retention race that produces stalled_gap).
         let slot_restart_lsn = repl.register_replica(replica_id.clone());
 
-        // Trigger a checkpoint first to ensure data is flushed
-        db.flush()
-            .map_err(|e| crate::grpc::control_support::internal_status(&e))?;
+        // Keep the native image and its logical cursor on one publication
+        // boundary. The pager owns the lifetime file lock; a second handle
+        // cannot read that live file on Windows.
+        let store = db.store();
+        let publication = store.vault_publication_lock.lock();
+        let snapshot = self.runtime.capture_serverless_snapshot().map_err(to_status)?;
 
         let snapshot_lsn = repl
             .logical_wal_spool
@@ -3691,7 +3694,7 @@ impl RedDb for GrpcRuntime {
             }
         }
         if let Some(path) = db.path() {
-            let bytes = std::fs::read(path)
+            let bytes = std::fs::read(snapshot.path())
                 .map_err(|e| crate::grpc::control_support::internal_status(&e))?;
             // A resumable snapshot token is keyed to the replica, the pinned
             // snapshot LSN, and the total size so a resuming caller is matched
@@ -3732,6 +3735,7 @@ impl RedDb for GrpcRuntime {
                 )?;
             }
         }
+        drop(publication);
         let payload = chunk.encode_json();
         Ok(Response::new(PayloadReply {
             ok: true,

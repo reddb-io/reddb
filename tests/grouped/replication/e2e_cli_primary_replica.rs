@@ -422,6 +422,105 @@ fn cli_no_auth_primary_replicates_to_read_replica() {
 
 #[cfg(feature = "grpc")]
 #[test]
+fn cli_replication_snapshots_preserve_independent_native_generations() {
+    use reddb::grpc::proto::red_db_client::RedDbClient;
+    use reddb::grpc::proto::Empty;
+    use reddb_wire::replication::BaseBackupChunk;
+
+    let temp = support::temp_data_dir("cli-native-replication-snapshot");
+    let ports = free_ports(2);
+    let mut primary = spawn_primary(&temp.join("primary.rdb"), ports[0], ports[1]);
+    wait_for_health(&mut primary, ports[0], "snapshot source");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("snapshot client runtime");
+    let endpoint =
+        tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", ports[1]))
+            .expect("snapshot endpoint")
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15));
+    let channel = runtime
+        .block_on(endpoint.connect())
+        .expect("connect snapshot client");
+    let mut client = RedDbClient::new(channel).max_decoding_message_size(64 * 1024 * 1024);
+    let mut snapshots = Vec::new();
+    for (ordinal, query, expected) in [
+        (
+            1,
+            "INSERT INTO snapshot_probe (id, name) VALUES (1, 'original')",
+            "original",
+        ),
+        (
+            2,
+            "UPDATE snapshot_probe SET name = 'updated' WHERE id = 1",
+            "updated",
+        ),
+    ] {
+        let body = format!(r#"{{"query":"{query}"}}"#);
+        let (status, response) = http_request(ports[0], "POST", "/query", Some(&body));
+        assert_eq!(status, 200, "snapshot source mutation: {response}");
+        let mut request = tonic::Request::new(Empty {});
+        request.metadata_mut().insert(
+            "x-reddb-replica-id",
+            "snapshot-reader".parse().expect("replica identity"),
+        );
+        let reply = runtime
+            .block_on(client.replication_snapshot(request))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "native replication snapshot RPC failed: {error:?}; source log:\n{}",
+                    std::fs::read_to_string(&primary.output_path).unwrap_or_default()
+                )
+            })
+            .into_inner();
+        assert!(reply.ok);
+        let chunk =
+            BaseBackupChunk::decode_json(reply.payload.as_bytes()).expect("snapshot wire contract");
+        assert!(chunk.snapshot_complete);
+        let lsn = chunk.snapshot_lsn.expect("snapshot cursor");
+        let bytes = chunk.snapshot_hex.expect("whole native snapshot");
+        assert_eq!(chunk.snapshot_total_bytes, Some(bytes.len() as u64));
+        let path = temp.join(format!("snapshot-{ordinal}.rdb"));
+        std::fs::write(&path, bytes).expect("independent replica image");
+        snapshots.push((path, expected, lsn));
+    }
+    assert!(snapshots[1].2 > snapshots[0].2);
+    // Read the older image only after the live source has changed again.
+    // Both images must have valid native roots and their own MVCC/index state.
+    for (path, expected, _) in snapshots {
+        let reader = reddb::RedDBRuntime::with_options(
+            reddb::RedDBOptions::persistent(&path)
+                .with_storage_profile(reddb::StorageDeployPreset::PrimaryReplicaDev.selection())
+                .expect("native snapshot reader")
+                .with_read_only(true),
+        )
+        .expect("cold open transferred native generation");
+        let point = reader
+            .execute_query("SELECT name FROM snapshot_probe WHERE id = 1")
+            .expect("cold snapshot point before scan");
+        assert_eq!(point.result.len(), 1);
+        assert_eq!(
+            point.result.records[0]
+                .get("name")
+                .and_then(|value| value.as_text()),
+            Some(expected)
+        );
+        let scan = reader
+            .execute_query("SELECT name FROM snapshot_probe")
+            .expect("snapshot scan");
+        assert_eq!(scan.result.len(), 1);
+        assert_eq!(
+            scan.result.records[0]
+                .get("name")
+                .and_then(|value| value.as_text()),
+            Some(expected)
+        );
+    }
+}
+
+#[cfg(feature = "grpc")]
+#[test]
 fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
     use reddb_client::{QueryOptions, Reddb, ValueOut};
     use reddb_wire::replication::{FailoverPromotionReply, FailoverPromotionRequest};
