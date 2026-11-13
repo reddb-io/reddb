@@ -74,12 +74,7 @@ value itself; integer, text and nested-array values are covered. The remaining
 runtime overhead is outside this projection. This is allocation evidence, not a
 throughput comparison with Redis or KiviDB.
 
-An optional diagnostic compares the indexed segment probe with an early-exit
-borrowed scan over 100, 10,000 and 100,000 rows (1,000 reads each):
-
-```sh
-cargo test -p reddb-io-server --lib key_lookup_scaling_diagnostic --locked -- --ignored --nocapture
-```
-
-This isolates lookup work. It excludes transport, parsing, durable writes and
-the old full-collection cloning overhead; it is not a competitive benchmark.
+The investigation also compared the indexed segment probe with an early-exit
+borrowed scan. That timing-only diagnostic was retired from the test suite in
+November 2026. Add a Criterion target if this comparison needs to be measured
+again; the automated suite retains the lookup correctness regressions.

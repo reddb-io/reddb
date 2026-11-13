@@ -475,28 +475,9 @@ impl RedDBRuntime {
         // empty for non-row entities, which is the desired no-op.
         let pre_mutation_fields = entity_row_fields_snapshot(&entity);
 
-        // VCS and graph contracts retain prior versions. Besides preserving
-        // history, this lets contract validation distinguish concurrent edits
-        // and restore the prior graph when a transaction rolls back.
+        // Retain MVCC history for VCS and transactional graph contracts.
         let patch_versions = epoch.is_some() || self.has_graph_contract(&collection);
-        let versioned_update_xid = if patch_versions {
-            match self.current_xid() {
-                Some(xid) => Some(xid),
-                None => {
-                    let snapshot_manager = self.snapshot_manager();
-                    let xid = snapshot_manager.begin();
-                    snapshot_manager.commit(xid);
-                    Some(xid)
-                }
-            }
-        } else {
-            None
-        };
-        let mut replaced_entity = versioned_update_xid.map(|xid| {
-            let mut old = entity.clone();
-            old.set_xmax(xid);
-            old
-        });
+        let mut replaced_entity = patch_versions.then(|| entity.clone());
 
         let db = self.db();
         let store = db.store();
@@ -1135,6 +1116,14 @@ impl RedDBRuntime {
         // prior version's xmax at the same xid. `install_versioned_*`
         // in persist installs the new row and tombstones the old one;
         // `record_pending_versioned_update` arms first-committer-wins.
+        let current_xid = self.current_xid();
+        let autocommit_update = (patch_versions && current_xid.is_none())
+            .then(|| crate::application::entity::AutocommitUpdate::new(self.snapshot_manager()));
+        let versioned_update_xid = if patch_versions {
+            current_xid.or_else(|| autocommit_update.as_ref().map(|update| update.xid))
+        } else {
+            None
+        };
         if let Some(xid) = versioned_update_xid {
             let logical_id = entity.logical_id();
             entity.id = store.next_entity_id();
@@ -1150,6 +1139,7 @@ impl RedDBRuntime {
         modified_columns = dedupe_modified_columns(modified_columns);
 
         Ok(AppliedEntityMutation {
+            autocommit_update,
             id: entity.id,
             collection,
             entity,
@@ -1186,20 +1176,7 @@ impl RedDBRuntime {
             )));
         };
 
-        let versioned_update_xid = match self.current_xid() {
-            Some(xid) => Some(xid),
-            None => {
-                let snapshot_manager = self.snapshot_manager();
-                let xid = snapshot_manager.begin();
-                snapshot_manager.commit(xid);
-                Some(xid)
-            }
-        };
-        let mut replaced_entity = versioned_update_xid.map(|xid| {
-            let mut old = entity.clone();
-            old.set_xmax(xid);
-            old
-        });
+        let mut replaced_entity = Some(entity.clone());
 
         let mut patch_metadata: Option<crate::storage::unified::Metadata> = None;
         let row_contract_timestamps = row_contract_plan
@@ -1359,6 +1336,12 @@ impl RedDBRuntime {
             .unwrap_or_default()
             .as_secs();
 
+        let current_xid = self.current_xid();
+        let autocommit_update = current_xid
+            .is_none()
+            .then(|| crate::application::entity::AutocommitUpdate::new(self.snapshot_manager()));
+        let versioned_update_xid =
+            current_xid.or_else(|| autocommit_update.as_ref().map(|update| update.xid));
         if let Some(xid) = versioned_update_xid {
             let logical_id = entity.logical_id();
             entity.id = store.next_entity_id();
@@ -1374,6 +1357,7 @@ impl RedDBRuntime {
         modified_columns = dedupe_modified_columns(modified_columns);
 
         Ok(AppliedEntityMutation {
+            autocommit_update,
             id: entity.id,
             collection,
             entity,
@@ -1431,18 +1415,48 @@ impl RedDBRuntime {
                 } else {
                     old_version.clone()
                 };
-                store
-                    .install_versioned_table_row_update(
-                        collection,
-                        old_version.clone(),
-                        item.entity.clone(),
-                        if item.persist_metadata {
-                            item.metadata.as_ref()
-                        } else {
-                            None
-                        },
-                    )
-                    .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
+                if item.autocommit_update.is_some()
+                    && crate::storage::UnifiedStore::deferred_store_wal_capture_active()
+                    && !crate::runtime::mvcc_lifecycle::autocommit_update_capture_available()
+                {
+                    return Err(crate::RedDBError::Internal(
+                        "missing autocommit update WAL scope".into(),
+                    ));
+                }
+                if let Err(error) = store.install_versioned_table_row_update(
+                    collection,
+                    old_version.clone(),
+                    item.entity.clone(),
+                    if item.persist_metadata {
+                        item.metadata.as_ref()
+                    } else {
+                        None
+                    },
+                ) {
+                    if let Some(update) = &item.autocommit_update {
+                        let changed = manager.get_with(old_version.id, |old| {
+                            epoch.map_or(old.xmax, |epoch| old.branch_xmax(epoch)) == update.xid
+                        }) == Some(true);
+                        if changed {
+                            let topology =
+                                self.index_store_ref().collection_topology_lock(collection);
+                            if let Err(undo) = self.revive_versioned_update(
+                                collection,
+                                old_version.id,
+                                item.entity.id,
+                                update.xid,
+                                item.replaced_entity_previous_xmax,
+                                topology.read_recursive(),
+                            ) {
+                                tracing::error!(%undo, "failed to undo incomplete autocommit update");
+                            }
+                        }
+                    }
+                    return Err(crate::RedDBError::Internal(error.to_string()));
+                }
+                if let Some(update) = &item.autocommit_update {
+                    crate::runtime::mvcc_lifecycle::publish_autocommit_update(self, item, update);
+                }
                 if self.current_xid().is_some() {
                     self.record_pending_versioned_update(
                         crate::runtime::impl_core::current_connection_id(),
@@ -1655,7 +1669,7 @@ impl RedDBRuntime {
             applied.metadata.as_ref(),
             true,
             changed_columns,
-        );
+        )?;
         Ok(())
     }
 
@@ -1859,7 +1873,7 @@ impl RedDBRuntime {
             &input.collection,
             id.raw(),
             "graph_node",
-        );
+        )?;
         Ok(CreateEntityOutput {
             id,
             entity: db.store().get(&input.collection, id),
@@ -1936,7 +1950,7 @@ impl RedDBRuntime {
             &input.collection,
             id.raw(),
             "graph_edge",
-        );
+        )?;
         Ok(CreateEntityOutput {
             id,
             entity: db.store().get(&input.collection, id),
@@ -2046,7 +2060,7 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
     }
 
     runtime.invalidate_result_cache();
-    runtime.cdc_emit_insert_batch_no_cache_invalidate(&collection, &ids, "table");
+    runtime.cdc_emit_insert_batch_no_cache_invalidate(&collection, &ids, "table")?;
 
     Ok(ids
         .into_iter()
@@ -2434,24 +2448,42 @@ impl RuntimeEntityPort for RedDBRuntime {
                 // own.
                 state.ensure_populated(&db.store(), &input.collection)?;
                 // Issue #694 — named crash boundaries for #673.
-                use crate::runtime::turbo_crash_inject::{fire, InjectionPoint};
+                use crate::runtime::turbo_crash_inject::{fire, injected_io_error, InjectionPoint};
                 fire(InjectionPoint::BeforeWalFsync);
-                let _ = db
-                    .store()
-                    .append_vector_insert_record(&input.collection, id.raw(), &dense);
+                let wal_result = injected_io_error(InjectionPoint::BeforeWalFsync).map_or_else(
+                    || {
+                        db.store()
+                            .append_vector_insert_record(&input.collection, id.raw(), &dense)
+                    },
+                    Err,
+                );
                 fire(InjectionPoint::BeforeIndexCommit);
                 let mut index = state.index.lock();
                 index.insert(id, dense.clone());
+                if let Err(error) = wal_result {
+                    return Err(error.into());
+                }
                 // Mirror the encoded codes into the per-collection
                 // TurboExtent when one is available. The bytes are the
                 // 4-bit-packed code groups (`n_byte_groups`) plus the
                 // little-endian L2 norm — same shape `BlockedCodeStorage`
-                // appends in-memory. Failures are non-fatal in this
-                // slice; durability of the extent is owned by #673.
+                // appends in-memory. The extent is derived state: on an
+                // uncertain append, discard it and recover from the entity.
                 fire(InjectionPoint::BeforeExtentFsync);
-                if let Some(extent) = state.extent.lock().as_mut() {
+                let mut extent_guard = state.extent.lock();
+                if let Some(extent) = extent_guard.as_mut() {
                     let packed = index.encode_for_extent(&dense);
-                    let _ = extent.append(&packed);
+                    let extent_result = injected_io_error(InjectionPoint::BeforeExtentFsync)
+                        .map_or_else(|| extent.append(&packed), |error| Err(error.into()));
+                    if let Err(error) = extent_result {
+                        *extent_guard = None;
+                        return Err(match error {
+                            crate::storage::engine::pager::PagerError::Io(error) => error.into(),
+                            error => crate::RedDBError::Internal(format!(
+                                "vector.turbo extent append failed: {error}"
+                            )),
+                        });
+                    }
                 }
             }
             self.cdc_emit(
@@ -2459,7 +2491,7 @@ impl RuntimeEntityPort for RedDBRuntime {
                 &input.collection,
                 id.raw(),
                 "vector",
-            );
+            )?;
             Ok(CreateEntityOutput {
                 id,
                 entity: db.store().get(&input.collection, id),
@@ -2563,7 +2595,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             &input.collection,
             id.raw(),
             "document",
-        );
+        )?;
         Ok(CreateEntityOutput {
             id,
             entity: db.store().get(&input.collection, id),
@@ -2817,7 +2849,7 @@ impl RuntimeEntityPort for RedDBRuntime {
                 &input.collection,
                 input.id.raw(),
                 "entity",
-            );
+            )?;
         }
         Ok(DeleteEntityOutput {
             deleted,

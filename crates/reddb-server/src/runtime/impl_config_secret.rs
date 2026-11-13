@@ -94,11 +94,11 @@ mod tests {
             )
             .expect("persist configuration");
         store
-            .try_set_config_tree("red.config.queue.max_wait_ms", &crate::json!(1))
+            .try_set_config_tree("queue.max_wait_ms", &crate::json!(1))
             .expect("queue wait limit");
         store.persist().expect("checkpoint");
         let manager = store
-            .get_collection("red_config")
+            .get_collection("red.config")
             .expect("config collection");
         assert!(manager.has_backing(), "fixture must read persisted rows");
         assert!(
@@ -154,6 +154,48 @@ mod tests {
             store.try_get_config("concurrency.locking.enabled").unwrap(),
             Some(Value::Boolean(false))
         );
+    }
+
+    #[test]
+    fn fresh_boot_never_persists_a_redundant_red_config_prefix() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("red.config")
+            .expect("red.config");
+        let mut invalid = Vec::new();
+        manager.for_each_entity(|entity| {
+            if let Some(Value::Text(key)) =
+                entity.data.as_row().and_then(|row| row.get_field("key"))
+            {
+                if key.starts_with("red.") {
+                    invalid.push(key.to_string());
+                }
+            }
+            true
+        });
+        assert!(
+            invalid.is_empty(),
+            "fresh red.config contains redundant prefixes: {invalid:?}"
+        );
+    }
+
+    #[test]
+    fn sql_config_surfaces_reject_redundant_red_prefixes() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        for query in ["SET CONFIG red.auth.enabled = true", "SHOW CONFIG red.auth"] {
+            let error = match runtime.execute_query(query) {
+                Ok(_) => panic!("legacy config key unexpectedly accepted: {query}"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("omit the redundant `red.` prefix"),
+                "unexpected error for {query}: {error}"
+            );
+        }
     }
 }
 
@@ -280,7 +322,7 @@ impl RedDBRuntime {
         guard.as_ref().and_then(|s| s.vault_secret_key())
     }
 
-    /// Resolve a boolean flag from `red_config`. Defaults to `default`
+    /// Resolve a boolean flag from `red.config`. Defaults to `default`
     /// when the key is missing or not coercible. If the same key has
     /// been written multiple times (SET CONFIG appends new rows), the
     /// most recent entity wins. Env-var overrides
@@ -353,6 +395,6 @@ impl RedDBRuntime {
     /// Whether `SECRET('...')` literals should be encrypted with the
     /// vault AES key on INSERT. Default `true`.
     pub(crate) fn secret_auto_encrypt(&self) -> bool {
-        self.config_bool("red.config.secret.auto_encrypt", true)
+        self.config_bool("secret.auto_encrypt", true)
     }
 }

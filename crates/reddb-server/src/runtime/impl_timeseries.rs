@@ -77,7 +77,7 @@ impl RedDBRuntime {
         // like `red.tables` does for `CREATE TABLE`.
         if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
             store.set_config_tree(
-                &format!("red.collection_tenants.{}", query.name),
+                &format!("collection_tenants.{}", query.name),
                 &crate::serde_json::Value::String(tenant_id),
             );
         }
@@ -972,7 +972,7 @@ fn timeseries_max_series_per_collection(
 }
 
 fn latest_usize_config(store: &crate::storage::unified::UnifiedStore, key: &str) -> Option<usize> {
-    let manager = store.get_collection("red_config")?;
+    let manager = store.get_collection("red.config")?;
     let mut newest: Option<(u64, usize)> = None;
     manager.for_each_entity(|entity| {
         let Some(row) = entity.data.as_row() else {
@@ -1198,6 +1198,8 @@ fn hypertable_collection_contract(
     crate::physical::CollectionContract {
         graph_contract: None,
         name: query.name.clone(),
+        description: None,
+        description_generated: false,
         // Table model — rows go through the normal INSERT path,
         // which now calls HypertableRegistry::route after each row
         // lands. Hypertable-specific behaviour (chunk bounds, TTL
@@ -1242,6 +1244,8 @@ fn timeseries_collection_contract(
     crate::physical::CollectionContract {
         graph_contract: None,
         name: query.name.clone(),
+        description: None,
+        description_generated: false,
         declared_model: crate::catalog::CollectionModel::TimeSeries,
         schema_mode: crate::catalog::SchemaMode::SemiStructured,
         origin: crate::physical::ContractOrigin::Explicit,

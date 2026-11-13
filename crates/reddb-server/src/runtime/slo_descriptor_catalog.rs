@@ -1,4 +1,4 @@
-//! SLO descriptor catalog persisted in `red_config`.
+//! SLO descriptor catalog persisted in `red.config`.
 //!
 //! Issue #791 — Analytics v0. An SLO is declared over an existing
 //! SLI-role metric descriptor (see `metric_descriptor_catalog`) with a
@@ -13,7 +13,7 @@ use reddb_types::Value;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const REGISTRY_KEY: &str = "red.analytics.slos.entries_json";
+const REGISTRY_KEY: &str = "analytics.slos.entries_json";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SloDescriptor {
@@ -125,7 +125,7 @@ fn validate_window_ms(window_ms: u64) -> RedDBResult<()> {
 }
 
 fn read_latest_registry_json(store: &UnifiedStore) -> Option<String> {
-    let manager = store.get_collection("red_config")?;
+    let manager = store.get_collection("red.config")?;
     let mut all = manager.query_all(|_| true);
     all.sort_by_key(|entity| std::cmp::Reverse(entity.id.raw()));
     for entity in all {

@@ -242,16 +242,14 @@ impl RedDBServer {
                 object.insert(
                     "last_applied_lsn".to_string(),
                     JsonValue::Number(
-                        self.runtime
-                            .config_u64("red.replication.last_applied_lsn", 0)
-                            as f64,
+                        self.runtime.config_u64("replication.last_applied_lsn", 0) as f64
                     ),
                 );
                 object.insert(
                     "state".to_string(),
-                    JsonValue::String(self.runtime.config_string("red.replication.state", "idle")),
+                    JsonValue::String(self.runtime.config_string("replication.state", "idle")),
                 );
-                let last_error = self.runtime.config_string("red.replication.last_error", "");
+                let last_error = self.runtime.config_string("replication.last_error", "");
                 if !last_error.is_empty() {
                     object.insert("last_error".to_string(), JsonValue::String(last_error));
                 }
@@ -259,7 +257,7 @@ impl RedDBServer {
                     "last_seen_primary_lsn".to_string(),
                     JsonValue::Number(
                         self.runtime
-                            .config_u64("red.replication.last_seen_primary_lsn", 0)
+                            .config_u64("replication.last_seen_primary_lsn", 0)
                             as f64,
                     ),
                 );
@@ -267,7 +265,7 @@ impl RedDBServer {
                     "last_seen_oldest_lsn".to_string(),
                     JsonValue::Number(
                         self.runtime
-                            .config_u64("red.replication.last_seen_oldest_lsn", 0)
+                            .config_u64("replication.last_seen_oldest_lsn", 0)
                             as f64,
                     ),
                 );
@@ -275,7 +273,7 @@ impl RedDBServer {
                     "rejoin_target_timeline".to_string(),
                     JsonValue::Number(
                         self.runtime
-                            .config_u64("red.replication.rejoin_target_timeline", 0)
+                            .config_u64("replication.rejoin_target_timeline", 0)
                             as f64,
                     ),
                 );
@@ -283,7 +281,7 @@ impl RedDBServer {
                     "rejoin_rewind_to_lsn".to_string(),
                     JsonValue::Number(
                         self.runtime
-                            .config_u64("red.replication.rejoin_rewind_to_lsn", 0)
+                            .config_u64("replication.rejoin_rewind_to_lsn", 0)
                             as f64,
                     ),
                 );
@@ -291,7 +289,7 @@ impl RedDBServer {
                     "rejoin_rewind_confirmed_timeline".to_string(),
                     JsonValue::Number(
                         self.runtime
-                            .config_u64("red.replication.rejoin_rewind_confirmed_timeline", 0)
+                            .config_u64("replication.rejoin_rewind_confirmed_timeline", 0)
                             as f64,
                     ),
                 );
@@ -299,7 +297,7 @@ impl RedDBServer {
                     "rejoin_rewind_confirmed_lsn".to_string(),
                     JsonValue::Number(
                         self.runtime
-                            .config_u64("red.replication.rejoin_rewind_confirmed_lsn", 0)
+                            .config_u64("replication.rejoin_rewind_confirmed_lsn", 0)
                             as f64,
                     ),
                 );
@@ -323,7 +321,7 @@ impl RedDBServer {
             return json_error(409, "rejoin rewind confirmation only allowed on a replica");
         }
 
-        if self.runtime.config_string("red.replication.state", "") != "rejoin_rewind_required" {
+        if self.runtime.config_string("replication.state", "") != "rejoin_rewind_required" {
             return json_error(409, "replica is not waiting for a confirmed rejoin rewind");
         }
 
@@ -343,10 +341,10 @@ impl RedDBServer {
 
         let planned_timeline = self
             .runtime
-            .config_u64("red.replication.rejoin_target_timeline", 0);
+            .config_u64("replication.rejoin_target_timeline", 0);
         let planned_lsn = self
             .runtime
-            .config_u64("red.replication.rejoin_rewind_to_lsn", 0);
+            .config_u64("replication.rejoin_rewind_to_lsn", 0);
         if target_timeline != planned_timeline || rewind_to_lsn != planned_lsn {
             return json_error(
                 409,
@@ -428,7 +426,7 @@ mod tests {
         )
         .expect("runtime");
         runtime.db().store().set_config_tree(
-            "red.replication",
+            "replication",
             &crate::json!({
                 "state": "rejoin_rewind_required",
                 "rejoin_target_timeline": 3,
@@ -448,7 +446,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
 
         assert_eq!(
-            runtime.config_string("red.replication.state", ""),
+            runtime.config_string("replication.state", ""),
             "rejoin_rewind_required"
         );
     }
@@ -462,7 +460,7 @@ mod tests {
         .expect("runtime");
         let deadline = Instant::now() + Duration::from_secs(5);
 
-        while runtime.config_string("red.replication.state", "") != "connecting" {
+        while runtime.config_string("replication.state", "") != "connecting" {
             assert!(Instant::now() < deadline, "replica loop did not start");
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -687,19 +685,17 @@ mod tests {
         assert_eq!(
             server
                 .runtime
-                .config_u64("red.replication.rejoin_rewind_confirmed_timeline", 0),
+                .config_u64("replication.rejoin_rewind_confirmed_timeline", 0),
             3
         );
         assert_eq!(
             server
                 .runtime
-                .config_u64("red.replication.rejoin_rewind_confirmed_lsn", 0),
+                .config_u64("replication.rejoin_rewind_confirmed_lsn", 0),
             42
         );
         assert_eq!(
-            server
-                .runtime
-                .config_u64("red.replication.last_applied_lsn", 0),
+            server.runtime.config_u64("replication.last_applied_lsn", 0),
             42
         );
     }
@@ -723,19 +719,17 @@ mod tests {
         assert_eq!(
             server
                 .runtime
-                .config_u64("red.replication.rejoin_rewind_confirmed_timeline", 0),
+                .config_u64("replication.rejoin_rewind_confirmed_timeline", 0),
             0
         );
         assert_eq!(
             server
                 .runtime
-                .config_u64("red.replication.rejoin_rewind_confirmed_lsn", 0),
+                .config_u64("replication.rejoin_rewind_confirmed_lsn", 0),
             0
         );
         assert_eq!(
-            server
-                .runtime
-                .config_u64("red.replication.last_applied_lsn", 0),
+            server.runtime.config_u64("replication.last_applied_lsn", 0),
             100
         );
     }

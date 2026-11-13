@@ -65,7 +65,7 @@ impl RedDBRuntime {
     /// has not been assigned yet. Used as the bounded `replica_id`
     /// dimension on `reddb_replication_reconnects_total`.
     pub fn replication_replica_id(&self) -> String {
-        self.config_string("red.replication.replica_id", "")
+        self.config_string("replication.replica_id", "")
     }
 
     /// Issue #1243 — drive the reconnect tracker from a replica health
@@ -281,23 +281,16 @@ impl RedDBRuntime {
         }
     }
 
-    /// PLAN.md Phase 11.4 — enforce the configured commit policy
-    /// against `post_lsn` (the LSN of the just-completed write).
-    /// Returns `Ok(AwaitOutcome)` on every successful enforcement
-    /// (including `Reached` and `TimedOut` when fail-on-timeout is
-    /// off). Returns `Err(ReadOnly)` only when a synchronous policy
-    /// misses its threshold and `RED_COMMIT_FAIL_ON_TIMEOUT=true` is
-    /// set.
-    ///
-    /// The HTTP / gRPC / wire surfaces map the error to 504 / wire
-    /// backoff. Default behaviour (env unset) logs warn and returns
-    /// success — matches PLAN.md "default v1 stays local" semantics
-    /// while still letting the operator opt into hard-blocking.
+    /// Enforce the requested durability. A missed synchronous threshold is
+    /// an uncertain replica outcome after local commit, never success and
+    /// never a claim that the source transaction rolled back.
     pub fn enforce_commit_policy(
         &self,
         post_lsn: u64,
     ) -> RedDBResult<crate::replication::AwaitOutcome> {
-        self.enforce_commit_policy_for_policy(post_lsn, self.commit_policy())
+        let policy = crate::replication::CommitPolicy::from_env_strict()
+            .map_err(RedDBError::InvalidConfig)?;
+        self.enforce_commit_policy_for_policy(post_lsn, policy)
     }
 
     pub fn enforce_commit_policy_for_request(
@@ -305,17 +298,19 @@ impl RedDBRuntime {
         post_lsn: u64,
         request_override: Option<crate::replication::CommitPolicy>,
     ) -> RedDBResult<crate::replication::AwaitOutcome> {
-        let resolution = self
-            .resolve_request_commit_policy(request_override)
-            .map_err(commit_policy_violation_error)?;
-        self.enforce_commit_policy_for_policy(post_lsn, resolution.effective)
+        let policy = self.validated_request_commit_policy(request_override)?;
+        self.enforce_commit_policy_for_policy(post_lsn, policy)
     }
 
-    fn enforce_commit_policy_for_policy(
+    pub(super) fn enforce_commit_policy_for_policy(
         &self,
         post_lsn: u64,
         policy: crate::replication::CommitPolicy,
     ) -> RedDBResult<crate::replication::AwaitOutcome> {
+        self.validate_commit_policy(policy)?;
+        if post_lsn == 0 {
+            return Ok(crate::replication::AwaitOutcome::NotRequired);
+        }
         if matches!(policy, crate::replication::CommitPolicy::Quorum) {
             return match self.inner.db.wait_for_replication_quorum(post_lsn) {
                 Ok(()) => Ok(crate::replication::AwaitOutcome::Reached(0)),
@@ -326,37 +321,16 @@ impl RedDBRuntime {
                         error = %err,
                         "quorum: timed out waiting for commit watermark"
                     );
-                    let fail = std::env::var("RED_COMMIT_FAIL_ON_TIMEOUT")
-                        .ok()
-                        .map(|v| {
-                            let t = v.trim();
-                            t.eq_ignore_ascii_case("true")
-                                || t == "1"
-                                || t.eq_ignore_ascii_case("yes")
-                        })
-                        .unwrap_or(false);
-                    if fail {
-                        return Err(RedDBError::ReadOnly(format!(
-                            "commit policy timed out at lsn {post_lsn}: {err} (RED_COMMIT_FAIL_ON_TIMEOUT=true)"
-                        )));
-                    }
-                    Ok(crate::replication::AwaitOutcome::TimedOut {
-                        observed: 0,
-                        required: 1,
+                    Err(RedDBError::CommitUncertain {
+                        lsn: post_lsn,
+                        detail: err.to_string(),
                     })
                 }
             };
         }
 
-        let durability = Self::primary_replica_durability_for_policy(policy);
-        let n = match durability {
-            reddb_file::ReplicationDurability::RemoteWrite { quorum }
-            | reddb_file::ReplicationDurability::RemoteFlush { quorum }
-            | reddb_file::ReplicationDurability::RemoteApply { quorum }
-                if quorum > 0 =>
-            {
-                u32::from(quorum)
-            }
+        let n = match policy {
+            crate::replication::CommitPolicy::AckN(n) if n > 0 => n,
             _ => return Ok(crate::replication::AwaitOutcome::NotRequired),
         };
         let timeout_ms = std::env::var("RED_REPLICATION_ACK_TIMEOUT_MS")
@@ -414,7 +388,14 @@ impl RedDBRuntime {
                     Some(format!("replication:lsn:{post_lsn}")),
                     None,
                     fields,
-                )?;
+                ).map_err(|error| {
+                    if matches!(outcome, crate::replication::AwaitOutcome::TimedOut { .. }) {
+                        RedDBError::CommitUncertain {
+                            lsn: post_lsn,
+                            detail: format!("replica ACK threshold missed; recording the outcome also failed: {error}"),
+                        }
+                    } else { error }
+                })?;
             }
         }
         if let crate::replication::AwaitOutcome::TimedOut { observed, required } = &outcome {
@@ -426,20 +407,58 @@ impl RedDBRuntime {
                 timeout_ms,
                 "ack_n: timed out waiting for replicas"
             );
-            let fail = std::env::var("RED_COMMIT_FAIL_ON_TIMEOUT")
-                .ok()
-                .map(|v| {
-                    let t = v.trim();
-                    t.eq_ignore_ascii_case("true") || t == "1" || t.eq_ignore_ascii_case("yes")
-                })
-                .unwrap_or(false);
-            if fail {
-                return Err(RedDBError::ReadOnly(format!(
-                    "commit policy timed out at lsn {post_lsn}: observed={observed} required={required} (RED_COMMIT_FAIL_ON_TIMEOUT=true)"
-                )));
-            }
+            return Err(RedDBError::CommitUncertain {
+                lsn: post_lsn,
+                detail: format!("observed={observed} required={required}"),
+            });
         }
         Ok(outcome)
+    }
+
+    pub(crate) fn validate_commit_policy(
+        &self,
+        policy: crate::replication::CommitPolicy,
+    ) -> RedDBResult<()> {
+        use crate::replication::CommitPolicy;
+        match policy {
+            CommitPolicy::Local | CommitPolicy::AckN(0) => Ok(()),
+            CommitPolicy::RemoteWal => Err(RedDBError::InvalidConfig(
+                "remote_wal commit acknowledgement is not implemented".into(),
+            )),
+            CommitPolicy::AckN(n) if n > u32::from(u16::MAX) => Err(RedDBError::InvalidConfig(
+                "ack_n exceeds the supported replica quorum size".into(),
+            )),
+            _ if self.inner.db.replication.is_none() => Err(RedDBError::InvalidConfig(
+                "synchronous commit policy requires a replication primary".into(),
+            )),
+            CommitPolicy::Quorum if self.inner.db.options().replication.quorum.is_async() => {
+                Err(RedDBError::InvalidConfig(
+                    "quorum commit policy requires a synchronous quorum configuration".into(),
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn validated_request_commit_policy(
+        &self,
+        request: Option<crate::replication::CommitPolicy>,
+    ) -> RedDBResult<crate::replication::CommitPolicy> {
+        let configured = crate::replication::CommitPolicy::from_env_strict()
+            .map_err(RedDBError::InvalidConfig)?;
+        if let Some(request) = request {
+            reject_incomparable_commit_policies(configured, request)?;
+        }
+        let floor = crate::cluster::CommitPolicyResolution {
+            effective: configured,
+            source: crate::cluster::ResolutionSource::ClusterDefault,
+            guardrail: crate::cluster::GuardrailDisposition::NotApplicable,
+        };
+        let effective = crate::cluster::resolve_request_commit_policy(floor, request)
+            .map_err(commit_policy_violation_error)?
+            .effective;
+        self.validate_commit_policy(effective)?;
+        Ok(effective)
     }
 }
 
@@ -461,4 +480,20 @@ pub(crate) fn commit_policy_violation_error(
         message: format!("{code}: {detail}"),
         validation: crate::json::Value::Object(validation),
     }
+}
+
+// Quorum membership/threshold and an absolute ACK count are different
+// requirements. Until both can be retained, reject a switch between them.
+pub(super) fn reject_incomparable_commit_policies(
+    prior: crate::replication::CommitPolicy,
+    next: crate::replication::CommitPolicy,
+) -> RedDBResult<()> {
+    use crate::replication::CommitPolicy;
+    if matches!((prior, next), (CommitPolicy::AckN(n), CommitPolicy::Quorum) | (CommitPolicy::Quorum, CommitPolicy::AckN(n)) if n > 0)
+    {
+        return Err(RedDBError::InvalidConfig(
+            "cannot mix AckN and Quorum commit requirements".into(),
+        ));
+    }
+    Ok(())
 }

@@ -24,7 +24,10 @@
  *
  *   cache.get               → GET    /cache/ns/:ns/:key
  *   cache.put               → PUT    /cache/ns/:ns/:key
+ *   cache.mget              → POST   /cache/ns/:ns/mget
+ *   cache.mput              → POST   /cache/ns/:ns/mput
  *   cache.exists            → GET    /cache/ns/:ns/:key/exists
+ *   cache.expiry            → PATCH  /cache/ns/:ns/:key/ttl
  *   cache.invalidate        → DELETE /cache/ns/:ns/:key
  *   cache.invalidate_prefix → DELETE /cache/ns/:ns?prefix=...
  *   cache.invalidate_tags   → POST   /cache/ns/:ns/invalidate-tags (body: {tags})
@@ -386,9 +389,24 @@ const ROUTES = {
     url: `${base}/cache/ns/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}`,
     init: { method: 'PUT', body: JSON.stringify(serializeJsonValue({ value, ttl_ms, tags, policy })) },
   }),
+  'cache.mget': (base, { namespace, keys }) => ({
+    url: `${base}/cache/ns/${encodeURIComponent(namespace)}/mget`,
+    init: { method: 'POST', body: JSON.stringify({ keys }) },
+  }),
+  'cache.mput': (base, { namespace, entries }) => ({
+    url: `${base}/cache/ns/${encodeURIComponent(namespace)}/mput`,
+    init: { method: 'POST', body: JSON.stringify(serializeJsonValue({ entries })) },
+  }),
   'cache.exists': (base, { namespace, key }) => ({
     url: `${base}/cache/ns/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}/exists`,
     init: { method: 'GET' },
+  }),
+  'cache.expiry': (base, { namespace, key, ttl_ms, expires_at_unix_ms, persist }) => ({
+    url: `${base}/cache/ns/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}/ttl`,
+    init: {
+      method: 'PATCH',
+      body: JSON.stringify(serializeJsonValue({ ttl_ms, expires_at_unix_ms, persist })),
+    },
   }),
   'cache.invalidate': (base, { namespace, key }) => ({
     url: `${base}/cache/ns/${encodeURIComponent(namespace)}/${encodeURIComponent(key)}`,

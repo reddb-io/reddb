@@ -10,9 +10,18 @@
     clippy::cast_possible_truncation
 )]
 
+mod staging;
+pub(crate) use staging::StagedPageBatch;
+
 use super::page::{Page, PageError, PageType, PAGE_SIZE};
 use reddb_file::{VfsFile, PAGED_SUPERBLOCK_SLOT_SIZE, PAGED_SUPERBLOCK_ZONE_SIZE};
 use std::io::{self, SeekFrom};
+
+mod dwb_publication;
+
+pub(crate) fn requires_dwb_publication<F: VfsFile>(file: &mut F) -> Result<bool, PagerIoError> {
+    dwb_publication::enabled(file)
+}
 
 pub const DWB_ZONE_START_PAGE: u32 = 3;
 pub const DWB_ZONE_PAGES: u32 = 64;
@@ -72,8 +81,20 @@ pub fn read_page<F: VfsFile>(
     // Page 0 contains independently sealed superblocks, not a page checksum.
     if verify_checksum && page_id != 0 {
         page.verify_checksum()?;
+        check_page_identity(&page, page_id)?;
     }
     Ok(page)
+}
+
+/// Check plaintext identity only; encrypted envelopes are authenticated by the host.
+pub fn check_page_identity(page: &Page, expected: u32) -> Result<(), PagerIoError> {
+    if expected != 0 && page.page_id() != expected {
+        return Err(PagerIoError::InvalidDatabase(format!(
+            "page identity mismatch: requested {expected}, found {}",
+            page.page_id()
+        )));
+    }
+    Ok(())
 }
 
 /// Raw write, without a durability barrier. The owner controls publication.
@@ -165,6 +186,7 @@ pub fn write_pages<F: VfsFile>(
         return Ok(());
     }
 
+    let protected = dwb_publication::enabled(file)?;
     for chunk in pages.chunks(DWB_MAX_PAGES_PER_FRAME.max(1)) {
         let buffer = reddb_file::encode_paged_dwb_frame(
             chunk
@@ -172,64 +194,130 @@ pub fn write_pages<F: VfsFile>(
                 .map(|(page_id, page)| (*page_id, page.as_bytes())),
         );
         assert!(buffer.len() <= DWB_ZONE_BYTES, "DWB frame fits its zone");
+        let mut publication = protected.then(|| dwb_publication::publication(&buffer));
+        if protected {
+            let mut seen = std::collections::HashSet::new();
+            if chunk.iter().any(|(id, _)| {
+                *id == 0
+                    || (DWB_ZONE_START_PAGE..FIRST_ALLOCATABLE_PAGE).contains(id)
+                    || !seen.insert(*id)
+            }) {
+                return Err(PagerIoError::InvalidDatabase(
+                    "invalid DWB publication ownership".into(),
+                ));
+            }
+        }
+        if let Some(publication) = publication {
+            dwb_publication::publish(file, publication)?;
+        }
         file.seek(SeekFrom::Start(dwb_zone_offset()))?;
         file.write_all(&buffer)?;
         file.sync_all()?;
+        if let Some(publication) = publication.as_mut() {
+            publication.phase = reddb_file::file_format::DwbPhase::Ready;
+            dwb_publication::publish(file, *publication)?;
+        }
         for (page_id, page) in chunk {
             write_page(file, *page_id, page)?;
         }
         file.sync_all()?;
+        if let Some(publication) = publication {
+            dwb_publication::consume(file, publication)?;
+        }
     }
-    // Each frame's home pages are durable before the next frame replaces its
+    // Legacy frames' home pages are durable before the next frame replaces their
     // staging image. An interrupted replacement can replay the old frame or
     // discard an incomplete new one: neither can lose those durable homes.
-    // Only the final frame needs clearing before returning to the owner.
-    if !pages.is_empty() {
+    // Only the final legacy frame needs clearing before returning to the owner.
+    // Guarded frames fence Consumed and clear before the next Preparing phase.
+    if !protected && !pages.is_empty() {
         clear_dwb_zone(file)?;
     }
     Ok(())
+}
+
+fn has_complete_dwb_zone<F: VfsFile>(file: &mut F) -> Result<bool, PagerIoError> {
+    if file.file_len()? >= dwb_zone_offset() + DWB_ZONE_BYTES as u64 {
+        return Ok(true);
+    }
+    // The complete reserved zone precedes the guarded capability fence. A
+    // shorter file lost durable bytes; it is not an interrupted stage/clear.
+    if dwb_publication::enabled(file)? {
+        return Err(PagerIoError::InvalidDatabase(
+            "DWB generation authority: reserved zone is truncated".into(),
+        ));
+    }
+    Ok(false)
 }
 
 /// Replay a complete staged DWB frame before allowing page access. Incomplete
 /// staging is discarded as on the native path: home writes start only after
 /// the complete frame crossed its barrier. No database root is recreated.
 pub fn recover_from_dwb<F: VfsFile>(file: &mut F) -> Result<(), PagerIoError> {
-    if file.file_len()? < dwb_zone_offset() + DWB_ZONE_BYTES as u64 {
+    if !has_complete_dwb_zone(file)? {
         return Ok(());
     }
-    let mut buffer = vec![0u8; DWB_ZONE_BYTES];
-    file.seek(SeekFrom::Start(dwb_zone_offset()))?;
-    file.read_exact(&mut buffer)?;
-    if buffer.get(..4) != Some(reddb_file::DWB_MAGIC.as_slice()) {
-        if dwb_zone_is_clear(&buffer) {
-            return Ok(());
+    if !dwb_publication::enabled(file)? {
+        return staging::recover(file);
+    }
+    let buffer = read_guarded_dwb_zone(file)?;
+    let plan = dwb_publication::plan(file, &buffer)?.ok_or_else(|| {
+        PagerIoError::InvalidDatabase("DWB generation authority disappeared during recovery".into())
+    })?;
+    let authority = match plan {
+        dwb_publication::Recovery::Unchanged => return Ok(()),
+        dwb_publication::Recovery::Discard(authority) => authority,
+        dwb_publication::Recovery::Apply(authority) => {
+            // Validate the independent digest and every address before the
+            // first home write. Repeat both Ready fences even when recovery
+            // selected a Preparing fallback after an interrupted publication.
+            let mut ready = authority;
+            ready.phase = reddb_file::file_format::DwbPhase::Ready;
+            dwb_publication::publish(file, ready)?;
+            let entries = reddb_file::decode_paged_dwb_frame(&buffer)
+                .map_err(|error| PagerIoError::InvalidDatabase(error.to_string()))?;
+            for entry in entries {
+                write_page(file, entry.page_id, &Page::from_bytes(entry.page))?;
+            }
+            file.sync_all()?;
+            authority
         }
-        return clear_dwb_zone(file);
-    }
-    let entries = match reddb_file::decode_paged_dwb_frame(&buffer) {
-        Ok(entries) => entries,
-        Err(_) => return clear_dwb_zone(file),
     };
-    for entry in entries {
-        write_page(file, entry.page_id, &Page::from_bytes(entry.page))?;
-    }
-    file.sync_all()?;
-    clear_dwb_zone(file)
+    dwb_publication::consume(file, authority)
 }
 
 /// Read a complete staged frame without consuming or repairing the source.
 /// Incomplete staging cannot have reached home pages and is ignored, just as
 /// in writer recovery. The frame decoder bounds the number of pages.
 pub fn read_dwb_pages<F: VfsFile>(file: &mut F) -> Result<Vec<(u32, Page)>, PagerIoError> {
-    if file.file_len()? < dwb_zone_offset() + DWB_ZONE_BYTES as u64 {
+    if !has_complete_dwb_zone(file)? {
         return Ok(Vec::new());
+    }
+    if !dwb_publication::enabled(file)? {
+        return staging::read_pages(file);
+    }
+    let buffer = read_guarded_dwb_zone(file)?;
+    let plan = dwb_publication::plan(file, &buffer)?.ok_or_else(|| {
+        PagerIoError::InvalidDatabase("DWB generation authority disappeared during recovery".into())
+    })?;
+    if !matches!(plan, dwb_publication::Recovery::Apply(_)) {
+        return Ok(Vec::new());
+    }
+    Ok(reddb_file::decode_paged_dwb_frame(&buffer)
+        .map_err(|error| PagerIoError::InvalidDatabase(error.to_string()))?
+        .into_iter()
+        .map(|entry| (entry.page_id, Page::from_bytes(entry.page)))
+        .collect())
+}
+
+fn read_guarded_dwb_zone<F: VfsFile>(file: &mut F) -> Result<Vec<u8>, PagerIoError> {
+    if DWB_ZONE_BYTES > file.max_read_buffer_bytes() {
+        return Err(PagerIoError::InvalidDatabase(
+            "guarded double-write recovery exceeds the owned read budget".into(),
+        ));
     }
     let mut buffer = vec![0u8; DWB_ZONE_BYTES];
     file.seek(SeekFrom::Start(dwb_zone_offset()))?;
     file.read_exact(&mut buffer)?;
-    Ok(reddb_file::decode_paged_dwb_frame(&buffer)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|entry| (entry.page_id, Page::from_bytes(entry.page)))
-        .collect())
+    Ok(buffer)
 }

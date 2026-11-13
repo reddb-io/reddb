@@ -15,6 +15,9 @@ const VALUE_BYTES_MAX: usize = 1024 * 1024;
 const KEY_BYTES_MAX: usize = 4096;
 const NAMESPACE_BYTES_MAX: usize = 256;
 const TAG_COUNT_MAX: usize = 64;
+const BATCH_ITEMS_MAX: usize = 256;
+const BATCH_VALUE_BYTES_MAX: usize = 8 * 1024 * 1024;
+const BATCH_KEYS_BODY_BYTES_MAX: usize = BATCH_ITEMS_MAX * (KEY_BYTES_MAX + 16);
 
 #[derive(Default)]
 struct CachePolicyInput {
@@ -35,6 +38,29 @@ struct CachePutInput {
 
 struct CacheTagsInput {
     tags: Vec<String>,
+}
+
+struct CacheMgetInput {
+    keys: Vec<String>,
+}
+
+struct CacheMputInput {
+    entries: Vec<CacheMputEntryInput>,
+}
+
+struct CacheMputEntryInput {
+    key: String,
+    value: String,
+    ttl_ms: Option<u64>,
+    tags: Vec<String>,
+    policy: CachePolicyInput,
+}
+
+#[derive(Default)]
+struct CacheExpiryInput {
+    ttl_ms: Option<u64>,
+    expires_at_unix_ms: Option<u64>,
+    persist: Option<bool>,
 }
 
 fn cache_fields(value: &JsonValue, allowed: &[&str]) -> Result<(), String> {
@@ -123,6 +149,48 @@ impl JsonDecode for CacheTagsInput {
     }
 }
 
+impl JsonDecode for CacheMgetInput {
+    fn from_json_value(value: JsonValue) -> Result<Self, String> {
+        cache_fields(&value, &["keys"])?;
+        Ok(Self {
+            keys: cache_field(&value, "keys")?.ok_or("cache keys are required")?,
+        })
+    }
+}
+
+impl JsonDecode for CacheMputInput {
+    fn from_json_value(value: JsonValue) -> Result<Self, String> {
+        cache_fields(&value, &["entries"])?;
+        Ok(Self {
+            entries: cache_field(&value, "entries")?.ok_or("cache entries are required")?,
+        })
+    }
+}
+
+impl JsonDecode for CacheMputEntryInput {
+    fn from_json_value(value: JsonValue) -> Result<Self, String> {
+        cache_fields(&value, &["key", "value", "ttl_ms", "tags", "policy"])?;
+        Ok(Self {
+            key: cache_field(&value, "key")?.ok_or("cache key is required")?,
+            value: cache_field(&value, "value")?.ok_or("cache value is required")?,
+            ttl_ms: cache_integer(&value, "ttl_ms")?,
+            tags: cache_field(&value, "tags")?.unwrap_or_default(),
+            policy: cache_field(&value, "policy")?.unwrap_or_default(),
+        })
+    }
+}
+
+impl JsonDecode for CacheExpiryInput {
+    fn from_json_value(value: JsonValue) -> Result<Self, String> {
+        cache_fields(&value, &["ttl_ms", "expires_at_unix_ms", "persist"])?;
+        Ok(Self {
+            ttl_ms: cache_integer(&value, "ttl_ms")?,
+            expires_at_unix_ms: cache_integer(&value, "expires_at_unix_ms")?,
+            persist: cache_field(&value, "persist")?,
+        })
+    }
+}
+
 impl RedDBServer {
     pub(crate) fn handle_cache(
         &self,
@@ -184,9 +252,68 @@ impl RedDBServer {
             "get" => {
                 let key = cache_segment(request.matched.params.get("key"), KEY_BYTES_MAX)?;
                 match cache.get(&namespace, &key) {
-                    Some(hit) => crate::json!({ "value": STANDARD.encode(hit.value()) }),
-                    None => crate::json!({ "value": JsonValue::Null }),
+                    Some(hit) => cache_hit_json(&key, &hit),
+                    None => cache_miss_json(&key),
                 }
+            }
+            "mget" => {
+                if request.body.len() > BATCH_KEYS_BODY_BYTES_MAX {
+                    return Err(json_error(413, "cache batch request is too large"));
+                }
+                let input: CacheMgetInput = cache_json(request.body)?;
+                validate_batch_count(input.keys.len())?;
+                let mut entries = Vec::with_capacity(input.keys.len());
+                for key in input.keys {
+                    validate_cache_text(&key, KEY_BYTES_MAX, false)?;
+                    entries.push(match cache.get(&namespace, &key) {
+                        Some(hit) => cache_hit_json(&key, &hit),
+                        None => cache_miss_json(&key),
+                    });
+                }
+                crate::json!({ "entries": entries })
+            }
+            "mput" => {
+                if request.body.len() > BATCH_VALUE_BYTES_MAX * 2 {
+                    return Err(json_error(413, "cache batch request is too large"));
+                }
+                let input: CacheMputInput = cache_json(request.body)?;
+                validate_batch_count(input.entries.len())?;
+                let mut decoded = Vec::with_capacity(input.entries.len());
+                let mut total_bytes = 0usize;
+                for entry in input.entries {
+                    validate_cache_text(&entry.key, KEY_BYTES_MAX, false)?;
+                    validate_tags(&entry.tags)?;
+                    if entry.value.len() > VALUE_BYTES_MAX.div_ceil(3) * 4 {
+                        return Err(json_error(413, "cache value is too large"));
+                    }
+                    let value = STANDARD
+                        .decode(&entry.value)
+                        .map_err(|_| json_error(400, "cache value must be standard base64"))?;
+                    if value.len() > VALUE_BYTES_MAX {
+                        return Err(json_error(413, "cache value is too large"));
+                    }
+                    total_bytes = total_bytes.saturating_add(value.len());
+                    if total_bytes > BATCH_VALUE_BYTES_MAX {
+                        return Err(json_error(413, "cache batch values are too large"));
+                    }
+                    decoded.push((
+                        entry.key,
+                        value,
+                        entry.tags,
+                        cache_policy(entry.ttl_ms, entry.policy)?,
+                    ));
+                }
+                let stored = decoded.len();
+                for (key, value, tags, policy) in decoded {
+                    cache
+                        .put(
+                            namespace.clone(),
+                            key,
+                            BlobCachePut::new(value).with_tags(tags).with_policy(policy),
+                        )
+                        .map_err(cache_error)?;
+                }
+                crate::json!({ "stored": stored })
             }
             "exists" => {
                 let key = cache_segment(request.matched.params.get("key"), KEY_BYTES_MAX)?;
@@ -196,6 +323,28 @@ impl RedDBServer {
                     CachePresence::MaybePresent => "maybe",
                 };
                 crate::json!({ "status": presence })
+            }
+            "expiry" => {
+                let key = cache_segment(request.matched.params.get("key"), KEY_BYTES_MAX)?;
+                let input: CacheExpiryInput = cache_json(request.body)?;
+                let choices = usize::from(input.ttl_ms.is_some())
+                    + usize::from(input.expires_at_unix_ms.is_some())
+                    + usize::from(input.persist == Some(true));
+                if choices != 1 || input.persist == Some(false) {
+                    return Err(json_error(
+                        400,
+                        "set exactly one of ttl_ms, expires_at_unix_ms or persist=true",
+                    ));
+                }
+                let updated = if let Some(ttl_ms) = input.ttl_ms {
+                    cache.expire(&namespace, &key, ttl_ms)
+                } else if let Some(expires_at) = input.expires_at_unix_ms {
+                    cache.expire_at(&namespace, &key, expires_at)
+                } else {
+                    cache.persist(&namespace, &key)
+                }
+                .map_err(cache_error)?;
+                crate::json!({ "updated": updated })
             }
             "invalidate" => {
                 let key = cache_segment(request.matched.params.get("key"), KEY_BYTES_MAX)?;
@@ -338,6 +487,56 @@ fn validate_tags(tags: &[String]) -> Result<(), HttpResponse> {
         validate_cache_text(tag, NAMESPACE_BYTES_MAX, false)?;
     }
     Ok(())
+}
+
+fn validate_batch_count(count: usize) -> Result<(), HttpResponse> {
+    if count == 0 || count > BATCH_ITEMS_MAX {
+        return Err(json_error(
+            400,
+            "cache batch must contain between 1 and 256 items",
+        ));
+    }
+    Ok(())
+}
+
+fn cache_hit_json(key: &str, hit: &crate::storage::cache::BlobCacheHit) -> JsonValue {
+    let now_ms = crate::utils::now_unix_millis();
+    let expires_at = hit
+        .expires_at_unix_ms()
+        .and_then(|value| i64::try_from(value).ok())
+        .map(JsonValue::Integer)
+        .unwrap_or(JsonValue::Null);
+    let ttl_ms = hit
+        .remaining_ttl_ms_at(now_ms)
+        .and_then(|value| i64::try_from(value).ok())
+        .map(JsonValue::Integer)
+        .unwrap_or(JsonValue::Null);
+    let version = hit
+        .version()
+        .and_then(|value| i64::try_from(value).ok())
+        .map(JsonValue::Integer)
+        .unwrap_or(JsonValue::Null);
+    crate::json!({
+        "key": key,
+        "value": STANDARD.encode(hit.value()),
+        "size_bytes": hit.value().len(),
+        "expires_at_unix_ms": expires_at,
+        "ttl_ms": ttl_ms,
+        "version": version,
+        "stale": hit.is_stale()
+    })
+}
+
+fn cache_miss_json(key: &str) -> JsonValue {
+    crate::json!({
+        "key": key,
+        "value": JsonValue::Null,
+        "size_bytes": JsonValue::Null,
+        "expires_at_unix_ms": JsonValue::Null,
+        "ttl_ms": JsonValue::Null,
+        "version": JsonValue::Null,
+        "stale": false
+    })
 }
 
 fn cache_json<T: JsonDecode>(body: &[u8]) -> Result<T, HttpResponse> {
@@ -513,6 +712,8 @@ mod tests {
             None
         ))["value"]
             .is_null());
+        // The authoritative GET removed the expired L2 metadata, but the
+        // no-false-negative Bloom synopsis cannot clear its insertion bits.
         assert_eq!(
             value(request(
                 &server,
@@ -521,7 +722,159 @@ mod tests {
                 "",
                 None
             ))["status"],
-            "absent"
+            "maybe"
+        );
+    }
+
+    #[test]
+    fn native_cache_http_batches_values_and_reports_ttl_metadata() {
+        let server = server();
+        let body = ::serde_json::json!({
+            "entries": [
+                { "key": "a", "value": STANDARD.encode(b"one"), "ttl_ms": 60_000 },
+                { "key": "b", "value": STANDARD.encode([0, 255]), "tags": ["batch"] }
+            ]
+        })
+        .to_string();
+        assert_eq!(
+            value(request(
+                &server,
+                "POST",
+                "/cache/ns/batched/mput",
+                &body,
+                None,
+            ))["stored"],
+            2
+        );
+
+        let response = value(request(
+            &server,
+            "POST",
+            "/cache/ns/batched/mget",
+            r#"{"keys":["a","missing","b"]}"#,
+            None,
+        ));
+        let entries = response["entries"].as_array().expect("batch entries");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0]["key"], "a");
+        assert_eq!(entries[0]["value"], STANDARD.encode(b"one"));
+        assert_eq!(entries[0]["size_bytes"], 3);
+        assert!(entries[0]["ttl_ms"]
+            .as_i64()
+            .is_some_and(|ttl| ttl <= 60_000));
+        assert!(entries[0]["expires_at_unix_ms"].as_i64().is_some());
+        assert!(entries[1]["value"].is_null());
+        assert_eq!(entries[2]["value"], STANDARD.encode([0, 255]));
+    }
+
+    #[test]
+    fn native_cache_http_updates_and_removes_ttl_without_rewriting_value() {
+        let server = server();
+        put(&server, "sessions", "token", b"secret", None);
+
+        assert_eq!(
+            value(request(
+                &server,
+                "PATCH",
+                "/cache/ns/sessions/token/ttl",
+                r#"{"ttl_ms":25}"#,
+                None,
+            ))["updated"],
+            true
+        );
+        let expiring = value(request(
+            &server,
+            "GET",
+            "/cache/ns/sessions/token",
+            "",
+            None,
+        ));
+        assert_eq!(expiring["value"], STANDARD.encode(b"secret"));
+        assert!(expiring["ttl_ms"].as_i64().is_some_and(|ttl| ttl <= 25));
+
+        assert_eq!(
+            value(request(
+                &server,
+                "PATCH",
+                "/cache/ns/sessions/token/ttl",
+                r#"{"persist":true}"#,
+                None,
+            ))["updated"],
+            true
+        );
+        assert!(value(request(
+            &server,
+            "GET",
+            "/cache/ns/sessions/token",
+            "",
+            None,
+        ))["ttl_ms"]
+            .is_null());
+        assert_eq!(
+            value(request(
+                &server,
+                "PATCH",
+                "/cache/ns/sessions/missing/ttl",
+                r#"{"ttl_ms":10}"#,
+                None,
+            ))["updated"],
+            false
+        );
+        for body in [
+            r#"{}"#,
+            r#"{"persist":false}"#,
+            r#"{"ttl_ms":1,"persist":true}"#,
+        ] {
+            assert_eq!(
+                request(&server, "PATCH", "/cache/ns/sessions/token/ttl", body, None,).status,
+                400
+            );
+        }
+    }
+
+    #[test]
+    fn native_cache_http_rejects_empty_and_oversized_batches() {
+        let server = server();
+        for body in [r#"{"keys":[]}"#, r#"{"entries":[]}"#] {
+            let operation = if body.contains("keys") {
+                "mget"
+            } else {
+                "mput"
+            };
+            assert_eq!(
+                request(
+                    &server,
+                    "POST",
+                    &format!("/cache/ns/batched/{operation}"),
+                    body,
+                    None,
+                )
+                .status,
+                400
+            );
+        }
+        let keys = (0..=BATCH_ITEMS_MAX)
+            .map(|index| format!("k{index}"))
+            .collect::<Vec<_>>();
+        let body = ::serde_json::json!({ "keys": keys }).to_string();
+        assert_eq!(
+            request(&server, "POST", "/cache/ns/batched/mget", &body, None,).status,
+            400
+        );
+        let oversized_body = format!(
+            r#"{{"keys":["{}"]}}"#,
+            "a".repeat(BATCH_KEYS_BODY_BYTES_MAX)
+        );
+        assert_eq!(
+            request(
+                &server,
+                "POST",
+                "/cache/ns/batched/mget",
+                &oversized_body,
+                None,
+            )
+            .status,
+            413
         );
     }
 
@@ -776,6 +1129,13 @@ mod tests {
         for (method, path, body) in [
             ("GET", "/cache/ns/reports/key", ""),
             ("PUT", "/cache/ns/reports/key", r#"{"value":"YQ=="}"#),
+            ("POST", "/cache/ns/reports/mget", r#"{"keys":["key"]}"#),
+            (
+                "POST",
+                "/cache/ns/reports/mput",
+                r#"{"entries":[{"key":"key","value":"YQ=="}]}"#,
+            ),
+            ("PATCH", "/cache/ns/reports/key/ttl", r#"{"ttl_ms":1000}"#),
             ("POST", "/cache/ns/reports/flush", ""),
         ] {
             assert_eq!(

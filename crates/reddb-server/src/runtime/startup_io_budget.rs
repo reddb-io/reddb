@@ -322,7 +322,7 @@ fn embedded_startup_bounds_snapshot_reads() {
             .unwrap();
         eprintln!("embedded: read_only={read_only}, snapshot_bytes={snapshot_len}, read_bytes={bytes}, ready={ready:?}, first_result={first_result:?}");
         assert_eq!(count, "32");
-        // A writable boot durably replaces red.system keys in one batch,
+        // A writable boot durably replaces system keys in one batch,
         // whose publication validates the existing snapshot once more.
         let snapshot_passes = if read_only { 1 } else { 2 };
         assert!(
@@ -347,6 +347,10 @@ fn embedded_startup_bounds_snapshot_reads() {
                 )
                 .unwrap();
         }
+        // Keep the measured cold boots focused on steady-state startup I/O.
+        // Activating the result-cache snapshot format is a one-time migration
+        // that checkpoints the embedded file and has its own regressions.
+        assert!(runtime.result_cache_snapshot().0.is_some());
         runtime.flush().unwrap();
     }
     let artifact = crate::storage::EmbeddedRdbArtifact::open(&path).unwrap();

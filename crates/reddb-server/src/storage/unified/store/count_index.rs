@@ -456,7 +456,7 @@ impl UnifiedStore {
             return Ok(None);
         };
         seed.postings.sort_unstable();
-        let tree = Arc::new(BTree::new(Arc::clone(pager)));
+        let tree = Self::new_derived_btree(pager)?;
         for postings in seed.postings.chunks(UNIFORM_BATCH_ROWS) {
             let records: Vec<_> = postings
                 .iter()
@@ -521,9 +521,7 @@ impl UnifiedStore {
             collection: collection.to_owned(),
             _active: active,
             source,
-            tree: Arc::new(BTree::new(Arc::clone(
-                self.pager.as_ref().expect("paged source"),
-            ))),
+            tree: Self::new_derived_btree(self.pager.as_ref().expect("paged source"))?,
             cursor,
             identity: spec.identity,
             projector: spec.projector,

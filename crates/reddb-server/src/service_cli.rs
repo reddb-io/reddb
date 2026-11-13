@@ -159,7 +159,7 @@ pub struct ServerCommandConfig {
     /// built-in default derived from `path` + stderr-only.
     pub telemetry: Option<crate::telemetry::TelemetryConfig>,
     /// HTTP handler-pool knobs from the CLI layer (issue #574 slice 5).
-    /// Carries flag and env values; red_config and built-in defaults
+    /// Carries flag and env values; red.config and built-in defaults
     /// are applied later by [`crate::server::http_limits::resolve_http_limits`]
     /// once the runtime is open.
     pub http_limits_cli: crate::server::HttpLimitsCliInput,
@@ -1745,11 +1745,11 @@ fn build_runtime_and_auth_store(
 }
 
 /// Open the runtime, initialise structured logging from merged CLI +
-/// `red_config` settings, and return a guard the caller must keep
+/// `red.config` settings, and return a guard the caller must keep
 /// alive for the server lifetime (drop flushes pending log writes).
 ///
-/// Merge priority: CLI flag (explicit `Some`) beats `red.logging.*`
-/// in red_config, beats the built-in default. A CLI-flag value of
+/// Merge priority: CLI flag (explicit `Some`) beats `logging.*`
+/// in red.config, beats the built-in default. A CLI-flag value of
 /// `None` / empty means "inherit from config or default" — never
 /// "disable". The one exception is `--no-log-file` which forces
 /// `log_dir = None` regardless of config.
@@ -1780,6 +1780,17 @@ fn build_runtime_with_bootstrap(
     ),
     String,
 > {
+    let mut db_options = db_options;
+    let lease_boot = crate::runtime::lease_loop::prepare_lease_loop_if_required(&mut db_options)
+        .map_err(|err| {
+            let msg = err.to_string();
+            crate::telemetry::operator_event::OperatorEvent::StartupFailed {
+                phase: "lease_prepare".to_string(),
+                error: msg.clone(),
+            }
+            .emit_global();
+            msg
+        })?;
     let runtime = RedDBRuntime::with_options(db_options.clone()).map_err(|err| {
         // Issue #205 — runtime construction failure is the canonical
         // StartupFailed phase. The audit sink isn't installed yet
@@ -1799,7 +1810,7 @@ fn build_runtime_with_bootstrap(
     // when `RED_LEASE_REQUIRED=true`. Failure here aborts boot: the
     // operator asked for a fence; running unfenced would silently
     // expose split-brain risk.
-    crate::runtime::lease_loop::start_lease_loop_if_required(&runtime).map_err(|err| {
+    crate::runtime::lease_loop::start_prepared_lease_loop(&runtime, lease_boot).map_err(|err| {
         let msg = err.to_string();
         crate::telemetry::operator_event::OperatorEvent::StartupFailed {
             phase: "lease_loop".to_string(),
@@ -1826,7 +1837,7 @@ fn build_runtime_with_bootstrap(
         crate::runtime::config_watcher::ConfigWatcher::new(config_path, store).spawn();
     }
 
-    // Phase 6 logging: merge red_config overrides onto the CLI-built
+    // Phase 6 logging: merge red.config overrides onto the CLI-built
     // telemetry config, then install the global subscriber.
     let merged = merge_telemetry_with_config(
         cli_telemetry
@@ -2622,9 +2633,9 @@ fn persist_bootstrap_state(
     Ok(())
 }
 
-/// Read `red.logging.*` keys from the persistent config store and
+/// Read `logging.*` keys from the persistent config store and
 /// merge them into the CLI-built `TelemetryConfig`. Merge priority:
-/// explicit CLI flag > red_config > built-in default.
+/// explicit CLI flag > red.config > built-in default.
 ///
 /// The "was a flag passed" signal comes from the `*_explicit` bools
 /// on `TelemetryConfig`, populated by the CLI parser. This replaces
@@ -2641,19 +2652,19 @@ fn merge_telemetry_with_config(
     let store = runtime.db().store();
 
     if !cli.level_explicit {
-        if let Some(Value::Text(v)) = store.get_config("red.logging.level") {
+        if let Some(Value::Text(v)) = store.get_config("logging.level") {
             cli.level_filter = v.to_string();
         }
     }
     if !cli.format_explicit {
-        if let Some(Value::Text(v)) = store.get_config("red.logging.format") {
+        if let Some(Value::Text(v)) = store.get_config("logging.format") {
             if let Some(parsed) = crate::telemetry::LogFormat::parse(&v) {
                 cli.format = parsed;
             }
         }
     }
     if !cli.rotation_keep_days_explicit {
-        match store.get_config("red.logging.keep_days") {
+        match store.get_config("logging.keep_days") {
             Some(Value::Integer(n)) if n >= 0 && n <= u16::MAX as i64 => {
                 cli.rotation_keep_days = n as u16
             }
@@ -2669,7 +2680,7 @@ fn merge_telemetry_with_config(
         }
     }
     if !cli.file_prefix_explicit {
-        if let Some(Value::Text(v)) = store.get_config("red.logging.file_prefix") {
+        if let Some(Value::Text(v)) = store.get_config("logging.file_prefix") {
             if !v.is_empty() {
                 cli.file_prefix = v.to_string();
             }
@@ -2678,7 +2689,7 @@ fn merge_telemetry_with_config(
     // --no-log-file is a kill-switch: config cannot resurrect the
     // file sink. Explicit --log-dir also wins.
     if !cli.log_dir_explicit && !cli.log_file_disabled {
-        if let Some(Value::Text(v)) = store.get_config("red.logging.dir") {
+        if let Some(Value::Text(v)) = store.get_config("logging.dir") {
             if !v.is_empty() {
                 cli.log_dir = Some(std::path::PathBuf::from(v.as_ref()));
             }
@@ -2717,7 +2728,7 @@ mod telemetry_merge_tests {
     #[test]
     fn config_log_dir_promoted_when_flag_absent() {
         let runtime = fresh_runtime();
-        set_str(&runtime, "red.logging.dir", "/var/log/reddb");
+        set_str(&runtime, "logging.dir", "/var/log/reddb");
         let merged = merge_telemetry_with_config(cli_base(), &runtime);
         assert_eq!(
             merged.log_dir.as_deref(),
@@ -2728,7 +2739,7 @@ mod telemetry_merge_tests {
     #[test]
     fn explicit_log_dir_wins_over_config() {
         let runtime = fresh_runtime();
-        set_str(&runtime, "red.logging.dir", "/var/log/reddb");
+        set_str(&runtime, "logging.dir", "/var/log/reddb");
         let mut cli = cli_base();
         cli.log_dir = Some(std::path::PathBuf::from("/custom/dir"));
         cli.log_dir_explicit = true;
@@ -2742,7 +2753,7 @@ mod telemetry_merge_tests {
     #[test]
     fn no_log_file_beats_config_log_dir() {
         let runtime = fresh_runtime();
-        set_str(&runtime, "red.logging.dir", "/var/log/reddb");
+        set_str(&runtime, "logging.dir", "/var/log/reddb");
         let mut cli = cli_base();
         cli.log_dir = None;
         cli.log_file_disabled = true;
@@ -2759,7 +2770,7 @@ mod telemetry_merge_tests {
         // though TelemetryConfig::default() is Pretty. The old equality
         // check silently dropped config here.
         let runtime = fresh_runtime();
-        set_str(&runtime, "red.logging.format", "pretty");
+        set_str(&runtime, "logging.format", "pretty");
         let merged = merge_telemetry_with_config(cli_base(), &runtime);
         assert_eq!(merged.format, LogFormat::Pretty);
     }
@@ -2767,7 +2778,7 @@ mod telemetry_merge_tests {
     #[test]
     fn explicit_format_wins_over_config() {
         let runtime = fresh_runtime();
-        set_str(&runtime, "red.logging.format", "pretty");
+        set_str(&runtime, "logging.format", "pretty");
         let mut cli = cli_base();
         cli.format = LogFormat::Json;
         cli.format_explicit = true;
@@ -3839,42 +3850,28 @@ mod tests {
         let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         clear_preset_env();
 
-        let manifest_dir = std::env::current_dir()
-            .expect("current dir")
-            .join(".red/tmp/bootstrap-manifest-tests");
-        std::fs::create_dir_all(&manifest_dir).expect("create manifest test dir");
-        let unique = format!(
-            "{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        );
-        let head_password = manifest_dir.join(format!("head-{unique}.secret"));
-        let customer_password = manifest_dir.join(format!("customer-{unique}.secret"));
-        let manifest_path = manifest_dir.join(format!("intent-{unique}.json"));
+        let manifest_dir = tempfile::tempdir().expect("create manifest test dir");
+        let head_password = manifest_dir.path().join("head.secret");
+        let customer_password = manifest_dir.path().join("customer.secret");
+        let manifest_path = manifest_dir.path().join("intent.json");
         std::fs::write(&head_password, "head-pass\n").expect("write head secret");
         std::fs::write(&customer_password, "customer-pass\n").expect("write customer secret");
+        let manifest = ::serde_json::json!({
+            "bootstrap": {
+                "preset": "cloud",
+                "cloud_head_admin": {
+                    "username": "head",
+                    "password_file": head_password,
+                },
+                "customer_admin": {
+                    "username": "customer",
+                    "password_file": customer_password,
+                },
+            },
+        });
         std::fs::write(
             &manifest_path,
-            format!(
-                r#"{{
-                    "bootstrap": {{
-                        "preset": "cloud",
-                        "cloud_head_admin": {{
-                            "username": "head",
-                            "password_file": "{}"
-                        }},
-                        "customer_admin": {{
-                            "username": "customer",
-                            "password_file": "{}"
-                        }}
-                    }}
-                }}"#,
-                head_password.display(),
-                customer_password.display()
-            ),
+            ::serde_json::to_vec(&manifest).expect("serialize manifest"),
         )
         .expect("write manifest");
 
@@ -3913,9 +3910,6 @@ mod tests {
         apply_preset_from_config(&runtime, &auth_store, &config.bootstrap)
             .expect("second boot is idempotent");
 
-        let _ = std::fs::remove_file(&manifest_path);
-        let _ = std::fs::remove_file(&head_password);
-        let _ = std::fs::remove_file(&customer_password);
         clear_preset_env();
     }
 
@@ -4168,7 +4162,7 @@ mod tests {
         );
 
         set_current_auth_identity("alice".to_string(), Role::Admin);
-        let config_denied = runtime.execute_query("SET CONFIG red.config.audit.enabled = true");
+        let config_denied = runtime.execute_query("SET CONFIG audit.enabled = true");
         clear_current_auth_identity();
         let err = config_denied.expect_err("managed config guardrail must deny ordinary admin");
         assert!(
@@ -4179,7 +4173,7 @@ mod tests {
         let denied_config_events = runtime
             .execute_query(
                 "SELECT action, resource, outcome FROM red.control_events \
-                 WHERE action = 'config:write' AND resource = 'config:red.config.audit.enabled'",
+                 WHERE action = 'config:write' AND resource = 'config:red.config/audit.enabled'",
             )
             .expect("red.control_events denied config write");
         assert_eq!(denied_config_events.result.records.len(), 1);
@@ -4217,18 +4211,8 @@ mod tests {
         let _g = no_auth_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         clear_preset_env();
 
-        let manifest_dir = std::env::current_dir()
-            .expect("current dir")
-            .join(".red/tmp/bootstrap-manifest-tests");
-        std::fs::create_dir_all(&manifest_dir).expect("create manifest test dir");
-        let manifest_path = manifest_dir.join(format!(
-            "reddb-bootstrap-manifest-{}-{}.json",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        ));
+        let manifest_dir = tempfile::tempdir().expect("create manifest test dir");
+        let manifest_path = manifest_dir.path().join("reddb-bootstrap-manifest.json");
         std::fs::write(
             &manifest_path,
             r#"{
@@ -4279,9 +4263,9 @@ mod tests {
                     }
                 ],
                 "config": [
-                    {"key": "red.ai.default.provider", "value": "openai"},
+                    {"key": "ai.default.provider", "value": "openai"},
                     {
-                        "key": "red.ai.openai.default.secret_ref",
+                        "key": "ai.openai.default.secret_ref",
                         "secret_ref": {"collection": "red.vault", "key": "openai"}
                     }
                 ],
@@ -4335,14 +4319,14 @@ mod tests {
 
         let store = runtime.db().store();
         match store
-            .get_config("red.ai.default.provider")
+            .get_config("ai.default.provider")
             .expect("plain config persisted")
         {
             Value::Text(s) => assert_eq!(s.as_ref(), "openai"),
             other => panic!("expected provider text, got {other:?}"),
         }
         let Value::Json(bytes) = store
-            .get_config("red.ai.openai.default.secret_ref")
+            .get_config("ai.openai.default.secret_ref")
             .expect("secret ref config persisted")
         else {
             panic!("secret ref must be stored as structured JSON");

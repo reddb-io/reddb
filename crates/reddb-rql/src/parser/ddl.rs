@@ -64,6 +64,7 @@ impl<'a> Parser<'a> {
         Ok(QueryExpr::CreateTable(CreateTableQuery {
             collection_model: CollectionModel::Table,
             name,
+            description: None,
             columns,
             unique_constraints,
             if_not_exists,
@@ -176,6 +177,7 @@ impl<'a> Parser<'a> {
         let mut append_only = false;
         let mut subscriptions = Vec::new();
         let mut ai_policy = reddb_types::catalog::AiPolicy::default();
+        let mut description = None;
 
         while self.consume(&Token::With)? {
             if self.consume_ident_ci("EVENTS")? {
@@ -213,6 +215,9 @@ impl<'a> Parser<'a> {
                     context_index_enabled = true;
                 } else if self.consume_ident_ci("TIMESTAMPS")? {
                     timestamps = self.parse_bool_assign()?;
+                } else if self.consume_ident_ci("DESCRIPTION")? {
+                    self.expect(Token::Eq)?;
+                    description = Some(self.parse_description()?);
                 } else if self.consume_ident_ci("EMBED")? {
                     if ai_policy.embed.is_some() {
                         return Err(ParseError::new(
@@ -333,6 +338,7 @@ impl<'a> Parser<'a> {
         Ok(QueryExpr::CreateTable(CreateTableQuery {
             collection_model: CollectionModel::Table,
             name,
+            description,
             columns,
             unique_constraints,
             if_not_exists,
@@ -473,9 +479,15 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
+        let description = if self.consume_ident_ci("DESCRIPTION")? {
+            Some(self.parse_description()?)
+        } else {
+            None
+        };
         Ok(QueryExpr::CreateTable(CreateTableQuery {
             collection_model: model,
             name,
+            description,
             columns: Vec::new(),
             unique_constraints: Vec::new(),
             if_not_exists,
@@ -656,8 +668,14 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
+        let description = if self.consume_ident_ci("DESCRIPTION")? {
+            Some(self.parse_description()?)
+        } else {
+            None
+        };
         Ok(QueryExpr::CreateCollection(CreateCollectionQuery {
             name,
+            description,
             kind,
             if_not_exists,
             vector_dimension,
@@ -965,6 +983,21 @@ impl<'a> Parser<'a> {
             self.expect(Token::To)?;
             let to = self.expect_ident()?;
             Ok(AlterOperation::RenameColumn { from, to })
+        } else if self.consume(&Token::Alter)? {
+            self.expect(Token::Column)?;
+            let column = self.expect_ident()?;
+            self.expect(Token::Set)?;
+            if !self.consume_ident_ci("DESCRIPTION")? {
+                return Err(ParseError::expected(
+                    vec!["DESCRIPTION"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            Ok(AlterOperation::SetDescription {
+                column: Some(column),
+                description: self.parse_description()?,
+            })
         } else if self.consume(&Token::Attach)? {
             // ATTACH PARTITION child FOR VALUES ...
             self.expect(Token::Partition)?;
@@ -1025,7 +1058,12 @@ impl<'a> Parser<'a> {
         } else if self.consume(&Token::Set)? || self.consume_ident_ci("SET")? {
             // SET APPEND_ONLY = true|false | SET VERSIONED = true|false
             // SET RETENTION <duration> (issue #580)
-            if self.consume_ident_ci("APPEND_ONLY")? {
+            if self.consume_ident_ci("DESCRIPTION")? {
+                Ok(AlterOperation::SetDescription {
+                    column: None,
+                    description: self.parse_description()?,
+                })
+            } else if self.consume_ident_ci("APPEND_ONLY")? {
                 let on = self.parse_bool_assign()?;
                 Ok(AlterOperation::SetAppendOnly(on))
             } else if self.consume_ident_ci("VERSIONED")? {
@@ -1042,7 +1080,7 @@ impl<'a> Parser<'a> {
                 })
             } else {
                 Err(ParseError::expected(
-                    vec!["APPEND_ONLY", "VERSIONED", "RETENTION"],
+                    vec!["DESCRIPTION", "APPEND_ONLY", "VERSIONED", "RETENTION"],
                     self.peek(),
                     self.position(),
                 ))
@@ -1211,6 +1249,7 @@ impl<'a> Parser<'a> {
 
         let mut def = CreateColumnDef {
             name,
+            description: None,
             data_type,
             sql_type: sql_type.clone(),
             not_null: false,
@@ -1237,6 +1276,8 @@ impl<'a> Parser<'a> {
                 def.compress = Some(self.parse_integer()? as u8);
             } else if self.consume(&Token::Unique)? {
                 def.unique = true;
+            } else if self.consume_ident_ci("DESCRIPTION")? {
+                def.description = Some(self.parse_description()?);
             } else if self.match_primary_key()? {
                 def.primary_key = true;
             } else if self.consume_ident_ci("GENERATED")? {
@@ -1268,6 +1309,24 @@ impl<'a> Parser<'a> {
         }
 
         Ok(def)
+    }
+
+    fn parse_description(&mut self) -> Result<String, ParseError> {
+        let Token::String(value) = self.peek().clone() else {
+            return Err(ParseError::expected(
+                vec!["string literal"],
+                self.peek(),
+                self.position(),
+            ));
+        };
+        self.advance()?;
+        if value.trim().is_empty() || value.len() > 2048 {
+            return Err(ParseError::new(
+                "DESCRIPTION must contain 1 to 2048 bytes".to_string(),
+                self.position(),
+            ));
+        }
+        Ok(value)
     }
 
     fn parse_schema_expression(
@@ -2315,5 +2374,43 @@ mod tests {
         assert!(decode_hex_32(&"gg".repeat(32))
             .unwrap_err()
             .contains("non-hex char"));
+    }
+
+    #[test]
+    fn descriptions_parse_for_collections_and_columns() {
+        let QueryExpr::CreateTable(table) = reddb_rql_parse(
+            "CREATE TABLE weather (sensor EMAIL DESCRIPTION 'Sensor address', amount MONEY) WITH (DESCRIPTION = 'Weather readings')",
+        ) else { panic!("table") };
+        assert_eq!(table.description.as_deref(), Some("Weather readings"));
+        assert_eq!(
+            table.columns[0].description.as_deref(),
+            Some("Sensor address")
+        );
+
+        let QueryExpr::CreateTable(graph) =
+            reddb_rql_parse("CREATE GRAPH routes DESCRIPTION 'Routes graph'")
+        else {
+            panic!("graph")
+        };
+        assert_eq!(graph.description.as_deref(), Some("Routes graph"));
+
+        let QueryExpr::CreateCollection(document) =
+            reddb_rql_parse("CREATE COLLECTION articles KIND document DESCRIPTION 'Articles'")
+        else {
+            panic!("document")
+        };
+        assert_eq!(document.description.as_deref(), Some("Articles"));
+
+        let QueryExpr::AlterTable(alter) = reddb_rql_parse("ALTER COLLECTION weather SET DESCRIPTION 'Updated', ALTER COLUMN sensor SET DESCRIPTION 'Contact email'") else { panic!("alter") };
+        assert!(
+            matches!(&alter.operations[0], AlterOperation::SetDescription { column: None, description } if description == "Updated")
+        );
+        assert!(
+            matches!(&alter.operations[1], AlterOperation::SetDescription { column: Some(column), description } if column == "sensor" && description == "Contact email")
+        );
+    }
+
+    fn reddb_rql_parse(sql: &str) -> QueryExpr {
+        crate::parser::parse(sql).expect("parse DDL").query
     }
 }

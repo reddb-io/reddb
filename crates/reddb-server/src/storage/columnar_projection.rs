@@ -674,6 +674,7 @@ fn value_kind(value: &Value) -> &'static str {
         Value::Currency(_) => "Currency",
         Value::AssetCode(_) => "AssetCode",
         Value::Money { .. } => "Money",
+        Value::Temperature(_) => "Temperature",
         Value::ColorAlpha(_) => "ColorAlpha",
         Value::BigInt(_) => "BigInt",
         Value::KeyRef(_, _) => "KeyRef",

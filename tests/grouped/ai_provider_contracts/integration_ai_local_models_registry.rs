@@ -334,7 +334,7 @@ fn inspect_unknown_model_returns_404() {
 fn registered_model_survives_runtime_handoff() {
     // Persistence within the same runtime handle is the strongest
     // guarantee we can prove with the in-memory runtime, which still
-    // exercises the durable red_config storage layer.
+    // exercises the durable red.config storage layer.
     let (_db, rt) = support::persistent_runtime("ai-registry-handoff");
     let addr = spawn_http_server(rt);
     let (status, _) = send(&addr, "POST", "/ai/models", MINIMAL_VALID);

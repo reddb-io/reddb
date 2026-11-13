@@ -129,6 +129,10 @@ impl Drop for StoreWalCaptureGuard<'_> {
 }
 
 impl DeferredStoreWalActions {
+    pub(crate) fn push(&mut self, action: StoreWalAction) {
+        self.actions.push(action);
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.actions.is_empty()
     }
@@ -587,6 +591,7 @@ impl StoreCommitCoordinator {
         ready: bool,
     ) -> io::Result<super::checkpoint_wal::CheckpointWalBatch> {
         use super::checkpoint_wal::CheckpointWalBatch;
+        self.check_write_error()?;
         if actions.is_empty() {
             return Ok(CheckpointWalBatch::default());
         }
@@ -715,6 +720,7 @@ impl StoreCommitCoordinator {
     /// [`Self::append_actions`] so durability semantics are uniform
     /// across record kinds.
     pub(crate) fn append_single_record(&self, record: WalRecord) -> io::Result<()> {
+        self.check_write_error()?;
         if matches!(record, WalRecord::PageOwnership { .. }) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -776,6 +782,7 @@ impl StoreCommitCoordinator {
     }
 
     fn append_durable_ownership_bytes(&self, bytes: Vec<u8>) -> io::Result<()> {
+        self.check_write_error()?;
         let _epoch = self.queue.epoch.read();
         // Set before writing: a failed or uncertain append must never allow
         // checkpoint truncation to discard the ownership journal.
@@ -806,6 +813,7 @@ impl StoreCommitCoordinator {
     }
 
     pub(crate) fn force_sync(&self) -> io::Result<()> {
+        self.check_write_error()?;
         // Strict append already owns a read lease. Do not wait behind a
         // checkpoint that needs that append to finish before resetting.
         let _epoch = self.queue.epoch.read_recursive();
@@ -825,6 +833,31 @@ impl StoreCommitCoordinator {
             state.last_error = None;
             cond.notify_all();
         }
+        Ok(())
+    }
+
+    fn truncate_incomplete_tail(&self, valid_lsn: u64) -> io::Result<()> {
+        let _epoch = self.queue.epoch.write();
+        if self.queue.has_pending() {
+            return Err(io::Error::other(
+                "WAL append raced incomplete-tail recovery",
+            ));
+        }
+        let mut wal = self.wal.lock();
+        wal.truncate_incomplete_tail(valid_lsn)?;
+        let durable = wal.durable_lsn();
+        drop(wal);
+        self.queue.reset(valid_lsn);
+
+        let (state_lock, cond) = &*self.state;
+        let mut state = state_lock.lock();
+        state.durable_lsn = durable;
+        state.pending_target_lsn = durable;
+        state.pending_statements = 0;
+        state.pending_wal_bytes = 0;
+        state.first_pending_at = None;
+        state.last_error = None;
+        cond.notify_all();
         Ok(())
     }
 
@@ -863,6 +896,7 @@ impl StoreCommitCoordinator {
     }
 
     fn truncate_inner(&self, runtime_snapshots_durable: bool) -> io::Result<()> {
+        self.check_write_error()?;
         let _epoch = self.queue.epoch.write();
         // Async appenders may have returned while their entries remain queued.
         // Drain them before deciding what the checkpoint may discard.
@@ -1136,6 +1170,17 @@ impl StoreCommitCoordinator {
                 // Readers validate ownership but never reclaim or finish an epoch.
                 return Ok(());
             };
+            let manifest_reference = pager
+                .manifest_reference()
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            if !plan.release.is_empty() && manifest_reference.page_id != 0 {
+                // A crash can leave only one header naming the selected catalog.
+                // Retiring its predecessor must first fence that same authority
+                // into both fallback copies, before any allocator writeback.
+                pager
+                    .publish_manifest_reference(manifest_reference)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+            }
             pager
                 .recover_unowned_pages(&plan.release)
                 .map_err(|error| io::Error::other(error.to_string()))?;
@@ -1298,14 +1343,15 @@ impl StoreCommitCoordinator {
         let mut has_page_writes = false;
         let mut ownership_journal = Vec::new();
         let mut latest_ownership_epoch = 0;
-        let mut incomplete_wal_tail = false;
+        let mut incomplete_wal_tail = None;
         let mut applied = false;
 
-        for record in reader.iter() {
+        let mut records = reader.iter();
+        while let Some(record) = records.next() {
             let (lsn, record) = match record {
                 Ok(record) => record,
                 Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
-                    incomplete_wal_tail = true;
+                    incomplete_wal_tail = Some(records.next_record_lsn());
                     break;
                 }
                 Err(err) => return Err(err),
@@ -1386,11 +1432,14 @@ impl StoreCommitCoordinator {
             }
         }
 
-        if incomplete_wal_tail && !ownership_journal.is_empty() {
+        if incomplete_wal_tail.is_some() && !ownership_journal.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "incomplete WAL prevents ownership recovery",
             ));
+        }
+        if let (Some(coordinator), Some(valid_lsn)) = (coordinator, incomplete_wal_tail) {
+            coordinator.truncate_incomplete_tail(valid_lsn)?;
         }
         Self::recover_page_ownership(coordinator, store, &ownership_journal)?;
 
@@ -1431,6 +1480,16 @@ impl StoreCommitCoordinator {
         if applied {
             // Opening is exclusive: no client can mutate published trees
             // while replay constructs replacement generations.
+            #[cfg(test)]
+            if let Ok(fault) = std::env::var("REDDB_TEST_PAGE_REPLAY_IO") {
+                use crate::storage::engine::pager;
+                match fault.as_str() {
+                    "empty" => pager::test_fail_next_pager_write(None, 0),
+                    "partial" => pager::test_fail_next_pager_write(None, 17),
+                    "sync" => pager::test_fail_pager_sync_after(0),
+                    _ => panic!("unknown replay publication I/O fault {fault}"),
+                }
+            }
             let epoch = latest_ownership_epoch
                 .max(store.ownership_catalog_epoch.load(Ordering::Acquire))
                 .checked_add(1)
@@ -1451,6 +1510,13 @@ impl StoreCommitCoordinator {
         self.wait_until_durable_batch(target_lsn, wal_bytes, false)
     }
 
+    fn check_write_error(&self) -> io::Result<()> {
+        if let Some(error) = &self.state.0.lock().last_error {
+            return Err(io::Error::other(error.clone()));
+        }
+        Ok(())
+    }
+
     fn wait_until_durable_batch(
         &self,
         target_lsn: u64,
@@ -1466,6 +1532,9 @@ impl StoreCommitCoordinator {
             DurabilityMode::Async => {
                 let (state_lock, cond) = &*self.state;
                 let mut state = state_lock.lock();
+                if let Some(error) = &state.last_error {
+                    return Err(io::Error::other(error.clone()));
+                }
                 state.pending_target_lsn = state.pending_target_lsn.max(target_lsn);
                 state.pending_statements = state.pending_statements.saturating_add(1);
                 state.pending_wal_bytes = state.pending_wal_bytes.saturating_add(wal_bytes);
@@ -1609,7 +1678,11 @@ impl StoreCommitCoordinator {
                     let _ = target_lsn;
                 }
                 Err(err) => {
-                    guard.last_error = Some(err.to_string());
+                    guard.last_error = Some(format!("WAL failed; reopen required: {err}"));
+                    // A failed write may have left a partial batch. Do not
+                    // retry it in a busy loop or later acknowledge its LSN.
+                    cond.notify_all();
+                    return;
                 }
             }
             cond.notify_all();
@@ -1627,7 +1700,22 @@ impl Drop for StoreCommitCoordinator {
     }
 }
 
+pub(super) struct PendingResultCacheAppend {
+    pending: crate::storage::embedded::PendingEmbeddedAppend,
+    epoch_guard: Option<super::result_cache_epoch::ResultCacheEpochGuard>,
+}
+
 impl UnifiedStore {
+    #[cfg(test)]
+    pub(crate) fn test_fail_wal_flush_after(&self, bytes: usize) {
+        self.commit
+            .as_ref()
+            .expect("fixture requires an external WAL")
+            .wal
+            .lock()
+            .test_fail_flush_after(bytes);
+    }
+
     pub(crate) fn sync_control_metadata(&self) -> Result<(), StoreError> {
         if let Some(commit) = &self.commit {
             commit.sync_pending().map_err(StoreError::Io)?;
@@ -1655,6 +1743,7 @@ impl UnifiedStore {
         if actions.actions.is_empty() {
             return Ok(());
         }
+        self.ensure_pager_writeback_available()?;
         #[cfg(test)]
         if self
             .test_require_deferred_publication_fence
@@ -1677,17 +1766,23 @@ impl UnifiedStore {
         if self.config.embedded_wal_path.is_some() {
             return self.append_embedded_store_wal_actions(&actions.actions);
         }
+        let _publication = self.vault_publication_lock.lock();
+        let mut actions = actions.actions;
+        let epoch_guard = self.append_result_cache_epoch_action(&mut actions)?;
         // Deferred transactions need a committed WAL batch even in Strict
         // mode. WAL-only versions have no pager pages to flush yet.
         if let Some(commit) = &self.commit {
             let references = commit
-                .append_checkpoint_actions(&actions.actions)
+                .append_checkpoint_actions(&actions)
                 .map_err(StoreError::Io)?;
-            self.remember_checkpoint_rows(actions.actions, references);
-            Ok(())
+            self.remember_checkpoint_rows(actions, references);
         } else {
-            self.flush_paged_state()
+            self.flush_paged_state()?;
         }
+        if let Some(guard) = epoch_guard {
+            guard.commit();
+        }
+        Ok(())
     }
 
     /// Emit a [`WalRecord::VectorInsert`] for a `vector.turbo`
@@ -1750,6 +1845,7 @@ impl UnifiedStore {
         if self.is_read_only() {
             return Ok(());
         }
+        self.ensure_pager_writeback_available()?;
         let actions: Vec<StoreWalAction> = actions.into_iter().collect();
         if deferred_store_wal_capture_active() {
             let captured = capture_deferred_store_wal_actions(actions);
@@ -1759,6 +1855,9 @@ impl UnifiedStore {
         if self.config.embedded_wal_path.is_some() {
             return self.append_embedded_store_wal_actions(&actions);
         }
+        let _publication = self.vault_publication_lock.lock();
+        let mut actions = actions;
+        let epoch_guard = self.append_result_cache_epoch_action(&mut actions)?;
         let mut references = super::checkpoint_wal::CheckpointWalBatch::default();
         let result = match self.config.durability_mode {
             DurabilityMode::Strict => {
@@ -1792,6 +1891,9 @@ impl UnifiedStore {
         if track {
             self.remember_checkpoint_rows(actions, references);
         }
+        if let Some(guard) = epoch_guard {
+            guard.commit();
+        }
         Ok(())
     }
 
@@ -1810,10 +1912,13 @@ impl UnifiedStore {
         if actions.is_empty() {
             return Ok(());
         }
+        let _publication = self.vault_publication_lock.lock();
+        let mut actions = actions.to_vec();
+        let epoch_guard = self.append_result_cache_epoch_action(&mut actions)?;
         let payloads: Vec<Vec<u8>> = actions.iter().map(StoreWalAction::encode).collect();
         let encoded_len = crate::storage::EmbeddedRdbArtifact::wal_payloads_encoded_len(&payloads)
             .map_err(|err| StoreError::Io(std::io::Error::other(err.to_string())))?;
-        match self.append_embedded_payloads(path, &payloads) {
+        let result = match self.append_embedded_payloads(path, &payloads) {
             Ok(_) => Ok(()),
             Err(crate::api::RedDBError::InvalidOperation(msg))
                 if msg.contains("embedded wal region full") =>
@@ -1821,7 +1926,13 @@ impl UnifiedStore {
                 self.recover_full_embedded_wal(path, &payloads, encoded_len)
             }
             Err(err) => Err(StoreError::Io(std::io::Error::other(err.to_string()))),
+        };
+        if result.is_ok() {
+            if let Some(guard) = epoch_guard {
+                guard.commit();
+            }
         }
+        result
     }
 
     fn recover_full_embedded_wal(
@@ -1904,7 +2015,7 @@ impl UnifiedStore {
     pub(super) fn enqueue_grouped_actions(
         &self,
         actions: &[StoreWalAction],
-    ) -> Result<Option<crate::storage::embedded::PendingEmbeddedAppend>, StoreError> {
+    ) -> Result<Option<PendingResultCacheAppend>, StoreError> {
         if self.config.durability_mode != DurabilityMode::WalDurableGrouped
             || deferred_store_wal_capture_active()
         {
@@ -1916,6 +2027,9 @@ impl UnifiedStore {
         let session = self
             .embedded_commit_session
             .get_or_init(|| crate::storage::EmbeddedRdbArtifact::group_commit_session(path));
+        let _publication = self.vault_publication_lock.lock();
+        let mut actions = actions.to_vec();
+        let epoch_guard = self.append_result_cache_epoch_action(&mut actions)?;
         let payloads: Vec<Vec<u8>> = actions.iter().map(StoreWalAction::encode).collect();
         let options = self.config.group_commit;
         session
@@ -1927,16 +2041,21 @@ impl UnifiedStore {
                     max_wal_bytes: options.max_wal_bytes,
                 },
             )
-            .map(Some)
+            .map(|pending| {
+                Some(PendingResultCacheAppend {
+                    pending,
+                    epoch_guard,
+                })
+            })
             .map_err(|error| StoreError::Io(io::Error::other(error.to_string())))
     }
 
     pub(super) fn complete_grouped_actions(
         &self,
-        pending: &crate::storage::embedded::PendingEmbeddedAppend,
+        pending: &mut PendingResultCacheAppend,
         actions: &[StoreWalAction],
     ) -> Result<(), StoreError> {
-        match pending.wait() {
+        let result = match pending.pending.wait() {
             Ok(_) => Ok(()),
             Err(crate::RedDBError::InvalidOperation(message))
                 if message.contains("embedded wal region full") =>
@@ -1944,7 +2063,13 @@ impl UnifiedStore {
                 self.append_embedded_store_wal_actions(actions)
             }
             Err(error) => Err(StoreError::Io(io::Error::other(error.to_string()))),
+        };
+        if result.is_ok() {
+            if let Some(guard) = pending.epoch_guard.take() {
+                guard.commit();
+            }
         }
+        result
     }
 
     pub(crate) fn apply_replayed_action(
@@ -2021,7 +2146,7 @@ impl UnifiedStore {
             )))
         })?;
 
-        self.swap_collection_state(name, new_manager, &prepared, &serialized, true);
+        self.swap_collection_state(name, new_manager, &prepared, &serialized, true)?;
 
         self.finish_paged_write([StoreWalAction::RefreshCollection {
             collection: name.to_string(),
@@ -2043,15 +2168,12 @@ impl UnifiedStore {
         prepared: &[UnifiedEntity],
         serialized: &[Vec<u8>],
         update_btrees: bool,
-    ) {
+    ) -> Result<(), StoreError> {
         self.resident
             .swap_collection_state(name, new_manager, prepared);
 
-        if let Some(pager) = self
-            .pager
-            .as_ref()
-            .filter(|_| update_btrees && self.config.resident_memory_bytes_max.is_none())
-        {
+        let immutable = self.immutable_paged_base()?;
+        if let Some(pager) = self.pager.as_ref().filter(|_| update_btrees && !immutable) {
             let new_btree = Arc::new(BTree::new(Arc::clone(pager)));
             let mut sorted: Vec<(Vec<u8>, Vec<u8>)> = prepared
                 .iter()
@@ -2060,13 +2182,16 @@ impl UnifiedStore {
                 .collect();
             sorted.sort_by(|a, b| a.0.cmp(&b.0));
             if !sorted.is_empty() {
-                let _ = new_btree.bulk_insert_sorted(&sorted);
+                new_btree
+                    .bulk_insert_sorted(&sorted)
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
             }
             self.btree_indices
                 .write()
                 .insert(name.to_string(), new_btree);
             self.mark_paged_registry_dirty();
         }
+        Ok(())
     }
 
     fn apply_replayed_refresh_collection(
@@ -2082,7 +2207,7 @@ impl UnifiedStore {
             self.format_version(),
             &self.config.manager_config,
         )?;
-        self.swap_collection_state(collection, new_manager, &prepared, records, update_btrees);
+        self.swap_collection_state(collection, new_manager, &prepared, records, update_btrees)?;
         Ok(())
     }
 
@@ -2142,11 +2267,8 @@ impl UnifiedStore {
             &self.config.manager_config,
         )?;
 
-        if let Some(pager) = self
-            .pager
-            .as_ref()
-            .filter(|_| update_btrees && self.config.resident_memory_bytes_max.is_none())
-        {
+        let immutable = self.immutable_paged_base()?;
+        if let Some(pager) = self.pager.as_ref().filter(|_| update_btrees && !immutable) {
             let mut btree_indices = self.btree_indices.write();
             let btree = btree_indices
                 .entry(collection.to_string())
@@ -2180,11 +2302,9 @@ impl UnifiedStore {
         update_btrees: bool,
     ) -> Result<(), StoreError> {
         let collection = Self::canonical_collection(collection);
+        let immutable = self.immutable_paged_base()?;
         self.resident.apply_replayed_delete(collection, id, || {
-            if self.pager.is_some()
-                && update_btrees
-                && self.config.resident_memory_bytes_max.is_none()
-            {
+            if self.pager.is_some() && update_btrees && !immutable {
                 let btree_indices = self.btree_indices.read();
                 if let Some(btree) = btree_indices.get(collection) {
                     let root_before = btree.root_page_id();
@@ -3859,21 +3979,34 @@ mod tests {
             .unwrap(),
         );
         // Pause the writer after enqueue, before it can register/wait for its
-        // acknowledgement. The flusher also needs this state lock to drain.
-        let state = coordinator.state.0.lock();
+        // acknowledgement. The write-error preflight now takes the state lock,
+        // so the fixture must let that preflight finish before holding it.
         let (written_tx, written_rx) = std::sync::mpsc::channel();
+        let (enqueued_tx, enqueued_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
         let writer_coordinator = Arc::clone(&coordinator);
         let writer = std::thread::spawn(move || {
-            let result = writer_coordinator.append_actions(&[StoreWalAction::CreateCollection {
+            writer_coordinator.check_write_error().unwrap();
+            let _epoch = writer_coordinator.queue.epoch.read();
+            let action = StoreWalAction::CreateCollection {
                 name: "acknowledged".into(),
-            }]);
+            }
+            .encode();
+            let wal_bytes = action.len() as u64;
+            let blob = WalRecord::TxCommitBatch {
+                tx_id: 1,
+                actions: vec![action],
+            }
+            .encode();
+            let target_lsn = writer_coordinator.queue.enqueue(blob);
+            enqueued_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+            let result = writer_coordinator.wait_until_durable_batch(target_lsn, wal_bytes, false);
             written_tx.send(result).unwrap();
         });
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !coordinator.queue.has_pending() {
-            assert!(Instant::now() < deadline, "writer never enqueued");
-            std::thread::yield_now();
-        }
+        enqueued_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let state = coordinator.state.0.lock();
+        resume_tx.send(()).unwrap();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (reset_tx, reset_rx) = std::sync::mpsc::channel();
         let reset_coordinator = Arc::clone(&coordinator);

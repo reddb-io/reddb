@@ -8,17 +8,39 @@ use crate::vfs::VfsFile;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    feature = "full",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 mod native;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    feature = "full",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
+mod native_lock;
+#[cfg(all(
+    feature = "full",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub use native::EmbeddedRdbWriterLock;
 
 mod portable;
 pub use portable::EmbeddedRdbFile;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    feature = "full",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 mod group_commit;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    feature = "full",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub use group_commit::{
     EmbeddedGroupCommitOptions, EmbeddedGroupCommitSession, PendingEmbeddedAppend,
 };
@@ -191,6 +213,7 @@ impl EmbeddedRdbArtifact {
         Self::open_inner_selected(file, path, validate_snapshot_refs).map(|(open, _)| open)
     }
 
+    #[cfg(feature = "full")]
     fn open_inner_with_snapshot(
         file: &mut impl VfsFile,
         path: &Path,
@@ -1182,12 +1205,15 @@ fn checkpoint_file(
     EmbeddedRdbArtifact::open_inner_with_file(file, path, true)
 }
 
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 struct PublishedAppend {
     open: EmbeddedRdbOpen,
+    #[cfg(feature = "full")]
     generation: u64,
+    #[cfg(feature = "full")]
     next_sequence: u64,
+    #[cfg(feature = "full")]
     previous_frame_crc: u32,
+    #[cfg(feature = "full")]
     valid_bytes: u64,
 }
 
@@ -1260,9 +1286,13 @@ fn append_file(
     let next_open = EmbeddedRdbArtifact::open_inner_with_file(file, path, !snapshot_validated)?;
     Ok(PublishedAppend {
         open: next_open,
+        #[cfg(feature = "full")]
         generation: next_superblock.generation,
+        #[cfg(feature = "full")]
         next_sequence: sequence,
+        #[cfg(feature = "full")]
         previous_frame_crc,
+        #[cfg(feature = "full")]
         valid_bytes: wal_scan.valid_bytes + encoded_len,
     })
 }

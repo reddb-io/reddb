@@ -14,6 +14,7 @@ pub(crate) fn status_text(status: u16) -> &'static str {
         500 => "Internal Server Error",
         501 => "Not Implemented",
         503 => "Service Unavailable",
+        504 => "Gateway Timeout",
         507 => "Insufficient Storage",
         _ => "OK",
     }
@@ -375,6 +376,7 @@ pub(crate) fn map_runtime_error(err: &crate::api::RedDBError) -> (u16, String) {
     let status = match err {
         NotFound(_) => 404,
         ReadOnly(_) => 403,
+        CommitUncertain { .. } => 504,
         // Issue #524 — chain-INSERT conflict surfaces as a 409 so a polite
         // client can retry against the advanced tip. The body still carries
         // the marker so deeper handlers can parse the tip payload back out.

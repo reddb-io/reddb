@@ -202,6 +202,14 @@ fn http_request(port: u16, method: &str, path: &str, body: Option<&str>) -> (u16
 }
 
 fn wait_for_health(child: &mut ServerChild, port: u16, name: &str) {
+    wait_for_probe(child, port, name, "/health");
+}
+
+fn wait_for_liveness(child: &mut ServerChild, port: u16, name: &str) {
+    wait_for_probe(child, port, name, "/health/live");
+}
+
+fn wait_for_probe(child: &mut ServerChild, port: u16, name: &str, path: &str) {
     let deadline = Instant::now() + PROCESS_READY_TIMEOUT;
     let mut last_status_line = String::new();
     while Instant::now() < deadline {
@@ -212,8 +220,9 @@ fn wait_for_health(child: &mut ServerChild, port: u16, name: &str) {
         if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
             let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-            let _ = stream
-                .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            let request =
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(request.as_bytes());
             let mut status_line = String::new();
             let _ = BufReader::new(stream).read_line(&mut status_line);
             if status_line.starts_with("HTTP/1.1 200") {
@@ -422,7 +431,106 @@ fn cli_no_auth_primary_replicates_to_read_replica() {
 
 #[cfg(feature = "grpc")]
 #[test]
-fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
+fn cli_replication_snapshots_preserve_independent_native_generations() {
+    use reddb::grpc::proto::red_db_client::RedDbClient;
+    use reddb::grpc::proto::Empty;
+    use reddb_wire::replication::BaseBackupChunk;
+
+    let temp = support::temp_data_dir("cli-native-replication-snapshot");
+    let ports = free_ports(2);
+    let mut primary = spawn_primary(&temp.join("primary.rdb"), ports[0], ports[1]);
+    wait_for_health(&mut primary, ports[0], "snapshot source");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("snapshot client runtime");
+    let endpoint =
+        tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", ports[1]))
+            .expect("snapshot endpoint")
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15));
+    let channel = runtime
+        .block_on(endpoint.connect())
+        .expect("connect snapshot client");
+    let mut client = RedDbClient::new(channel).max_decoding_message_size(64 * 1024 * 1024);
+    let mut snapshots = Vec::new();
+    for (ordinal, query, expected) in [
+        (
+            1,
+            "INSERT INTO snapshot_probe (id, name) VALUES (1, 'original')",
+            "original",
+        ),
+        (
+            2,
+            "UPDATE snapshot_probe SET name = 'updated' WHERE id = 1",
+            "updated",
+        ),
+    ] {
+        let body = format!(r#"{{"query":"{query}"}}"#);
+        let (status, response) = http_request(ports[0], "POST", "/query", Some(&body));
+        assert_eq!(status, 200, "snapshot source mutation: {response}");
+        let mut request = tonic::Request::new(Empty {});
+        request.metadata_mut().insert(
+            "x-reddb-replica-id",
+            "snapshot-reader".parse().expect("replica identity"),
+        );
+        let reply = runtime
+            .block_on(client.replication_snapshot(request))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "native replication snapshot RPC failed: {error:?}; source log:\n{}",
+                    std::fs::read_to_string(&primary.output_path).unwrap_or_default()
+                )
+            })
+            .into_inner();
+        assert!(reply.ok);
+        let chunk =
+            BaseBackupChunk::decode_json(reply.payload.as_bytes()).expect("snapshot wire contract");
+        assert!(chunk.snapshot_complete);
+        let lsn = chunk.snapshot_lsn.expect("snapshot cursor");
+        let bytes = chunk.snapshot_hex.expect("whole native snapshot");
+        assert_eq!(chunk.snapshot_total_bytes, Some(bytes.len() as u64));
+        let path = temp.join(format!("snapshot-{ordinal}.rdb"));
+        std::fs::write(&path, bytes).expect("independent replica image");
+        snapshots.push((path, expected, lsn));
+    }
+    assert!(snapshots[1].2 > snapshots[0].2);
+    // Read the older image only after the live source has changed again.
+    // Both images must have valid native roots and their own MVCC/index state.
+    for (path, expected, _) in snapshots {
+        let reader = reddb::RedDBRuntime::with_options(
+            reddb::RedDBOptions::persistent(&path)
+                .with_storage_profile(reddb::StorageDeployPreset::PrimaryReplicaDev.selection())
+                .expect("native snapshot reader")
+                .with_read_only(true),
+        )
+        .expect("cold open transferred native generation");
+        let point = reader
+            .execute_query("SELECT name FROM snapshot_probe WHERE id = 1")
+            .expect("cold snapshot point before scan");
+        assert_eq!(point.result.len(), 1);
+        assert_eq!(
+            point.result.records[0]
+                .get("name")
+                .and_then(|value| value.as_text()),
+            Some(expected)
+        );
+        let scan = reader
+            .execute_query("SELECT name FROM snapshot_probe")
+            .expect("snapshot scan");
+        assert_eq!(scan.result.len(), 1);
+        assert_eq!(
+            scan.result.records[0]
+                .get("name")
+                .and_then(|value| value.as_text()),
+            Some(expected)
+        );
+    }
+}
+
+#[cfg(feature = "grpc")]
+#[test]
+fn cli_manual_promotion_recovers_a_replica_below_the_fork_and_fences_the_old_primary() {
     use reddb_client::{QueryOptions, Reddb, ValueOut};
     use reddb_wire::replication::{FailoverPromotionReply, FailoverPromotionRequest};
 
@@ -434,14 +542,33 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
             .any(|(_, value)| matches!(value, ValueOut::String(value) if value == expected))
     }
 
+    fn wait_for_follower_row(port: u16, id: u64, expected: &str) {
+        let deadline = Instant::now() + REPLICATION_TIMEOUT;
+        let query = format!(r#"{{"query":"SELECT name FROM failover_probe WHERE id = {id}"}}"#);
+        loop {
+            let (status, row) = http_request(port, "POST", "/query", Some(&query));
+            let (_, health) = http_request(port, "GET", "/replication/status", None);
+            if status == 200 && row.contains(expected) && health.contains(r#""state":"healthy""#) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "replica missed row {id}: row={row}; replication={health}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     let temp = support::temp_data_dir("cli-manual-promotion");
     let backend_root = temp.join("lease-backend");
     std::fs::create_dir_all(&backend_root).expect("create lease backend root");
     let primary_path = temp.join("primary.rdb");
     let replica_path = temp.join("replica.rdb");
-    let ports = free_ports(6);
+    let follower_path = temp.join("follower.rdb");
+    let ports = free_ports(8);
     let (primary_http, primary_grpc, replica_http, replica_grpc, stale_http, stale_grpc) =
         (ports[0], ports[1], ports[2], ports[3], ports[4], ports[5]);
+    let (follower_http, follower_grpc) = (ports[6], ports[7]);
     let primary_failover = FailoverConfig {
         backend_root: &backend_root,
         remote_key: "manual-promotion",
@@ -466,7 +593,7 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
     wait_for_health(&mut primary, primary_http, "leased primary");
     for query in [
         "CREATE TABLE failover_probe (id INTEGER, name TEXT)",
-        "INSERT INTO failover_probe (id, name) VALUES (1, 'before-promotion')",
+        "INSERT INTO failover_probe (id, name) VALUES (1, 'initial-snapshot')",
     ] {
         let body = format!(r#"{{"query":"{query}"}}"#);
         let (status, response) = http_request(primary_http, "POST", "/query", Some(&body));
@@ -491,7 +618,7 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         );
         let (_, replication) = http_request(replica_http, "GET", "/replication/status", None);
         if status == 200
-            && body.contains("before-promotion")
+            && body.contains("initial-snapshot")
             && replication.contains("\"state\":\"healthy\"")
         {
             break;
@@ -503,7 +630,70 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    // Stop another durable replica at the initial frontier. After failover it
+    // must recover the source update below the fork before it can consume new
+    // writes from the promoted primary.
+    let follower_failover = FailoverConfig {
+        holder_id: "follower-c",
+        ..replica_failover
+    };
+    let mut follower = spawn_replica_with_failover(
+        &follower_path,
+        follower_http,
+        follower_grpc,
+        primary_grpc,
+        Some(&follower_failover),
+    );
+    wait_for_health(
+        &mut follower,
+        follower_http,
+        "lagging promotion-era replica",
+    );
+    wait_for_follower_row(follower_http, 1, "initial-snapshot");
+    let _ = follower.stop_and_read_output();
+    let follower_replica_id = {
+        let reader = reddb::RedDBRuntime::with_options(
+            reddb::RedDBOptions::persistent(&follower_path)
+                .with_storage_profile(reddb::StorageDeployPreset::PrimaryReplicaDev.selection())
+                .expect("lagging replica identity reader")
+                .with_read_only(true),
+        )
+        .expect("cold open lagging replica identity");
+        let replica_id = reader.replication_replica_id();
+        assert!(!replica_id.is_empty(), "replica identity must be durable");
+        replica_id
+    };
+
+    // The candidate must advance beyond the canonical outbox in its initial
+    // snapshot. Promotion must restore this later, genuinely applied WAL LSN.
+    let (status, update) = http_request(
+        primary_http,
+        "POST",
+        "/query",
+        Some(r#"{"query":"UPDATE failover_probe SET name = 'before-promotion' WHERE id = 1"}"#),
+    );
+    assert_eq!(status, 200, "post-bootstrap source update: {update}");
+    wait_for_follower_row(replica_http, 1, "before-promotion");
+
+    // Seed the negative upload sentinel after both fresh replicas bootstrap.
+    let legacy_payload = backend_root.join("manual-promotion");
+    let legacy_payload_bytes = b"a replica must not publish over this backend object";
+    std::fs::write(&legacy_payload, legacy_payload_bytes).expect("backend payload sentinel");
+    let (status, checkpoint) = http_request(replica_http, "POST", "/checkpoint", None);
+    assert_eq!(status, 200, "replica local checkpoint failed: {checkpoint}");
+    assert_eq!(
+        std::fs::read(&legacy_payload).expect("backend payload after replica checkpoint"),
+        legacy_payload_bytes
+    );
+
     let _ = primary.stop_and_read_output();
+    // Older lease-only boots could leave serverless control objects behind.
+    // This profile must recover its local replica without consulting them.
+    let foreign_head = backend_root.join("manual-promotion.serverless/HEAD.json");
+    std::fs::create_dir_all(foreign_head.parent().expect("head directory"))
+        .expect("create unrelated serverless directory");
+    let foreign_head_bytes = b"unrelated serverless publication must remain untouched";
+    std::fs::write(&foreign_head, foreign_head_bytes).expect("old serverless control object");
     let request = FailoverPromotionRequest {
         holder_id: Some("replica-b".to_string()),
         ttl_ms: Some(30_000),
@@ -547,6 +737,28 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         Some(&promoted_failover),
     );
     wait_for_health(&mut promoted, replica_http, "promoted primary");
+    let (status, retention) = http_request(replica_http, "GET", "/replication/status", None);
+    assert_eq!(status, 200, "promoted replication status: {retention}");
+    assert!(
+        retention.contains(r#""wal_retention_error":false"#),
+        "promoted primary must calculate WAL retention: {retention}"
+    );
+    let follower_failover = FailoverConfig {
+        term: promotion.term,
+        ..follower_failover
+    };
+    let mut follower = spawn_replica_with_failover(
+        &follower_path,
+        follower_http,
+        follower_grpc,
+        replica_grpc,
+        Some(&follower_failover),
+    );
+    wait_for_health(
+        &mut follower,
+        follower_http,
+        "replica following the new primary",
+    );
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -577,6 +789,93 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         "before={before:?}"
     );
     assert!(contains_text(&after, "after-promotion"), "after={after:?}");
+    let rebootstrap_deadline = Instant::now() + REPLICATION_TIMEOUT;
+    loop {
+        let (status, row) = http_request(
+            follower_http,
+            "POST",
+            "/query",
+            Some(r#"{"query":"SELECT name FROM failover_probe WHERE id = 2"}"#),
+        );
+        let (_, replication) = http_request(follower_http, "GET", "/replication/status", None);
+        if replication.contains(r#""state":"rebootstrap_ready""#) {
+            break;
+        }
+        assert!(
+            !(status == 200 && row.contains("after-promotion")),
+            "fixture must exercise the bounded basebackup recovery path: {replication}"
+        );
+        assert!(
+            Instant::now() < rebootstrap_deadline,
+            "lagging replica did not stage recovery: row={row}; replication={replication}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let rebootstrap_marker = reddb_file::layout::rebootstrap_ready_marker_path(&follower_path);
+    let rebootstrap_pending = reddb_file::layout::rebootstrap_pending_path(&follower_path);
+    assert!(
+        rebootstrap_marker.exists(),
+        "ready state must follow durable marker publication"
+    );
+    assert!(
+        rebootstrap_pending.exists(),
+        "ready state must retain the complete pending database"
+    );
+    let _ = follower.stop_and_read_output();
+    follower = spawn_replica_with_failover(
+        &follower_path,
+        follower_http,
+        follower_grpc,
+        replica_grpc,
+        Some(&follower_failover),
+    );
+    wait_for_liveness(
+        &mut follower,
+        follower_http,
+        "replica after one explicit rebootstrap reopen",
+    );
+    assert!(
+        !rebootstrap_marker.exists(),
+        "reopen must consume the ready marker"
+    );
+    assert!(
+        !rebootstrap_pending.exists(),
+        "reopen must promote the pending database"
+    );
+    wait_for_follower_row(follower_http, 1, "before-promotion");
+    wait_for_follower_row(follower_http, 2, "after-promotion");
+    assert_eq!(
+        std::fs::read(&foreign_head).expect("unrelated head after promotion"),
+        foreign_head_bytes
+    );
+
+    let _ = promoted.stop_and_read_output();
+    let lease_path = backend_root.join(reddb_file::serverless_writer_lease_key(
+        "leases/",
+        "manual-promotion",
+    ));
+    let expired_lease_bytes = std::fs::read(&lease_path).expect("read promoted writer lease");
+    let expired_lease = reddb_file::decode_serverless_writer_lease_json(&expired_lease_bytes)
+        .expect("decode promoted writer lease");
+    assert_eq!(expired_lease.term, promotion.term);
+    let lease_expiry_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let now_ms = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time after epoch")
+                .as_millis(),
+        )
+        .expect("current epoch milliseconds fit u64");
+        if expired_lease.is_expired(now_ms) {
+            break;
+        }
+        assert!(
+            Instant::now() < lease_expiry_deadline,
+            "promoted writer lease did not expire after shutdown: {expired_lease:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
 
     let mut stale_primary = spawn_primary_with_failover(
         &primary_path,
@@ -590,5 +889,110 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
             .to_ascii_lowercase()
             .contains("fenced lease op"),
         "stale primary did not report term fencing:\n{stale_output}"
+    );
+    assert_eq!(
+        std::fs::read(&lease_path).expect("lease after stale primary restart"),
+        expired_lease_bytes,
+        "a stale term must not mutate or reacquire an expired newer-term lease"
+    );
+
+    let mut reopened = spawn_primary_with_failover(
+        &replica_path,
+        replica_http,
+        replica_grpc,
+        Some(&promoted_failover),
+    );
+    wait_for_health(&mut reopened, replica_http, "restarted promoted primary");
+    let client = runtime
+        .block_on(Reddb::connect(&format!("grpc://127.0.0.1:{replica_grpc}")))
+        .expect("reconnect after a second crash");
+    for (id, expected) in [(1, "before-promotion"), (2, "after-promotion")] {
+        let result = runtime
+            .block_on(client.query_with_options(
+                &format!("SELECT name FROM failover_probe WHERE id = {id}"),
+                QueryOptions::strong(),
+            ))
+            .expect("cold acknowledged row");
+        assert_eq!(result.rows.len(), 1, "row {id}: {result:?}");
+        assert!(contains_text(&result, expected), "row {id}: {result:?}");
+    }
+    runtime
+        .block_on(client.query("INSERT INTO failover_probe (id, name) VALUES (3, 'after-restart')"))
+        .expect("writer makes progress after restart");
+    wait_for_follower_row(follower_http, 3, "after-restart");
+    let _ = follower.stop_and_read_output();
+    let recovered_follower = reddb::RedDBRuntime::with_options(
+        reddb::RedDBOptions::persistent(&follower_path)
+            .with_storage_profile(reddb::StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("recovered replica identity reader")
+            .with_read_only(true),
+    )
+    .expect("cold open recovered replica");
+    assert_eq!(
+        recovered_follower.replication_replica_id(),
+        follower_replica_id,
+        "basebackup recovery must preserve the target replica identity"
+    );
+    drop(recovered_follower);
+    let scan = runtime
+        .block_on(client.query_with_options(
+            "SELECT id, name FROM failover_probe ORDER BY id",
+            QueryOptions::strong(),
+        ))
+        .expect("scan agrees with cold points and new write");
+    assert_eq!(scan.rows.len(), 3, "scan={scan:?}");
+    for expected in ["before-promotion", "after-promotion", "after-restart"] {
+        assert!(contains_text(&scan, expected), "scan={scan:?}");
+    }
+    let (status, checkpoint) = http_request(replica_http, "POST", "/checkpoint", None);
+    assert_eq!(status, 200, "promoted checkpoint failed: {checkpoint}");
+    let backup = reddb::RedDBRuntime::with_options(
+        reddb::RedDBOptions::persistent(backend_root.join("manual-promotion"))
+            .with_storage_profile(reddb::StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("native backup reader profile")
+            .with_read_only(true),
+    )
+    .expect("open the checkpoint's remote backup independently");
+    let catalog = backup
+        .primary_replica_slot_catalog()
+        .expect("read persisted promoted slots")
+        .expect("promoted slot catalog");
+    assert_eq!(catalog.timeline.0, 2);
+    assert!(
+        !catalog.slots.is_empty(),
+        "real follower must persist its slot"
+    );
+    assert_eq!(
+        catalog.slots.len(),
+        1,
+        "the promoted node must not retain its own former upstream slot: {catalog:?}"
+    );
+    assert_eq!(catalog.slots[0].replica_id, follower_replica_id);
+    assert!(catalog.slots.iter().all(|slot| slot.timeline.0 == 2));
+    backup
+        .primary_replica_wal_retention_plan()
+        .expect("promoted backup retains a usable retention catalog")
+        .expect("backup retention plan");
+    let restored = backup
+        .execute_query("SELECT id, name FROM failover_probe ORDER BY id")
+        .expect("read all acknowledged rows from the backup");
+    assert_eq!(restored.result.records.len(), 3);
+    let names: Vec<_> = restored
+        .result
+        .records
+        .iter()
+        .map(|row| {
+            row.get("name")
+                .and_then(|value| value.as_text())
+                .expect("backup name")
+        })
+        .collect();
+    assert_eq!(
+        names,
+        ["before-promotion", "after-promotion", "after-restart"]
+    );
+    assert_eq!(
+        std::fs::read(&foreign_head).expect("unrelated head after restart"),
+        foreign_head_bytes
     );
 }

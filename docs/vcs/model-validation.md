@@ -9,7 +9,7 @@ specific scenario, not a guarantee that the model supports every VCS operation.
 | --- | --- | --- |
 | Table | Independent branch updates, typed divergent merge, insert/delete, hard reset, cherry-pick/revert, indexed AS OF and recovery | Broader constraint and authorization combinations |
 | Document | Historical patch/delete, independent branches, fast-forward/forced merge and recovery | Conflicts involving independent creations of the same application key |
-| Graph | Node/edge history, independent branches, actual merge, persisted conflict resolution, recovery and failed publication | Contract enforcement during merge |
+| Graph | Node/edge history, independent branches, actual merge, persisted conflict resolution, optional contract validation, recovery and failed publication | Additional graph contract migrations |
 | Vector | Autocommit, independent branches, merge, native reads, exact fallback for approximate search, embedded/paged recovery | Additional historical similarity workloads |
 | KV | History, independent branch updates, INCR/CAS, tag invalidation, merge, conflicts on independently created keys and recovery | More failure/authorization combinations |
 | Mixed | Row/node/vector snapshots, independent additions/deletion, divergent merge and embedded/paged recovery | More combinations of native mutation surfaces |
@@ -60,3 +60,14 @@ Queue payloads are historical data. Delivery leases, acknowledgements, retry
 delays and deduplication belong to a branch writer epoch. Merge does not copy
 leases, and moving HEAD starts a new operational scope. Queue configuration
 and consumer group definitions remain shared catalog metadata.
+
+Optional graph contracts are validated on admission, update, delete, transaction
+commit, merge and hard reset. Enabling a contract checks every live branch.
+`e2e_graph_contract` covers typed properties, endpoints, tenancy, concurrent
+endpoint changes, embedded/paged reopen, and the HTTP API. Each vertex has one
+concrete type. `e2e_hybrid_relations` checks text/vector seeds, selected edge
+labels, one-hop paths, score fusion, RLS, branch isolation and transaction views.
+
+Metadata publication tests inject WAL failures into branch creation/deletion,
+checkout, tags, soft/mixed reset and merges. Missing ancestry or malformed
+references fail the operation instead of producing partial history.

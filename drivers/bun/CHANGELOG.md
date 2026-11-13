@@ -1,5 +1,89 @@
 # @reddb-io/client-bun
 
+## 1.35.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @reddb-io/client@1.35.0
+
+## 1.34.1
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @reddb-io/client@1.34.1
+
+## 1.34.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @reddb-io/client@1.34.0
+
+## 1.33.5
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @reddb-io/client@1.33.5
+
+## 1.33.4
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @reddb-io/client@1.33.4
+
+## 1.33.3
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @reddb-io/client@1.33.3
+
+## 1.33.2
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @reddb-io/client@1.33.2
+
+## 1.33.1
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @reddb-io/client@1.33.1
+
+## 1.33.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @reddb-io/client@1.33.0
+
+## 1.32.1
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @reddb-io/client@1.32.1
+
+## 1.32.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @reddb-io/client@1.32.0
+
+## 1.31.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @reddb-io/client@1.31.0
+
 ## 1.30.1
 
 ### Patch Changes

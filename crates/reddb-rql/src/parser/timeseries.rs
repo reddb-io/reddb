@@ -140,6 +140,7 @@ impl<'a> Parser<'a> {
         Ok(QueryExpr::CreateTable(CreateTableQuery {
             collection_model: CollectionModel::Metrics,
             name,
+            description: None,
             columns: Vec::new(),
             unique_constraints: Vec::new(),
             if_not_exists,

@@ -9,6 +9,12 @@ pub trait PageStore {
     fn allocate_page(&self, page_type: PageType) -> Result<Page, PagerError>;
     fn free_page(&self, page_id: u32) -> Result<(), PagerError>;
     fn page_count(&self) -> Result<u32, PagerError>;
+    /// A generation proof retains old paths until its new root is published.
+    fn enable_deferred_reclamation(&self) -> Result<(), PagerError> {
+        Err(PagerError::InvalidDatabase(
+            "page generation proofs require deferred reclamation".into(),
+        ))
+    }
     fn prefetch_hint(&self, _page_id: u32) {}
 }
 
@@ -27,5 +33,9 @@ impl<F: VfsFile, W: WalBarrier> PageStore for Pager<F, W> {
     }
     fn page_count(&self) -> Result<u32, PagerError> {
         self.page_count()
+    }
+
+    fn enable_deferred_reclamation(&self) -> Result<(), PagerError> {
+        self.enable_deferred_reclamation()
     }
 }

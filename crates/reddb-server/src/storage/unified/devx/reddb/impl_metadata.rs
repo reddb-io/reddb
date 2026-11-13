@@ -328,6 +328,16 @@ impl RedDB {
     /// Clone only the selected value. Legacy positional rows without an
     /// indexed key use their collection schema in the borrowed fallback scan.
     pub fn get_kv(&self, collection: &str, key: &str) -> Option<(Value, EntityId)> {
+        if UnifiedStore::canonical_collection(collection) == "red.config" {
+            let entity = self.store.try_get_config_entity(key).ok().flatten()?;
+            let value = entity
+                .data
+                .as_row()
+                .and_then(|row| row.get_field("value"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            return Some((value, entity.id));
+        }
         let manager = self.store.get_collection(collection)?;
         if let Some(value) = manager.project_key_entity(key, None, false, |entity| {
             (

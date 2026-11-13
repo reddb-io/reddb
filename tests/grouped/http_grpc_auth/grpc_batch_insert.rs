@@ -3,9 +3,8 @@
 //! `RedDBGrpcServer`, drives the streaming `BatchInsert` RPC with a
 //! tonic client, and asserts the brief's acceptance bullets end-to-end:
 //!
-//! * `Idempotency-Key` initial-metadata replays the cached prior result
-//!   without re-executing, and the cache is shared with the HTTP /
-//!   RedWire transports (verified via the process-wide `global_cache`).
+//! * `Idempotency-Key` initial-metadata replays the committed prior result
+//!   without re-executing.
 //! * All-or-nothing: row K's failure rolls back the batch; the
 //!   response surfaces the offending row index via `x-row-index`
 //!   trailing metadata.
@@ -159,7 +158,7 @@ async fn grpc_batch_insert_happy_path_returns_count_and_preserves_order() {
 /// call must succeed with the same count and storage must be untouched
 /// by the replay.
 #[tokio::test]
-async fn grpc_batch_insert_idempotency_key_replays_cached_result() {
+async fn grpc_batch_insert_idempotency_key_replays_committed_result() {
     let table = format!("events_586_idem_{}", unique_suffix());
     let key = format!("grpc-586-idem-{}", unique_suffix());
     let ddl = format!("CREATE TABLE {table} (id INTEGER, name TEXT)");
@@ -217,45 +216,6 @@ async fn grpc_batch_insert_idempotency_key_replays_cached_result() {
         !names.iter().any(|n| n == "should-not-land"),
         "replay re-executed: {names:?}"
     );
-
-    h.abort();
-}
-
-/// Bullet 2 (cont.) — the cache is shared with HTTP slice 4 / RedWire
-/// slice 6: a gRPC batch populates the process-wide cache, and looking
-/// the entry up via `global_cache().lookup` (the same handle HTTP and
-/// RedWire use) returns the cached body bytes. That's the entire
-/// "cross-transport shared cache" contract.
-#[tokio::test]
-async fn grpc_batch_insert_cache_shared_with_other_transports() {
-    use reddb::runtime::batch_insert::global_cache;
-
-    let table = format!("events_586_shared_{}", unique_suffix());
-    let key = format!("grpc-586-shared-{}", unique_suffix());
-    let ddl = format!("CREATE TABLE {table} (id INTEGER, name TEXT)");
-    let (_db, _runtime, server, _bind, port) = build_runtime_and_server(&ddl);
-
-    let h = tokio::spawn(async move {
-        let _ = server.serve().await;
-    });
-    wait_for_port(port, 5000).await;
-
-    let mut client = connect_client(port).await;
-    let chunks = vec![BatchInsertChunk {
-        collection: table.clone(),
-        row_json: r#"{"fields":{"id":1,"name":"x"}}"#.to_string(),
-    }];
-    let mut req = tonic::Request::new(tokio_stream::iter(chunks));
-    req.metadata_mut()
-        .insert("idempotency-key", key.parse().unwrap());
-    let _ = client.batch_insert(req).await.expect("ok");
-
-    let hit = global_cache()
-        .lookup(&table, &key, std::time::Instant::now())
-        .expect("global cache must serve the gRPC write");
-    assert_eq!(hit.status, 200);
-    let body = std::str::from_utf8(&hit.body).expect("utf8 body");
-    assert!(body.contains("\"count\":1"), "body = {body}");
 
     h.abort();
 }

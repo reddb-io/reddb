@@ -603,7 +603,7 @@ pub fn plan_and_route_with_observations<M: PlannerModel>(
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentLoopOutcome {
     Routed {
-        route: PlannedRoute,
+        route: Box<PlannedRoute>,
         observations: Vec<PlannerObservation>,
     },
     BudgetExhausted(BudgetExhausted),
@@ -672,13 +672,13 @@ where
                     return Ok(AgentLoopOutcome::BudgetExhausted(exhausted));
                 }
                 return Ok(AgentLoopOutcome::Routed {
-                    route,
+                    route: Box::new(route),
                     observations,
                 });
             }
             _ => {
                 return Ok(AgentLoopOutcome::Routed {
-                    route,
+                    route: Box::new(route),
                     observations,
                 })
             }
@@ -876,13 +876,13 @@ where
                     return Ok(AgentLoopOutcome::BudgetExhausted(exhausted));
                 }
                 return Ok(AgentLoopOutcome::Routed {
-                    route,
+                    route: Box::new(route),
                     observations,
                 });
             }
             _ => {
                 return Ok(AgentLoopOutcome::Routed {
-                    route,
+                    route: Box::new(route),
                     observations,
                 })
             }
@@ -894,7 +894,7 @@ where
 // Plan budget (ADR 0068 §4, issue #1748)
 // ===========================================================================
 
-/// Default `red.config.ai.ask.max_plan_steps` cap when unset.
+/// Default `ai.ask.max_plan_steps` cap when unset.
 pub const DEFAULT_MAX_PLAN_STEPS: usize = 3;
 
 /// A budgeted step in the executed plan. Every retrieval refinement, metadata
@@ -1859,12 +1859,9 @@ mod tests {
         assert!(matches!(
             outcome,
             AgentLoopOutcome::Routed {
-                route: PlannedRoute {
-                    routing: PlanRouting::Execute { .. },
-                    ..
-                },
+                route,
                 ..
-            }
+            } if matches!(route.routing, PlanRouting::Execute { .. })
         ));
         assert_eq!(
             budget.executed_steps(),

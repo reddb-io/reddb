@@ -22,6 +22,7 @@ use super::execution_context::current_connection_id;
 use super::*;
 
 thread_local! {
+    static DEFERRED_UPDATES: std::cell::RefCell<Option<Vec<DeferredUpdate>>> = const { std::cell::RefCell::new(None) };
     static GRAPH_INSERT_WRITER: std::cell::Cell<Option<(usize, u64, u64)>> = const { std::cell::Cell::new(None) };
     static DML_CAPTURE_OWNER: std::cell::Cell<Option<(usize, u64, bool)>> = const { std::cell::Cell::new(None) };
     static DML_CAPTURE_GRAPH_WRITER: std::cell::RefCell<Option<GraphInsertWriter>> = const { std::cell::RefCell::new(None) };
@@ -62,6 +63,133 @@ impl Drop for GraphInsertWriter {
         if !self.finished {
             self.manager.rollback(self.xid);
         }
+    }
+}
+
+struct DeferredUpdate {
+    runtime: RedDBRuntime,
+    collection: String,
+    old_id: EntityId,
+    new_id: EntityId,
+    previous_xmax: u64,
+    update: Arc<crate::application::entity::AutocommitUpdate>,
+    committed: bool,
+}
+
+impl Drop for DeferredUpdate {
+    fn drop(&mut self) {
+        if !self.committed {
+            let topology = self
+                .runtime
+                .index_store_ref()
+                .collection_topology_lock(&self.collection);
+            if let Err(error) = self.runtime.revive_versioned_update(
+                &self.collection,
+                self.old_id,
+                self.new_id,
+                self.update.xid,
+                self.previous_xmax,
+                topology.read_recursive(),
+            ) {
+                tracing::error!(%error, "autocommit update rollback failed");
+            }
+        }
+    }
+}
+
+struct DeferredUpdates;
+
+impl DeferredUpdates {
+    fn begin() -> Self {
+        DEFERRED_UPDATES.with(|slot| {
+            assert!(slot.borrow().is_none(), "update WAL scopes cannot nest");
+            *slot.borrow_mut() = Some(Vec::new());
+        });
+        Self
+    }
+
+    fn commit(self) {
+        DEFERRED_UPDATES.with(|slot| {
+            for mut pending in slot.borrow_mut().take().expect("update WAL scope") {
+                let update = &pending.update;
+                update.commit();
+                pending.committed = true;
+            }
+        });
+    }
+
+    fn prepare(&self) -> RedDBResult<()> {
+        DEFERRED_UPDATES.with(|slot| {
+            for pending in slot.borrow().as_ref().expect("update WAL scope") {
+                let store = pending.runtime.db().store();
+                let Some(manager) = store.get_collection(&pending.collection) else {
+                    return Err(RedDBError::Internal(
+                        "updated collection disappeared".into(),
+                    ));
+                };
+                let epoch = manager
+                    .try_get(pending.new_id, usize::MAX)?
+                    .and_then(|entity| entity.branch_version().map(|version| version.origin));
+                let old_owned = manager
+                    .try_get(pending.old_id, usize::MAX)
+                    .map_err(|error| RedDBError::Internal(error.to_string()))?
+                    .is_some_and(|old| {
+                        epoch.map_or(old.xmax, |epoch| old.branch_xmax(epoch)) == pending.update.xid
+                    });
+                let new_owned = manager
+                    .try_get(pending.new_id, usize::MAX)
+                    .map_err(|error| RedDBError::Internal(error.to_string()))?
+                    .is_some_and(|new| new.xmin == pending.update.xid);
+                if !old_owned || !new_owned {
+                    return Err(RedDBRuntime::conflict_error(
+                        &pending.collection,
+                        pending.old_id,
+                        pending.update.xid,
+                    ));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+impl Drop for DeferredUpdates {
+    fn drop(&mut self) {
+        let pending = DEFERRED_UPDATES.with(|slot| slot.borrow_mut().take());
+        if let Some(pending) = pending {
+            for update in pending.into_iter().rev() {
+                drop(update);
+            }
+        }
+    }
+}
+
+pub(crate) fn autocommit_update_capture_available() -> bool {
+    DEFERRED_UPDATES.with(|slot| slot.borrow().is_some())
+}
+
+pub(crate) fn publish_autocommit_update(
+    runtime: &RedDBRuntime,
+    item: &crate::application::entity::AppliedEntityMutation,
+    update: &Arc<crate::application::entity::AutocommitUpdate>,
+) {
+    if UnifiedStore::deferred_store_wal_capture_active() {
+        DEFERRED_UPDATES.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("update WAL scope")
+                .push(DeferredUpdate {
+                    runtime: runtime.clone(),
+                    collection: item.collection.clone(),
+                    old_id: item.replaced_entity.as_ref().expect("versioned update").id,
+                    new_id: item.entity.id,
+                    previous_xmax: item.replaced_entity_previous_xmax,
+                    update: Arc::clone(update),
+                    committed: false,
+                });
+        });
+    } else {
+        update.commit();
     }
 }
 
@@ -235,6 +363,7 @@ impl RedDBRuntime {
         }
         self.drain_committed_writes_under_pressure(0)?;
         let deletions = super::delete_publication::DeletePublicationScope::begin();
+        let updates = DeferredUpdates::begin();
         let mut writer = GraphInsertWriter::begin(self);
         let capture = DmlWalCapture::begin(self, false);
         let result = f();
@@ -243,9 +372,11 @@ impl RedDBRuntime {
             mut graph_writer,
         } = capture.finish();
         if result.is_err() {
+            self.flush_deferred_cache_invalidation();
             return result;
         }
-        deletions.publish(self, || {
+        let published = deletions.publish(self, || {
+            updates.prepare()?;
             self.inner
                 .db
                 .store()
@@ -255,8 +386,11 @@ impl RedDBRuntime {
                 writer.commit();
             }
             writer.commit();
+            updates.commit();
             Ok(())
-        })?;
+        });
+        self.flush_deferred_cache_invalidation();
+        published?;
         result
     }
 
@@ -374,6 +508,12 @@ impl RedDBRuntime {
             return f();
         }
 
+        let logical_start = self
+            .inner
+            .pending_logical_records
+            .lock()
+            .get(&conn_id)
+            .map_or(0, |pending| pending.len());
         let capture = DmlWalCapture::begin(self, true);
         let result = f();
         let CapturedDmlWal {
@@ -385,12 +525,18 @@ impl RedDBRuntime {
                 "autocommit graph writer cannot join a transaction WAL capture".to_string(),
             ));
         }
+        self.flush_deferred_cache_invalidation();
         match result {
             Ok(value) => {
                 self.record_pending_store_wal_actions(conn_id, actions);
                 Ok(value)
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                if let Some(records) = self.inner.pending_logical_records.lock().get_mut(&conn_id) {
+                    records.truncate(logical_start);
+                }
+                Err(err)
+            }
         }
     }
 
@@ -409,6 +555,7 @@ impl RedDBRuntime {
         }
 
         let deletions = super::delete_publication::DeletePublicationScope::begin();
+        let updates = DeferredUpdates::begin();
         let capture = DmlWalCapture::begin(self, false);
         let result = f();
         let CapturedDmlWal {
@@ -416,9 +563,11 @@ impl RedDBRuntime {
             mut graph_writer,
         } = capture.finish();
         if result.is_err() && (deletions.has_pending() || graph_writer.is_some()) {
+            self.flush_deferred_cache_invalidation();
             return result;
         }
-        deletions.publish(self, || {
+        let published = deletions.publish(self, || {
+            updates.prepare()?;
             self.inner
                 .db
                 .store()
@@ -427,8 +576,11 @@ impl RedDBRuntime {
             if let Some(writer) = &mut graph_writer {
                 writer.commit();
             }
+            updates.commit();
             Ok(())
-        })?;
+        });
+        self.flush_deferred_cache_invalidation();
+        published?;
         result
     }
 
@@ -480,26 +632,31 @@ impl RedDBRuntime {
             return;
         }
         let mut guard = self.inner.pending_store_wal_actions.write();
-        guard.entry(conn_id).or_default().extend(actions);
+        guard
+            .entry(conn_id)
+            .or_default()
+            .push((self.current_xid().unwrap_or(0), actions));
     }
 
     pub(crate) fn flush_pending_store_wal_actions(&self, conn_id: u64) -> RedDBResult<()> {
-        let Some(actions) = self
+        let groups = self
             .inner
             .pending_store_wal_actions
             .write()
             .remove(&conn_id)
-        else {
-            return Ok(());
-        };
-        self.inner
-            .db
-            .store()
-            .append_deferred_store_wal_actions(actions)
-            .map_err(|err| RedDBError::Internal(err.to_string()))
+            .unwrap_or_default();
+        let mut actions = crate::storage::unified::DeferredStoreWalActions::default();
+        for (xid, group) in groups {
+            if !self.snapshot_manager().is_aborted(xid) {
+                actions.extend(group);
+            }
+        }
+        self.commit_transactional_replication(conn_id, actions)
     }
 
     pub(crate) fn discard_pending_store_wal_actions(&self, conn_id: u64) {
+        self.inner.pending_commit_policies.lock().remove(&conn_id);
+        self.inner.pending_logical_records.lock().remove(&conn_id);
         self.inner
             .pending_store_wal_actions
             .write()
@@ -894,12 +1051,17 @@ impl RedDBRuntime {
                 manager.remove_metadata_expiry(id);
             }
             store.context_index().remove_entity(id);
-            self.cdc_emit(
-                crate::replication::cdc::ChangeOperation::Delete,
-                &collection,
-                id.raw(),
-                "entity",
-            );
+            self.invalidate_result_cache_for_table(&collection);
+            // Primary CDC identities are allocated before the durable outbox
+            // captures their restart frontier.
+            if self.inner.db.replication.is_none() {
+                self.inner.cdc.emit(
+                    crate::replication::cdc::ChangeOperation::Delete,
+                    &collection,
+                    id.raw(),
+                    "entity",
+                );
+            }
         }
     }
 

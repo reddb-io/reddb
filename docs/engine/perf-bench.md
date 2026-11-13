@@ -72,12 +72,12 @@ docker run -e REDDB_STORAGE_WAL_MAX_INTERVAL_MS=5 reddb:latest
 ```
 
 Env vars are in-memory only — re-read every boot, never written to
-`red_config`. Restart without the env var to revert.
+`red.config`. Restart without the env var to revert.
 
 ### Mounted config file
 
 Drop a JSON object at `/etc/reddb/config.json` (override path via
-`REDDB_CONFIG_FILE=…`). Keys land in `red_config` with
+`REDDB_CONFIG_FILE=…`). Keys land in `red.config` with
 write-if-absent semantics, so a later `SET CONFIG` by the user always
 wins and the matrix's Tier A self-heal isn't overwritten.
 
@@ -101,7 +101,7 @@ ignored; boot never fails on a bad overlay file.
 
 ### SET CONFIG at runtime
 
-The classic path — writes directly into `red_config`, persists across
+The classic path — writes directly into `red.config`, persists across
 restarts, lowest priority vs env but higher than matrix default:
 
 ```sql

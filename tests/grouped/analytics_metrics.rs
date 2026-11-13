@@ -95,6 +95,3 @@ mod e2e_within_clause;
 
 #[path = "sql_window/e2e_within_multi_model.rs"]
 mod e2e_within_multi_model;
-
-#[path = "sql_window/window_perf_smoke.rs"]
-mod window_perf_smoke;

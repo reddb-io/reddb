@@ -134,7 +134,7 @@ pub struct MergeOpts {
     /// Custom merge commit message; auto-generated if None.
     pub message: Option<String>,
     /// Abort merge and restore working set on conflict, instead of
-    /// leaving shadow docs in `red_conflicts`.
+    /// leaving shadow docs in `red.vcs.conflicts`.
     pub abort_on_conflict: bool,
 }
 
@@ -253,7 +253,7 @@ pub struct Diff {
 }
 
 /// Result of a merge operation. Non-empty `conflicts` means the merge
-/// is paused — user must resolve shadow docs in `red_conflicts` before
+/// is paused — user must resolve shadow docs in `red.vcs.conflicts` before
 /// committing.
 #[derive(Debug, Clone)]
 pub struct MergeOutcome {

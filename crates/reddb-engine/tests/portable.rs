@@ -82,6 +82,15 @@ mod storage;
 #[path = "support/pager.rs"]
 mod pager;
 
+#[path = "support/page_proofs.rs"]
+mod page_proofs;
+
+#[path = "support/dwb_publication.rs"]
+mod dwb_publication;
+
+#[path = "support/dwb_extent.rs"]
+mod dwb_extent;
+
 #[test]
 fn paged_layout_version_is_independent_of_current_writer_version() {
     use reddb_engine::storage::pager::{NoWal, Pager, PagerConfig, PagerError};
@@ -129,6 +138,76 @@ fn paged_layout_version_is_independent_of_current_writer_version() {
         open(with_version(reddb_file::PAGE_FILE_VERSION + 1), false),
         Err(PagerError::InvalidDatabase(_))
     ));
+}
+
+#[test]
+fn cold_page_lsn_is_authorized_by_a_completed_checkpoint_without_a_live_wal() {
+    use reddb_engine::storage::{
+        page::PageType,
+        pager::{NoWal, Pager, PagerConfig, WalBarrier},
+    };
+    struct DurableWal;
+    impl WalBarrier for DurableWal {
+        fn flush_until(&self, _: u64) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let writer = Pager::open_owned(
+        pager::MemoryFile::default(),
+        "checkpoint-lsn.rdb".into(),
+        PagerConfig::default(),
+        DurableWal,
+        true,
+    )
+    .expect("create checkpoint fixture");
+    let mut page = writer
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("allocate leaf");
+    let id = page.page_id();
+    page.insert_cell(b"key", b"committed").expect("leaf value");
+    page.set_lsn(42);
+    writer.write_page(id, page).expect("stage committed page");
+    writer.sync().expect("durable WAL and page");
+    writer
+        .complete_checkpoint(42)
+        .expect("publish completed checkpoint");
+    let bytes = writer
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("checkpoint image");
+    let reader = Pager::open_owned(
+        pager::MemoryFile::from_bytes(bytes.clone()),
+        "checkpoint-lsn.rdb".into(),
+        PagerConfig::default(),
+        NoWal,
+        false,
+    )
+    .expect("cold open");
+    assert_eq!(
+        reader
+            .read_page(id)
+            .expect("checkpoint authorizes the page")
+            .lsn(),
+        42
+    );
+
+    let mut future = reader.read_page(id).expect("copy page");
+    future.set_lsn(43);
+    future.update_checksum();
+    let mut corrupted = bytes;
+    let start = usize::try_from(id).expect("fixture page ID") * reddb_file::PAGED_PAGE_SIZE;
+    corrupted[start..start + reddb_file::PAGED_PAGE_SIZE].copy_from_slice(future.as_bytes());
+    let reader = Pager::open_owned(
+        pager::MemoryFile::from_bytes(corrupted),
+        "checkpoint-lsn.rdb".into(),
+        PagerConfig::default(),
+        NoWal,
+        false,
+    )
+    .expect("open header");
+    let error = reader
+        .read_page(id)
+        .expect_err("LSN beyond checkpoint needs WAL proof");
+    assert!(error.to_string().contains("LSN"), "{error}");
 }
 
 #[test]
@@ -395,6 +474,154 @@ fn format_upgrade_fences_both_superblocks_and_stops_after_io_failure() {
             pager.allocate_page(PageType::BTreeLeaf).is_err(),
             "failure must fence writes"
         );
+    }
+}
+
+#[test]
+fn capability_fence_precedes_dependent_pages_and_survives_either_superblock() {
+    use reddb_engine::storage::{
+        page::PageType,
+        pager::{NoWal, Pager, PagerConfig},
+    };
+    use reddb_file::{
+        FILE_CAPABILITY_TEMPERATURE, PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE,
+        PAGE_REQUIRED_CAPABILITIES_FILE_VERSION,
+    };
+
+    let pager = Pager::open_owned(
+        pager::MemoryFile::default(),
+        "capability-fence.rdb".into(),
+        PagerConfig::default(),
+        NoWal,
+        true,
+    )
+    .expect("create pager");
+    let persisted_page_count = pager.header().expect("header").page_count;
+    pager
+        .allocate_page(PageType::BTreeLeaf)
+        .expect("dirty allocation");
+    pager
+        .fence_required_capabilities(FILE_CAPABILITY_TEMPERATURE)
+        .expect("fence temperature");
+
+    let bytes = pager
+        .with_file(|file| file.durable.borrow().clone())
+        .expect("durable bytes");
+    for copy in 0..PAGED_SUPERBLOCK_SLOT_COUNT {
+        let start = copy * PAGED_SUPERBLOCK_SLOT_SIZE;
+        let slot = &bytes[start..start + PAGED_SUPERBLOCK_SLOT_SIZE];
+        let header = reddb_file::decode_database_header(slot).expect("header");
+        assert_eq!(header.version, PAGE_REQUIRED_CAPABILITIES_FILE_VERSION);
+        assert_eq!(header.required_capabilities, FILE_CAPABILITY_TEMPERATURE);
+        assert_eq!(
+            header.page_count, persisted_page_count,
+            "capability fence must not publish dirty allocator state"
+        );
+
+        let mut damaged = bytes.clone();
+        damaged[start + 64] ^= 1;
+        let reopened = Pager::open_owned(
+            pager::MemoryFile::from_bytes(damaged),
+            "capability-fallback.rdb".into(),
+            PagerConfig::default(),
+            NoWal,
+            false,
+        )
+        .expect("either fenced copy can recover");
+        assert_eq!(
+            reopened
+                .header()
+                .expect("fallback header")
+                .required_capabilities,
+            FILE_CAPABILITY_TEMPERATURE
+        );
+    }
+}
+
+#[test]
+fn result_cache_format_fences_both_paged_storage_profiles() {
+    use reddb_engine::storage::pager::{NoWal, Pager, PagerConfig};
+    use reddb_file::{file_format, PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE};
+
+    for (version, disk_residency) in [
+        (file_format::PAGE_RESULT_CACHE_FILE_VERSION, false),
+        (file_format::PAGE_RESULT_CACHE_DISK_FILE_VERSION, true),
+    ] {
+        let pager = Pager::open_owned(
+            pager::MemoryFile::default(),
+            "result-cache-format.rdb".into(),
+            PagerConfig {
+                disk_residency,
+                ..PagerConfig::default()
+            },
+            NoWal,
+            true,
+        )
+        .expect("create pager");
+        pager
+            .fence_file_format_version(version)
+            .expect("fence both copies");
+        let bytes = pager
+            .with_file(|file| file.durable.borrow().clone())
+            .unwrap();
+        for copy in 0..PAGED_SUPERBLOCK_SLOT_COUNT {
+            let start = copy * PAGED_SUPERBLOCK_SLOT_SIZE;
+            let slot = &bytes[start..start + PAGED_SUPERBLOCK_SLOT_SIZE];
+            assert!(reddb_file::paged_superblock_slot_generation(slot, copy).is_some());
+            assert_eq!(
+                reddb_file::decode_database_header(slot).unwrap().version,
+                version
+            );
+        }
+        assert_eq!(
+            file_format::page_format_is_disk_resident(version),
+            disk_residency
+        );
+        assert!(version > file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION);
+    }
+}
+
+#[test]
+fn capability_fence_preserves_result_cache_storage_profile() {
+    use reddb_engine::storage::pager::{NoWal, Pager, PagerConfig};
+    use reddb_file::{
+        file_format, FILE_CAPABILITY_DISK_RESIDENCY, FILE_CAPABILITY_TEMPERATURE,
+        PAGE_REQUIRED_CAPABILITIES_FILE_VERSION,
+    };
+
+    for (version, disk_residency) in [
+        (file_format::PAGE_RESULT_CACHE_FILE_VERSION, false),
+        (file_format::PAGE_RESULT_CACHE_DISK_FILE_VERSION, true),
+    ] {
+        let pager = Pager::open_owned(
+            pager::MemoryFile::default(),
+            "result-cache-capability-upgrade.rdb".into(),
+            PagerConfig {
+                disk_residency,
+                ..PagerConfig::default()
+            },
+            NoWal,
+            true,
+        )
+        .expect("create pager");
+        pager
+            .fence_file_format_version(version)
+            .expect("fence result-cache format");
+        pager
+            .fence_required_capabilities(FILE_CAPABILITY_TEMPERATURE)
+            .expect("fence temperature capability");
+
+        let header = pager.header().expect("header after capability fence");
+        assert_eq!(header.version, PAGE_REQUIRED_CAPABILITIES_FILE_VERSION);
+        assert_ne!(
+            header.required_capabilities & FILE_CAPABILITY_TEMPERATURE,
+            0
+        );
+        assert_eq!(
+            header.required_capabilities & FILE_CAPABILITY_DISK_RESIDENCY != 0,
+            disk_residency
+        );
+        assert_eq!(header.requires_disk_residency(), disk_residency);
     }
 }
 

@@ -104,7 +104,9 @@ impl<'rt> MutationEngine<'rt> {
         collection: String,
         mut rows: Vec<MutationRow>,
     ) -> RedDBResult<MutationResult> {
-        let _branch_publication = self.runtime.vcs_is_versioned(&collection)?
+        let _branch_publication = self
+            .runtime
+            .vcs_is_versioned(&collection)?
             .then(|| self.store.vault_publication_lock.lock());
         // Public-mutation gate (PLAN.md W1). Every public path that
         // creates rows funnels through `apply`, so a single check here
@@ -380,7 +382,7 @@ impl<'rt> MutationEngine<'rt> {
             &collection,
             id.raw(),
             cdc_item_kind,
-        );
+        )?;
         if !self.suppress_events {
             self.runtime
                 .emit_insert_events_for_collection(&collection, &[id], &[lsn])?;
@@ -562,7 +564,7 @@ impl<'rt> MutationEngine<'rt> {
             &collection,
             &ids,
             cdc_item_kind,
-        );
+        )?;
         if !self.suppress_events {
             self.runtime
                 .emit_insert_events_for_collection(&collection, &ids, &lsns)?;
@@ -1422,7 +1424,7 @@ pub(crate) fn emit_truncate_event_for_collection(
         collection,
         0,
         "truncate",
-    );
+    )?;
     for subscription in &subscriptions {
         let payload = truncate_event_payload(collection, lsn, entities_count)?;
         runtime.enqueue_event_payload(&effective_queue_name(subscription), Value::Json(payload))?;
@@ -1458,7 +1460,7 @@ pub(crate) fn emit_collection_dropped_event_for_collection(
         collection,
         0,
         "collection_dropped",
-    );
+    )?;
     for subscription in &subscriptions {
         let payload = collection_dropped_event_payload(collection, lsn, final_entities_count)?;
         runtime.enqueue_event_payload(&effective_queue_name(subscription), Value::Json(payload))?;

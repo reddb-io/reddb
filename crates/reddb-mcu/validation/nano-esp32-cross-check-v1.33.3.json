@@ -1,0 +1,34 @@
+{
+  "date": "2026-11-11",
+  "package": "reddb-io-mcu",
+  "version": "1.33.3",
+  "target": "xtensa-esp32s3-espidf",
+  "board": "Arduino Nano ESP32",
+  "toolchain": {
+    "installer": "espup 0.19.0",
+    "rustc": "1.97.0-nightly (8ea53bcd7 2026-07-08)",
+    "llvm": "21.1.3"
+  },
+  "command": "cargo +esp check -Z build-std=std,panic_abort -p reddb-io-mcu --lib --target xtensa-esp32s3-espidf",
+  "result": "success",
+  "shared_components": [
+    "SQL/RQL parser and lowering",
+    "logical types and catalog codecs",
+    "paged local executor",
+    "pager and double-write recovery",
+    "B-tree and RER1 records",
+    "canonical .rdb file format"
+  ],
+  "excluded_full_profile_components": [
+    "resident store and process file locks",
+    "Rayon parallel execution",
+    "Vault crypto",
+    "serverless and replica file planning",
+    "deterministic host fault injection"
+  ],
+  "limitations": [
+    "This is a library cross-check; it does not link or boot ESP-IDF firmware.",
+    "No LittleFS or FatFS VfsFile adapter was exercised.",
+    "Wokwi and a physical Nano ESP32 were not run by this receipt."
+  ]
+}

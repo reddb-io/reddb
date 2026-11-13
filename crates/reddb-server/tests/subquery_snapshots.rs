@@ -328,15 +328,6 @@ fn happy_where_in_subquery_after_subquery_ast_lands() {
     assert_table_where_contains_subquery("SELECT * FROM t WHERE id IN (SELECT id FROM u)");
 }
 
-// FIXME: bug — same gating as the IN-subquery happy path. Drop
-// `#[ignore]` once `EXISTS (SELECT …)` is wired through the Pratt
-// expression parser.
-#[test]
-#[ignore = "blocked: WHERE EXISTS (SELECT …) needs Pratt-prefix support for Token::Exists"]
-fn happy_where_exists_subquery_after_subquery_ast_lands() {
-    let _q = parse_query("SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u)");
-}
-
 #[test]
 fn happy_scalar_subquery_after_subquery_ast_lands() {
     assert_table_where_contains_subquery("SELECT * FROM t WHERE x = (SELECT MAX(y) FROM u)");

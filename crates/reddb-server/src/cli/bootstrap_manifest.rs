@@ -4,7 +4,7 @@
 //! persisted by the server bootstrap path. It is intentionally a thin
 //! translation layer over existing public surfaces: `AuthStore` for users
 //! and IAM policies, `ConfigRegistry` for managed guardrails, and
-//! `red_config` rows for config values.
+//! `red.config` rows for config values.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -850,11 +850,11 @@ fn insert_config_value_if_absent(
 
 fn insert_config_value(runtime: &RedDBRuntime, key: &str, value: Value) -> Result<(), String> {
     let store = runtime.db().store();
-    let _ = store.get_or_create_collection("red_config");
+    let _ = store.get_or_create_collection("red.config");
     let entity = UnifiedEntity::new(
         EntityId::new(0),
         EntityKind::TableRow {
-            table: Arc::from("red_config"),
+            table: Arc::from("red.config"),
             row_id: 0,
         },
         EntityData::Row(RowData {
@@ -871,7 +871,7 @@ fn insert_config_value(runtime: &RedDBRuntime, key: &str, value: Value) -> Resul
         }),
     );
     store
-        .insert_auto("red_config", entity)
+        .insert_auto("red.config", entity)
         .map(|_| ())
         .map_err(|err| format!("persist config `{key}`: {err}"))
 }
@@ -1061,18 +1061,20 @@ mod tests {
     use crate::auth::AuthConfig;
     use crate::RedDBRuntime;
     use reddb_types::Value;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
-    fn manifest_test_env() -> (RedDBRuntime, Arc<AuthStore>, std::path::PathBuf) {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    fn manifest_test_env() -> (
+        RedDBRuntime,
+        Arc<AuthStore>,
+        tempfile::TempDir,
+        std::path::PathBuf,
+    ) {
         let runtime =
             RedDBRuntime::with_options(crate::api::RedDBOptions::in_memory()).expect("runtime");
         let auth = Arc::new(AuthStore::new(AuthConfig::default()));
-        let tmp =
-            std::env::temp_dir().join(format!("reddb_manifest_{}_{}.json", std::process::id(), id));
-        (runtime, auth, tmp)
+        let manifest_dir = tempfile::tempdir().expect("create manifest test dir");
+        let manifest_path = manifest_dir.path().join("manifest.json");
+        (runtime, auth, manifest_dir, manifest_path)
     }
 
     fn write_manifest(path: &std::path::Path, body: &str) {
@@ -1081,32 +1083,29 @@ mod tests {
 
     #[test]
     fn bootstrap_intent_manifest_reads_password_files() {
-        let (_runtime, _auth, path) = manifest_test_env();
+        let (_runtime, _auth, _manifest_dir, path) = manifest_test_env();
         let dir = path.parent().expect("manifest parent");
         let head_password = dir.join(format!("head-secret-{}", std::process::id()));
         let customer_password = dir.join(format!("customer-secret-{}", std::process::id()));
         std::fs::write(&head_password, "head-pass\n").expect("write head secret");
         std::fs::write(&customer_password, "customer-pass\r\n").expect("write customer secret");
 
+        let manifest = ::serde_json::json!({
+            "bootstrap": {
+                "preset": "cloud",
+                "cloud_head_admin": {
+                    "username": "head",
+                    "password_file": head_password,
+                },
+                "customer_admin": {
+                    "username": "customer",
+                    "password_file": customer_password,
+                },
+            },
+        });
         write_manifest(
             &path,
-            &format!(
-                r#"{{
-                    "bootstrap": {{
-                        "preset": "cloud",
-                        "cloud_head_admin": {{
-                            "username": "head",
-                            "password_file": "{}"
-                        }},
-                        "customer_admin": {{
-                            "username": "customer",
-                            "password_file": "{}"
-                        }}
-                    }}
-                }}"#,
-                head_password.display(),
-                customer_password.display()
-            ),
+            &::serde_json::to_string(&manifest).expect("serialize manifest"),
         );
 
         let config = super::bootstrap_config_from_manifest_file(&path)
@@ -1135,7 +1134,7 @@ mod tests {
 
     #[test]
     fn bootstrap_intent_manifest_rejects_inline_plaintext_secret() {
-        let (_runtime, _auth, path) = manifest_test_env();
+        let (_runtime, _auth, _manifest_dir, path) = manifest_test_env();
         write_manifest(
             &path,
             r#"{
@@ -1160,7 +1159,7 @@ mod tests {
     fn owner_apply_creates_user_and_initial_config() {
         // Acceptance #1/#4: the fenced owner applies the manifest, creating the
         // initial admin and writing initial config.
-        let (runtime, auth, path) = manifest_test_env();
+        let (runtime, auth, _manifest_dir, path) = manifest_test_env();
         write_manifest(
             &path,
             r#"{
@@ -1187,23 +1186,19 @@ mod tests {
 
     #[test]
     fn owner_apply_reads_user_password_file() {
-        let (runtime, auth, path) = manifest_test_env();
+        let (runtime, auth, _manifest_dir, path) = manifest_test_env();
         let password_path = path.with_extension("secret");
         std::fs::write(&password_path, "hunter2\n").expect("write secret");
+        let manifest = ::serde_json::json!({
+            "users": [{
+                "username": "ops",
+                "password_file": password_path,
+                "role": "admin",
+            }],
+        });
         write_manifest(
             &path,
-            &format!(
-                r#"{{
-                    "users": [
-                        {{
-                            "username": "ops",
-                            "password_file": "{}",
-                            "role": "admin"
-                        }}
-                    ]
-                }}"#,
-                password_path.display()
-            ),
+            &::serde_json::to_string(&manifest).expect("serialize manifest"),
         );
 
         apply_manifest_file(&runtime, &auth, &runtime.config_registry(), &path).expect("apply");
@@ -1218,7 +1213,7 @@ mod tests {
     fn initial_config_is_write_if_absent_and_keeps_operator_value() {
         // Acceptance #3: initial config uses write-if-absent semantics — a value
         // an operator has already set for the same key survives manifest apply.
-        let (runtime, auth, path) = manifest_test_env();
+        let (runtime, auth, _manifest_dir, path) = manifest_test_env();
         super::insert_config_value(
             &runtime,
             "app.feature.x",
@@ -1249,7 +1244,7 @@ mod tests {
         // Acceptance #4: a duplicate apply (e.g. a restart that re-runs the
         // manifest) refuses to recreate existing global auth state instead of
         // silently mutating it.
-        let (runtime, auth, path) = manifest_test_env();
+        let (runtime, auth, _manifest_dir, path) = manifest_test_env();
         write_manifest(
             &path,
             r#"{
@@ -1275,7 +1270,7 @@ mod tests {
         // cloud admin lifecycle operations.
         use crate::auth::{Role, UserId};
 
-        let (runtime, auth, path) = manifest_test_env();
+        let (runtime, auth, _manifest_dir, path) = manifest_test_env();
         write_manifest(
             &path,
             r#"{

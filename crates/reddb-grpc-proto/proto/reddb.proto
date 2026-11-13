@@ -97,6 +97,9 @@ service RedDb {
   rpc GraphCycles(JsonPayloadRequest) returns (PayloadReply);
   rpc GraphTopologicalSort(JsonPayloadRequest) returns (PayloadReply);
   rpc CreateRow(JsonCreateRequest) returns (EntityReply);
+  // Structured single-row insert. Values use the same typed vocabulary as
+  // parameterized queries; no SQL or JSON payload is assembled by the caller.
+  rpc CreateRowTyped(TypedCreateRowRequest) returns (EntityReply);
   rpc CreateNode(JsonCreateRequest) returns (EntityReply);
   rpc CreateEdge(JsonCreateRequest) returns (EntityReply);
   rpc CreateVector(JsonCreateRequest) returns (EntityReply);
@@ -137,6 +140,10 @@ service RedDb {
 
   // Replication
   rpc ReplicationStatus(Empty) returns (PayloadReply);
+  // Versioned binary WAL data plane. The legacy JSON/hex unary RPC remains
+  // available during rolling upgrades; new replicas fall back only when an
+  // older primary reports UNIMPLEMENTED.
+  rpc StreamWalRecords(WalStreamRequest) returns (stream WalStreamChunk);
   rpc PullWalRecords(JsonPayloadRequest) returns (PayloadReply);
   rpc ReplicationSnapshot(Empty) returns (PayloadReply);
   // Replica-to-primary ASK side effects. Initial commands:
@@ -268,9 +275,57 @@ message JsonPayloadRequest {
   string payload_json = 1;
 }
 
+message WalStreamRequest {
+  uint32 version = 1;
+  uint64 since_lsn = 2;
+  uint32 max_count = 3;
+  optional string replica_id = 4;
+  uint64 term = 5;
+  bool await_data = 6;
+  uint64 await_timeout_ms = 7;
+  map<string, string> routing_endpoints = 8;
+  uint32 max_chunk_bytes = 9;
+  optional string installed_snapshot_token = 10;
+}
+
+message WalStreamRecord {
+  uint64 lsn = 1;
+  bytes data = 2;
+}
+
+message WalCatchup {
+  string mode = 1;
+  optional uint64 available_from_lsn = 2;
+  optional uint64 replica_lsn = 3;
+  optional string reason = 4;
+}
+
+message WalStreamChunk {
+  uint32 version = 1;
+  repeated WalStreamRecord records = 2;
+  uint64 current_lsn = 3;
+  optional uint64 oldest_available_lsn = 4;
+  bool partial_resync = 5;
+  uint64 partial_resync_count = 6;
+  bool needs_rebootstrap = 7;
+  optional string invalidation_reason = 8;
+  optional WalCatchup catchup = 9;
+  map<string, string> primary_endpoints = 10;
+}
+
 message JsonCreateRequest {
   string collection = 1;
   string payload_json = 2;
+}
+
+message TypedCreateRowRequest {
+  string collection = 1;
+  repeated MutationField fields = 2;
+}
+
+message MutationField {
+  string name = 1;
+  QueryValue value = 2;
 }
 
 message JsonBulkCreateRequest {
@@ -342,6 +397,10 @@ message AskReply {
   bool cache_hit = 10;
   string mode = 11;
   uint32 retry_count = 12;
+  string reasoning_json = 13;
+  string exploratory_queries_json = 14;
+  optional string final_query = 15;
+  string final_query_params_json = 16;
 }
 
 message AskStreamEvent {

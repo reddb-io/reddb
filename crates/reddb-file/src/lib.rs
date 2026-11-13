@@ -16,17 +16,32 @@
 // checked conversions.
 #![allow(clippy::cast_possible_truncation)]
 
+// The MCU feature set does not carry the deterministic host-simulation
+// context. Keep crash hooks compilable and inert instead of pulling that
+// machinery into constrained builds.
+#[cfg(not(feature = "full"))]
+#[macro_export]
+macro_rules! buggify {
+    ($env:expr, $point:expr) => {{
+        let _ = ($env, $point);
+        false
+    }};
+}
+
 pub mod ai_model_cache;
 pub mod append_only_segment;
 pub mod audit_log;
 pub mod backup_manifest;
+#[cfg(feature = "full")]
 pub mod backup_temp;
 pub mod blob_cache;
 pub mod bloom_segment;
 pub mod btree_value_layout;
+#[cfg(feature = "full")]
 pub mod clock;
 pub mod column_block;
 pub mod control_store;
+#[cfg(feature = "full")]
 pub mod dst;
 pub mod embedded;
 pub mod file_format;
@@ -42,15 +57,23 @@ pub mod native_key_index;
 pub mod native_resume;
 pub mod native_store;
 pub mod native_value;
+#[cfg(feature = "full")]
 pub mod operational_manifest;
 pub mod page_ownership_journal;
+pub mod page_proof;
 pub mod physical_metadata;
 pub mod physical_metadata_policy;
+#[cfg(feature = "full")]
 pub mod primary_replica;
 pub mod profile;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    feature = "full",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub mod salvage;
 pub mod scrub;
+#[cfg(feature = "full")]
 pub mod serverless;
 pub mod shm;
 pub mod spill;
@@ -101,6 +124,7 @@ pub use backup_manifest::{
     UnifiedSnapshotEntry, UnifiedWalEntry, WalSegmentManifest, WalSegmentMeta,
     BACKUP_MANIFEST_FORMAT_VERSION,
 };
+#[cfg(feature = "full")]
 pub use backup_temp::{
     BackupTempJsonFile, ARCHIVED_CHANGE_RECORDS_READ_TEMP_PREFIX,
     ARCHIVED_CHANGE_RECORDS_TEMP_PREFIX, BACKUP_JSON_OBJECT_READ_TEMP_PREFIX,
@@ -123,6 +147,7 @@ pub use btree_value_layout::{
     encode_btree_pointer, BTreeValueCell, BTreeValueCellError, BTREE_VALUE_COMPRESSION_THRESHOLD,
     BTREE_VALUE_MAX_SIZE, BTREE_VALUE_OVERFLOW_THRESHOLD, BTREE_VALUE_POINTER_CELL_LEN,
 };
+#[cfg(feature = "full")]
 pub use clock::{Clock, SimClock, SystemClock};
 pub use column_block::{
     column_block_crc32, decode_column_block_frame, decode_column_block_granule_bloom_blob,
@@ -137,8 +162,13 @@ pub use control_store::{
     DurableLastVote, FileLastVoteStore, FileTermStore, DEFAULT_FILE_TERM, LAST_VOTE_TEMP_EXTENSION,
     TERM_TEMP_EXTENSION,
 };
+#[cfg(feature = "full")]
 pub use dst::{FaultClass, FaultDecision, FaultRecord, SimulationContext};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    feature = "full",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub use embedded::EmbeddedRdbWriterLock;
 pub use embedded::{
     EmbeddedRdbArtifact, EmbeddedRdbFile, EmbeddedRdbManifest, EmbeddedRdbOpen,
@@ -151,8 +181,9 @@ pub use embedded::{
 pub use file_format::{
     clear_paged_page_checksum, database_header_freelist_head, database_header_magic_matches,
     database_header_page_count, database_header_page_size, decode_database_header,
-    decode_paged_dwb_frame, decode_paged_encryption_header, decode_paged_page_header,
-    encode_database_header, encode_paged_dwb_frame, encode_paged_encryption_header,
+    decode_paged_dwb_frame, decode_paged_dwb_header, decode_paged_encryption_header,
+    decode_paged_page_header, decode_published_database_header, encode_database_header,
+    encode_paged_dwb_frame, encode_paged_dwb_header, encode_paged_encryption_header,
     encode_paged_page_header, init_database_header_page, paged_cell_bytes, paged_cell_key_value,
     paged_cell_len, paged_cell_pointer, paged_cell_pointer_is_valid, paged_cell_pointer_offset,
     paged_cell_total_len, paged_encryption_header_bytes, paged_encryption_marker_present,
@@ -160,21 +191,23 @@ pub use file_format::{
     paged_page_id, paged_page_lsn, paged_page_parent_id, paged_page_right_child, paged_page_type,
     paged_superblock_next_copy, paged_superblock_slot_generation, paged_superblock_slot_offset,
     seal_paged_superblock_slot, select_paged_superblock, set_database_header_freelist_head,
-    set_database_header_page_count, set_database_header_version, set_paged_cell_pointer,
-    set_paged_page_cell_count, set_paged_page_checksum, set_paged_page_free_end,
-    set_paged_page_free_start, set_paged_page_lsn, set_paged_page_parent_id,
-    set_paged_page_right_child, write_paged_cell, write_paged_encryption_marker_and_header,
-    DatabaseHeader, DatabaseHeaderError, PagedDwbEntry, PagedDwbFrameError, PagedEncryptionHeader,
-    PagedPageHeader, PagedSuperblockSelection, PhysicalFileHeader, BLOOM_SEGMENT_V2_MAGIC,
-    COLUMN_BLOCK_MAGIC, COLUMN_BLOCK_VERSION_V1, DWB_MAGIC, PAGED_CELL_HEADER_SIZE,
+    set_database_header_page_count, set_database_header_required_capabilities,
+    set_database_header_version, set_paged_cell_pointer, set_paged_page_cell_count,
+    set_paged_page_checksum, set_paged_page_free_end, set_paged_page_free_start,
+    set_paged_page_lsn, set_paged_page_parent_id, set_paged_page_right_child, write_paged_cell,
+    write_paged_encryption_marker_and_header, DatabaseHeader, DatabaseHeaderError, PagedDwbEntry,
+    PagedDwbFrameError, PagedEncryptionHeader, PagedPageHeader, PagedSuperblockSelection,
+    PhysicalFileHeader, BLOOM_SEGMENT_V2_MAGIC, COLUMN_BLOCK_MAGIC, COLUMN_BLOCK_VERSION_V1,
+    DWB_MAGIC, FILE_CAPABILITIES_SUPPORTED, FILE_CAPABILITY_CATALOG_ROOT,
+    FILE_CAPABILITY_DISK_RESIDENCY, FILE_CAPABILITY_TEMPERATURE, PAGED_CELL_HEADER_SIZE,
     PAGED_CELL_POINTER_SIZE, PAGED_DWB_ENTRY_HEADER_SIZE, PAGED_DWB_ENTRY_SIZE,
     PAGED_DWB_HEADER_SIZE, PAGED_ENCRYPTION_HEADER_SIZE, PAGED_ENCRYPTION_KEY_CHECK_BLOB_SIZE,
     PAGED_ENCRYPTION_KEY_CHECK_PLAINTEXT_SIZE, PAGED_ENCRYPTION_MARKER,
     PAGED_ENCRYPTION_MARKER_OFFSET, PAGED_ENCRYPTION_SALT_SIZE, PAGED_PAGE_HEADER_SIZE,
     PAGED_PAGE_SIZE, PAGED_SUPERBLOCK_SLOT_COUNT, PAGED_SUPERBLOCK_SLOT_SIZE,
     PAGED_SUPERBLOCK_TRAILER_OFFSET, PAGED_SUPERBLOCK_ZONE_SIZE, PAGE_DWB_ZONE_FILE_VERSION,
-    PAGE_FILE_MAGIC, PAGE_FILE_VERSION, VECTOR_BTREE_FORMAT_VERSION,
-    VECTOR_BTREE_FORMAT_VERSION_V1, VECTOR_BTREE_FORMAT_VERSION_V2,
+    PAGE_FILE_MAGIC, PAGE_FILE_VERSION, PAGE_REQUIRED_CAPABILITIES_FILE_VERSION,
+    VECTOR_BTREE_FORMAT_VERSION, VECTOR_BTREE_FORMAT_VERSION_V1, VECTOR_BTREE_FORMAT_VERSION_V2,
 };
 pub use graph_label_registry::{
     decode_graph_label_registry_frame, encode_graph_label_registry_frame, GraphLabelRegistryEntry,
@@ -222,10 +255,10 @@ pub use local_backend::{local_backend_atomic_upload, local_backend_download};
 pub use logical_wal::{
     build_logical_wal_seek_index, encode_logical_wal_v2_for_compat, encode_logical_wal_v3,
     read_and_repair_logical_wal_entries, read_logical_wal_entries_from,
-    rewrite_logical_wal_entries, LogicalWalEntry, LOGICAL_WAL_CRC_LEN,
-    LOGICAL_WAL_SEEK_INDEX_INTERVAL, LOGICAL_WAL_SPOOL_MAGIC, LOGICAL_WAL_SPOOL_VERSION_CURRENT,
-    LOGICAL_WAL_SPOOL_VERSION_V1, LOGICAL_WAL_SPOOL_VERSION_V2, LOGICAL_WAL_SPOOL_VERSION_V3,
-    LOGICAL_WAL_V3_HEADER_LEN,
+    read_logical_wal_entries_from_bounded, rewrite_logical_wal_entries, LogicalWalEntry,
+    LOGICAL_WAL_CRC_LEN, LOGICAL_WAL_SEEK_INDEX_INTERVAL, LOGICAL_WAL_SPOOL_MAGIC,
+    LOGICAL_WAL_SPOOL_VERSION_CURRENT, LOGICAL_WAL_SPOOL_VERSION_V1, LOGICAL_WAL_SPOOL_VERSION_V2,
+    LOGICAL_WAL_SPOOL_VERSION_V3, LOGICAL_WAL_V3_HEADER_LEN,
 };
 pub use native_index_artifact::{
     decode_native_doc_pathvalue_frame, decode_native_fulltext_frame,
@@ -274,9 +307,10 @@ pub use native_store::{
     NATIVE_MANIFEST_SAMPLE_LIMIT, NATIVE_METADATA_STATE_MAGIC, NATIVE_RECOVERY_MAGIC,
     NATIVE_REGISTRY_MAGIC, NATIVE_VECTOR_ARTIFACT_MAGIC, STORE_MAGIC, STORE_VERSION_CURRENT,
     STORE_VERSION_V1, STORE_VERSION_V10, STORE_VERSION_V11, STORE_VERSION_V12, STORE_VERSION_V13,
-    STORE_VERSION_V2, STORE_VERSION_V3, STORE_VERSION_V4, STORE_VERSION_V5, STORE_VERSION_V6,
-    STORE_VERSION_V7, STORE_VERSION_V8, STORE_VERSION_V9,
+    STORE_VERSION_V14, STORE_VERSION_V2, STORE_VERSION_V3, STORE_VERSION_V4, STORE_VERSION_V5,
+    STORE_VERSION_V6, STORE_VERSION_V7, STORE_VERSION_V8, STORE_VERSION_V9,
 };
+#[cfg(feature = "full")]
 pub use operational_manifest::{
     AppendOnlySegmentState, ForkHydrationState, ForkInfo, ForkOrigin, OperationalManifest,
     PreparedCollectionCreate, PreparedCollectionDrop,
@@ -308,8 +342,7 @@ pub use physical_metadata::{
     encode_physical_tree_definition_json, list_physical_metadata_journal_paths,
     physical_manifest_block_reference, physical_superblock_checkpoint_event,
     physical_superblock_object_key, prune_physical_metadata_journal_paths,
-    read_physical_metadata_document, write_physical_metadata_binary_document,
-    write_physical_metadata_json_document, BlockReference, ExportDescriptor, ManifestEvent,
+    read_physical_metadata_document, BlockReference, ExportDescriptor, ManifestEvent,
     ManifestEventKind, ManifestPointers, PersistedPhysicalHypertable,
     PersistedPhysicalHypertableChunk, PersistedPhysicalIndexState, PhysicalAiEmbedPolicy,
     PhysicalAiModeratePolicy, PhysicalAiPolicy, PhysicalAiVisionPolicy,
@@ -347,6 +380,11 @@ pub use vector_ivf_index::{
 };
 pub use vfs::{BorrowedStdFile, OpenMode, StdVfs, Vfs, VfsDirEntry, VfsFile};
 
+#[cfg(feature = "full")]
+pub use physical_metadata::{
+    write_physical_metadata_binary_document, write_physical_metadata_json_document,
+};
+#[cfg(feature = "full")]
 pub use primary_replica::{
     cleanup_rebootstrap_artifacts, decode_rebootstrap_ready_marker_json,
     discard_ready_rebootstrap_marker, encode_rebootstrap_ready_marker_json,
@@ -360,7 +398,11 @@ pub use primary_replica::{
     TimelineHistoryEntry, TimelineId, WalPruneResult, WalRetentionPlan, WalRetentionPolicy,
 };
 pub use profile::{FileArtifactKind, FileProfile};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    feature = "full",
+    not(target_arch = "wasm32"),
+    not(target_os = "espidf")
+))]
 pub use salvage::{
     salvage_embedded_store, StorageSalvageCollection, StorageSalvageMode, StorageSalvageReport,
     StorageSalvageSkippedRegion,
@@ -368,16 +410,19 @@ pub use salvage::{
 pub use scrub::{
     scrub_embedded_store, StorageScrubFinding, StorageScrubReport, StorageScrubVerifiedCounters,
 };
+#[cfg(feature = "full")]
 pub use serverless::{
-    decode_serverless_writer_lease_json, encode_serverless_writer_lease_json,
-    serverless_writer_lease_key, serverless_writer_lease_temp_path, ServerlessBootIndex,
-    ServerlessBootIndexEntry, ServerlessBootPlan, ServerlessCacheEntry,
-    ServerlessCacheEvictionPlan, ServerlessCachePolicy, ServerlessContentHash,
-    ServerlessExtentIndex, ServerlessExtentRef, ServerlessFilePlan, ServerlessGenerationPointer,
-    ServerlessHydratedRange, ServerlessHydrationPlan, ServerlessHydrationRequest,
-    ServerlessLocalCache, ServerlessManifest, ServerlessManifestEntry, ServerlessPackKind,
-    ServerlessSecondaryIndex, ServerlessSecondaryIndexEntry, ServerlessWriterLease,
-    ServerlessWriterLeaseTempFile, SERVERLESS_WRITER_LEASE_DEFAULT_TERM,
+    decode_serverless_snapshot_head_json, decode_serverless_writer_lease_json,
+    encode_serverless_snapshot_head_json, encode_serverless_writer_lease_json,
+    serverless_snapshot_head_key, serverless_snapshot_key, serverless_writer_lease_key,
+    serverless_writer_lease_temp_path, ServerlessBootIndex, ServerlessBootIndexEntry,
+    ServerlessBootPlan, ServerlessCacheEntry, ServerlessCacheEvictionPlan, ServerlessCachePolicy,
+    ServerlessContentHash, ServerlessExtentIndex, ServerlessExtentRef, ServerlessFilePlan,
+    ServerlessGenerationPointer, ServerlessHydratedRange, ServerlessHydrationPlan,
+    ServerlessHydrationRequest, ServerlessLocalCache, ServerlessManifest, ServerlessManifestEntry,
+    ServerlessPackKind, ServerlessSecondaryIndex, ServerlessSecondaryIndexEntry,
+    ServerlessSnapshotHead, ServerlessWriterLease, ServerlessWriterLeaseTempFile,
+    SERVERLESS_SNAPSHOT_HEAD_FORMAT_VERSION, SERVERLESS_WRITER_LEASE_DEFAULT_TERM,
 };
 pub use shm::{
     initialize_shm_file, read_shm_header_from_file, write_shm_header_to_file, ShmHeader,

@@ -158,7 +158,7 @@ ALTER TABLE orders DISABLE TENANCY;
 
 ## Persistence across restart
 
-Tenant-table markers are persisted to the internal `red_config`
+Tenant-table markers are persisted to the internal `red.config`
 collection (`tenant_tables.{table}.column`). On boot, RedDB replays
 every marker and re-installs the auto-policy + in-memory registry.
 

@@ -99,7 +99,7 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
             store.set_config_tree(
-                &format!("red.collection_tenants.{}", query.name),
+                &format!("collection_tenants.{}", query.name),
                 &crate::serde_json::Value::String(tenant_id),
             );
         }
@@ -117,13 +117,14 @@ impl RedDBRuntime {
                 collection: query.name.clone(),
                 columns,
                 type_tags: Vec::new(),
-                description: None,
+                description: query.description.clone(),
             },
         );
+        self.schema_vocabulary_sync_descriptions(&query.name);
         // Partition metadata (Phase 2.2 PG parity).
         //
         // When the CREATE TABLE carries a `PARTITION BY RANGE|LIST|HASH (col)`
-        // clause, stamp the partition config into `red_config` under
+        // clause, stamp the partition config into `red.config` under
         // `partition.{table}.{by,column}`. Children are registered separately
         // via `ALTER TABLE parent ATTACH PARTITION child ...`.
         if let Some(spec) = &query.partition_by {
@@ -220,11 +221,11 @@ impl RedDBRuntime {
                 "cluster"
             };
             store.set_config_tree(
-                &format!("red.vault.{}.key_scope", query.name),
+                &format!("vault.{}.key_scope", query.name),
                 &crate::serde_json::Value::String(key_scope.to_string()),
             );
             store.set_config_tree(
-                &format!("red.vault.{}.status", query.name),
+                &format!("vault.{}.status", query.name),
                 &crate::serde_json::Value::String("sealed".to_string()),
             );
         }
@@ -255,7 +256,7 @@ impl RedDBRuntime {
                     .db
                     .set_collection_default_ttl_ms(&query.name, raw_retention_ms);
                 store.set_config_tree(
-                    &format!("red.metrics.{}.raw_retention_ms", query.name),
+                    &format!("metrics.{}.raw_retention_ms", query.name),
                     &crate::serde_json::Value::Number(raw_retention_ms as f64),
                 );
             }
@@ -264,16 +265,16 @@ impl RedDBRuntime {
                 .clone()
                 .unwrap_or_else(|| "current_tenant".to_string());
             store.set_config_tree(
-                &format!("red.metrics.{}.tenant_identity", query.name),
+                &format!("metrics.{}.tenant_identity", query.name),
                 &crate::serde_json::Value::String(tenant_identity),
             );
             store.set_config_tree(
-                &format!("red.metrics.{}.namespace", query.name),
+                &format!("metrics.{}.namespace", query.name),
                 &crate::serde_json::Value::String("default".to_string()),
             );
             if !query.metrics_rollup_policies.is_empty() {
                 store.set_config_tree(
-                    &format!("red.metrics.{}.rollup_policies", query.name),
+                    &format!("metrics.{}.rollup_policies", query.name),
                     &crate::serde_json::Value::Array(
                         query
                             .metrics_rollup_policies
@@ -285,7 +286,7 @@ impl RedDBRuntime {
                 );
             }
         }
-        let contract = if query.collection_model == CollectionModel::Metrics {
+        let mut contract = if query.collection_model == CollectionModel::Metrics {
             metrics_collection_contract(query)
         } else {
             keyed_collection_contract(
@@ -294,13 +295,14 @@ impl RedDBRuntime {
                 query.analytics_config.clone(),
             )
         };
+        contract.description = query.description.clone();
         self.inner
             .db
             .save_collection_contract(contract)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
             store.set_config_tree(
-                &format!("red.collection_tenants.{}", query.name),
+                &format!("collection_tenants.{}", query.name),
                 &crate::serde_json::Value::String(tenant_id),
             );
         }
@@ -309,6 +311,15 @@ impl RedDBRuntime {
             .persist_metadata()
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         self.invalidate_result_cache();
+        self.schema_vocabulary_apply(
+            crate::runtime::schema_vocabulary::DdlEvent::CreateCollection {
+                collection: query.name.clone(),
+                columns: Vec::new(),
+                type_tags: Vec::new(),
+                description: query.description.clone(),
+            },
+        );
+        self.schema_vocabulary_sync_descriptions(&query.name);
 
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),
@@ -388,6 +399,16 @@ impl RedDBRuntime {
                     if_not_exists: query.if_not_exists,
                 };
                 let result = self.execute_create_vector(raw_query, &create)?;
+                if let Some(description) = &query.description {
+                    if let Some(mut contract) = self.inner.db.collection_contract(&query.name) {
+                        contract.description = Some(description.clone());
+                        self.inner
+                            .db
+                            .save_collection_contract(contract)
+                            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                        self.schema_vocabulary_sync_descriptions(&query.name);
+                    }
+                }
                 // Issue #693 — durable kind marker that distinguishes
                 // this collection from the legacy `vector` path on
                 // every restart. Runtime state (TurboQuantIndex +
@@ -421,6 +442,7 @@ impl RedDBRuntime {
         let create = CreateTableQuery {
             collection_model: model,
             name: query.name.clone(),
+            description: query.description.clone(),
             columns: Vec::new(),
             unique_constraints: Vec::new(),
             if_not_exists: query.if_not_exists,
@@ -444,7 +466,7 @@ impl RedDBRuntime {
         // Issue #522 — wire `SIGNED_BY (...)` into the runtime. The parser
         // already produces a validated 32-byte pubkey list; installing
         // the registry stamps the per-collection signer set into
-        // `red_config` so the INSERT path can load it cheaply.
+        // `red.config` so the INSERT path can load it cheaply.
         if !query.allowed_signers.is_empty() {
             let actor = crate::runtime::impl_core::current_user_projected()
                 .unwrap_or_else(|| "@system/create-collection".to_string());
@@ -458,7 +480,7 @@ impl RedDBRuntime {
         Ok(result)
     }
 
-    /// Stamp `red.collection.{name}.kind = "chain"` and append the genesis
+    /// Stamp `collection.{name}.kind = "chain"` and append the genesis
     /// row. Idempotent against `IF NOT EXISTS`: if the collection already
     /// has a row at height 0 we leave it.
     fn install_blockchain_kind(&self, name: &str) -> RedDBResult<()> {
@@ -536,7 +558,7 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
             store.set_config_tree(
-                &format!("red.collection_tenants.{}", query.name),
+                &format!("collection_tenants.{}", query.name),
                 &crate::serde_json::Value::String(tenant_id),
             );
         }
@@ -559,6 +581,14 @@ impl RedDBRuntime {
         // — the lazy path in `turbo_state` retries on next access.
         let _ = self.inner.db.turbo_state(&query.name);
         self.invalidate_result_cache();
+        self.schema_vocabulary_apply(
+            crate::runtime::schema_vocabulary::DdlEvent::CreateCollection {
+                collection: query.name.clone(),
+                columns: Vec::new(),
+                type_tags: Vec::new(),
+                description: None,
+            },
+        );
 
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),
@@ -953,6 +983,25 @@ impl RedDBRuntime {
         }
 
         let mut messages = Vec::new();
+        let existing_contract = self.inner.db.collection_contract(&query.name);
+        for operation in &query.operations {
+            if let AlterOperation::SetDescription {
+                column: Some(name), ..
+            } = operation
+            {
+                if !existing_contract.as_ref().is_some_and(|contract| {
+                    contract
+                        .declared_columns
+                        .iter()
+                        .any(|declared| declared.name == *name)
+                }) {
+                    return Err(RedDBError::NotFound(format!(
+                        "column '{}' not found in collection '{}'",
+                        name, query.name
+                    )));
+                }
+            }
+        }
 
         // Collect column-level changes upfront for schema-change event emission below.
         let fields_added: Vec<String> = query
@@ -990,8 +1039,14 @@ impl RedDBRuntime {
                 AlterOperation::RenameColumn { from, to } => {
                     messages.push(format!("column '{}' renamed to '{}'", from, to));
                 }
+                AlterOperation::SetDescription { column, .. } => {
+                    messages.push(match column {
+                        Some(name) => format!("column '{}' description set", name),
+                        None => "collection description set".to_string(),
+                    });
+                }
                 AlterOperation::AttachPartition { child, bound } => {
-                    // Persist child → parent binding in red_config so the
+                    // Persist child → parent binding in red.config so the
                     // future planner-side pruner can enumerate children and
                     // evaluate their bounds.
                     store.set_config_tree(
@@ -1018,7 +1073,7 @@ impl RedDBRuntime {
                         .rls_enabled_tables
                         .write()
                         .insert(query.name.clone());
-                    // Persist flag so RLS survives restart via red_config.
+                    // Persist flag so RLS survives restart via red.config.
                     store.set_config_tree(
                         &format!("rls.enabled.{}", query.name),
                         &crate::serde_json::Value::Bool(true),
@@ -1072,7 +1127,7 @@ impl RedDBRuntime {
                 }
                 AlterOperation::SetVersioned(on) => {
                     // Opt the collection into (or out of) Git-for-Data.
-                    // Persists a row in red_vcs_settings; next AS OF /
+                    // Persists a row in red.vcs.settings; next AS OF /
                     // merge / diff against this table honours the
                     // flag. Retroactive: existing row versions whose
                     // xmins are still pinned by commits become
@@ -1318,9 +1373,14 @@ impl RedDBRuntime {
                 collection: query.name.clone(),
                 columns: post_alter_columns,
                 type_tags: Vec::new(),
-                description: None,
+                description: self
+                    .inner
+                    .db
+                    .collection_contract(&query.name)
+                    .and_then(|contract| contract.description),
             },
         );
+        self.schema_vocabulary_sync_descriptions(&query.name);
 
         let message = if messages.is_empty() {
             format!("table '{}' altered (no operations)", query.name)
@@ -2010,6 +2070,7 @@ impl RedDBRuntime {
 }
 
 pub(crate) fn is_system_schema_name(name: &str) -> bool {
+    let name = reddb_engine::storage::system_collection_names::canonical_or_self(name);
     name == "red" || name.starts_with("red.") || name.starts_with("__red_schema_")
 }
 
@@ -2079,6 +2140,8 @@ fn default_collection_contract_for_existing_table(
     crate::physical::CollectionContract {
         graph_contract: None,
         name: name.to_string(),
+        description: None,
+        description_generated: false,
         declared_model: crate::catalog::CollectionModel::Table,
         schema_mode: crate::catalog::SchemaMode::SemiStructured,
         origin: crate::physical::ContractOrigin::Explicit,
@@ -2118,6 +2181,8 @@ fn keyed_collection_contract(
     crate::physical::CollectionContract {
         graph_contract: None,
         name: name.to_string(),
+        description: None,
+        description_generated: false,
         declared_model: model,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
         origin: crate::physical::ContractOrigin::Explicit,
@@ -2153,6 +2218,8 @@ fn metrics_collection_contract(query: &CreateTableQuery) -> crate::physical::Col
     crate::physical::CollectionContract {
         graph_contract: None,
         name: query.name.clone(),
+        description: None,
+        description_generated: false,
         declared_model: crate::catalog::CollectionModel::Metrics,
         schema_mode: crate::catalog::SchemaMode::SemiStructured,
         origin: crate::physical::ContractOrigin::Explicit,
@@ -2193,6 +2260,8 @@ fn vector_collection_contract(query: &CreateVectorQuery) -> crate::physical::Col
     crate::physical::CollectionContract {
         graph_contract: None,
         name: query.name.clone(),
+        description: None,
+        description_generated: false,
         declared_model: crate::catalog::CollectionModel::Vector,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
         origin: crate::physical::ContractOrigin::Explicit,
@@ -2232,6 +2301,24 @@ fn apply_alter_operations_to_contract(
     }
     for operation in operations {
         match operation {
+            AlterOperation::SetDescription {
+                column,
+                description,
+            } => {
+                if let Some(name) = column {
+                    if let Some(declared) = contract
+                        .declared_columns
+                        .iter_mut()
+                        .find(|declared| declared.name == *name)
+                    {
+                        declared.description = Some(description.clone());
+                        declared.description_generated = false;
+                    }
+                } else {
+                    contract.description = Some(description.clone());
+                    contract.description_generated = false;
+                }
+            }
             AlterOperation::AddColumn(column) => {
                 if !contract
                     .declared_columns
@@ -2347,19 +2434,19 @@ fn apply_alter_operations_to_contract(
                 }
             }
             // Partition ops don't touch the column contract — metadata is
-            // persisted separately via `red_config.partition.*`.
+            // persisted separately via `partition.*` inside `red.config`.
             AlterOperation::AttachPartition { .. } | AlterOperation::DetachPartition { .. } => {}
             // RLS toggles don't touch the column contract — flag is persisted
-            // separately via `red_config.rls.enabled.{table}` and enforced
+            // separately via `rls.enabled.{table}` inside `red.config` and enforced
             // through the in-memory `rls_enabled_tables` set.
             AlterOperation::EnableRowLevelSecurity | AlterOperation::DisableRowLevelSecurity => {}
-            // Phase 2.5.4: tenancy toggles persist via `red_config.tenant_tables.*`
+            // Phase 2.5.4: tenancy toggles persist via `tenant_tables.*` in `red.config`
             // and are enforced through `tenant_tables` + RLS auto-policy.
             AlterOperation::EnableTenancy { .. } | AlterOperation::DisableTenancy => {}
             AlterOperation::SetAppendOnly(on) => {
                 contract.append_only = *on;
             }
-            // VCS opt-in is persisted to red_vcs_settings by the
+            // VCS opt-in is persisted to red.vcs.settings by the
             // executor, not the contract — nothing to do here.
             AlterOperation::SetVersioned(_) => {}
             AlterOperation::EnableEvents(subscription) => {
@@ -2396,7 +2483,7 @@ fn apply_alter_operations_to_contract(
             AlterOperation::DropSubscription { name } => {
                 contract.subscriptions.retain(|s| s.name != *name);
             }
-            // Signer registry mutations live in `red_config` outside the
+            // Signer registry mutations live in `red.config` outside the
             // contract surface — the executor applied them directly via
             // `signed_writes_kind::{add,revoke}_signer`. Nothing to fold
             // into the column-shaped contract.
@@ -2762,6 +2849,8 @@ fn event_queue_collection_contract(queue: &str) -> crate::physical::CollectionCo
     crate::physical::CollectionContract {
         graph_contract: None,
         name: queue.to_string(),
+        description: None,
+        description_generated: false,
         declared_model: crate::catalog::CollectionModel::Queue,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
         origin: crate::physical::ContractOrigin::Implicit,
@@ -3466,5 +3555,168 @@ mod tests {
             rt.db().store().get_collection("bad").is_none(),
             "rejected DDL must not create the collection"
         );
+    }
+
+    #[test]
+    fn descriptions_cover_collection_models_and_survive_reopen() {
+        let directory = tempfile::tempdir().expect("temporary database");
+        let path = directory.path().join("descriptions.rdb");
+        let options = RedDBOptions::persistent(&path);
+        {
+            let rt = RedDBRuntime::with_options(options.clone()).expect("runtime");
+            assert!(!rt.config_bool("ai.collection_descriptions.auto_enrich", false));
+            rt.execute_query("CREATE TABLE contacts (email EMAIL DESCRIPTION 'Contact address', balance MONEY) WITH (DESCRIPTION = 'Contact records')").expect("table");
+            rt.execute_query(
+                "CREATE COLLECTION articles KIND document DESCRIPTION 'Published articles'",
+            )
+            .expect("document");
+            rt.execute_query("ALTER COLLECTION articles SET DESCRIPTION 'Editorial articles'")
+                .expect("alter document");
+            rt.execute_query(
+                "ALTER COLLECTION contacts ALTER COLUMN balance SET DESCRIPTION 'Account balance'",
+            )
+            .expect("alter column");
+            let contract = rt
+                .db()
+                .collection_contract("contacts")
+                .expect("table contract");
+            assert_eq!(contract.description.as_deref(), Some("Contact records"));
+            assert_eq!(
+                contract.declared_columns[0].description.as_deref(),
+                Some("Contact address")
+            );
+            assert_eq!(
+                contract.declared_columns[1].description.as_deref(),
+                Some("Account balance")
+            );
+            assert!(!contract.declared_columns[1].description_generated);
+            let show_create = rt
+                .execute_query("SHOW CREATE TABLE contacts")
+                .expect("show create");
+            let Some(Value::Text(ddl)) = show_create.result.records[0].get("ddl") else {
+                panic!("DDL text")
+            };
+            assert!(ddl.contains("DESCRIPTION 'Account balance'"), "{ddl}");
+            assert!(
+                ddl.contains("WITH (DESCRIPTION = 'Contact records')"),
+                "{ddl}"
+            );
+            let collections = rt
+                .execute_query("SELECT description FROM red.collections WHERE name = 'contacts'")
+                .expect("collections view");
+            assert_eq!(
+                collections.result.records[0].get("description"),
+                Some(&Value::text("Contact records"))
+            );
+            let columns = rt.execute_query("SELECT description FROM red.columns WHERE collection = 'contacts' AND name = 'email'").expect("columns view");
+            assert_eq!(
+                columns.result.records[0].get("description"),
+                Some(&Value::text("Contact address"))
+            );
+            assert!(rt
+                .execute_query(
+                    "ALTER COLLECTION contacts ALTER COLUMN missing SET DESCRIPTION 'Nope'"
+                )
+                .is_err());
+            rt.checkpoint().expect("checkpoint");
+        }
+        let reopened = RedDBRuntime::with_options(options).expect("reopen");
+        assert_eq!(
+            reopened
+                .db()
+                .collection_contract("articles")
+                .unwrap()
+                .description
+                .as_deref(),
+            Some("Editorial articles")
+        );
+        let contract = reopened.db().collection_contract("contacts").unwrap();
+        assert_eq!(
+            contract.declared_columns[1].description.as_deref(),
+            Some("Account balance")
+        );
+    }
+
+    #[test]
+    fn generated_descriptions_preserve_manual_edits_and_reject_stale_versions() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        rt.execute_query("CREATE TABLE readings (email EMAIL DESCRIPTION 'Manual', amount MONEY)")
+            .expect("table");
+        let contract = rt.db().collection_contract("readings").expect("contract");
+        let suggestions = std::collections::HashMap::from([
+            ("email".to_string(), "Generated email".to_string()),
+            ("amount".to_string(), "Generated amount".to_string()),
+        ]);
+        assert!(rt
+            .db()
+            .save_generated_descriptions_if_version(
+                "readings",
+                contract.version,
+                contract.created_at_unix_ms,
+                Some("Generated collection".to_string()),
+                &suggestions
+            )
+            .expect("save generated"));
+        let generated = rt.db().collection_contract("readings").unwrap();
+        assert_eq!(
+            generated.declared_columns[0].description.as_deref(),
+            Some("Manual")
+        );
+        assert!(!generated.declared_columns[0].description_generated);
+        assert_eq!(
+            generated.declared_columns[1].description.as_deref(),
+            Some("Generated amount")
+        );
+        assert!(generated.declared_columns[1].description_generated);
+        rt.execute_query(
+            "ALTER COLLECTION readings ALTER COLUMN amount SET DESCRIPTION 'Manual amount'",
+        )
+        .expect("manual override");
+        assert!(!rt
+            .db()
+            .save_generated_descriptions_if_version(
+                "readings",
+                generated.version,
+                generated.created_at_unix_ms,
+                Some("Stale".to_string()),
+                &suggestions
+            )
+            .expect("stale rejected"));
+        let updated = rt.db().collection_contract("readings").unwrap();
+        assert_eq!(
+            updated.declared_columns[1].description.as_deref(),
+            Some("Manual amount")
+        );
+        assert!(!updated.declared_columns[1].description_generated);
+    }
+
+    #[test]
+    fn alter_collection_description_works_across_models() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        for (create, name) in [
+            ("CREATE TABLE records (id INT)", "records"),
+            ("CREATE DOCUMENT documents", "documents"),
+            ("CREATE GRAPH network", "network"),
+            ("CREATE VECTOR embeddings DIM 3", "embeddings"),
+            (
+                "CREATE TIMESERIES measurements RETENTION 90 d",
+                "measurements",
+            ),
+            ("CREATE QUEUE jobs MAX_SIZE 100", "jobs"),
+            ("CREATE KV settings", "settings"),
+        ] {
+            rt.execute_query(create).expect(create);
+            rt.execute_query(&format!(
+                "ALTER COLLECTION {name} SET DESCRIPTION 'User description'"
+            ))
+            .expect("alter collection");
+            let contract = rt.db().collection_contract(name).expect("contract");
+            assert_eq!(
+                contract.description.as_deref(),
+                Some("User description"),
+                "{name}"
+            );
+            assert!(!contract.description_generated, "{name}");
+        }
     }
 }

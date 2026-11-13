@@ -76,6 +76,7 @@ pub fn runtime_partial_cmp(
     }
 
     match (left, right) {
+        (Value::Temperature(a), Value::Temperature(b)) => return Some(a.cmp(b)),
         (Value::Timestamp(left), Value::Timestamp(right)) => return Some(left.cmp(right)),
         (Value::TimestampMs(left), Value::TimestampMs(right)) => return Some(left.cmp(right)),
         (Value::Date(left), Value::Date(right)) => return Some(left.cmp(right)),
@@ -262,6 +263,7 @@ pub fn runtime_value_text(value: &Value) -> Option<String> {
         Value::TableRef(name) => Some(name.clone()),
         Value::PageRef(page_id) => Some(format!("page:{}", page_id)),
         Value::Secret(_) | Value::Password(_) => Some("***".to_string()),
+        Value::Temperature(value) => Some(value.to_string()),
     }
 }
 

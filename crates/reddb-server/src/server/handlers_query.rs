@@ -100,7 +100,7 @@ impl RedDBServer {
                     object.insert("validation".to_string(), validation.clone());
                     return json_response(422, crate::json::Value::Object(object));
                 }
-                if err.to_string().contains("commit policy timed out") {
+                if matches!(&err, RedDBError::CommitUncertain { .. }) {
                     return json_error(504, err.to_string());
                 }
                 // Issue #769 — an aggregating executor blew its
@@ -1904,6 +1904,7 @@ pub(crate) fn constant_time_str_eq(a: &str, b: &str) -> bool {
 pub(crate) fn ndjson_error_code(err: &crate::api::RedDBError) -> &'static str {
     use crate::api::RedDBError::*;
     match err {
+        CommitUncertain { .. } => "commit_uncertain",
         NotFound(_) => "not_found",
         ReadOnly(_) => "read_only",
         InvalidConfig(_) => "invalid_config",
@@ -2542,7 +2543,7 @@ mod tests {
             )
             .expect("persisted verification default");
         store.persist().expect("publish tombstones");
-        let manager = store.get_collection("red_config").expect("config");
+        let manager = store.get_collection("red.config").expect("config");
         let pager = Arc::clone(store.pager().expect("pager"));
         let data = Arc::new(crate::storage::engine::BTree::new(pager));
         manager
@@ -3261,7 +3262,7 @@ mod tests {
             .runtime
             .db()
             .store()
-            .get_collection("red_ask_audit")
+            .get_collection("red.ask.audit")
             .is_none());
 
         for _ in 0..5 {
@@ -3971,8 +3972,8 @@ mod tests {
             .runtime
             .db()
             .store()
-            .get_collection("red_ask_audit")
-            .expect("red_ask_audit collection");
+            .get_collection("red.ask.audit")
+            .expect("red.ask.audit collection");
         manager
             .query_all(|entity| entity.data.as_row().is_some())
             .into_iter()

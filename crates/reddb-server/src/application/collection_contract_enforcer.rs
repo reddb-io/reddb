@@ -52,6 +52,8 @@ fn ensure_collection_model_contract(
     db.save_collection_contract(crate::physical::CollectionContract {
         graph_contract: None,
         name: collection.to_string(),
+        description: None,
+        description_generated: false,
         declared_model: requested_model,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
         origin: crate::physical::ContractOrigin::Implicit,
@@ -542,6 +544,8 @@ mod tests {
         CollectionContract {
             graph_contract: None,
             name: "people".to_string(),
+            description: None,
+            description_generated: false,
             declared_model: CollectionModel::Table,
             schema_mode,
             origin: ContractOrigin::Explicit,

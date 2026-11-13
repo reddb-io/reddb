@@ -68,6 +68,8 @@ pub fn is_collection_contract_decode_error(error: &std::io::Error) -> bool {
 #[derive(Debug, Clone)]
 pub struct DeclaredColumnContract {
     pub name: String,
+    pub description: Option<String>,
+    pub description_generated: bool,
     pub data_type: String,
     pub sql_type: Option<reddb_types::SqlTypeName>,
     pub not_null: bool,
@@ -87,6 +89,8 @@ pub struct DeclaredColumnContract {
 #[derive(Debug, Clone)]
 pub struct CollectionContract {
     pub name: String,
+    pub description: Option<String>,
+    pub description_generated: bool,
     pub declared_model: crate::catalog::CollectionModel,
     pub schema_mode: crate::catalog::SchemaMode,
     pub origin: ContractOrigin,

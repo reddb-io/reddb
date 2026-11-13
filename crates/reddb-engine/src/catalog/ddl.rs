@@ -19,6 +19,8 @@ pub fn collection_contract_from_create_table(
         // UnifiedEntity::created_at/updated_at. BIGINT unix-ms, NOT NULL.
         declared_columns.push(super::DeclaredColumnContract {
             name: "created_at".to_string(),
+            description: None,
+            description_generated: false,
             data_type: "BIGINT".to_string(),
             sql_type: Some(reddb_types::SqlTypeName::simple("BIGINT")),
             not_null: true,
@@ -34,6 +36,8 @@ pub fn collection_contract_from_create_table(
         });
         declared_columns.push(super::DeclaredColumnContract {
             name: "updated_at".to_string(),
+            description: None,
+            description_generated: false,
             data_type: "BIGINT".to_string(),
             sql_type: Some(reddb_types::SqlTypeName::simple("BIGINT")),
             not_null: true,
@@ -51,6 +55,8 @@ pub fn collection_contract_from_create_table(
     Ok(super::CollectionContract {
         graph_contract: None,
         name: query.name.clone(),
+        description: query.description.clone(),
+        description_generated: false,
         declared_model: super::CollectionModel::Table,
         schema_mode: super::SchemaMode::SemiStructured,
         origin: super::ContractOrigin::Explicit,
@@ -86,6 +92,8 @@ pub fn declared_column_contract_from_ddl(
 ) -> super::DeclaredColumnContract {
     super::DeclaredColumnContract {
         name: column.name.clone(),
+        description: column.description.clone(),
+        description_generated: false,
         data_type: column.data_type.clone(),
         sql_type: Some(column.sql_type.clone()),
         not_null: column.not_null,

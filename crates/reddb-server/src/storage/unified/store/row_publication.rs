@@ -43,6 +43,7 @@ pub(super) struct RowPublicationQueue {
 impl UnifiedStore {
     pub(crate) fn publish_rows(&self, rows: RowPublication) -> Result<(), StoreError> {
         assert!(!Self::deferred_store_wal_capture_active());
+        Self::validate_row_publication(&rows)?;
         if self.commit.is_none()
             || self.config.durability_mode != DurabilityMode::WalDurableGrouped
             || self.vault_publication_lock.is_owned_by_current_thread()
@@ -101,6 +102,13 @@ impl UnifiedStore {
                     .map(|(name, _)| name.len() as u64 + 16)
                     .sum::<u64>(),
             )
+    }
+
+    fn validate_row_publication(rows: &RowPublication) -> Result<(), StoreError> {
+        for (collection, entity, _) in rows.inserts.iter().chain(&rows.replacements) {
+            super::config_keys::validate_config_entity(collection, entity)?;
+        }
+        Ok(())
     }
 
     fn enqueue_row_preparation(
@@ -219,6 +227,9 @@ impl UnifiedStore {
 
     fn publish_row_group(&self, rows: Vec<RowPublication>) -> Result<(), StoreError> {
         let _publication = self.vault_publication_lock.lock();
+        for request in &rows {
+            Self::validate_row_publication(request)?;
+        }
         if rows.iter().all(|rows| {
             rows.inserts.is_empty() && rows.replacements.is_empty() && rows.deletes.is_empty()
         }) {
@@ -300,7 +311,7 @@ impl UnifiedStore {
             }
             Ok(())
         })();
-        let actions = capture.finish();
+        let mut actions = capture.finish();
         let committed = staged.and_then(|()| {
             #[cfg(test)]
             if self
@@ -316,11 +327,15 @@ impl UnifiedStore {
                     && !self.is_read_only()
             }) {
                 let track = self.config.resident_memory_bytes_max.is_some();
+                let epoch_guard = self.append_result_cache_epoch_action(&mut actions.actions)?;
                 let references = commit
                     .append_ready_actions(&actions.actions, track)
                     .map_err(StoreError::Io)?;
                 if track {
                     self.remember_checkpoint_rows(actions.actions, references);
+                }
+                if let Some(guard) = epoch_guard {
+                    guard.commit();
                 }
                 Ok(())
             } else {

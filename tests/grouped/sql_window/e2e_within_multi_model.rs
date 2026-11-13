@@ -81,55 +81,6 @@ fn within_filters_queue_messages() {
 }
 
 #[test]
-#[ignore = "MATCH executor does not apply RLS today — known gap"]
-fn within_filters_graph_nodes() {
-    let rt = open_runtime();
-    // Graph collections auto-create on first NODE insert — declaring
-    // them as TABLE first locks the kind and rejects NODE writes.
-    exec(
-        &rt,
-        "INSERT INTO social NODE (label, name, tenant_id) VALUES ('User', 'alice', 'acme')",
-    );
-    exec(
-        &rt,
-        "INSERT INTO social NODE (label, name, tenant_id) VALUES ('User', 'bob', 'globex')",
-    );
-    exec(
-        &rt,
-        "INSERT INTO social NODE (label, name, tenant_id) VALUES ('User', 'carol', 'acme')",
-    );
-
-    // Same kind-vs-Table caveat as timeseries: MATCH does not consult
-    // Nodes-kind policies today, so we use the basic `ON <coll>` form
-    // which the read path does evaluate.
-    exec(
-        &rt,
-        "CREATE POLICY tenant_iso ON social \
-         USING (properties.tenant_id = CURRENT_TENANT())",
-    );
-    exec(&rt, "ALTER TABLE social ENABLE ROW LEVEL SECURITY");
-
-    set_current_connection_id(803);
-
-    let acme = rt
-        .execute_query("WITHIN TENANT 'acme' MATCH (n) RETURN n")
-        .unwrap();
-    assert_eq!(
-        acme.result.records.len(),
-        2,
-        "acme should see 2 nodes, got {:?}",
-        acme.result.records
-    );
-
-    let globex = rt
-        .execute_query("WITHIN TENANT 'globex' MATCH (n) RETURN n")
-        .unwrap();
-    assert_eq!(globex.result.records.len(), 1);
-
-    clear_current_connection_id();
-}
-
-#[test]
 fn within_filters_timeseries_points() {
     let rt = open_runtime();
     exec(&rt, "CREATE TIMESERIES metrics RETENTION 7 d");

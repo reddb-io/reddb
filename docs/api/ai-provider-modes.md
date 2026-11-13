@@ -1,8 +1,8 @@
-# AI provider modes (`red.config.ai.provider`)
+# AI provider modes (`ai.provider` in `red.config`)
 
 RedDB AI consumers select their provider through `REDDB_AI_PROVIDER`,
-`red.config.ai.ask.provider`, or `red.config.ai.inference.provider`.
-`red.config.ai.provider` (or `REDDB_AI_PROVIDER_MODE`) remains a legacy fallback
+`ai.ask.provider`, or `ai.inference.provider` in `red.config`.
+`ai.provider` (or `REDDB_AI_PROVIDER_MODE`) remains a legacy fallback
 when no provider is selected. A mode setting does not replace an explicitly
 configured vendor or gateway. New gateway configurations should use the
 `openai-compat` or `red-router` provider token and supply both endpoint and key.
@@ -23,7 +23,7 @@ Hyphen and underscore spellings are both accepted (e.g.
 Set the mode via the HTTP config endpoint:
 
 ```bash
-curl -X PUT http://127.0.0.1:5000/config/red.config.ai.provider \
+curl -X PUT http://127.0.0.1:5000/config/ai.provider \
   -H 'Content-Type: application/json' \
   -d '{"value":"openai-compat"}'
 ```
@@ -31,11 +31,11 @@ curl -X PUT http://127.0.0.1:5000/config/red.config.ai.provider \
 Or via SQL:
 
 ```sql
-SET CONFIG red.config.ai.provider = 'anthropic-native';
+SET CONFIG ai.provider = 'anthropic-native';
 ```
 
 When `openai-compat` is the fallback, supply the endpoint at
-`red.config.ai.providers.openai-compat.base_url` (or
+`ai.providers.openai-compat.base_url` in `red.config` (or
 `REDDB_OPENAI_COMPAT_API_BASE`) and the API key through the Vault or
 `REDDB_OPENAI_COMPAT_API_KEY`. Registering through `/ai/credentials` requires
 both fields. See [BYOK gateways and RedRouter](../guides/ai-providers.md#byok-gateways-and-redrouter).
@@ -104,10 +104,10 @@ different capability set.
 
 ## Relationship to provider task pointers
 
-`red.config.ai.ask.provider` and `red.config.ai.inference.provider` select the
+`ai.ask.provider` and `ai.inference.provider` in `red.config` select the
 provider identity used for model, endpoint, and credential resolution.
-`red.config.ai.embeddings.provider` selects the embedding provider independently.
+`ai.embeddings.provider` selects the embedding provider independently.
 The legacy mode selector is consulted only when no generation provider has
 been selected; `openai-compat` maps to the named `OpenAiCompat` provider rather
-than an empty custom provider ID. `red.config.ai.default.provider` is removed;
-writing it returns an error naming the task pointer to use instead.
+than an empty custom provider ID. If neither ASK nor the inference task pointer
+selects a provider, `ai.default.provider` is the global fallback.

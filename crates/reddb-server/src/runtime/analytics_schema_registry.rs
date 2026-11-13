@@ -3,7 +3,7 @@
 //! breaking-change rejection.
 //!
 //! Owns `(event_name, version) → schema_json` mappings persisted in
-//! `red_config`, validates payloads at insert time, and exposes the
+//! `red.config`, validates payloads at insert time, and exposes the
 //! registered set for the `red.schema_registry` virtual table.
 //!
 //! Re-registering an existing `event_name` is allowed iff the change
@@ -16,9 +16,9 @@
 //! incompatible change through the same one.
 //!
 //! Persistence shape: a single JSON document stored under
-//! `red.analytics.schema_registry.entries_json` as a Text value. It
+//! `analytics.schema_registry.entries_json` as a Text value. It
 //! contains an array of entries `{event_name, version, schema_json,
-//! registered_at_ms}`. `red_config` is append-only, so we read by
+//! registered_at_ms}`. `red.config` is append-only, so we read by
 //! scanning that collection and keeping the row with the largest
 //! engine-assigned `EntityId` (most recent write) — same trick
 //! `signed_writes_kind` uses.
@@ -42,7 +42,7 @@ use reddb_types::Value;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const REGISTRY_KEY: &str = "red.analytics.schema_registry.entries_json";
+const REGISTRY_KEY: &str = "analytics.schema_registry.entries_json";
 
 /// One registered schema row.
 #[derive(Debug, Clone, PartialEq)]
@@ -152,12 +152,12 @@ fn now_ms() -> u128 {
 }
 
 /// Read the *latest* Text payload for the registry key out of
-/// `red_config`. `red_config` is append-only — `UnifiedStore::get_config`
+/// `red.config`. `red.config` is append-only — `UnifiedStore::get_config`
 /// returns the first matching row, but the most-recent write wins
 /// for us. We sort by `EntityId` descending and keep the first
 /// matching row — identical to `signed_writes_kind::read_latest_config`.
 fn read_latest_registry_json(store: &UnifiedStore) -> Option<String> {
-    let manager = store.get_collection("red_config")?;
+    let manager = store.get_collection("red.config")?;
     let mut all = manager.query_all(|_| true);
     all.sort_by_key(|b| std::cmp::Reverse(b.id.raw()));
     for entity in all {

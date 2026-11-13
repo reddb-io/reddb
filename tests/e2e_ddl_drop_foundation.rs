@@ -92,6 +92,8 @@ fn register_collection(rt: &RedDBRuntime, name: &str, model: CollectionModel) {
         .save_collection_contract(CollectionContract {
             graph_contract: None,
             name: name.to_string(),
+            description: None,
+            description_generated: false,
             declared_model: model,
             schema_mode: SchemaMode::Dynamic,
             origin: ContractOrigin::Explicit,

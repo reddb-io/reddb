@@ -127,6 +127,8 @@ const ARGS_H3_RING: &[DataType] = &[DataType::UnsignedInteger, DataType::Integer
 const ARGS_H3_POINT: &[DataType] = &[DataType::GeoPoint, DataType::Integer];
 const ARGS_VERIFY_PWD: &[DataType] = &[DataType::Password, DataType::Text];
 const ARGS_MONEY: &[DataType] = &[DataType::Money];
+const ARGS_TEMPERATURE: &[DataType] = &[DataType::Temperature];
+const ARGS_TEMPERATURE_VALUE: &[DataType] = &[DataType::Temperature, DataType::Text];
 const ARGS_ONE_TEXT: &[DataType] = &[DataType::Text];
 const ARGS_TWO_TEXT_ANY: &[DataType] = &[DataType::Text, DataType::Text];
 
@@ -861,6 +863,27 @@ pub const FUNCTION_CATALOG: &[FunctionEntry] = &[
         "MONEY",
         ARGS_ONE_TEXT,
         DataType::Money,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "TEMPERATURE",
+        ARGS_ONE_TEXT,
+        DataType::Temperature,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "TEMPERATURE_UNIT",
+        ARGS_TEMPERATURE,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "TEMPERATURE_VALUE",
+        ARGS_TEMPERATURE_VALUE,
+        DataType::Float,
         FunctionKind::Scalar,
         false,
     ),

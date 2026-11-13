@@ -113,12 +113,18 @@ fn active_rebootstrap_matches_ready_marker(
             data_path.display()
         )
     })?;
+    store.normalize_red_config_keys().map_err(|err| {
+        format!(
+            "normalize config keys in active replica rebootstrap candidate {}: {err}",
+            data_path.display()
+        )
+    })?;
     Ok(matches!(
-        store.get_config("red.replication.last_applied_lsn"),
+        store.get_config("replication.last_applied_lsn"),
         Some(reddb_types::Value::Integer(value))
             if value >= 0 && value as u64 == ready.checkpoint_lsn
     ) || matches!(
-        store.get_config("red.replication.last_applied_lsn"),
+        store.get_config("replication.last_applied_lsn"),
         Some(reddb_types::Value::UnsignedInteger(value))
             if value == ready.checkpoint_lsn
     ))
@@ -188,6 +194,7 @@ fn operational_store_from_embedded_artifact(
         return Ok(None);
     };
     let source = UnifiedStore::load_from_bytes_with_config(&snapshot, config.clone())?;
+    source.normalize_red_config_keys()?;
 
     std::fs::remove_file(path)?;
     let store = UnifiedStore::open_with_config(path, config)?;
@@ -387,15 +394,13 @@ impl RedDB {
             }
         }
 
-        if embedded_single_file_selected(options) {
-            let local_path = options.resolved_path(reddb_file::default_database_path());
-            if promote_ready_replica_rebootstrap(&local_path, options.read_only)? {
-                tracing::info!(
-                    target: "reddb::replication::rebootstrap",
-                    path = %local_path.display(),
-                    "promoted staged replica rebootstrap before opening database"
-                );
-            }
+        let local_path = options.resolved_path(reddb_file::default_database_path());
+        if promote_ready_replica_rebootstrap(&local_path, options.read_only)? {
+            tracing::info!(
+                target: "reddb::replication::rebootstrap",
+                path = %local_path.display(),
+                "promoted staged replica rebootstrap before opening database"
+            );
         }
 
         let mut replica_bootstrap = None;
@@ -424,10 +429,55 @@ impl RedDB {
             }
         }
 
+        // Keep the writer fence across hydration and open: replacing a cached
+        // snapshot must never overwrite another live runtime's local artifact.
+        let mut bootstrap_writer_lock = None;
         // If remote backend configured, download before opening
         if let Some(backend) = &options.remote_backend {
             let local_path = options.resolved_path(reddb_file::default_database_path());
-            if !local_path.exists() {
+            if let Some(snapshot_key) = &options.remote_bootstrap_key {
+                if options.read_only {
+                    return Err(
+                        "serverless snapshot hydration requires a writable local cache".into(),
+                    );
+                }
+                if embedded_single_file_selected(options) {
+                    bootstrap_writer_lock =
+                        Some(reddb_file::EmbeddedRdbWriterLock::acquire(&local_path)?);
+                }
+                if let Some(parent) = local_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let snapshot = reddb_file::ServerlessWriterLeaseTempFile::new("snapshot-hydration");
+                match backend.download(snapshot_key, snapshot.path()) {
+                    Ok(true) => {
+                        if bootstrap_writer_lock.is_some() {
+                            std::fs::copy(snapshot.path(), &local_path)?;
+                        } else {
+                            // Operational hydration must use an isolated cache,
+                            // never replace a live native pager or reuse its WAL.
+                            let mut output = std::fs::OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .open(&local_path)?;
+                            std::io::copy(&mut File::open(snapshot.path())?, &mut output)?;
+                            output.sync_all()?;
+                        }
+                    }
+                    Ok(false) => {
+                        return Err(format!(
+                            "serverless bootstrap snapshot '{snapshot_key}' does not exist"
+                        )
+                        .into());
+                    }
+                    Err(err) => {
+                        return Err(format!(
+                            "serverless bootstrap snapshot download failed: {err}"
+                        )
+                        .into());
+                    }
+                }
+            } else if !local_path.exists() {
                 // Ensure parent directory exists for the download target
                 if let Some(parent) = local_path.parent() {
                     if !parent.exists() {
@@ -524,7 +574,9 @@ impl RedDB {
         // Taken before reading the snapshot: every writer holds the whole
         // store in memory and checkpoints it on close, so a second writer
         // process would silently discard the first one's commits.
-        let embedded_writer_lock = if embedded_single_file_selected(options)
+        let embedded_writer_lock = if bootstrap_writer_lock.is_some() {
+            bootstrap_writer_lock
+        } else if embedded_single_file_selected(options)
             && !options.bounded_disk_residency
             && !options.read_only
             && (path_buf.exists() || options.create_if_missing)
@@ -686,12 +738,27 @@ impl RedDB {
             )
         };
 
+        if options.read_only {
+            store.require_normalized_red_config_keys()?;
+        } else {
+            let normalized_config_keys = store.normalize_red_config_keys()?;
+            if normalized_config_keys > 0 {
+                tracing::warn!(
+                    migrated = normalized_config_keys,
+                    "normalized legacy red.config keys before database initialization"
+                );
+            }
+        }
+
         let remote_key = options.remote_key.clone();
 
         let store = Arc::new(store);
+        // Embedded WAL replay may have advanced the result-cache epoch after
+        // loading the snapshot; publish that recovered value before boot writes.
+        store.load_result_cache_epoch()?;
         if let Some((snapshot_lsn, replica_id)) = &replica_bootstrap {
             store.set_config_tree(
-                "red.replication",
+                "replication",
                 &crate::json!({
                     "last_applied_lsn": snapshot_lsn,
                     "replica_id": replica_id,
@@ -871,6 +938,13 @@ impl RedDB {
         let Some(path) = &self.path else {
             return Ok(());
         };
+        self.upload_checkpoint_to_remote_backend(path)
+    }
+
+    pub(crate) fn upload_checkpoint_to_remote_backend(
+        &self,
+        path: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if let (Some(backend), Some(key)) = (&self.remote_backend, &self.remote_key) {
             backend
                 .upload(path, key)

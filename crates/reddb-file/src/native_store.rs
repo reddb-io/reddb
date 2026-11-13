@@ -35,9 +35,11 @@ pub const STORE_VERSION_V10: u32 = 10;
 /// metric tag maps.
 pub const STORE_VERSION_V11: u32 = 11;
 pub const STORE_VERSION_V12: u32 = 12;
-/// Optional entity branch provenance and independent branch deletion stamps.
+/// Persisted SQL results require an epoch recorded with the data WAL.
 pub const STORE_VERSION_V13: u32 = 13;
-pub const STORE_VERSION_CURRENT: u32 = STORE_VERSION_V13;
+/// Optional entity branch provenance and independent branch deletion stamps.
+pub const STORE_VERSION_V14: u32 = 14;
+pub const STORE_VERSION_CURRENT: u32 = STORE_VERSION_V14;
 
 pub const METADATA_MAGIC: &[u8; 4] = b"RDM2";
 pub const METADATA_HEADER_BYTES: usize = 12;
@@ -442,27 +444,38 @@ pub fn decode_native_paged_metadata_header(
 /// Read the publication epoch without following any collection's tree. Undo
 /// recovery must determine this boundary before loading possibly changed pages.
 pub fn decode_native_paged_catalog_ownership_epoch(data: &[u8]) -> RdbFileResult<Option<u64>> {
+    decode_catalog_ownership_at(data, &mut 0)
+}
+
+pub fn decode_native_paged_catalog_tree_proofs(
+    data: &[u8],
+) -> RdbFileResult<Option<crate::page_proof::CatalogProofs>> {
     let mut position = 0;
+    decode_catalog_ownership_at(data, &mut position)?;
+    crate::page_proof::decode_catalog(data, &mut position)
+}
+
+fn decode_catalog_ownership_at(data: &[u8], position: &mut usize) -> RdbFileResult<Option<u64>> {
     let collections = match decode_native_paged_metadata_header(data)? {
         Some(header) => {
-            position = METADATA_HEADER_BYTES;
+            *position = METADATA_HEADER_BYTES;
             header.collection_count
         }
-        None => read_native_u32(data, &mut position, "truncated collection count")?,
+        None => read_native_u32(data, position, "truncated collection count")?,
     };
     for _ in 0..collections {
-        decode_native_paged_collection_root(data, &mut position)?;
+        decode_native_paged_collection_root(data, position)?;
     }
-    if position == data.len() {
+    if *position == data.len() {
         return Ok(None);
     }
-    let cross_refs = read_native_u32(data, &mut position, "truncated cross reference count")?;
+    let cross_refs = read_native_u32(data, position, "truncated cross reference count")?;
     for _ in 0..cross_refs {
-        decode_native_paged_cross_ref(data, &mut position)?;
+        decode_native_paged_cross_ref(data, position)?;
     }
-    decode_native_paged_retired_trees(data, &mut position)?;
-    decode_native_paged_deferred_pages(data, &mut position)?;
-    decode_native_paged_ownership_epoch(data, &mut position)
+    decode_native_paged_retired_trees(data, position)?;
+    decode_native_paged_deferred_pages(data, position)?;
+    decode_native_paged_ownership_epoch(data, position)
 }
 
 pub fn encode_native_len_prefixed_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -643,6 +656,7 @@ pub fn is_supported_store_version(version: u32) -> bool {
             | STORE_VERSION_V11
             | STORE_VERSION_V12
             | STORE_VERSION_V13
+            | STORE_VERSION_V14
     )
 }
 

@@ -93,9 +93,10 @@ this contract.
 Enabling a contract validates existing data on every live VCS branch. Contract
 changes require active transactions to finish and apply to the collection across
 branches. Inserts, updates, deletes, transaction commits, merges and changes of
-VCS HEAD validate the resulting graph. Delete referencing edges before deleting
+VCS data view validate the resulting graph. Delete referencing edges before deleting
 a vertex, or delete both in one statement. Historical reads retain their original
-data; selecting an invalid historical state as the new HEAD is rejected.
+data; installing an invalid historical data view through hard reset or merge is
+rejected. Soft/mixed reset only moves commit references and retains working data.
 
 Validation scans the projected graph and uses query memory admission. It is an
 opt-in integrity check with a cost proportional to the graph size. The contract

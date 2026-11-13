@@ -64,10 +64,10 @@ impl RedDBRuntime {
                 self.validate_graph_projection(collection, graph, &snapshot, &[], &[])?;
             }
             // Earlier readers must reject the file instead of ignoring a contract
-            // they cannot enforce. V13 also carries branch provenance.
-            if store.format_version() < reddb_file::native_store::STORE_VERSION_V13 {
+            // they cannot enforce. V14 also carries branch provenance.
+            if store.format_version() < reddb_file::native_store::STORE_VERSION_V14 {
                 let previous = store.format_version();
-                store.set_format_version(reddb_file::native_store::STORE_VERSION_V13);
+                store.set_format_version(reddb_file::native_store::STORE_VERSION_V14);
                 if store.pager().is_some() {
                     if let Err(error) = store.persist() {
                         store.set_format_version(previous);

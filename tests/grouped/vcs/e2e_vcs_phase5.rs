@@ -1,5 +1,5 @@
 //! Phase 5 e2e: cherry-pick + revert commit bookkeeping, non-FF
-//! merge conflict materialisation in `red_conflicts`.
+//! merge conflict materialisation in `red.vcs.conflicts`.
 //!
 //! These tests cover the commit-graph + merge-state layer. Data
 //! body reconciliation lands in Phase 6; here we validate that the

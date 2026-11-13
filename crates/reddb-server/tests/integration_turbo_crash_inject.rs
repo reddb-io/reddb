@@ -10,14 +10,16 @@
 //!
 //! Contract (per issue #673 acceptance criteria):
 //!
-//! - A kill at `BeforeWalFsync` loses the in-flight INSERT entirely
-//!   (no partial vector left searchable; the WAL record never landed).
+//! - A kill at `BeforeWalFsync` may leave the authoritative entity
+//!   committed; recovery must expose either a complete vector or no vector.
 //! - A kill at `BeforeIndexCommit` or `BeforeExtentFsync` is recovered
 //!   on boot: the INSERT is fully present (WAL had fsync'd) and the
 //!   deterministic codec seed reproduces an identical extent layout.
 //! - A kill at `MidCheckpoint` does not corrupt the WAL — recovery
 //!   replays from the prior checkpoint LSN and converges on the same
 //!   logical state.
+//! - Injected WAL and extent I/O failures are returned to the caller;
+//!   the authoritative entity remains available for deterministic rebuild.
 //!
 //! Gated behind the `turbo-crash-inject` Cargo feature so the
 //! panicking installable injector pathway is available outside the
@@ -82,6 +84,34 @@ fn db_path(tag: &str) -> TempDb {
 struct PanicOnce {
     target: InjectionPoint,
     fired: std::sync::atomic::AtomicBool,
+}
+
+struct IoFailOnce {
+    target: InjectionPoint,
+    fired: std::sync::atomic::AtomicBool,
+}
+
+impl TurboCrashInjector for IoFailOnce {
+    fn before(&self, _point: InjectionPoint) {}
+
+    fn io_error(&self, point: InjectionPoint) -> Option<std::io::Error> {
+        (point == self.target
+            && self
+                .fired
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok())
+        .then(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                format!("injected vector.turbo I/O failure at {point:?}"),
+            )
+        })
+    }
 }
 
 impl TurboCrashInjector for PanicOnce {
@@ -172,6 +202,72 @@ fn install_panic_injector(point: InjectionPoint) -> Arc<PanicOnce> {
     });
     install(Some(injector.clone() as Arc<dyn TurboCrashInjector>));
     injector
+}
+
+fn install_io_failure(point: InjectionPoint) -> Arc<IoFailOnce> {
+    let injector = Arc::new(IoFailOnce {
+        target: point,
+        fired: std::sync::atomic::AtomicBool::new(false),
+    });
+    install(Some(injector.clone() as Arc<dyn TurboCrashInjector>));
+    injector
+}
+
+fn assert_failed_insert_recovers(point: InjectionPoint, content: &str) {
+    let path = db_path(content);
+    let vector = synth_vector(1);
+    {
+        let options = RedDBOptions::persistent(&path)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true);
+        let rt = RedDBRuntime::with_options(options).expect("boot paged runtime");
+        rt.execute_query("CREATE COLLECTION cx KIND vector.turbo DIM 8 METRIC cosine")
+            .expect("create");
+        insert_vector(&rt, "cx", "survivor", &synth_vector(0));
+
+        let injector = install_io_failure(point);
+        let error = rt
+            .execute_query(&format!(
+                "INSERT INTO cx VECTOR (embedding, content) VALUES ({vector:?}, '{content}')"
+            ))
+            .expect_err("durable vector.turbo I/O failure must not be acknowledged");
+        install(None);
+        assert!(injector.fired.load(std::sync::atomic::Ordering::Acquire));
+        assert!(error
+            .to_string()
+            .contains("injected vector.turbo I/O failure"));
+        assert!(
+            search_contents(&rt, "cx", &vector, 5)
+                .iter()
+                .any(|candidate| candidate == content),
+            "the authoritative entity must remain searchable after the uncertain write"
+        );
+    }
+
+    let rt = RedDBRuntime::with_options(
+        RedDBOptions::persistent(&path)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true),
+    )
+    .expect("cold reopen after injected I/O failure");
+    assert!(
+        search_contents(&rt, "cx", &vector, 5)
+            .iter()
+            .any(|candidate| candidate == content),
+        "the authoritative entity must rebuild vector.turbo after cold reopen"
+    );
+}
+
+#[test]
+fn wal_io_failure_is_reported_and_recovers_from_authoritative_entity() {
+    let _serial = injector_test_lock().lock();
+    assert_failed_insert_recovers(InjectionPoint::BeforeWalFsync, "wal-io-failure");
+}
+
+#[test]
+fn extent_io_failure_is_reported_and_recovers_from_authoritative_entity() {
+    let _serial = injector_test_lock().lock();
+    assert_failed_insert_recovers(InjectionPoint::BeforeExtentFsync, "extent-io-failure");
 }
 
 /// `BeforeWalFsync` fires after the entity record has already

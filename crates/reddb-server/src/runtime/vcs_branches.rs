@@ -4,7 +4,7 @@ use super::*;
 use reddb_engine::transaction::read::BranchReadView;
 use std::collections::BTreeMap;
 
-const VIEWS: &str = "red_vcs_branch_views";
+const VIEWS: &str = "red.vcs.branch_views";
 
 pub(super) fn encode_epochs(view: &BranchReadView) -> Value {
     Value::Array(

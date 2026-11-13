@@ -177,6 +177,28 @@ impl RedDBRuntime {
     ) -> RedDBResult<()> {
         use reddb_rql::ast::ConfigCommand;
         match cmd {
+            ConfigCommand::Put {
+                collection, key, ..
+            }
+            | ConfigCommand::Get { collection, key }
+            | ConfigCommand::Resolve { collection, key }
+            | ConfigCommand::Rotate {
+                collection, key, ..
+            }
+            | ConfigCommand::Delete { collection, key }
+            | ConfigCommand::History { collection, key }
+            | ConfigCommand::Watch {
+                collection, key, ..
+            } => validate_red_config_content_key(collection, key)?,
+            ConfigCommand::List {
+                collection,
+                prefix: Some(prefix),
+                ..
+            } => validate_red_config_content_key(collection, prefix)?,
+            ConfigCommand::List { prefix: None, .. }
+            | ConfigCommand::InvalidVolatileOperation { .. } => {}
+        }
+        match cmd {
             ConfigCommand::InvalidVolatileOperation { operation, .. } => {
                 Err(invalid_config_volatility(operation))
             }
@@ -934,6 +956,8 @@ impl RedDBRuntime {
             .save_collection_contract(CollectionContract {
                 graph_contract: None,
                 name: collection.to_string(),
+                description: None,
+                description_generated: false,
                 declared_model: CollectionModel::Config,
                 schema_mode: SchemaMode::Dynamic,
                 origin: ContractOrigin::Explicit,
@@ -1161,15 +1185,15 @@ impl RedDBRuntime {
             principal_is_admin_role: role == crate::auth::Role::Admin,
             principal_is_platform_scoped: principal_id.tenant.is_none(),
         };
-        let managed_key = if collection == "red.config" {
-            format!("red.config.{key}")
-        } else {
-            key.to_string()
-        };
         let gate = crate::auth::managed_config::ManagedConfigGate::new(
             self.inner.config_registry.as_ref(),
         );
-        match gate.check_write(&auth_store, &principal_id, &ctx, &managed_key) {
+        let decision = if collection == "red.config" {
+            gate.check_red_config_write(&auth_store, &principal_id, &ctx, key)
+        } else {
+            gate.check_write(&auth_store, &principal_id, &ctx, key)
+        };
+        match decision {
             crate::auth::managed_config::ManagedConfigDecision::Allow {
                 entry_id,
                 resource_type,
@@ -1201,7 +1225,7 @@ impl RedDBRuntime {
             } => {
                 return ConfigMutationAuthz::Denied {
                     reason: format!(
-                        "permission denied: managed config mutation blocked for `{managed_key}`: {reason}"
+                        "permission denied: managed config mutation blocked for `{key}`: {reason}"
                     ),
                     evidence: ConfigMutationEvidence {
                         id: entry_id,
@@ -1401,20 +1425,20 @@ impl RedDBRuntime {
             principal_is_platform_scoped: principal_id.tenant.is_none(),
         };
         if action == "config:write" {
-            let managed_key = if collection == "red.config" {
-                format!("red.config.{key}")
-            } else {
-                key.to_string()
-            };
             let gate = crate::auth::managed_config::ManagedConfigGate::new(
                 self.inner.config_registry.as_ref(),
             );
-            match gate.check_write(&auth_store, &principal_id, &ctx, &managed_key) {
+            let decision = if collection == "red.config" {
+                gate.check_red_config_write(&auth_store, &principal_id, &ctx, key)
+            } else {
+                gate.check_write(&auth_store, &principal_id, &ctx, key)
+            };
+            match decision {
                 crate::auth::managed_config::ManagedConfigDecision::PassThrough { .. } => {}
                 crate::auth::managed_config::ManagedConfigDecision::Allow { .. } => return Ok(()),
                 crate::auth::managed_config::ManagedConfigDecision::Deny { reason, .. } => {
                     return Err(format!(
-                        "permission denied: managed config mutation blocked for `{managed_key}`: {reason}"
+                        "permission denied: managed config mutation blocked for `{key}`: {reason}"
                     ));
                 }
             }
@@ -1577,6 +1601,19 @@ impl RedDBRuntime {
         }
         self.audit_log().record_event(builder.build());
     }
+}
+
+pub(super) fn validate_red_config_content_key(collection: &str, key: &str) -> RedDBResult<()> {
+    let normalized_collection = collection.to_ascii_lowercase();
+    let is_red_config =
+        reddb_engine::storage::system_collection_names::canonical_or_self(&normalized_collection)
+            == "red.config";
+    if is_red_config && key.starts_with("red.") {
+        return Err(RedDBError::Query(format!(
+            "config key `{key}` is invalid inside red.config: omit the redundant `red.` prefix"
+        )));
+    }
+    Ok(())
 }
 
 /// `SecretRefGuard` — returns `true` when the storage value carries the

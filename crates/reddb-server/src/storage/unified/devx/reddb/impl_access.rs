@@ -811,6 +811,7 @@ impl RedDB {
             Value::Currency(c) => Some(String::from_utf8_lossy(c).to_string()),
             Value::AssetCode(code) => Some(code.clone()),
             Value::Money { .. } => Some(value.display_string()),
+            Value::Temperature(_) => Some(value.display_string()),
             Value::ColorAlpha([r, g, b, a]) => {
                 Some(format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a))
             }

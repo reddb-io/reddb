@@ -23,7 +23,44 @@ pub const PAGE_SECONDARY_INDEX_FILE_VERSION: u32 = 0x0001_0005;
 /// Legacy recovery output: identity high-water marks are unknown and every
 /// writer must refuse this file. Older readers reject the version outright.
 pub const PAGE_RECOVERY_READ_ONLY_FILE_VERSION: u32 = 0x0001_0006;
-pub const PAGE_FILE_VERSION: u32 = PAGE_RECOVERY_READ_ONLY_FILE_VERSION;
+/// Result-cache epoch fencing for resident paged stores.
+pub const PAGE_RESULT_CACHE_FILE_VERSION: u32 = 0x0001_0007;
+/// Result-cache epoch fencing for disk-resident paged stores.
+pub const PAGE_RESULT_CACHE_DISK_FILE_VERSION: u32 = 0x0001_0008;
+/// The first version whose superblock declares mandatory reader capabilities.
+pub const PAGE_REQUIRED_CAPABILITIES_FILE_VERSION: u32 = 0x0001_0009;
+pub const PAGE_FILE_VERSION: u32 = PAGE_REQUIRED_CAPABILITIES_FILE_VERSION;
+
+/// Native measured-temperature values may appear in entity payloads.
+pub const FILE_CAPABILITY_TEMPERATURE: u64 = 1 << 0;
+/// The file's published trees require a disk-resident writer.
+pub const FILE_CAPABILITY_DISK_RESIDENCY: u64 = 1 << 1;
+/// A copy-on-write catalog is independently sealed by both superblock copies.
+pub const FILE_CAPABILITY_CATALOG_ROOT: u64 = 1 << 2;
+/// Recovery output whose identity high-water marks are unknown cannot admit writers.
+pub const FILE_CAPABILITY_RECOVERY_READ_ONLY: u64 = 1 << 3;
+/// Published catalog roots carry independently sealed tree-image maps.
+pub const FILE_CAPABILITY_TREE_PROOFS: u64 = 1 << 4;
+/// Double-write frames require independent superblock publication authority.
+pub const FILE_CAPABILITY_DWB_PUBLICATION: u64 = 1 << 5;
+// Freeze the old entry point's reader contract. An older engine may link a
+// newer compatible codec crate without implementing its new recovery rules.
+const FILE_CAPABILITIES_LEGACY_HEADER: u64 =
+    FILE_CAPABILITY_TEMPERATURE | FILE_CAPABILITY_DISK_RESIDENCY;
+/// Capabilities understood by this reader. Unknown mandatory bits are fatal.
+pub const FILE_CAPABILITIES_SUPPORTED: u64 = FILE_CAPABILITY_TEMPERATURE
+    | FILE_CAPABILITY_DISK_RESIDENCY
+    | FILE_CAPABILITY_CATALOG_ROOT
+    | FILE_CAPABILITY_RECOVERY_READ_ONLY
+    | FILE_CAPABILITY_TREE_PROOFS
+    | FILE_CAPABILITY_DWB_PUBLICATION;
+
+/// Whether a pre-capability format version implies disk residency.
+/// Capability-aware callers must use [`DatabaseHeader::requires_disk_residency`].
+pub fn page_format_is_disk_resident(version: u32) -> bool {
+    (PAGE_DISK_RESIDENCY_FILE_VERSION..PAGE_REQUIRED_CAPABILITIES_FILE_VERSION).contains(&version)
+        && version != PAGE_RESULT_CACHE_FILE_VERSION
+}
 
 /// Paged database page size.
 pub const PAGED_PAGE_SIZE: usize = 16_384;
@@ -344,7 +381,88 @@ const DB_VECTOR_ARTIFACT_PAGE_OFFSET: usize = PAGED_PAGE_HEADER_SIZE + 180;
 const DB_VECTOR_ARTIFACT_CHECKSUM_OFFSET: usize = PAGED_PAGE_HEADER_SIZE + 184;
 const DB_CHECKPOINT_IN_PROGRESS_OFFSET: usize = PAGED_PAGE_HEADER_SIZE + 192;
 const DB_CHECKPOINT_TARGET_LSN_OFFSET: usize = PAGED_PAGE_HEADER_SIZE + 193;
-const DB_HEADER_MIN_LEN: usize = DB_CHECKPOINT_TARGET_LSN_OFFSET + 8;
+const DB_REQUIRED_CAPABILITIES_OFFSET: usize = PAGED_PAGE_HEADER_SIZE + 208;
+const DB_HEADER_MIN_LEN: usize = DB_REQUIRED_CAPABILITIES_OFFSET + 8;
+// Keep the legacy encryption envelope (bytes 64..160) and all existing fields intact.
+const DB_MANIFEST_REFERENCE_OFFSET: usize = 256;
+const DB_MANIFEST_REFERENCE_END: usize = DB_MANIFEST_REFERENCE_OFFSET + 36;
+const _: () = assert!(DB_MANIFEST_REFERENCE_END < PAGED_SUPERBLOCK_TRAILER_OFFSET);
+// Maintained by protected page I/O, under the superblock publication lock.
+// Ordinary DatabaseHeader encoding preserves this extension from the newest
+// slot instead of copying stale publication state from the header cache.
+const DB_DWB_PUBLICATION_OFFSET: usize = 296;
+const DB_DWB_PUBLICATION_END: usize = DB_DWB_PUBLICATION_OFFSET + 40;
+const _: () = assert!(DB_MANIFEST_REFERENCE_END <= DB_DWB_PUBLICATION_OFFSET);
+const _: () = assert!(DB_DWB_PUBLICATION_END < PAGED_SUPERBLOCK_TRAILER_OFFSET);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DwbPhase {
+    Preparing = 1,
+    Ready = 2,
+    Consumed = 3,
+}
+
+/// Authority over the complete raw frame, including encrypted page images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DwbPublication {
+    pub phase: DwbPhase,
+    pub frame_bytes: u32,
+    pub digest: [u8; 32],
+}
+
+pub fn dwb_frame_digest(bytes: &[u8]) -> [u8; 32] {
+    *blake3::hash(bytes).as_bytes()
+}
+
+pub fn database_header_dwb_publication(
+    page: &[u8],
+) -> Result<Option<DwbPublication>, HeaderPublicationError> {
+    ensure_len(page, DB_DWB_PUBLICATION_END)?;
+    let field = &page[DB_DWB_PUBLICATION_OFFSET..DB_DWB_PUBLICATION_END];
+    if field == [0; 40] {
+        return Ok(None);
+    }
+    let phase = match read_u32(field, 0)? {
+        1 => DwbPhase::Preparing,
+        2 => DwbPhase::Ready,
+        3 => DwbPhase::Consumed,
+        _ => return Err(HeaderPublicationError::InvalidDwbPublication),
+    };
+    let frame_bytes = read_u32(field, 4)?;
+    let digest = field[8..40].try_into().expect("fixed digest field");
+    let count = (frame_bytes as usize).checked_sub(PAGED_DWB_HEADER_SIZE);
+    if digest == [0; 32]
+        || !count.is_some_and(|bytes| {
+            bytes >= PAGED_DWB_ENTRY_SIZE
+                && bytes.is_multiple_of(PAGED_DWB_ENTRY_SIZE)
+                && frame_bytes as usize <= 64 * PAGED_PAGE_SIZE
+        })
+    {
+        return Err(HeaderPublicationError::InvalidDwbPublication);
+    }
+    Ok(Some(DwbPublication {
+        phase,
+        frame_bytes,
+        digest,
+    }))
+}
+
+pub fn set_database_header_dwb_publication(
+    page: &mut [u8],
+    publication: Option<DwbPublication>,
+) -> Result<(), HeaderPublicationError> {
+    ensure_len(page, DB_DWB_PUBLICATION_END)?;
+    let field = &mut page[DB_DWB_PUBLICATION_OFFSET..DB_DWB_PUBLICATION_END];
+    field.fill(0);
+    if let Some(publication) = publication {
+        write_u32(field, 0, publication.phase as u32)?;
+        write_u32(field, 4, publication.frame_bytes)?;
+        field[8..40].copy_from_slice(&publication.digest);
+        database_header_dwb_publication(page)?;
+    }
+    Ok(())
+}
 
 /// Double-write-buffer file magic: `RDDW`.
 pub const DWB_MAGIC: [u8; 4] = [0x52, 0x44, 0x44, 0x57];
@@ -387,6 +505,27 @@ impl fmt::Display for PagedDwbFrameError {
 
 impl std::error::Error for PagedDwbFrameError {}
 
+pub fn encode_paged_dwb_header(count: u32, checksum: u32) -> [u8; PAGED_DWB_HEADER_SIZE] {
+    let mut header = [0; PAGED_DWB_HEADER_SIZE];
+    header[..4].copy_from_slice(&DWB_MAGIC);
+    header[4..8].copy_from_slice(&count.to_le_bytes());
+    header[8..12].copy_from_slice(&checksum.to_le_bytes());
+    header
+}
+
+pub fn decode_paged_dwb_header(bytes: &[u8]) -> Result<(u32, u32), PagedDwbFrameError> {
+    if bytes.len() < PAGED_DWB_HEADER_SIZE {
+        return Err(PagedDwbFrameError::ShortHeader { got: bytes.len() });
+    }
+    if bytes[..4] != DWB_MAGIC {
+        return Err(PagedDwbFrameError::InvalidMagic);
+    }
+    Ok((
+        u32::from_le_bytes(bytes[4..8].try_into().expect("header length checked")),
+        u32::from_le_bytes(bytes[8..12].try_into().expect("header length checked")),
+    ))
+}
+
 pub fn encode_paged_dwb_frame<'a>(
     pages: impl IntoIterator<Item = (u32, &'a [u8; PAGED_PAGE_SIZE])>,
 ) -> Vec<u8> {
@@ -394,9 +533,10 @@ pub fn encode_paged_dwb_frame<'a>(
     let total = PAGED_DWB_HEADER_SIZE + pages.len() * PAGED_DWB_ENTRY_SIZE;
     let mut out = Vec::with_capacity(total);
 
-    out.extend_from_slice(&DWB_MAGIC);
-    out.extend_from_slice(&(pages.len() as u32).to_le_bytes());
-    out.extend_from_slice(&[0u8; 4]);
+    out.extend_from_slice(&encode_paged_dwb_header(
+        u32::try_from(pages.len()).expect("DWB count fits u32"),
+        0,
+    ));
 
     for (page_id, page) in pages {
         out.extend_from_slice(&page_id.to_le_bytes());
@@ -409,15 +549,8 @@ pub fn encode_paged_dwb_frame<'a>(
 }
 
 pub fn decode_paged_dwb_frame(bytes: &[u8]) -> Result<Vec<PagedDwbEntry>, PagedDwbFrameError> {
-    if bytes.len() < PAGED_DWB_HEADER_SIZE {
-        return Err(PagedDwbFrameError::ShortHeader { got: bytes.len() });
-    }
-    if bytes[0..4] != DWB_MAGIC {
-        return Err(PagedDwbFrameError::InvalidMagic);
-    }
-
-    let count = u32::from_le_bytes(bytes[4..8].try_into().expect("len checked")) as usize;
-    let stored_checksum = u32::from_le_bytes(bytes[8..12].try_into().expect("len checked"));
+    let (count, stored_checksum) = decode_paged_dwb_header(bytes)?;
+    let count = count as usize;
     let expected_len = PAGED_DWB_HEADER_SIZE + count * PAGED_DWB_ENTRY_SIZE;
     if bytes.len() < expected_len {
         return Err(PagedDwbFrameError::IncompleteFrame {
@@ -481,7 +614,30 @@ pub struct DatabaseHeader {
     pub checkpoint_lsn: u64,
     pub checkpoint_in_progress: bool,
     pub checkpoint_target_lsn: u64,
+    /// Monotonic set of byte-level features required to decode this file.
+    pub required_capabilities: u64,
     pub physical: PhysicalFileHeader,
+}
+
+impl DatabaseHeader {
+    pub fn is_recovery_read_only(&self) -> bool {
+        self.version == PAGE_RECOVERY_READ_ONLY_FILE_VERSION
+            || self.required_capabilities & FILE_CAPABILITY_RECOVERY_READ_ONLY != 0
+    }
+
+    /// Whether the file requires a writer that participates in the bounded
+    /// disk-residency protocol.
+    ///
+    /// Versions before the capability bitmap encoded that requirement in the
+    /// monotonically increasing version number. Newer files declare it as an
+    /// independent capability so unrelated codecs can evolve the format.
+    pub fn requires_disk_residency(&self) -> bool {
+        if self.version < PAGE_REQUIRED_CAPABILITIES_FILE_VERSION {
+            page_format_is_disk_resident(self.version)
+        } else {
+            self.required_capabilities & FILE_CAPABILITY_DISK_RESIDENCY != 0
+        }
+    }
 }
 
 impl Default for DatabaseHeader {
@@ -496,6 +652,7 @@ impl Default for DatabaseHeader {
             checkpoint_lsn: 0,
             checkpoint_in_progress: false,
             checkpoint_target_lsn: 0,
+            required_capabilities: 0,
             physical: PhysicalFileHeader::default(),
         }
     }
@@ -543,6 +700,7 @@ pub enum DatabaseHeaderError {
     InvalidMagic,
     UnsupportedPageSize(u32),
     UnsupportedDatabaseVersion { file_version: u32, supported: u32 },
+    UnsupportedRequiredCapabilities(u64),
 }
 
 impl fmt::Display for DatabaseHeaderError {
@@ -560,11 +718,50 @@ impl fmt::Display for DatabaseHeaderError {
                 f,
                 "Unsupported database version: file version {file_version} is newer than supported {supported}"
             ),
+            Self::UnsupportedRequiredCapabilities(bits) => write!(
+                f,
+                "Unsupported required database capabilities: {bits:#018x}"
+            ),
         }
     }
 }
 
 impl std::error::Error for DatabaseHeaderError {}
+
+/// Errors in the independently published catalog and recovery extensions.
+/// Keeping these separate preserves exhaustive matches on `DatabaseHeaderError`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HeaderPublicationError {
+    Header(DatabaseHeaderError),
+    InvalidManifestReference,
+    InvalidDwbPublication,
+}
+
+impl From<DatabaseHeaderError> for HeaderPublicationError {
+    fn from(error: DatabaseHeaderError) -> Self {
+        Self::Header(error)
+    }
+}
+
+impl fmt::Display for HeaderPublicationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Header(error) => error.fmt(f),
+            Self::InvalidManifestReference => write!(f, "invalid catalog generation reference"),
+            Self::InvalidDwbPublication => write!(f, "invalid DWB generation publication"),
+        }
+    }
+}
+
+impl std::error::Error for HeaderPublicationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Header(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 pub fn database_header_magic_matches(page: &[u8]) -> bool {
     page.get(DB_MAGIC_OFFSET..DB_MAGIC_OFFSET + PAGE_FILE_MAGIC.len()) == Some(&PAGE_FILE_MAGIC)
@@ -612,11 +809,72 @@ pub fn set_database_header_freelist_head(
     write_u32(page, DB_FREELIST_HEAD_OFFSET, page_id)
 }
 
+pub fn set_database_header_required_capabilities(
+    page: &mut [u8],
+    capabilities: u64,
+) -> Result<(), DatabaseHeaderError> {
+    write_u64(page, DB_REQUIRED_CAPABILITIES_OFFSET, capabilities)
+}
+
+pub fn set_database_header_manifest_reference(
+    page: &mut [u8],
+    reference: crate::page_proof::PageReference,
+) -> Result<(), HeaderPublicationError> {
+    ensure_len(page, DB_MANIFEST_REFERENCE_END)?;
+    if (reference.page_id == 0) != (reference.digest == [0; 32]) {
+        return Err(HeaderPublicationError::InvalidManifestReference);
+    }
+    crate::page_proof::encode_reference(
+        &mut page[DB_MANIFEST_REFERENCE_OFFSET..DB_MANIFEST_REFERENCE_END],
+        reference,
+    );
+    Ok(())
+}
+
+/// Digest over the catalog root and all continuation pages. The zero reference
+/// retains the legacy fixed page-1 bootstrap catalog. Storage owners validate
+/// this extension before recovery can modify the file.
+pub fn database_header_manifest_reference(
+    page: &[u8],
+) -> Result<crate::page_proof::PageReference, HeaderPublicationError> {
+    let header = decode_database_header_fields(page, FILE_CAPABILITIES_SUPPORTED)?;
+    if header.required_capabilities & FILE_CAPABILITY_CATALOG_ROOT == 0 {
+        return Ok(crate::page_proof::PageReference::default());
+    }
+    ensure_len(page, DB_MANIFEST_REFERENCE_END)?;
+    crate::page_proof::decode_reference(
+        &page[DB_MANIFEST_REFERENCE_OFFSET..DB_MANIFEST_REFERENCE_END],
+    )
+    .ok_or(HeaderPublicationError::InvalidManifestReference)
+}
+
 pub fn database_header_page_size(page: &[u8]) -> Result<u32, DatabaseHeaderError> {
     read_u32(page, DB_PAGE_SIZE_OFFSET)
 }
 
+/// Decode the legacy header contract. Engines implementing publication-aware
+/// recovery must explicitly opt into [`decode_published_database_header`].
 pub fn decode_database_header(page: &[u8]) -> Result<DatabaseHeader, DatabaseHeaderError> {
+    decode_database_header_fields(page, FILE_CAPABILITIES_LEGACY_HEADER)
+}
+
+/// Validate the ordinary header and its required catalog/recovery publications.
+/// Only storage owners that implement those protocols should use this entry point.
+pub fn decode_published_database_header(
+    page: &[u8],
+) -> Result<DatabaseHeader, HeaderPublicationError> {
+    let header = decode_database_header_fields(page, FILE_CAPABILITIES_SUPPORTED)?;
+    database_header_manifest_reference(page)?;
+    if header.required_capabilities & FILE_CAPABILITY_DWB_PUBLICATION != 0 {
+        database_header_dwb_publication(page)?;
+    }
+    Ok(header)
+}
+
+fn decode_database_header_fields(
+    page: &[u8],
+    supported_capabilities: u64,
+) -> Result<DatabaseHeader, DatabaseHeaderError> {
     ensure_len(page, DB_HEADER_MIN_LEN)?;
     if !database_header_magic_matches(page) {
         return Err(DatabaseHeaderError::InvalidMagic);
@@ -633,7 +891,17 @@ pub fn decode_database_header(page: &[u8]) -> Result<DatabaseHeader, DatabaseHea
             supported: PAGE_FILE_VERSION,
         });
     }
-
+    let required_capabilities = if version >= PAGE_REQUIRED_CAPABILITIES_FILE_VERSION {
+        read_u64(page, DB_REQUIRED_CAPABILITIES_OFFSET)?
+    } else {
+        0
+    };
+    let unsupported_capabilities = required_capabilities & !supported_capabilities;
+    if unsupported_capabilities != 0 {
+        return Err(DatabaseHeaderError::UnsupportedRequiredCapabilities(
+            unsupported_capabilities,
+        ));
+    }
     Ok(DatabaseHeader {
         version,
         page_size,
@@ -643,6 +911,7 @@ pub fn decode_database_header(page: &[u8]) -> Result<DatabaseHeader, DatabaseHea
         checkpoint_lsn: read_u64(page, DB_CHECKPOINT_LSN_OFFSET)?,
         checkpoint_in_progress: page[DB_CHECKPOINT_IN_PROGRESS_OFFSET] != 0,
         checkpoint_target_lsn: read_u64(page, DB_CHECKPOINT_TARGET_LSN_OFFSET)?,
+        required_capabilities,
         physical: PhysicalFileHeader {
             format_version: read_u32(page, DB_PHYSICAL_FORMAT_VERSION_OFFSET)?,
             sequence: read_u64(page, DB_PHYSICAL_SEQUENCE_OFFSET)?,
@@ -798,7 +1067,15 @@ pub fn encode_database_header(
         page,
         DB_CHECKPOINT_TARGET_LSN_OFFSET,
         header.checkpoint_target_lsn,
-    )
+    )?;
+    write_u64(
+        page,
+        DB_REQUIRED_CAPABILITIES_OFFSET,
+        header.required_capabilities,
+    )?;
+    // Independently published catalog and DWB authority carry forward from the
+    // newest slot; an ordinary header update must not replace either extension.
+    Ok(())
 }
 
 // ── Paged superblock zone (ADR 0038 §2 phase 1) ─────────────────────────
@@ -1202,6 +1479,81 @@ mod tests {
     }
 
     #[test]
+    fn required_capabilities_round_trip_and_unknown_bits_fail_before_page_reads() {
+        let mut page = vec![0u8; PAGED_SUPERBLOCK_SLOT_SIZE];
+        let header = DatabaseHeader {
+            version: PAGE_REQUIRED_CAPABILITIES_FILE_VERSION,
+            required_capabilities: FILE_CAPABILITY_TEMPERATURE,
+            ..DatabaseHeader::default()
+        };
+        encode_database_header(&mut page, &header).expect("encode capabilities");
+        assert_eq!(
+            decode_database_header(&page)
+                .expect("supported capabilities")
+                .required_capabilities,
+            FILE_CAPABILITY_TEMPERATURE
+        );
+
+        set_database_header_required_capabilities(&mut page, 1 << 63)
+            .expect("set unknown capability");
+        assert_eq!(
+            decode_database_header(&page),
+            Err(DatabaseHeaderError::UnsupportedRequiredCapabilities(
+                1 << 63
+            ))
+        );
+    }
+
+    #[test]
+    fn disk_residency_moves_from_legacy_version_to_explicit_capability() {
+        let legacy = DatabaseHeader {
+            version: PAGE_DISK_RESIDENCY_FILE_VERSION,
+            ..DatabaseHeader::default()
+        };
+        assert!(legacy.requires_disk_residency());
+
+        let resident_result_cache = DatabaseHeader {
+            version: PAGE_RESULT_CACHE_FILE_VERSION,
+            ..DatabaseHeader::default()
+        };
+        assert!(!resident_result_cache.requires_disk_residency());
+
+        let disk_result_cache = DatabaseHeader {
+            version: PAGE_RESULT_CACHE_DISK_FILE_VERSION,
+            ..DatabaseHeader::default()
+        };
+        assert!(disk_result_cache.requires_disk_residency());
+
+        let temperature_only = DatabaseHeader {
+            version: PAGE_REQUIRED_CAPABILITIES_FILE_VERSION,
+            required_capabilities: FILE_CAPABILITY_TEMPERATURE,
+            ..DatabaseHeader::default()
+        };
+        assert!(!temperature_only.requires_disk_residency());
+
+        let disk_resident = DatabaseHeader {
+            required_capabilities: FILE_CAPABILITY_DISK_RESIDENCY,
+            ..temperature_only
+        };
+        assert!(disk_resident.requires_disk_residency());
+    }
+
+    #[test]
+    fn legacy_headers_ignore_the_reserved_capability_bytes() {
+        let mut page = vec![0u8; PAGED_SUPERBLOCK_SLOT_SIZE];
+        init_database_header_page(&mut page, 7).expect("init header");
+        set_database_header_required_capabilities(&mut page, u64::MAX)
+            .expect("fill reserved bytes");
+
+        assert_eq!(
+            decode_database_header(&page)
+                .expect("legacy header")
+                .required_capabilities,
+            0
+        );
+    }
+
+    #[test]
     fn paged_dwb_frame_round_trips_entries_and_validates_checksum() {
         let mut page = [0u8; PAGED_PAGE_SIZE];
         page[0] = 7;
@@ -1249,6 +1601,7 @@ mod tests {
             checkpoint_lsn: 99,
             checkpoint_in_progress: true,
             checkpoint_target_lsn: 123,
+            required_capabilities: FILE_CAPABILITY_TEMPERATURE,
             physical: PhysicalFileHeader {
                 format_version: 11,
                 sequence: 12,

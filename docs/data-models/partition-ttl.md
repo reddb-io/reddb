@@ -178,7 +178,7 @@ API for now.
 The sweep function runs when a daemon (the retention daemon, or
 your own maintenance loop) calls it. Production installations run
 the retention daemon every 60s by default — configured via
-`red.config.retention.interval_ms`. A cold install with no daemon
+content key `retention.interval_ms` in `red.config`. A cold install with no daemon
 doesn't auto-sweep.
 
 **Q: Can I combine partition TTL with `APPEND ONLY`?**

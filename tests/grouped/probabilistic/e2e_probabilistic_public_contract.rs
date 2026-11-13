@@ -16,10 +16,10 @@ use reddb_types::Value;
 use serde_json::{json, Value as JsonValue};
 use support::{checkpoint_and_reopen, PersistentDbPath};
 
-const PROB_HLL_STATE_PREFIX: &str = "red.probabilistic.hll.";
-const PROB_SKETCH_STATE_PREFIX: &str = "red.probabilistic.sketch.";
-const PROB_FILTER_STATE_PREFIX: &str = "red.probabilistic.filter.";
-const PROB_ENCODING_MARKER_KEY: &str = "red.probabilistic.state_encoding";
+const PROB_HLL_STATE_PREFIX: &str = "probabilistic.hll.";
+const PROB_SKETCH_STATE_PREFIX: &str = "probabilistic.sketch.";
+const PROB_FILTER_STATE_PREFIX: &str = "probabilistic.filter.";
+const PROB_ENCODING_MARKER_KEY: &str = "probabilistic.state_encoding";
 
 fn runtime() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("runtime")
@@ -70,7 +70,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn config_values(rt: &RedDBRuntime, key: &str) -> Vec<Value> {
-    let Some(manager) = rt.db().store().get_collection("red_config") else {
+    let Some(manager) = rt.db().store().get_collection("red.config") else {
         return Vec::new();
     };
     manager
@@ -95,7 +95,7 @@ fn config_values(rt: &RedDBRuntime, key: &str) -> Vec<Value> {
 
 fn delete_config_key(rt: &RedDBRuntime, key: &str) {
     let store = rt.db().store();
-    let Some(manager) = store.get_collection("red_config") else {
+    let Some(manager) = store.get_collection("red.config") else {
         return;
     };
     let ids: Vec<EntityId> = manager
@@ -114,18 +114,18 @@ fn delete_config_key(rt: &RedDBRuntime, key: &str) {
         .collect();
     for id in ids {
         store
-            .delete("red_config", id)
+            .delete("red.config", id)
             .expect("delete seeded config row");
     }
 }
 
 fn insert_config_value(rt: &RedDBRuntime, key: &str, value: Value) {
     let store = rt.db().store();
-    let _ = store.get_or_create_collection("red_config");
+    let _ = store.get_or_create_collection("red.config");
     let entity = UnifiedEntity::new(
         EntityId::new(0),
         EntityKind::TableRow {
-            table: std::sync::Arc::from("red_config"),
+            table: std::sync::Arc::from("red.config"),
             row_id: 0,
         },
         EntityData::Row(RowData {
@@ -142,7 +142,7 @@ fn insert_config_value(rt: &RedDBRuntime, key: &str, value: Value) {
         }),
     );
     store
-        .insert_auto("red_config", entity)
+        .insert_auto("red.config", entity)
         .expect("insert seeded config row");
 }
 

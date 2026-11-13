@@ -18,6 +18,7 @@ fn value_type_tag(v: &Value) -> u8 {
 
 pub fn partial_compare_values(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
+        (Value::Temperature(a), Value::Temperature(b)) => Some(a.cmp(b)),
         (Value::Null, Value::Null) => Some(Ordering::Equal),
         (Value::Integer(a), Value::Integer(b)) => Some(a.cmp(b)),
         (Value::UnsignedInteger(a), Value::UnsignedInteger(b)) => Some(a.cmp(b)),

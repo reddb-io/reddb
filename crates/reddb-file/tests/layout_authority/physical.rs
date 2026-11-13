@@ -8,7 +8,10 @@ fn server_does_not_redeclare_physical_metadata_core_json_format() {
         .split("#[cfg(test)]")
         .next()
         .expect("physical/json_codec.rs has non-test source");
-    let file = read(root.join("crates/reddb-file/src/physical_metadata.rs"));
+    let mut file = read(root.join("crates/reddb-file/src/physical_metadata.rs"));
+    file.push_str(&read(
+        root.join("crates/reddb-file/src/physical_metadata/json_helpers.rs"),
+    ));
 
     for forbidden in [
         "\"collection_roots\"",

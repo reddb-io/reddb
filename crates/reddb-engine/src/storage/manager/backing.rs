@@ -584,11 +584,13 @@ impl SegmentManager {
         limit_bytes: usize,
         predicate: impl FnMut(&UnifiedEntity) -> bool,
     ) -> Result<(usize, Vec<UnifiedEntity>), StoreError> {
-        self.try_page_in_id_order_at_snapshot(None, offset, limit, limit_bytes, predicate)
+        self.try_page_in_id_order_where_at_snapshot(None, offset, limit, limit_bytes, predicate)
     }
 
-    /// Filter MVCC versions before counting and paging the authorized view.
-    pub fn try_page_in_id_order_at_snapshot(
+    /// Page a caller-filtered logical view under an explicit MVCC snapshot.
+    /// Visibility is applied before the predicate, total, and offset so an
+    /// aborted writer or an in-progress deleter cannot distort pagination.
+    pub fn try_page_in_id_order_where_at_snapshot(
         &self,
         snapshot: Option<&SnapshotContext>,
         offset: usize,

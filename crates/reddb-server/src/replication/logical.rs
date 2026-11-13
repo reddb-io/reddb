@@ -25,6 +25,8 @@ pub enum ApplyMode {
 /// trash from primary regardless of cause".
 #[derive(Debug, Default)]
 pub struct ReplicaApplyMetrics {
+    #[cfg(test)]
+    transaction_member_barrier: Mutex<Option<std::sync::Arc<std::sync::Barrier>>>,
     pub gap_total: std::sync::atomic::AtomicU64,
     pub divergence_total: std::sync::atomic::AtomicU64,
     pub apply_error_total: std::sync::atomic::AtomicU64,
@@ -551,8 +553,20 @@ impl LogicalChangeApplier {
     pub fn apply_record_with_metrics(
         db: &RedDB,
         record: &ChangeRecord,
-        _mode: ApplyMode,
+        mode: ApplyMode,
         metrics: &ReplicaApplyMetrics,
+    ) -> RedDBResult<()> {
+        if record.operation == ChangeOperation::Transaction {
+            return Self::apply_transaction(db, record, mode, metrics);
+        }
+        Self::apply_member(db, record, metrics, None)
+    }
+
+    fn apply_member(
+        db: &RedDB,
+        record: &ChangeRecord,
+        metrics: &ReplicaApplyMetrics,
+        transaction_xid: Option<u64>,
     ) -> RedDBResult<()> {
         if db.options().read_only {
             return Err(RedDBError::InvalidOperation(
@@ -575,6 +589,7 @@ impl LogicalChangeApplier {
                 .map(|recs| recs.iter().map(|r| r.len() as u64).sum())
                 .unwrap_or(0),
             ChangeOperation::Delete => 0,
+            ChangeOperation::Transaction => unreachable!("transaction members are validated"),
         };
         let store = db.store();
         let runtime = db
@@ -584,7 +599,9 @@ impl LogicalChangeApplier {
         let indexes = runtime.as_ref().map(|runtime| runtime.index_store_ref());
         let _publication = indexes.map(|indexes| indexes.begin_indexed_mutation());
         let topology = indexes.map(|indexes| indexes.collection_topology_lock(&record.collection));
-        let _topology = topology.as_ref().map(|lock| lock.read());
+        // Transaction apply already holds this read guard. Recursive reads
+        // must not wait behind an index DDL writer waiting for the outer guard.
+        let _topology = topology.as_ref().map(|lock| lock.read_recursive());
         let _storage_publication = store.vault_publication_lock.lock();
         // Decode before changing either data or indexes. Collect only affected
         // physical versions, except Refresh which replaces the whole collection.
@@ -625,7 +642,13 @@ impl LogicalChangeApplier {
                     store
                         .table_row_versions_by_logical_id(&record.collection, entity.logical_id())
                         .into_iter()
-                        .filter(|version| version.id != entity.id && version.xmax == 0),
+                        .filter(|version| {
+                            version.id != entity.id
+                                && (version.xmax == 0
+                                    || runtime.as_ref().is_some_and(|runtime| {
+                                        runtime.snapshot_manager().is_aborted(version.xmax)
+                                    }))
+                        }),
                 );
             }
         }
@@ -643,8 +666,11 @@ impl LogicalChangeApplier {
                         .filter(|entity| matches!(entity.kind, EntityKind::TableRow { .. })),
                 ) {
                     let mut tombstone = entity.clone();
-                    if tombstone.xmax == 0 {
-                        tombstone.set_xmax(runtime.snapshot_manager().allocate_committed_xid());
+                    if tombstone.xmax == 0 || runtime.snapshot_manager().is_aborted(tombstone.xmax)
+                    {
+                        tombstone.set_xmax(transaction_xid.unwrap_or_else(|| {
+                            runtime.snapshot_manager().allocate_committed_xid()
+                        }));
                         let manager = store
                             .get_collection(&record.collection)
                             .expect("existing row collection");
@@ -721,7 +747,32 @@ impl LogicalChangeApplier {
                 let mut entity = incoming.clone().ok_or_else(|| {
                     RedDBError::Internal("replication record missing entity payload".to_string())
                 })?;
-                if matches!(entity.kind, EntityKind::TableRow { .. }) && entity.xmax == 0 {
+                if let Some(xid) = transaction_xid {
+                    let existing = previous.iter().find(|old| {
+                        old.id == entity.id
+                            && runtime.as_ref().is_some_and(|runtime| {
+                                !runtime.snapshot_manager().is_aborted(old.xmin)
+                            })
+                    });
+                    // Replaying a durable physical version after a lost ACK
+                    // cannot transfer its visibility to a new, abortable xid.
+                    entity.set_xmin(existing.map(|old| old.xmin).unwrap_or(xid));
+                    if entity.xmax != 0 {
+                        entity.set_xmax(
+                            existing
+                                .filter(|old| {
+                                    old.xmax != 0
+                                        && runtime.as_ref().is_some_and(|runtime| {
+                                            !runtime.snapshot_manager().is_aborted(old.xmax)
+                                        })
+                                })
+                                .map(|old| old.xmax)
+                                .unwrap_or(xid),
+                        );
+                    } else if let Some(existing) = existing {
+                        entity.set_xmax(existing.xmax);
+                    }
+                } else if matches!(entity.kind, EntityKind::TableRow { .. }) && entity.xmax == 0 {
                     if let Some(runtime) = &runtime {
                         // Source and replica allocators are independent. A source
                         // xid already in a local snapshot's past must not make a
@@ -763,7 +814,13 @@ impl LogicalChangeApplier {
                     let stale: Vec<_> = store
                         .table_row_versions_by_logical_id(&record.collection, logical)
                         .into_iter()
-                        .filter(|version| version.id != new_id && version.xmax == 0)
+                        .filter(|version| {
+                            version.id != new_id
+                                && (version.xmax == 0
+                                    || runtime.as_ref().is_some_and(|runtime| {
+                                        runtime.snapshot_manager().is_aborted(version.xmax)
+                                    }))
+                        })
                         .collect();
                     if !stale.is_empty() {
                         let manager = store
@@ -816,14 +873,17 @@ impl LogicalChangeApplier {
                 // batch and metadata have become durable.
                 replayed_xid = entity.max_transaction_id();
             }
+            ChangeOperation::Transaction => unreachable!("transaction members are validated"),
         }
         if let Some(capture) = capture {
             store
                 .append_deferred_store_wal_actions(capture.finish())
                 .map_err(|error| RedDBError::Internal(error.to_string()))?;
         }
-        if let Some(manager) = store.snapshot_manager.get() {
-            manager.observe_committed_xid(replayed_xid);
+        if transaction_xid.is_none() {
+            if let Some(manager) = store.snapshot_manager.get() {
+                manager.observe_committed_xid(replayed_xid);
+            }
         }
         if let Some(indexes) = indexes {
             let publish = (|| -> Result<(), String> {
@@ -844,6 +904,9 @@ impl LogicalChangeApplier {
                         .filter(|entity| entity.xmax == 0)
                         .collect(),
                     ChangeOperation::Delete => Vec::new(),
+                    ChangeOperation::Transaction => {
+                        unreachable!("transaction members are validated")
+                    }
                 };
                 for entity in &current {
                     indexes.index_entity_insert(
@@ -875,6 +938,122 @@ impl LogicalChangeApplier {
             .records_applied_total
             .fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    fn apply_transaction(
+        db: &RedDB,
+        record: &ChangeRecord,
+        _mode: ApplyMode,
+        metrics: &ReplicaApplyMetrics,
+    ) -> RedDBResult<()> {
+        let encoded = record
+            .refresh_records
+            .as_ref()
+            .ok_or_else(|| RedDBError::Internal("replication transaction has no members".into()))?;
+        if encoded.is_empty()
+            || encoded.len() > 65_536
+            || encoded.iter().map(Vec::len).sum::<usize>() > 16 * 1024 * 1024
+        {
+            return Err(RedDBError::InvalidOperation(
+                "invalid replication transaction size".into(),
+            ));
+        }
+        let members = encoded
+            .iter()
+            .map(|bytes| ChangeRecord::decode(bytes))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(RedDBError::Internal)?;
+        let store = db.store();
+        // Reject malformed or recursive envelopes before mutating any member.
+        for member in &members {
+            if !matches!(
+                member.operation,
+                ChangeOperation::Insert | ChangeOperation::Update | ChangeOperation::Delete
+            ) {
+                return Err(RedDBError::InvalidOperation(
+                    "unsupported replication transaction member".into(),
+                ));
+            }
+            if let Some(bytes) = &member.entity_bytes {
+                let entity = UnifiedStore::deserialize_entity(bytes, store.format_version())
+                    .map_err(|error| RedDBError::Internal(error.to_string()))?;
+                if entity.id.raw() != member.entity_id {
+                    return Err(RedDBError::Internal(
+                        "replication member identity mismatch".into(),
+                    ));
+                }
+            } else if member.operation != ChangeOperation::Delete {
+                return Err(RedDBError::Internal(
+                    "replication member missing entity".into(),
+                ));
+            }
+            if let Some(metadata) = &member.metadata {
+                metadata_from_json(&wire_json_to_server_json(metadata))?;
+            }
+        }
+        let runtime = db
+            .runtime
+            .get()
+            .and_then(crate::runtime::WeakRuntime::upgrade);
+        let indexes = runtime.as_ref().map(|runtime| runtime.index_store_ref());
+        let _indexes = indexes.map(|indexes| indexes.begin_indexed_mutation());
+        let mut collections: Vec<_> = members.iter().map(|member| &member.collection).collect();
+        collections.sort_unstable();
+        collections.dedup();
+        let topology: Vec<_> = indexes
+            .map(|indexes| {
+                collections
+                    .iter()
+                    .map(|collection| indexes.collection_topology_lock(collection))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let _topology: Vec<_> = topology.iter().map(|lock| lock.read()).collect();
+        let _storage = store.vault_publication_lock.lock();
+        let manager = store.snapshot_manager.get();
+        let xid = manager.map(|manager| manager.begin());
+        let capture = crate::storage::unified::store::StoreWalCaptureGuard::begin(None);
+        let applied = (|| -> RedDBResult<()> {
+            for member in &members {
+                Self::apply_member(db, member, metrics, xid)?;
+                #[cfg(test)]
+                if std::ptr::eq(member, &members[0]) {
+                    let barrier = metrics
+                        .transaction_member_barrier
+                        .lock()
+                        .expect("test barrier mutex")
+                        .clone();
+                    if let Some(barrier) = barrier {
+                        barrier.wait();
+                        barrier.wait();
+                    }
+                }
+            }
+            store
+                .append_deferred_store_wal_actions(capture.finish())
+                .map_err(|error| RedDBError::Internal(error.to_string()))
+        })();
+        match applied {
+            Ok(()) => {
+                if let (Some(manager), Some(xid)) = (manager, xid) {
+                    manager.commit(xid);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let (Some(manager), Some(xid)) = (manager, xid) {
+                    manager.rollback(xid);
+                }
+                if let Some(indexes) = indexes {
+                    for member in &members {
+                        for index in indexes.list_indices(&member.collection) {
+                            indexes.drop_index(&index.name, &member.collection);
+                        }
+                    }
+                }
+                Err(error)
+            }
+        }
     }
 }
 
@@ -919,6 +1098,161 @@ mod tests {
     use crate::storage::{EntityData, EntityId, EntityKind, RedDB, RowData, UnifiedEntity};
     use reddb_types::Value;
     use std::sync::Arc;
+
+    #[test]
+    fn transaction_members_become_visible_together() {
+        let replica =
+            crate::RedDBRuntime::with_options(crate::RedDBOptions::in_memory()).expect("replica");
+        replica
+            .execute_query("CREATE TABLE users (id INT, payload BLOB)")
+            .expect("schema");
+        // Initialize the durable result-cache format before the test pauses a
+        // transaction while holding the publication lock. A real transaction
+        // completes without this test-only barrier; letting the first read
+        // create cache metadata inside the pause would deadlock the harness
+        // rather than exercise transaction visibility.
+        assert!(replica
+            .execute_query("SELECT id FROM users")
+            .expect("initialize read metadata")
+            .result
+            .records
+            .is_empty());
+        let applier = Arc::new(LogicalChangeApplier::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        *applier
+            .metrics()
+            .transaction_member_barrier
+            .lock()
+            .expect("barrier mutex") = Some(barrier.clone());
+        let transaction =
+            ChangeRecord::for_transaction(1, 1, vec![record(1, b"a"), record(2, b"b")]);
+        let writer = replica.clone();
+        let worker = std::thread::spawn(move || {
+            applier.apply(writer.db().as_ref(), &transaction, ApplyMode::Replica)
+        });
+        barrier.wait();
+        let during = replica.execute_query("SELECT id FROM users");
+        barrier.wait();
+        worker
+            .join()
+            .expect("apply worker")
+            .expect("apply transaction");
+        assert!(during.expect("concurrent query").result.records.is_empty());
+        assert_eq!(
+            replica
+                .execute_query("SELECT id FROM users")
+                .expect("query")
+                .result
+                .records
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn transaction_retry_supersedes_versions_from_aborted_apply() {
+        let replica = crate::RedDBRuntime::with_options(crate::RedDBOptions::in_memory())
+            .expect("in-memory replica should open");
+        replica
+            .execute_query("CREATE TABLE users (id INT, payload BLOB)")
+            .expect("users table should be created");
+        let applier = LogicalChangeApplier::new(0);
+        applier
+            .apply(
+                replica.db().as_ref(),
+                &record(1, b"old"),
+                ApplyMode::Replica,
+            )
+            .expect("initial record should apply");
+        let mut update = record(2, b"new");
+        let mut entity = UnifiedStore::deserialize_entity(
+            update
+                .entity_bytes
+                .as_ref()
+                .expect("update record should contain an entity"),
+            crate::api::REDDB_FORMAT_VERSION,
+        )
+        .expect("update entity should deserialize");
+        entity.set_logical_id(EntityId::new(1));
+        update.entity_bytes = Some(UnifiedStore::serialize_entity(
+            &entity,
+            replica.db().store().format_version(),
+        ));
+        update.operation = ChangeOperation::Update;
+        let transaction = ChangeRecord::for_transaction(2, 1, vec![update]);
+        replica
+            .db()
+            .store()
+            .test_fail_deferred_wal_append
+            .store(true, Ordering::Release);
+        assert!(applier
+            .apply(replica.db().as_ref(), &transaction, ApplyMode::Replica)
+            .is_err());
+        assert_eq!(
+            replica
+                .execute_query("SELECT * FROM users")
+                .expect("users query should succeed after failed apply")
+                .result
+                .records
+                .len(),
+            1
+        );
+        applier
+            .apply(replica.db().as_ref(), &transaction, ApplyMode::Replica)
+            .expect("transaction retry should apply");
+        let versions = replica
+            .db()
+            .store()
+            .get_collection("users")
+            .expect("users collection should exist")
+            .query_all(|_| true);
+        assert_eq!(
+            replica
+                .execute_query("SELECT * FROM users")
+                .expect("users query should succeed after retry")
+                .result
+                .records
+                .len(),
+            1,
+            "versions: {:?}",
+            versions
+                .iter()
+                .map(|row| (row.id, row.logical_id(), row.xmin, row.xmax))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(applier.last_applied_lsn(), 2);
+    }
+
+    #[test]
+    fn failed_replay_cannot_hide_an_already_committed_transaction() {
+        let replica = crate::RedDBRuntime::with_options(crate::RedDBOptions::in_memory())
+            .expect("in-memory replica should open");
+        replica
+            .execute_query("CREATE TABLE users (id INT, payload BLOB)")
+            .expect("users table should be created");
+        let transaction =
+            ChangeRecord::for_transaction(1, 1, vec![record(1, b"a"), record(2, b"b")]);
+        LogicalChangeApplier::new(0)
+            .apply(replica.db().as_ref(), &transaction, ApplyMode::Replica)
+            .expect("transaction should apply initially");
+        replica
+            .db()
+            .store()
+            .test_fail_deferred_wal_append
+            .store(true, Ordering::Release);
+        assert!(LogicalChangeApplier::new(0)
+            .apply(replica.db().as_ref(), &transaction, ApplyMode::Replica)
+            .is_err());
+        assert_eq!(
+            replica
+                .execute_query("SELECT * FROM users")
+                .expect("users query should succeed after failed replay")
+                .result
+                .records
+                .len(),
+            2
+        );
+    }
 
     fn open_db() -> (RedDB, std::path::PathBuf) {
         let path = std::env::temp_dir().join(format!(

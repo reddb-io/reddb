@@ -938,9 +938,9 @@ struct RuntimeResultCacheEntry {
     result: RuntimeQueryResult,
     cached_at: std::time::Instant,
     scopes: HashSet<String>,
+    data_epoch: u64,
 }
 
-pub const METRIC_CACHE_SHADOW_DIVERGENCE_TOTAL: &str = "cache_shadow_divergence_total";
 /// Stable metric names for the query/graph-analytics result cache
 /// (issue #802). Exposed under the `red.metrics` surface as
 /// `reddb_result_cache_{hit,miss,evict}_total` and readable in-process
@@ -1158,18 +1158,26 @@ struct RuntimeInner {
     pub(crate) columnar_projection_size_floor_rows: usize,
     backup_scheduler: crate::replication::scheduler::BackupScheduler,
     query_cache: parking_lot::RwLock<crate::storage::query::planner::cache::PlanCache>,
-    result_cache: parking_lot::RwLock<(
-        HashMap<String, RuntimeResultCacheEntry>,
-        std::collections::VecDeque<String>,
-    )>,
     result_blob_cache: crate::storage::cache::BlobCache,
+    result_cache_format_lock: parking_lot::Mutex<()>,
+    // Serializes L2 promotion with result publication and invalidation,
+    // without blocking readers of the in-memory result.
+    result_blob_promotion: parking_lot::Mutex<()>,
     result_blob_entries: parking_lot::RwLock<(
         HashMap<String, RuntimeResultCacheEntry>,
         std::collections::VecDeque<String>,
+        // L2 may contain entries whose dependencies are not in the map.
+        bool,
+        // Detect writes or invalidations while decoding an L2 hit.
+        u64,
+        // Results kept in memory while their tables are changing.
+        HashSet<String>,
+        Option<std::time::Instant>,
+        // Last data epoch whose table invalidation has been processed.
+        u64,
     )>,
     ask_answer_cache_entries:
         parking_lot::RwLock<(HashSet<String>, std::collections::VecDeque<String>)>,
-    result_cache_shadow_divergences: std::sync::atomic::AtomicU64,
     /// Result-cache observability counters (issue #802). Process-cumulative
     /// hit/miss/eviction tallies surfaced under `red.metrics`.
     result_cache_hits: std::sync::atomic::AtomicU64,
@@ -1238,7 +1246,7 @@ struct RuntimeInner {
     lock_manager: Arc<crate::runtime::lock_manager::LockManager>,
     /// Perf-parity env-var overrides (`REDDB_<UP_DOTTED_KEY>`).
     /// Populated once at boot, read by every config getter; takes
-    /// precedence over the persisted red_config value so operators
+    /// precedence over the persisted red.config value so operators
     /// can hot-fix a bad config by restarting with a different env
     /// var set. Keys are restricted to those declared in the matrix.
     env_config_overrides: HashMap<String, String>,
@@ -1308,8 +1316,14 @@ struct RuntimeInner {
     pending_kv_watch_events:
         parking_lot::RwLock<HashMap<u64, Vec<(u64, crate::replication::cdc::KvWatchEvent)>>>,
     pending_vault_writes: parking_lot::RwLock<HashMap<u64, Vec<impl_kv::PendingVaultWrite>>>,
-    pending_store_wal_actions:
-        parking_lot::RwLock<HashMap<u64, crate::storage::unified::DeferredStoreWalActions>>,
+    pending_store_wal_actions: parking_lot::RwLock<
+        HashMap<u64, Vec<(u64, crate::storage::unified::DeferredStoreWalActions)>>,
+    >,
+    pending_logical_records:
+        parking_lot::Mutex<HashMap<u64, transactional_replication::PendingLogicalChanges>>,
+    pending_commit_policies: parking_lot::Mutex<HashMap<u64, crate::replication::CommitPolicy>>,
+    logical_publication: parking_lot::ReentrantMutex<()>,
+    logical_allocated_lsn: std::sync::atomic::AtomicU64,
     /// Transaction-scoped table UPDATE CLAIM ownership.
     ///
     /// Keyed by `(collection, logical_row_id)` and valued by connection id.
@@ -1321,7 +1335,7 @@ struct RuntimeInner {
     /// Maps `table_name → tenant_column`. DML auto-fill looks here to
     /// inject `CURRENT_TENANT()` on INSERTs that omit the column, and
     /// DDL keeps the in-memory registry in sync with the
-    /// `tenant_tables.*` keys in red_config. Read-side enforcement
+    /// `tenant_tables.*` keys in red.config. Read-side enforcement
     /// piggy-backs on the existing RLS infrastructure: every entry
     /// installs an implicit `col = CURRENT_TENANT()` policy.
     tenant_tables: parking_lot::RwLock<HashMap<String, String>>,
@@ -1393,6 +1407,7 @@ struct RuntimeInner {
     /// #121) Stage 2 to narrow vector-search candidates before any
     /// embedding compute. Mutated only from DDL execution paths.
     schema_vocabulary: parking_lot::RwLock<crate::runtime::schema_vocabulary::SchemaVocabulary>,
+    description_enrichment: parking_lot::Mutex<collection_description_enrichment::QueueState>,
     /// Issue #205 — dedicated slow-query sink (`red-slow.log`).
     /// Built once at runtime startup; below-threshold calls pay only a
     /// single relaxed atomic load. Threshold + sample-pct come from
@@ -1434,7 +1449,7 @@ struct RuntimeInner {
     /// Issue #742 — consumer presence (heartbeat / lease / lifecycle
     /// state per (queue, group, consumer)). Process-local in this
     /// slice; durability across restart lands in the follow-up that
-    /// mirrors the registry into `red_queue_meta` rows. Independent
+    /// mirrors the registry into `red.queue.meta` rows. Independent
     /// of pending-delivery state by design — see
     /// `storage::queue::presence` for the contract.
     queue_presence: std::sync::Arc<crate::storage::queue::presence::ConsumerPresenceRegistry>,
@@ -1469,11 +1484,11 @@ struct RuntimeInner {
         parking_lot::Mutex<HashMap<String, crate::runtime::blockchain_kind::ChainTipFull>>,
     /// Issue #525 — in-memory mirror of the persisted `integrity` flag per
     /// chain collection.  `true` means INSERTs must be rejected with
-    /// `ChainIntegrityBroken`.  Loaded lazily from `red_config` on first
+    /// `ChainIntegrityBroken`.  Loaded lazily from `red.config` on first
     /// access so the flag survives restart.
     chain_integrity_broken: parking_lot::Mutex<HashMap<String, bool>>,
     /// Issue #765 / S6 — in-memory cache of input-stream integrity tombstone
-    /// RID ranges. Loaded lazily from `red_config` on first read so the set
+    /// RID ranges. Loaded lazily from `red.config` on first read so the set
     /// survives restart (the durable list lives under
     /// `stream.integrity.tombstones`). `integrity_tombstones_state` is the
     /// hot-path gate: `0` = unloaded, `1` = loaded-empty (reads skip
@@ -1596,6 +1611,7 @@ mod background_tasks;
 pub mod batch_insert;
 pub mod blockchain_kind;
 mod collection_contract;
+mod collection_description_enrichment;
 pub mod config_matrix;
 pub mod config_overlay;
 pub mod config_watcher;
@@ -1656,6 +1672,7 @@ mod impl_runtime_index_registry;
 mod impl_telemetry_accessors;
 mod impl_tenant_registry;
 mod store_forks;
+mod transactional_replication;
 pub(crate) use impl_queue::RedwireWaitOutcome;
 pub(crate) mod claim_telemetry;
 #[cfg(test)]
@@ -1666,7 +1683,9 @@ mod function_execution;
 mod function_validation;
 mod graph_contract;
 mod hybrid_search;
+mod impl_index_integrity;
 mod impl_scrub;
+pub use impl_index_integrity::IndexIntegrityFinding;
 mod impl_search;
 mod impl_serverless;
 mod impl_timeseries;
@@ -1714,6 +1733,11 @@ pub(crate) mod mvcc_maintenance;
 pub(crate) mod node_load_telemetry;
 pub(crate) mod occupancy_sampler;
 pub(crate) mod owned_query_result;
+#[cfg(test)]
+mod page_integrity_faults;
+#[cfg(test)]
+mod recovery_io_faults;
+pub mod serverless_snapshot_publication;
 pub use owned_query_result::OwnedQueryResult;
 pub(crate) mod primary_queue_store;
 mod probabilistic_store;

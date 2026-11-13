@@ -2211,6 +2211,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn gateway_registration_drives_http_grpc_and_batch_with_saved_connection() {
+        use crate::application::ports::RuntimeEntityPort;
         use crate::auth::{AuthConfig, AuthStore};
         use crate::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
         let path = std::env::temp_dir().join(format!(
@@ -2267,6 +2268,30 @@ mod tests {
                 String::from_utf8_lossy(&response.body)
             );
             assert!(!String::from_utf8_lossy(&response.body).contains("synthetic-gateway-key"));
+            assert_eq!(
+                runtime
+                    .db()
+                    .store()
+                    .get_config("ai.providers.red-router.base_url"),
+                Some(reddb_types::Value::text(endpoint.clone())),
+                "registration must replace the endpoint in red.config"
+            );
+            assert_eq!(
+                runtime
+                    .get_kv("red.config", "ai.providers.red-router.base_url")
+                    .expect("read registered gateway endpoint")
+                    .map(|(value, _)| value),
+                Some(reddb_types::Value::text(endpoint.clone())),
+                "registration must replace the endpoint visible to runtime readers"
+            );
+            assert_eq!(
+                runtime
+                    .get_kv("red.config", "ai.inference.provider")
+                    .expect("read registered gateway provider")
+                    .map(|(value, _)| value),
+                Some(reddb_types::Value::text("red-router")),
+                "registration must select the canonical inference provider key"
+            );
             match operation {
                 "prompt" => {
                     let response = server.handle_ai_prompt(br#"{"prompt":"hi"}"#.to_vec());
@@ -2506,7 +2531,7 @@ mod tests {
     #[test]
     fn resolve_provider_mode_reads_kv_key() {
         let kv = |key: &str| -> crate::RedDBResult<Option<String>> {
-            if key == "red.config.ai.provider" {
+            if key == "ai.provider" {
                 Ok(Some("anthropic-native".to_string()))
             } else {
                 Ok(None)
@@ -2523,8 +2548,8 @@ mod tests {
         // A wire protocol must not replace the configured provider identity.
         let kv = |key: &str| -> crate::RedDBResult<Option<String>> {
             match key {
-                "red.config.ai.provider" => Ok(Some("anthropic-native".to_string())),
-                "red.config.ai.inference.provider" => Ok(Some("groq".to_string())),
+                "ai.provider" => Ok(Some("anthropic-native".to_string())),
+                "ai.inference.provider" => Ok(Some("groq".to_string())),
                 _ => Ok(None),
             }
         };
@@ -2568,7 +2593,7 @@ mod tests {
             .expect("endpoint required");
         assert!(err.to_string().contains("endpoint"));
         let endpoint_only = |key: &str| -> crate::RedDBResult<Option<String>> {
-            Ok((key == "red.config.ai.providers.red-router.base_url")
+            Ok((key == "ai.providers.red-router.base_url")
                 .then(|| "https://example.com/v1".to_string()))
         };
         let err = resolve_connection(&provider, None, &endpoint_only)
@@ -2582,10 +2607,10 @@ mod tests {
         let provider = parse_provider("openai-compat").expect("gateway");
         let getter = |key: &str| -> crate::RedDBResult<Option<String>> {
             Ok(match key {
-                "red.config.ai.providers.openai-compat.base_url" => {
+                "ai.providers.openai-compat.base_url" => {
                     Some("https://example.com/Gateway/v1".to_string())
                 }
-                "red.config.ai.providers.openai-compat.credential" => Some("my-key".to_string()),
+                "ai.providers.openai-compat.credential" => Some("my-key".to_string()),
                 "red.secret.ai.providers.openai-compat.tokens.my-key" => {
                     Some("synthetic-key".to_string())
                 }
@@ -2650,7 +2675,7 @@ mod tests {
     #[test]
     fn invalid_provider_selection_does_not_fall_back_to_vendor_credentials() {
         let getter = |key: &str| -> crate::RedDBResult<Option<String>> {
-            Ok((key == "red.config.ai.inference.provider").then(|| "typo-provider".to_string()))
+            Ok((key == "ai.inference.provider").then(|| "typo-provider".to_string()))
         };
         assert!(resolve_default_provider(&getter).is_err());
         assert!(resolve_embeddings_provider(&getter).is_err());
@@ -2660,8 +2685,8 @@ mod tests {
     fn inference_provider_ask_specific_beats_task_pointer() {
         let kv = |key: &str| -> crate::RedDBResult<Option<String>> {
             match key {
-                "red.config.ai.ask.provider" => Ok(Some("groq".to_string())),
-                "red.config.ai.inference.provider" => Ok(Some("deepseek".to_string())),
+                "ai.ask.provider" => Ok(Some("groq".to_string())),
+                "ai.inference.provider" => Ok(Some("deepseek".to_string())),
                 _ => Ok(None),
             }
         };
@@ -2672,16 +2697,24 @@ mod tests {
     }
 
     #[test]
-    fn inference_provider_falls_through_to_task_pointer_then_default() {
+    fn inference_provider_falls_through_task_pointer_then_global_default() {
         let pointer = |key: &str| -> crate::RedDBResult<Option<String>> {
             match key {
-                "red.config.ai.inference.provider" => Ok(Some("deepseek".to_string())),
+                "ai.inference.provider" => Ok(Some("deepseek".to_string())),
                 _ => Ok(None),
             }
         };
         assert_eq!(
             resolve_default_provider(&pointer).expect("provider"),
             AiProvider::DeepSeek
+        );
+
+        let global = |key: &str| -> crate::RedDBResult<Option<String>> {
+            Ok((key == "ai.default.provider").then(|| "groq".to_string()))
+        };
+        assert_eq!(
+            resolve_default_provider(&global).expect("provider"),
+            AiProvider::Groq
         );
 
         let empty = |_: &str| -> crate::RedDBResult<Option<String>> { Ok(None) };
@@ -2692,13 +2725,11 @@ mod tests {
     }
 
     #[test]
-    fn inference_model_ask_specific_beats_models_block_beats_builtin() {
+    fn inference_model_ask_specific_beats_models_block_then_global_default() {
         let ask = |key: &str| -> crate::RedDBResult<Option<String>> {
             match key {
-                "red.config.ai.ask.model" => Ok(Some("gpt-ask".to_string())),
-                "red.config.ai.providers.openai.models.inference" => {
-                    Ok(Some("gpt-block".to_string()))
-                }
+                "ai.ask.model" => Ok(Some("gpt-ask".to_string())),
+                "ai.providers.openai.models.inference" => Ok(Some("gpt-block".to_string())),
                 _ => Ok(None),
             }
         };
@@ -2706,15 +2737,21 @@ mod tests {
 
         let block = |key: &str| -> crate::RedDBResult<Option<String>> {
             match key {
-                "red.config.ai.providers.openai.models.inference" => {
-                    Ok(Some("gpt-block".to_string()))
-                }
+                "ai.providers.openai.models.inference" => Ok(Some("gpt-block".to_string())),
                 _ => Ok(None),
             }
         };
         assert_eq!(
             resolve_default_model(&AiProvider::OpenAi, &block),
             "gpt-block"
+        );
+
+        let global = |key: &str| -> crate::RedDBResult<Option<String>> {
+            Ok((key == "ai.default.model").then(|| "gpt-global".to_string()))
+        };
+        assert_eq!(
+            resolve_default_model(&AiProvider::OpenAi, &global),
+            "gpt-global"
         );
 
         let empty = |_: &str| -> crate::RedDBResult<Option<String>> { Ok(None) };
@@ -2728,7 +2765,7 @@ mod tests {
     fn embeddings_provider_follows_task_pointer() {
         let kv = |key: &str| -> crate::RedDBResult<Option<String>> {
             match key {
-                "red.config.ai.embeddings.provider" => Ok(Some("ollama".to_string())),
+                "ai.embeddings.provider" => Ok(Some("ollama".to_string())),
                 _ => Ok(None),
             }
         };
@@ -2761,13 +2798,13 @@ mod tests {
     fn embeddings_provider_rejects_modality_incapable_pointer() {
         let kv = |key: &str| -> crate::RedDBResult<Option<String>> {
             match key {
-                "red.config.ai.embeddings.provider" => Ok(Some("anthropic".to_string())),
+                "ai.embeddings.provider" => Ok(Some("anthropic".to_string())),
                 _ => Ok(None),
             }
         };
         let err = resolve_embeddings_provider(&kv).unwrap_err().to_string();
         assert!(
-            err.contains("red.config.ai.embeddings.provider"),
+            err.contains("ai.embeddings.provider"),
             "error must name the pointer to fix: {err}"
         );
         assert!(
@@ -2785,7 +2822,7 @@ mod tests {
         // regression the local-vector text-search tests guard against.
         let kv = |key: &str| -> crate::RedDBResult<Option<String>> {
             match key {
-                "red.config.ai.inference.provider" => Ok(Some("ollama".to_string())),
+                "ai.inference.provider" => Ok(Some("ollama".to_string())),
                 _ => Ok(None),
             }
         };
@@ -2799,7 +2836,7 @@ mod tests {
     fn embeddings_model_block_beats_builtin() {
         let block = |key: &str| -> crate::RedDBResult<Option<String>> {
             match key {
-                "red.config.ai.providers.openai.models.embeddings" => {
+                "ai.providers.openai.models.embeddings" => {
                     Ok(Some("text-embedding-custom".to_string()))
                 }
                 _ => Ok(None),
@@ -2820,7 +2857,7 @@ mod tests {
     #[test]
     fn base_url_reads_provider_block_key() {
         let kv = |key: &str| -> crate::RedDBResult<Option<String>> {
-            if key == "red.config.ai.providers.openai.base_url" {
+            if key == "ai.providers.openai.base_url" {
                 Ok(Some("https://proxy.example/v1".to_string()))
             } else {
                 Ok(None)
@@ -2836,30 +2873,17 @@ mod tests {
 
     #[test]
     fn removed_config_keys_rejected_naming_replacements() {
-        let err = validate_ai_config_key_on_write("red.config.ai.default.provider")
+        let err = validate_ai_config_key_on_write("ai.openai.default.base_url")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("red.config.ai.inference.provider"), "{err}");
+        assert!(err.contains("ai.providers.<provider>.base_url"), "{err}");
 
-        let err = validate_ai_config_key_on_write("red.config.ai.default.model")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("red.config.ai.providers.<provider>.models.inference"),
-            "{err}"
-        );
-
-        let err = validate_ai_config_key_on_write("red.config.ai.openai.default.base_url")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("red.config.ai.providers.<provider>.base_url"),
-            "{err}"
-        );
-
-        // New-schema keys and unrelated keys are accepted.
-        assert!(validate_ai_config_key_on_write("red.config.ai.inference.provider").is_ok());
-        assert!(validate_ai_config_key_on_write("red.config.ai.providers.openai.base_url").is_ok());
+        // Global defaults reported by existing databases remain valid,
+        // alongside the task/provider-specific schema.
+        assert!(validate_ai_config_key_on_write("ai.default.provider").is_ok());
+        assert!(validate_ai_config_key_on_write("ai.default.model").is_ok());
+        assert!(validate_ai_config_key_on_write("ai.inference.provider").is_ok());
+        assert!(validate_ai_config_key_on_write("ai.providers.openai.base_url").is_ok());
         assert!(validate_ai_config_key_on_write("acme.some.other.key").is_ok());
     }
 
@@ -2867,8 +2891,8 @@ mod tests {
     fn ask_planner_model_and_effort_resolve() {
         let kv = |key: &str| -> crate::RedDBResult<Option<String>> {
             match key {
-                "red.config.ai.ask.planner_model" => Ok(Some("planner-x".to_string())),
-                "red.config.ai.ask.effort" => Ok(Some("high".to_string())),
+                "ai.ask.planner_model" => Ok(Some("planner-x".to_string())),
+                "ai.ask.effort" => Ok(Some("high".to_string())),
                 _ => Ok(None),
             }
         };
@@ -3122,19 +3146,19 @@ pub fn parse_provider(name: &str) -> crate::RedDBResult<AiProvider> {
 // ============================================================================
 // AI config schema (ADR-0068 §5) — clean break
 //
-//   red.config.ai.ask.{provider,model,planner_model,effort,max_plan_steps}
-//   red.config.ai.providers.<provider>.base_url
-//   red.config.ai.providers.<provider>.models.{inference,embeddings}
-//   red.config.ai.inference.provider   # task pointer: who generates
-//   red.config.ai.embeddings.provider  # task pointer: who embeds
+//   ai.default.{provider,model}       # global fallbacks
+//   ai.ask.{provider,model,planner_model,effort,max_plan_steps}
+//   ai.providers.<provider>.base_url
+//   ai.providers.<provider>.models.{inference,embeddings}
+//   ai.inference.provider   # task pointer: who generates
+//   ai.embeddings.provider  # task pointer: who embeds
 //
 // Resolution order for any AI call:
 //   ASK-specific config -> task pointer -> pointed provider's models block
 //   -> provider built-in default.
 //
-// The old flat keys (`red.config.ai.default.provider|model` and the old
-// per-alias `red.config.ai.<provider>.<alias>.base_url` base-URL shape)
-// are removed and rejected on write; there is no deprecation window.
+// The old per-alias `ai.<provider>.<alias>.base_url` base-URL shape is
+// removed and rejected on write; there is no deprecation window.
 // ============================================================================
 
 /// Providers that can serve embeddings, listed for didactic errors.
@@ -3143,16 +3167,13 @@ pub const EMBEDDING_CAPABLE_PROVIDERS: &str =
 
 /// KV key for a provider's base URL under the new schema.
 pub fn provider_base_url_key(provider: &AiProvider) -> String {
-    format!("red.config.ai.providers.{}.base_url", provider.token())
+    format!("ai.providers.{}.base_url", provider.token())
 }
 
 /// KV key for a provider's per-modality model under the new schema.
 /// `modality` is `"inference"` or `"embeddings"`.
 pub fn provider_models_key(provider: &AiProvider, modality: &str) -> String {
-    format!(
-        "red.config.ai.providers.{}.models.{modality}",
-        provider.token()
-    )
+    format!("ai.providers.{}.models.{modality}", provider.token())
 }
 
 /// Reject an AI config key that was removed in the ADR-0068 clean break,
@@ -3161,32 +3182,13 @@ pub fn provider_models_key(provider: &AiProvider, modality: &str) -> String {
 /// for every key that is still valid (including non-AI keys).
 pub fn validate_ai_config_key_on_write(key: &str) -> crate::RedDBResult<()> {
     let key = key.trim();
-    if key == "red.config.ai.default.provider" {
-        return Err(crate::RedDBError::Query(
-            "AI config key 'red.config.ai.default.provider' was removed in the ADR-0068 \
-             clean break; set the task pointer 'red.config.ai.inference.provider' (or \
-             'red.config.ai.ask.provider' for the ASK planner) instead"
-                .to_string(),
-        ));
-    }
-    if key == "red.config.ai.default.model" {
-        return Err(crate::RedDBError::Query(
-            "AI config key 'red.config.ai.default.model' was removed in the ADR-0068 clean \
-             break; set 'red.config.ai.ask.model' or \
-             'red.config.ai.providers.<provider>.models.inference' instead"
-                .to_string(),
-        ));
-    }
-    // Old per-alias base-URL shape: red.config.ai.<provider>.<alias>.base_url
-    // (anything under red.config.ai.* ending in .base_url that is NOT the
-    // new red.config.ai.providers.<provider>.base_url form).
-    if key.starts_with("red.config.ai.")
-        && key.ends_with(".base_url")
-        && !key.starts_with("red.config.ai.providers.")
-    {
+    // Old per-alias base-URL shape: ai.<provider>.<alias>.base_url
+    // (anything under ai.* ending in .base_url that is NOT the
+    // new ai.providers.<provider>.base_url form).
+    if key.starts_with("ai.") && key.ends_with(".base_url") && !key.starts_with("ai.providers.") {
         return Err(crate::RedDBError::Query(format!(
             "AI config key '{key}' uses the removed per-credential base-URL shape; set \
-             'red.config.ai.providers.<provider>.base_url' instead (ADR-0068 clean break)"
+             'ai.providers.<provider>.base_url' instead (ADR-0068 clean break)"
         )));
     }
     Ok(())
@@ -3194,10 +3196,11 @@ pub fn validate_ai_config_key_on_write(key: &str) -> crate::RedDBResult<()> {
 
 /// Resolve the inference (generation) provider. Precedence:
 /// 1. `REDDB_AI_PROVIDER` env var.
-/// 2. ASK-specific config `red.config.ai.ask.provider`.
-/// 3. Inference task pointer `red.config.ai.inference.provider`.
-/// 4. Legacy wire-protocol mode selector when no provider was selected.
-/// 5. Falls back to OpenAI.
+/// 2. ASK-specific config `ai.ask.provider`.
+/// 3. Inference task pointer `ai.inference.provider`.
+/// 4. Global default `ai.default.provider`.
+/// 5. Legacy wire-protocol mode selector when no provider was selected.
+/// 6. Falls back to OpenAI.
 pub fn resolve_default_provider<F>(kv_getter: &F) -> crate::RedDBResult<AiProvider>
 where
     F: Fn(&str) -> crate::RedDBResult<Option<String>>,
@@ -3208,8 +3211,9 @@ where
         }
     }
     for key in [
-        "red.config.ai.ask.provider",
-        "red.config.ai.inference.provider",
+        "ai.ask.provider",
+        "ai.inference.provider",
+        "ai.default.provider",
     ] {
         if let Some(value) = kv_getter(key)? {
             if !value.trim().is_empty() {
@@ -3225,9 +3229,10 @@ where
 /// Resolve the inference (generation) model for `provider`. Precedence:
 /// 1. `REDDB_AI_MODEL` env var.
 /// 2. Provider-specific prompt-model env var.
-/// 3. ASK-specific config `red.config.ai.ask.model`.
+/// 3. ASK-specific config `ai.ask.model`.
 /// 4. Provider models block `…providers.<p>.models.inference`.
-/// 5. Provider built-in default prompt model.
+/// 5. Global default `ai.default.model`.
+/// 6. Provider built-in default prompt model.
 pub fn resolve_default_model<F>(provider: &AiProvider, kv_getter: &F) -> String
 where
     F: Fn(&str) -> crate::RedDBResult<Option<String>>,
@@ -3248,8 +3253,9 @@ where
     }
     // 3. ASK-specific config, then 4. provider models block.
     for key in [
-        "red.config.ai.ask.model".to_string(),
+        "ai.ask.model".to_string(),
         provider_models_key(provider, "inference"),
+        "ai.default.model".to_string(),
     ] {
         if let Ok(Some(value)) = kv_getter(&key) {
             let value = value.trim().to_string();
@@ -3263,7 +3269,7 @@ where
 
 /// Resolve the embeddings provider. Precedence:
 /// 1. `REDDB_AI_EMBEDDINGS_PROVIDER` env var (embeddings-specific override).
-/// 2. `red.config.ai.embeddings.provider` task pointer.
+/// 2. `ai.embeddings.provider` task pointer.
 /// 3. Fall back to the general default provider — [`resolve_default_provider`]
 ///    honours `REDDB_AI_PROVIDER`, the wire-protocol mode selector, and the
 ///    ASK/inference chain — so a deployment that only sets a single global
@@ -3282,7 +3288,7 @@ where
         .filter(|v| !v.is_empty())
     {
         parse_provider(&value)?
-    } else if let Some(value) = kv_getter("red.config.ai.embeddings.provider")?
+    } else if let Some(value) = kv_getter("ai.embeddings.provider")?
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
     {
@@ -3303,7 +3309,7 @@ pub fn ensure_provider_supports_embeddings(provider: &AiProvider) -> crate::RedD
         return Ok(());
     }
     Err(crate::RedDBError::Query(format!(
-        "the embeddings task pointer 'red.config.ai.embeddings.provider' names '{}', which \
+        "the embeddings task pointer 'ai.embeddings.provider' names '{}', which \
          has no embeddings API. Point it at a capable provider ({}) — RedDB never silently \
          re-routes embeddings to a different provider than the one you named.",
         provider.token(),
@@ -3357,14 +3363,14 @@ where
     provider.default_embedding_model().to_string()
 }
 
-/// Resolve the ASK planner model (`red.config.ai.ask.planner_model`),
+/// Resolve the ASK planner model (`ai.ask.planner_model`),
 /// falling back to `fallback_model` (typically the resolved ASK model).
 /// Inert until the ASK planner slice consumes it.
 pub fn resolve_ask_planner_model<F>(kv_getter: &F, fallback_model: &str) -> String
 where
     F: Fn(&str) -> crate::RedDBResult<Option<String>>,
 {
-    if let Ok(Some(value)) = kv_getter("red.config.ai.ask.planner_model") {
+    if let Ok(Some(value)) = kv_getter("ai.ask.planner_model") {
         let value = value.trim().to_string();
         if !value.is_empty() {
             return value;
@@ -3373,13 +3379,13 @@ where
     fallback_model.to_string()
 }
 
-/// Resolve the ASK planner effort (`red.config.ai.ask.effort`) if set.
+/// Resolve the ASK planner effort (`ai.ask.effort`) if set.
 /// Inert until the ASK planner slice consumes it.
 pub fn resolve_ask_effort<F>(kv_getter: &F) -> Option<String>
 where
     F: Fn(&str) -> crate::RedDBResult<Option<String>>,
 {
-    if let Ok(Some(value)) = kv_getter("red.config.ai.ask.effort") {
+    if let Ok(Some(value)) = kv_getter("ai.ask.effort") {
         let value = value.trim().to_string();
         if !value.is_empty() {
             return Some(value);
@@ -3394,7 +3400,7 @@ pub fn resolve_defaults_from_runtime(
 ) -> crate::RedDBResult<(AiProvider, String)> {
     use crate::application::ports::RuntimeEntityPort;
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
-        match runtime.get_kv("red_config", key)? {
+        match runtime.get_kv("red.config", key)? {
             Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
@@ -3413,13 +3419,13 @@ pub fn resolve_prompt_model_from_runtime(
     if let Some(model) = explicit {
         return model.to_string();
     }
-    resolve_default_model(provider, &|key| match runtime.get_kv("red_config", key)? {
+    resolve_default_model(provider, &|key| match runtime.get_kv("red.config", key)? {
         Some((reddb_types::Value::Text(value), _)) => Ok(Some(value.to_string())),
         _ => Ok(None),
     })
 }
 
-/// Resolve the ASK planner model from runtime KV (`red.config.ai.ask.planner_model`),
+/// Resolve the ASK planner model from runtime KV (`ai.ask.planner_model`),
 /// falling back to `fallback_model` — the resolved synthesis/ASK model — when
 /// no planner model is configured (ADR 0068 §3). Lets a cheap/fast model plan
 /// while the user-chosen model synthesizes.
@@ -3429,7 +3435,7 @@ pub fn resolve_ask_planner_model_from_runtime(
 ) -> String {
     use crate::application::ports::RuntimeEntityPort;
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
-        match runtime.get_kv("red_config", key)? {
+        match runtime.get_kv("red.config", key)? {
             Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
@@ -3444,7 +3450,7 @@ pub fn resolve_defaults_from_runtime_port<
     runtime: &P,
 ) -> crate::RedDBResult<(AiProvider, String)> {
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
-        match runtime.get_kv("red_config", key)? {
+        match runtime.get_kv("red.config", key)? {
             Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
@@ -3471,7 +3477,7 @@ pub fn resolve_embeddings_provider_from_runtime<
         return Ok(provider);
     }
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
-        match runtime.get_kv("red_config", key)? {
+        match runtime.get_kv("red.config", key)? {
             Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
@@ -3493,7 +3499,7 @@ pub fn resolve_embeddings_model_from_runtime<
         return model.to_string();
     }
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
-        match runtime.get_kv("red_config", key)? {
+        match runtime.get_kv("red.config", key)? {
             Some((reddb_types::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
@@ -3509,21 +3515,21 @@ pub fn resolve_embeddings_model_from_runtime<
 /// Resolution order (issue #1745 — clean break, no deprecation window):
 /// 1. Vault token path: `red.secret.ai.providers.<provider>.tokens.<alias>`
 /// 2. Vault token indirected via
-///    `red.config.ai.providers.<provider>.tokens.<alias>.secret_ref`
+///    `ai.providers.<provider>.tokens.<alias>.secret_ref`
 /// 3. Env fallback: `REDDB_<PROVIDER>_API_KEY[_<ALIAS>]`
 ///
 /// With no explicit alias, use `providers.<provider>.credential`, then `default`.
 /// First non-empty source wins per request.
 ///
 /// The old vault path shape (`red.secret.ai.<provider>.<alias>.api_key`)
-/// and the legacy plaintext config path (`red.config.ai.<provider>.<alias>.key`)
+/// and the legacy plaintext config path (`ai.<provider>.<alias>.key`)
 /// are **removed**: a credential still sitting at either is rejected with a
 /// didactic error naming the new vault path to populate — never silently
 /// read.
 ///
 /// `kv_getter` receives either a `red.secret.*` path (routed to the
 /// encrypted vault by [`resolve_api_key_from_runtime`]) or a
-/// `red.config.*` key and returns the value if found. Vault-stored keys
+/// canonical content key from `red.config` and returns the value if found. Vault-stored keys
 /// are therefore encrypted at rest and rotatable via the existing vault
 /// KV path; the env vars carry no such guarantees, which is why they are
 /// the fallback rather than the primary source.
@@ -3536,10 +3542,7 @@ where
     F: Fn(&str) -> crate::RedDBResult<Option<String>>,
 {
     let configured_alias = if credential_alias.is_none() {
-        kv_getter(&format!(
-            "red.config.ai.providers.{}.credential",
-            provider.token()
-        ))?
+        kv_getter(&format!("ai.providers.{}.credential", provider.token()))?
     } else {
         None
     };
@@ -3646,7 +3649,7 @@ pub fn ai_api_secret_path(provider: &AiProvider, alias: &str) -> String {
 /// Config key holding a vault indirection ref for the token (issue #1745).
 pub fn ai_api_secret_ref_config_key(provider: &AiProvider, alias: &str) -> String {
     format!(
-        "red.config.ai.providers.{}.tokens.{}.secret_ref",
+        "ai.providers.{}.tokens.{}.secret_ref",
         provider.token(),
         normalize_credential_alias_path(alias)
     )
@@ -3663,11 +3666,11 @@ fn removed_vault_api_key_path(provider: &AiProvider, alias: &str) -> String {
     )
 }
 
-/// Removed plaintext config path (`red.config.ai.<provider>.<alias>.key`,
+/// Removed plaintext config path (`ai.<provider>.<alias>.key`,
 /// issue #1745). Probed ONLY to reject with a migration error.
 fn removed_plaintext_config_key(provider: &AiProvider, alias: &str) -> String {
     format!(
-        "red.config.ai.{}.{}.key",
+        "ai.{}.{}.key",
         provider.token(),
         normalize_credential_alias_path(alias)
     )
@@ -3761,7 +3764,7 @@ pub fn resolve_connection_from_runtime(
 ) -> crate::RedDBResult<AiConnection> {
     use crate::application::ports::RuntimeEntityPort;
     let api_base =
-        provider.resolve_api_base_checked(&|key| match runtime.get_kv("red_config", key)? {
+        provider.resolve_api_base_checked(&|key| match runtime.get_kv("red.config", key)? {
             Some((reddb_types::Value::Text(value), _)) => Ok(Some(value.to_string())),
             _ => Ok(None),
         })?;
@@ -3786,8 +3789,8 @@ pub fn resolve_api_key_from_runtime(
     use crate::application::ports::RuntimeEntityPort;
     let configured_alias = if credential_alias.is_none() {
         match runtime.get_kv(
-            "red_config",
-            &format!("red.config.ai.providers.{}.credential", provider.token()),
+            "red.config",
+            &format!("ai.providers.{}.credential", provider.token()),
         )? {
             Some((reddb_types::Value::Text(value), _)) => Some(value.to_string()),
             _ => None,
@@ -3808,7 +3811,7 @@ pub fn resolve_api_key_from_runtime(
                 .push((kv_key.to_string(), value.is_some()));
             return Ok(value);
         }
-        match runtime.get_kv("red_config", kv_key)? {
+        match runtime.get_kv("red.config", kv_key)? {
             Some((reddb_types::Value::Text(secret), _)) => {
                 audited_paths.borrow_mut().push((kv_key.to_string(), true));
                 Ok(Some(secret.to_string()))
@@ -4530,9 +4533,9 @@ pub fn openai_compat_embeddings(
 // ============================================================================
 // Provider mode selector (issue gh-516)
 //
-// `red.config.ai.provider` picks the wire-protocol family that engine
+// `ai.provider` picks the wire-protocol family that engine
 // consumers (currently AskPipeline) should use. This is intentionally
-// distinct from `red.config.ai.default.provider`, which names a
+// distinct from `ai.default.provider`, which names a
 // concrete vendor (openai, groq, ollama, ...). The mode selector
 // answers the prior question of which HTTP shape to speak.
 // ============================================================================
@@ -4572,7 +4575,7 @@ pub fn parse_provider_mode(name: &str) -> Option<AiProviderMode> {
 
 /// Resolve the provider mode. Lookup chain:
 /// 1. `REDDB_AI_PROVIDER_MODE` env var.
-/// 2. `red_config` KV key `red.config.ai.provider`.
+/// 2. `red.config` key `ai.provider`.
 /// 3. Returns `None` so callers can fall back to their existing
 ///    vendor-based routing.
 pub fn resolve_provider_mode<F>(kv_getter: &F) -> Option<AiProviderMode>
@@ -4584,7 +4587,7 @@ where
             return Some(mode);
         }
     }
-    if let Ok(Some(value)) = kv_getter("red.config.ai.provider") {
+    if let Ok(Some(value)) = kv_getter("ai.provider") {
         if let Some(mode) = parse_provider_mode(&value) {
             return Some(mode);
         }

@@ -1,4 +1,4 @@
-//! Ranking capability catalog persisted in `red_config`.
+//! Ranking capability catalog persisted in `red.config`.
 //!
 //! Issue #918 / ADR 0035 — leaderboard rank as a *table capability*. A
 //! `CREATE RANKING` statement declares order-statistics over an ordinary
@@ -8,7 +8,7 @@
 //!
 //! This module owns three things:
 //!   1. the [`RankingDescriptor`] record and its persistence in
-//!      `red_config` (mirroring [`super::metric_descriptor_catalog`]);
+//!      `red.config` (mirroring [`super::metric_descriptor_catalog`]);
 //!   2. the narrow statement parsers (`CREATE RANKING`, `SHOW RANKINGS`,
 //!      `RANK OF … IN …`) that keep the surface off the recursive-descent
 //!      grammar — the same intercept pattern `READ METRIC` uses; and
@@ -24,7 +24,7 @@ use reddb_types::Value;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const REGISTRY_KEY: &str = "red.ranking.entries_json";
+const REGISTRY_KEY: &str = "ranking.entries_json";
 
 /// Default size of the exact top-K head when `TOP <k>` is omitted.
 ///
@@ -355,7 +355,7 @@ pub fn parse_approx_rank_of(sql: &str) -> Option<RedDBResult<ApproxRankOfRequest
 
 // ───────────────────────── persistence ─────────────────────────
 
-/// Read the latest persisted `value` Text for an arbitrary `red_config`
+/// Read the latest persisted `value` Text for an arbitrary `red.config`
 /// key (most-recent entity wins, mirroring the WAL-as-log-of-writes shape).
 fn read_latest_config_value(store: &UnifiedStore, key: &str) -> Option<String> {
     match store.get_config(key) {
@@ -368,11 +368,11 @@ fn read_latest_registry_json(store: &UnifiedStore) -> Option<String> {
     read_latest_config_value(store, REGISTRY_KEY)
 }
 
-/// `red_config` key for the approximate score sketch of `(table, column)`.
+/// `red.config` key for the approximate score sketch of `(table, column)`.
 /// The sketch is keyed per `(collection, score column)` (criterion 4), not
 /// per ranking name, so two rankings over the same column share one sketch.
 fn sketch_key(table: &str, column: &str) -> String {
-    format!("red.ranking.sketch.{table}.{column}")
+    format!("ranking.sketch.{table}.{column}")
 }
 
 /// Persist the approximate score sketch for `(table, column)`.

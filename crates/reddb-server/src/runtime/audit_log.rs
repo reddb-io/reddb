@@ -1492,19 +1492,6 @@ mod tests {
     }
 
     #[test]
-    fn audit_field_escaper_no_format_macro_in_value_path() {
-        // Compile-time guarantee: AuditField construction goes
-        // through AuditValue, not through `Display`. This test is
-        // a documentation anchor — if a contributor adds a `Display`
-        // impl that bypasses the typed value, the property tests
-        // below still catch the smuggling, but this test makes the
-        // intent explicit.
-        let _ = AuditFieldEscaper::field("name", "value"); // compiles
-                                                           // No `format!` path, no `to_string()` of attacker bytes:
-                                                           // the only entry is `Into<AuditValue>`.
-    }
-
-    #[test]
     fn audit_field_escaper_chains_via_builder_fields() {
         let ev = AuditEvent::builder("test/multi")
             .fields([

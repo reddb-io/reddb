@@ -248,8 +248,9 @@ fn create_rollback_copy(data_path: &Path, backup_path: &Path) -> std::io::Result
 /// re-create the retired sidecars beside it.
 ///
 /// This is a true inverse of [`migrate_to_zoned`], not a backup restore, so a
-/// store that was migrated and then written to still reverts to a coherent
-/// legacy store. The retained `.pre-migration` file, if one is still around, is
+/// store that still uses legacy reader capabilities reverts to a coherent
+/// legacy store after writes. New publication capabilities are refused before
+/// any source or rollback file is changed. The retained `.pre-migration` file is
 /// dropped last: once the legacy shape is durable it has nothing left to roll
 /// back to.
 pub fn revert_to_sidecars(data_path: &Path) -> Result<ZoneMigrationReport> {
@@ -259,6 +260,11 @@ pub fn revert_to_sidecars(data_path: &Path) -> Result<ZoneMigrationReport> {
 
     let image = newest_superblock_image(data_path)?
         .ok_or_else(|| ZoneMigrationError::HeaderUnrecoverable(data_path.to_path_buf()))?;
+
+    // This inverse restores the legacy fixed manifest and recovery protocol.
+    // Validate that contract before stripping either independently sealed slot.
+    reddb_file::decode_database_header(&image)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
     // Strip the slot trailer and restore the whole-page checksum: this is
     // byte-for-byte the page 0 the sidecar-era pager wrote.

@@ -4,7 +4,7 @@
 //! subsequent writes. Native merge plans publish data and history together.
 //!
 //! Every VCS entity is stored as a plain TableRow in a `red_*`
-//! collection (same pattern as `red_queue_meta` / `red_stats`).
+//! collection (same pattern as `red.queue.meta` / `red.query.stats_catalog`).
 //! Commits reuse the MVCC snapshot xid as their immutable root, and
 //! pin that xid so VACUUM cannot reclaim historical row versions.
 
@@ -1798,9 +1798,9 @@ impl RedDBRuntime {
                 "cannot disable history while branches share versions".into(),
             ));
         }
-        if enabled && store.format_version() < reddb_file::native_store::STORE_VERSION_V13 {
+        if enabled && store.format_version() < reddb_file::native_store::STORE_VERSION_V14 {
             let previous_format = store.format_version();
-            store.set_format_version(reddb_file::native_store::STORE_VERSION_V13);
+            store.set_format_version(reddb_file::native_store::STORE_VERSION_V14);
             if store.pager().is_some() {
                 if let Err(error) = store.persist() {
                     store.set_format_version(previous_format);

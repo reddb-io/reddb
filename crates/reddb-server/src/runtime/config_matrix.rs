@@ -3,7 +3,7 @@
 //! Two tiers:
 //!
 //! - **Tier A (`Critical`)** — self-healing on boot. If the key is
-//!   missing from `red_config`, the loader writes the default in.
+//!   missing from `red.config`, the loader writes the default in.
 //!   Operators always see these via `SHOW CONFIG` so they know what
 //!   guarantees and tuning they have.
 //! - **Tier B (`Optional`)** — in-memory default. Never self-populated.
@@ -114,6 +114,11 @@ pub const MATRIX: &[ConfigDefault] = &[
         default: || num(crate::storage::cache::DEFAULT_BLOB_L2_BYTES_MAX as f64),
     },
     ConfigDefault {
+        key: "cache.blob.namespace_bytes_max",
+        tier: Tier::Critical,
+        default: || num(crate::storage::cache::DEFAULT_BLOB_NAMESPACE_BYTES_MAX as f64),
+    },
+    ConfigDefault {
         key: "cache.blob.max_namespaces",
         tier: Tier::Critical,
         default: || num(crate::storage::cache::DEFAULT_BLOB_MAX_NAMESPACES as f64),
@@ -177,11 +182,6 @@ pub const MATRIX: &[ConfigDefault] = &[
         default: || text("sync"),
     },
     // runtime.result_cache.*
-    ConfigDefault {
-        key: "runtime.result_cache.backend",
-        tier: Tier::Critical,
-        default: || text("legacy"),
-    },
     // Kill-switch (issue #802). Critical so it self-heals to `true` on
     // boot and is always visible in SHOW CONFIG — operators flip it to
     // `false` to disable result caching wholesale for debugging.
@@ -303,6 +303,11 @@ pub const MATRIX: &[ConfigDefault] = &[
         default: || JsonValue::Bool(true),
     },
     // ai.ner.* — opt-in LLM backend for AskPipeline Stage 1 (issue #189).
+    ConfigDefault {
+        key: "ai.collection_descriptions.auto_enrich",
+        tier: Tier::Optional,
+        default: || JsonValue::Bool(false),
+    },
     // Default backend stays heuristic so existing deployments keep
     // their current behaviour without operator action.
     ConfigDefault {
@@ -390,7 +395,7 @@ pub fn tier_for(key: &str) -> Option<Tier> {
 }
 
 /// Boot-time self-healing pass: for every `Tier::Critical` key, if
-/// `red_config` does not already contain the key, write the default
+/// `red.config` does not already contain the key, write the default
 /// in. Idempotent — re-running produces no writes.
 ///
 /// `Tier::Optional` keys are never touched here; they stay
@@ -409,7 +414,7 @@ pub fn heal_critical_keys(store: &UnifiedStore) {
     }
 }
 
-/// Lightweight presence probe. Avoids loading the whole red_config
+/// Lightweight presence probe. Avoids loading the whole red.config
 /// collection; scans until the first hit.
 fn is_key_present(store: &UnifiedStore, key: &str) -> bool {
     match store.try_get_config(key) {
@@ -446,9 +451,9 @@ mod tests {
         let required_critical = [
             "cache.blob.l1_bytes_max",
             "cache.blob.l2_bytes_max",
+            "cache.blob.namespace_bytes_max",
             "cache.blob.max_namespaces",
             "durability.mode",
-            "runtime.result_cache.backend",
             "concurrency.locking.enabled",
             "storage.wal.max_interval_ms",
             "storage.deploy.profile",

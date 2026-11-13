@@ -160,6 +160,11 @@ impl<'a> DmlTargetScan<'a> {
         let snapshot = crate::runtime::impl_core::capture_current_snapshot();
         let index_store = self.runtime.index_store_ref();
         let generation = index_store.indexed_mutation_generation();
+        #[cfg(test)]
+        index_store.mutation_test_hook(
+            self.table,
+            super::index_store::MutationTestPhase::DmlTargetSelectionStarted,
+        );
         // DML target discovery may run against a retained snapshot even for an
         // autocommit statement. Current index entries cannot recover old values.
         // Only retry a pure filter outside stored-function work limits if

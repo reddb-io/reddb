@@ -126,6 +126,7 @@ impl Resource {
     /// `"public.users"` → `Table { schema: Some("public"), table: "users" }`.
     /// `"users"` → `Table { schema: None, table: "users" }`.
     pub fn table_from_name(name: &str) -> Self {
+        let name = reddb_engine::storage::system_collection_names::canonical_or_self(name);
         match name.split_once('.') {
             Some((schema, table)) => Self::Table {
                 schema: Some(schema.to_string()),

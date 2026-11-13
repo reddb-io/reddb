@@ -347,8 +347,8 @@ impl RedDBServer {
     /// Issue #582 — Analytics slice 4. `POST /collections/:name/batch`.
     /// All-or-nothing commit of a JSON array of rows under a single
     /// Statement frame, with `AnalyticsSchemaRegistry` validation up
-    /// front and `Idempotency-Key` replay served from an in-memory
-    /// process-wide cache (see [`crate::runtime::batch_insert`]).
+    /// front and `Idempotency-Key` replay served from the durable
+    /// `red.batch.idempotency` receipts.
     ///
     /// The core ingest pipeline lives in [`process_batch_insert`] so
     /// the RedWire (#587) and gRPC (#585) mirrors can call the same
@@ -1023,11 +1023,9 @@ impl RedDBServer {
 /// always a compact JSON object so a downstream consumer can decode it
 /// once and present whichever fields the client cares about.
 ///
-/// Sharing this representation across transports is what lets the
-/// idempotency cache (process-wide, keyed by `(collection, key)`)
-/// replay byte-for-byte across HTTP / gRPC / RedWire: the cache stores
-/// the body that this function produces, and every transport agrees on
-/// the shape.
+/// Sharing this representation across transports lets the durable
+/// `(collection, key)` receipt replay byte-for-byte across HTTP, gRPC,
+/// and RedWire.
 #[derive(Debug, Clone)]
 pub(crate) struct BatchOutcome {
     pub status: u16,
@@ -1103,7 +1101,7 @@ fn batch_outcome_to_http(outcome: BatchOutcome) -> HttpResponse {
 /// contract, the dedup window, and the all-or-nothing commit all agree.
 ///
 /// Reads:
-/// - The process-wide `BatchInsertCache` (see [`crate::runtime::batch_insert`]).
+/// - Durable receipts in `red.batch.idempotency`.
 /// - `RED_BATCH_MAX_ROWS` and `RED_BATCH_IDEMPOTENCY_WINDOW_SECS` via
 ///   `BatchInsertConfig::from_env()`.
 /// - The `AnalyticsSchemaRegistry` for any row carrying a registered
@@ -1113,49 +1111,51 @@ fn batch_outcome_to_http(outcome: BatchOutcome) -> HttpResponse {
 /// - The batch via `EntityUseCases::create_rows_batch`, which already
 ///   threads CDC through `MutationEngine::commit_rows` so events fire
 ///   for every row in caller order.
-/// - The (collection, key) entry in the idempotency cache, so a retry
-///   replays the exact same body bytes (both 2xx and deterministic 4xx).
+/// - The successful response receipt in the same transaction as the rows,
+///   so a retry after response loss replays the exact same body bytes.
 pub(crate) fn process_batch_insert(
     runtime: &crate::runtime::RedDBRuntime,
     collection: &str,
     items: &[JsonValue],
     idempotency_key: Option<&str>,
 ) -> BatchOutcome {
-    use crate::runtime::batch_insert::{global_cache, BatchInsertConfig, BatchInsertError};
-    use std::time::Instant;
+    use crate::runtime::batch_insert::{
+        lock_durable_commit, lookup_durable_receipt, unix_time_ms, BatchInsertConfig,
+        BatchInsertError,
+    };
 
-    let cache = global_cache();
     let config = BatchInsertConfig::from_env();
-    let now = Instant::now();
+    let now_ms = unix_time_ms();
 
     // Idempotency replay short-circuits before any work so a misshapen
-    // retry of an earlier success still returns the cached success.
+    // retry of an earlier success still returns the committed success.
     let cache_key = idempotency_key.filter(|k| !k.is_empty());
+    if cache_key.is_some()
+        && runtime
+            .connection_in_transaction(crate::runtime::execution_context::current_connection_id())
+    {
+        return BatchOutcome::from_runtime_error(&crate::api::RedDBError::InvalidOperation(
+            "batch Idempotency-Key is autocommit-only".to_string(),
+        ));
+    }
     if let Some(key) = cache_key {
-        if let Some(cached) = cache.lookup(collection, key, now) {
-            return BatchOutcome {
-                status: cached.status,
-                body: cached.body,
-            };
+        match lookup_durable_receipt(runtime, collection, key, now_ms) {
+            Ok(Some(receipt)) => {
+                return BatchOutcome {
+                    status: receipt.status,
+                    body: receipt.body,
+                }
+            }
+            Ok(None) => {}
+            Err(error) => return BatchOutcome::from_runtime_error(&error),
         }
     }
 
     if items.len() > config.max_rows {
-        let outcome = BatchOutcome::from_error(&BatchInsertError::BatchTooLarge {
+        return BatchOutcome::from_error(&BatchInsertError::BatchTooLarge {
             limit: config.max_rows,
             got: items.len(),
         });
-        if let Some(key) = cache_key {
-            cache.store(
-                collection,
-                key,
-                outcome.status,
-                outcome.body.clone(),
-                config.idempotency_window,
-                now,
-            );
-        }
-        return outcome;
     }
 
     // Two-phase: parse + schema-validate every row BEFORE any storage
@@ -1171,44 +1171,68 @@ pub(crate) fn process_batch_insert(
         ) {
             Ok(input) => input,
             Err(err) => {
-                let outcome = BatchOutcome::from_error(&BatchInsertError::RowParseFailure {
+                return BatchOutcome::from_error(&BatchInsertError::RowParseFailure {
                     index,
                     reason: err.to_string(),
                 });
-                if let Some(key) = cache_key {
-                    cache.store(
-                        collection,
-                        key,
-                        outcome.status,
-                        outcome.body.clone(),
-                        config.idempotency_window,
-                        now,
-                    );
-                }
-                return outcome;
             }
         };
 
         if let Some(reason) = schema_validate_row(store.as_ref(), &input) {
-            let outcome =
-                BatchOutcome::from_error(&BatchInsertError::RowSchemaRejected { index, reason });
-            if let Some(key) = cache_key {
-                cache.store(
-                    collection,
-                    key,
-                    outcome.status,
-                    outcome.body.clone(),
-                    config.idempotency_window,
-                    now,
-                );
-            }
-            return outcome;
+            return BatchOutcome::from_error(&BatchInsertError::RowSchemaRejected {
+                index,
+                reason,
+            });
         }
 
         row_inputs.push(input);
     }
 
     let count = row_inputs.len();
+    if let Some(key) = cache_key {
+        // Validation can overlap across unrelated requests. Serialize only the
+        // durable check+commit window, then re-check because another request
+        // with this key may have committed while this one was validating.
+        let _commit = lock_durable_commit(collection, key);
+        match lookup_durable_receipt(runtime, collection, key, unix_time_ms()) {
+            Ok(Some(receipt)) => {
+                return BatchOutcome {
+                    status: receipt.status,
+                    body: receipt.body,
+                }
+            }
+            Ok(None) => {}
+            Err(error) => return BatchOutcome::from_runtime_error(&error),
+        }
+
+        let outcome = BatchOutcome::ok(count);
+        let window_ms = u64::try_from(config.idempotency_window.as_millis()).unwrap_or(u64::MAX);
+        let expires_at_ms = unix_time_ms().saturating_add(window_ms);
+        let result = commit_batch_with_durable_receipt(
+            runtime,
+            collection,
+            row_inputs,
+            key,
+            &outcome,
+            expires_at_ms,
+        );
+        return match result {
+            Ok(()) => outcome,
+            Err(error) => {
+                // COMMIT can report a post-durability publication failure. If
+                // the receipt is visible, the rows and receipt committed in
+                // the same WAL batch and replaying success is authoritative.
+                match lookup_durable_receipt(runtime, collection, key, unix_time_ms()) {
+                    Ok(Some(receipt)) => BatchOutcome {
+                        status: receipt.status,
+                        body: receipt.body,
+                    },
+                    _ => BatchOutcome::from_runtime_error(&error),
+                }
+            }
+        };
+    }
+
     let result = crate::application::EntityUseCases::new(runtime).create_rows_batch(
         crate::application::CreateRowsBatchInput {
             collection: collection.to_string(),
@@ -1217,23 +1241,78 @@ pub(crate) fn process_batch_insert(
         },
     );
 
-    let outcome = match result {
+    match result {
         Ok(_) => BatchOutcome::ok(count),
         Err(err) => BatchOutcome::from_runtime_error(&err),
-    };
+    }
+}
 
-    if let Some(key) = cache_key {
-        cache.store(
-            collection,
-            key,
-            outcome.status,
-            outcome.body.clone(),
-            config.idempotency_window,
-            now,
-        );
+struct BatchTransaction<'a> {
+    runtime: &'a crate::runtime::RedDBRuntime,
+    connection_id: u64,
+    previous_connection_id: u64,
+}
+
+impl<'a> BatchTransaction<'a> {
+    fn begin(runtime: &'a crate::runtime::RedDBRuntime) -> crate::api::RedDBResult<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(u64::MAX);
+        let previous_connection_id = crate::runtime::execution_context::current_connection_id();
+        let connection_id = NEXT_CONNECTION_ID.fetch_sub(1, Ordering::Relaxed);
+        crate::runtime::execution_context::set_current_connection_id(connection_id);
+        if let Err(error) = runtime.execute_query("BEGIN") {
+            crate::runtime::execution_context::set_current_connection_id(previous_connection_id);
+            return Err(error);
+        }
+        Ok(Self {
+            runtime,
+            connection_id,
+            previous_connection_id,
+        })
     }
 
-    outcome
+    fn commit(self) -> crate::api::RedDBResult<()> {
+        self.runtime.execute_query("COMMIT").map(|_| ())
+    }
+}
+
+impl Drop for BatchTransaction<'_> {
+    fn drop(&mut self) {
+        if self.runtime.connection_in_transaction(self.connection_id) {
+            let _ = self.runtime.rollback_connection(self.connection_id);
+        }
+        crate::runtime::execution_context::set_current_connection_id(self.previous_connection_id);
+    }
+}
+
+fn commit_batch_with_durable_receipt(
+    runtime: &crate::runtime::RedDBRuntime,
+    collection: &str,
+    rows: Vec<crate::application::CreateRowInput>,
+    idempotency_key: &str,
+    outcome: &BatchOutcome,
+    expires_at_ms: u64,
+) -> crate::api::RedDBResult<()> {
+    let transaction = BatchTransaction::begin(runtime)?;
+    runtime.with_deferred_store_wal_if_transaction(|| {
+        crate::application::EntityUseCases::new(runtime).create_rows_batch(
+            crate::application::CreateRowsBatchInput {
+                collection: collection.to_string(),
+                rows,
+                suppress_events: false,
+            },
+        )?;
+        crate::runtime::batch_insert::insert_durable_receipt(
+            runtime,
+            collection,
+            idempotency_key,
+            outcome.status,
+            &outcome.body,
+            expires_at_ms,
+        )
+    })?;
+    transaction.commit()
 }
 
 /// Run `AnalyticsSchemaRegistry::validate` against a single row's
@@ -1824,7 +1903,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_insert_idempotency_key_replays_cached_result() {
+    fn batch_insert_idempotency_key_replays_committed_result() {
         let server = make_server();
         create_table(&server, "CREATE TABLE events (id INTEGER, name TEXT)");
 
@@ -1834,14 +1913,14 @@ mod tests {
         let body1 = String::from_utf8_lossy(&r1.body).to_string();
 
         // Replay with the same key + DIFFERENT body should still
-        // return the cached prior result and NOT execute again.
+        // return the committed prior result and NOT execute again.
         let other_body = r#"[{"fields": {"id": 2, "name": "second"}}]"#;
         let r2 = post_batch(&server, "events", other_body, Some("replay-token-1"));
         assert_eq!(r2.status, 200);
         assert_eq!(
             String::from_utf8_lossy(&r2.body).to_string(),
             body1,
-            "replay must return the cached body byte-for-byte"
+            "replay must return the committed body byte-for-byte"
         );
 
         // Storage holds only the first row, proving the replay did
@@ -1853,6 +1932,63 @@ mod tests {
             !scan_text.contains("\"name\":\"second\""),
             "replay re-executed: {scan_text}"
         );
+    }
+
+    #[test]
+    fn failed_atomic_receipt_commit_leaves_no_rows_or_false_replay() {
+        use std::sync::atomic::Ordering;
+
+        let server = make_server();
+        create_table(
+            &server,
+            "CREATE TABLE receipt_failure (id INTEGER, name TEXT)",
+        );
+        server
+            .runtime()
+            .db()
+            .store()
+            .test_fail_deferred_wal_append
+            .store(true, Ordering::Release);
+
+        let body = r#"[{"fields": {"id": 1, "name": "first-attempt"}}]"#;
+        let failed = post_batch(
+            &server,
+            "receipt_failure",
+            body,
+            Some("atomic-failure-token"),
+        );
+        assert_eq!(
+            failed.status,
+            400,
+            "{}",
+            String::from_utf8_lossy(&failed.body)
+        );
+        let after_failure = server.handle_scan("receipt_failure", &Default::default());
+        assert!(
+            !String::from_utf8_lossy(&after_failure.body).contains("first-attempt"),
+            "a failed WAL batch exposed its data rows"
+        );
+
+        let retry = post_batch(
+            &server,
+            "receipt_failure",
+            body,
+            Some("atomic-failure-token"),
+        );
+        assert_eq!(
+            retry.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&retry.body)
+        );
+        let after_retry = String::from_utf8_lossy(
+            &server
+                .handle_scan("receipt_failure", &Default::default())
+                .body,
+        )
+        .into_owned();
+        assert!(after_retry.contains("first-attempt"), "{after_retry}");
+        assert!(after_retry.contains("\"total\":1"), "{after_retry}");
     }
 
     #[test]

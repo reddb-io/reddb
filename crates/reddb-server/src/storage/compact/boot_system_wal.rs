@@ -35,14 +35,14 @@ fn boot_key(entity: &UnifiedEntity) -> Option<&'static str> {
     row.get_field("value")?;
     // Exactly the process information recreated by runtime/impl_lifecycle.rs.
     match key.as_ref() {
-        "red.system.pid" => Some("red.system.pid"),
-        "red.system.cpu_cores" => Some("red.system.cpu_cores"),
-        "red.system.total_memory_bytes" => Some("red.system.total_memory_bytes"),
-        "red.system.available_memory_bytes" => Some("red.system.available_memory_bytes"),
-        "red.system.os" => Some("red.system.os"),
-        "red.system.arch" => Some("red.system.arch"),
-        "red.system.hostname" => Some("red.system.hostname"),
-        "red.system.started_at" => Some("red.system.started_at"),
+        "system.pid" => Some("system.pid"),
+        "system.cpu_cores" => Some("system.cpu_cores"),
+        "system.total_memory_bytes" => Some("system.total_memory_bytes"),
+        "system.available_memory_bytes" => Some("system.available_memory_bytes"),
+        "system.os" => Some("system.os"),
+        "system.arch" => Some("system.arch"),
+        "system.hostname" => Some("system.hostname"),
+        "system.started_at" => Some("system.started_at"),
         _ => None,
     }
 }
@@ -161,7 +161,7 @@ impl BootSystemWalPlan {
         catalog.retain_canonical_system_config()?;
         let mut identities = HashMap::new();
         if legacy_root != 0 {
-            let tree = BTree::with_root(Arc::clone(source), legacy_root);
+            let tree = source.tree(legacy_root)?;
             let mut cursor = tree.cursor_first()?;
             while let Some((key, bytes)) = cursor.next_with_budget(32 * 1024 * 1024)? {
                 ensure(

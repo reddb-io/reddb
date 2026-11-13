@@ -9,6 +9,7 @@ CRATES=(
   reddb-io-crypto
   reddb-io-file
   reddb-io-engine
+  reddb-io-mcu
   reddb-io-grpc-proto
   reddb-io-rql
   reddb-io-server

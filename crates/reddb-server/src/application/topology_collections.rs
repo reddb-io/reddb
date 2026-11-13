@@ -48,7 +48,7 @@ pub const CLUSTER: &str = "red.topology.cluster";
 /// Sidecar collection holding the single materialisation-metadata row
 /// (`graph_version`, `computed_at`, `fingerprint`). Kept out of the graph so it
 /// never pollutes the analytics computation.
-pub const META: &str = "red_topology_meta";
+pub const META: &str = "red.topology.meta";
 
 /// Analytics outputs declared on the topology graph.
 pub const OUTPUTS: &[AnalyticsOutput] = &[
@@ -371,7 +371,7 @@ pub fn refresh(rt: &RedDBRuntime, members: &[ClusterMember]) -> RedDBResult<Refr
 /// Pull the live cluster state off the runtime and materialise it.
 pub fn refresh_from_runtime(rt: &RedDBRuntime) -> RedDBResult<RefreshOutcome> {
     let db = rt.db();
-    let primary_addr = rt.config_string("red.grpc.advertise_addr", "");
+    let primary_addr = rt.config_string("grpc.advertise_addr", "");
     let primary_region = db.options().replication.region.clone();
     let primary_lsn = db
         .replication

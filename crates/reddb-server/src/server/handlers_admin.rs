@@ -753,6 +753,10 @@ impl RedDBServer {
             JsonValue::Number(s.l1_bytes_max() as f64),
         );
         obj.insert(
+            "namespace_bytes_max".to_string(),
+            JsonValue::Number(s.namespace_bytes_max() as f64),
+        );
+        obj.insert(
             "l2_bytes_in_use".to_string(),
             JsonValue::Number(s.l2_bytes_in_use() as f64),
         );
@@ -1125,25 +1129,29 @@ mod tests {
         let body = String::from_utf8(response.body.to_vec()).expect("utf8 metrics");
 
         for needle in [
-            "reddb_cache_blob_get_total{namespace=\"runtime.result_cache\",result=\"hit_l1\"}",
-            "reddb_cache_blob_get_total{namespace=\"runtime.result_cache\",result=\"hit_l2\"}",
-            "reddb_cache_blob_get_total{namespace=\"runtime.result_cache\",result=\"miss\"}",
-            "reddb_cache_blob_put_total{namespace=\"runtime.result_cache\",outcome=\"ok\"}",
-            "reddb_cache_blob_put_total{namespace=\"runtime.result_cache\",outcome=\"version_mismatch\"}",
-            "reddb_cache_blob_put_total{namespace=\"runtime.result_cache\",outcome=\"too_large\"}",
-            "reddb_cache_blob_put_total{namespace=\"runtime.result_cache\",outcome=\"metadata_too_large\"}",
-            "reddb_cache_blob_invalidate_total{namespace=\"runtime.result_cache\",kind=\"dependency\"}",
-            "reddb_cache_blob_invalidate_total{namespace=\"runtime.result_cache\",kind=\"namespace\"}",
-            "reddb_cache_blob_evict_total{namespace=\"runtime.result_cache\",reason=\"capacity\"}",
-            "reddb_cache_blob_evict_total{namespace=\"runtime.result_cache\",reason=\"expiry\"}",
-            "reddb_cache_blob_evict_total{namespace=\"runtime.result_cache\",reason=\"policy\"}",
-            "reddb_cache_blob_l1_bytes_in_use{namespace=\"runtime.result_cache\"}",
-            "reddb_cache_blob_l1_entries{namespace=\"runtime.result_cache\"}",
-            "reddb_cache_blob_l2_bytes_in_use{namespace=\"runtime.result_cache\"}",
-            "reddb_cache_blob_l2_full_rejections_total{namespace=\"runtime.result_cache\"}",
-            "reddb_cache_blob_version_mismatch_total{namespace=\"runtime.result_cache\"}",
+            "reddb_cache_blob_get_total{namespace=\"__all__\",result=\"hit_l1\"}",
+            "reddb_cache_blob_get_total{namespace=\"__all__\",result=\"hit_l2\"}",
+            "reddb_cache_blob_get_total{namespace=\"__all__\",result=\"miss\"}",
+            "reddb_cache_blob_put_total{namespace=\"__all__\",outcome=\"ok\"}",
+            "reddb_cache_blob_put_total{namespace=\"__all__\",outcome=\"version_mismatch\"}",
+            "reddb_cache_blob_put_total{namespace=\"__all__\",outcome=\"too_large\"}",
+            "reddb_cache_blob_put_total{namespace=\"__all__\",outcome=\"metadata_too_large\"}",
+            "reddb_cache_blob_invalidate_total{namespace=\"__all__\",kind=\"all\"}",
+            "reddb_cache_blob_invalidate_total{namespace=\"__all__\",kind=\"namespace\"}",
+            "reddb_cache_blob_evict_total{namespace=\"__all__\",reason=\"capacity\"}",
+            "reddb_cache_blob_evict_total{namespace=\"__all__\",reason=\"expiry\"}",
+            "reddb_cache_blob_evict_total{namespace=\"__all__\",reason=\"policy\"}",
+            "reddb_cache_blob_l1_bytes_in_use{namespace=\"__all__\"}",
+            "reddb_cache_blob_namespace_bytes_max",
+            "reddb_cache_blob_l1_entries{namespace=\"__all__\"}",
+            "reddb_cache_blob_l2_bytes_in_use{namespace=\"__all__\"}",
+            "reddb_cache_blob_l2_full_rejections_total{namespace=\"__all__\"}",
+            "reddb_cache_blob_version_mismatch_total{namespace=\"__all__\"}",
         ] {
-            assert!(body.contains(needle), "missing metric line for {needle}");
+            assert!(
+                body.contains(needle),
+                "missing metric line for {needle}\n{body}"
+            );
         }
     }
 
@@ -1412,6 +1420,16 @@ mod tests {
                 "missing field {field} in response: {parsed:?}"
             );
         }
+    }
+
+    #[test]
+    fn admin_blob_cache_stats_exposes_global_and_namespace_memory_limits() {
+        let server = test_server();
+        let response = server.handle_admin_blob_cache_stats(&BTreeMap::new());
+        assert_eq!(response.status, 200);
+        let parsed = parse_body(&response);
+        assert!(parsed.get("l1_bytes_max").is_some());
+        assert!(parsed.get("namespace_bytes_max").is_some());
     }
 
     #[test]

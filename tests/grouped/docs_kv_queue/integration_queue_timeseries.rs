@@ -556,7 +556,7 @@ fn test_queue_push_dedup_survives_persistent_reopen() {
     let path = PersistentDbPath::new("queue_dedup_reopen");
     let rt = path.open_runtime();
 
-    exec(&rt, "CREATE QUEUE durable_dedup DEDUP_WINDOW 1 s");
+    exec(&rt, "CREATE QUEUE durable_dedup DEDUP_WINDOW 300 s");
     let first = exec(&rt, "QUEUE PUSH durable_dedup 'first' DEDUP 'retry-1'");
     let first_id = text(&first.result.records[0], "message_id");
 
@@ -1156,7 +1156,7 @@ fn test_create_timeseries_persists_contract_and_downsample_metadata() {
 
     let store = rt.db().store();
     let meta = store
-        .get_collection("red_timeseries_meta")
+        .get_collection("red.timeseries.meta")
         .expect("timeseries metadata collection should exist");
     let rows = meta.query_all(|entity| {
         entity
@@ -1325,7 +1325,7 @@ fn test_timeseries_series_dictionary_interns_canonical_tags() {
     {
         let store = rt.db().store();
         let dictionary = store
-            .get_collection("red_timeseries_series")
+            .get_collection("red.timeseries.series")
             .expect("series dictionary collection should exist");
         let rows = dictionary.query_all(|entity| {
             entity.data.as_row().is_some_and(|row| {
@@ -1393,7 +1393,7 @@ fn test_timeseries_tag_index_filters_series_for_equality_and_in_after_reopen() {
     {
         let store = rt.db().store();
         let tag_index = store
-            .get_collection("red_timeseries_tag_index")
+            .get_collection("red.timeseries.tag_index")
             .expect("tag index collection should be maintained at series creation");
         let host_rows = tag_index.query_all(|entity| {
             entity.data.as_row().is_some_and(|row| {

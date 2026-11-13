@@ -1,5 +1,166 @@
 # Changelog
 
+## 1.35.0
+
+### Minor Changes
+
+- [#2813](https://github.com/reddb-io/reddb/pull/2813) [`2659ad5`](https://github.com/reddb-io/reddb/commit/2659ad5757565c1217bd0d25a068fe68d11e4c71) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Bind native paged data, indexes, retired generations and double-write recovery to independently sealed catalog and superblock authority. Reject checksum-valid stale pages and recovery frames before they can replace current data, and preserve recovery evidence after interrupted writes. Preparing a legacy store also authenticates retained generations without moving their data or releasing active readers. Older readers reject the new required capabilities at open.
+
+  Guarded readers and writers also reject a truncated reserved double-write area before serving surviving stale home pages, without consuming recovery evidence.
+
+  Preserve streaming MCU recovery for legacy files, and reject prepared batches or incompatible read budgets before they can bypass guarded recovery.
+
+  Keep initial tree insertion separate from the existing-tree buffers so cold multimodel checkpoints can allocate generation proofs on ordinary worker stacks.
+
+  Upgrade notes: legacy files remain readable and keep their existing addresses during preparation. Once a store enables the new catalog, tree-proof or double-write publication capabilities, older readers reject it at open. Retain a verified pre-upgrade backup; downgrading requires restoring that backup or exporting verified data into a compatible store. Reverting the application binary does not downgrade the file. Existing Rust `DatabaseHeader` struct literals and exhaustive `DatabaseHeaderError` matches remain source compatible; publication extensions use additive accessors and a separate error type.
+
+  The existing header decoder keeps rejecting publication-specific capabilities even when an older engine links this newer file codec. Participating engines use the explicit publication-aware decoder, which validates catalog and recovery extensions before page access.
+
+  The legacy sidecar reversion tool also refuses these capabilities before modifying the store or deleting its retained backup.
+
+### Patch Changes
+
+- [#2827](https://github.com/reddb-io/reddb/pull/2827) [`5c5b9ce`](https://github.com/reddb-io/reddb/commit/5c5b9ce1e3ae629863a6722413438891c7043b6f) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reject cyclic overflow page chains with an explicit corruption error so reads and recovery cannot spin forever.
+
+- [#2825](https://github.com/reddb-io/reddb/pull/2825) [`a03bbe8`](https://github.com/reddb-io/reddb/commit/a03bbe8c46c3642f2a3d1abab4339ba92412bd5f) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Persist batch idempotency receipts in `red.batch.idempotency` in the same transaction as the inserted rows. Retries after a lost response, process restart, or writer takeover now replay the committed response without duplicating data.
+
+- [#2828](https://github.com/reddb-io/reddb/pull/2828) [`57652d2`](https://github.com/reddb-io/reddb/commit/57652d23755ad9923363266be75361b6491facac) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Archive and hash an immutable checkpoint cut so concurrent updates, DDL, and vacuum cannot publish an unrestorable backup.
+
+- [#2817](https://github.com/reddb-io/reddb/pull/2817) [`e372d66`](https://github.com/reddb-io/reddb/commit/e372d66bbeae4dc2bb89dfeeaf242ff660c0f8b7) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve the local authoritative database when a primary/replica or cluster node acquires a writer lease. A backend used for ownership fencing no longer activates serverless snapshot hydration or replaces a promoted replica with an older remote snapshot. Embedded and serverless snapshot publication keep their existing behavior.
+
+  Keep replica checkpoints local, and upload native writer checkpoints through a consistent copy made with the pager's existing file handle. This preserves manual checkpoint backups without reopening a live locked database file on Windows.
+
+- [#2819](https://github.com/reddb-io/reddb/pull/2819) [`084ba67`](https://github.com/reddb-io/reddb/commit/084ba679f6cb0134e1636e7693b2a147372c6344) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Transfer native replica snapshots through a consistent checkpoint copy made with the pager's owned file handle. Keep the image and its logical cursor under the same publication fence. This avoids Windows file-lock failures and prevents a fresh replica from silently falling back to WAL replay with a second replication identity when its snapshot cannot be read.
+
+- [#2818](https://github.com/reddb-io/reddb/pull/2818) [`3531f25`](https://github.com/reddb-io/reddb/commit/3531f25e6e9f1c7ccd596d8b12385919f283a196) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Continue logical replication after promotion without reusing an already applied LSN. Restore the published and allocated log frontiers from the local applied position and durable promotion history, even when the former replica has no primary WAL spool.
+
+  Keep replication slots and WAL retention on the promoted timeline across cold restarts. Preserve ancestor slots within the shared history, invalidate divergent acknowledgements, and reject slot histories unrelated to the current branch.
+
+  Retire the promoted node's former upstream slot before publishing its new timeline, so it cannot retain WAL indefinitely as a consumer of itself. Other replicas keep their retention positions.
+
+- [#2821](https://github.com/reddb-io/reddb/pull/2821) [`a09ffc0`](https://github.com/reddb-io/reddb/commit/a09ffc01d0375f6f0e16856ce8b3ef1ab1f46991) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Recover a replica that rejoins below a promoted timeline's fork through one bounded basebackup and reopen. Preserve the target replica identity, retire the replaced native WAL, and require a durable snapshot proof before repairing an invalidated replication slot so forged or stale cursors cannot release retained WAL.
+
+- [#2816](https://github.com/reddb-io/reddb/pull/2816) [`1a2c4ac`](https://github.com/reddb-io/reddb/commit/1a2c4ac55150641392f1692237ccbd7627f7addb) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Serialize logical-WAL retention with durable appends and indexed replica reads. Prevent a concurrent rewrite from losing acknowledged records, invalidating seek offsets, or allowing an oldest-record lookup to truncate a live append.
+
+- [#2829](https://github.com/reddb-io/reddb/pull/2829) [`59f2bee`](https://github.com/reddb-io/reddb/commit/59f2beed86c6b7e54f1449b48377f9d754cd06a6) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Report an explicit unsupported-operation error when physical persisted-index verification is
+  requested for resident serverless indexes.
+
+- [#2830](https://github.com/reddb-io/reddb/pull/2830) [`8000c2f`](https://github.com/reddb-io/reddb/commit/8000c2fcc579bd08b0c0a5942090c6cbcb2d0d0a) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Return vector.turbo WAL and extent I/O failures instead of acknowledging them, while preserving
+  the authoritative vector entity for immediate access and cold rebuild.
+
+## 1.34.1
+
+### Patch Changes
+
+- [#2814](https://github.com/reddb-io/reddb/pull/2814) [`767b13d`](https://github.com/reddb-io/reddb/commit/767b13db81c84af8d7a5cb33b0f074cb1f981d03) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Raise the measured release-container budget from 64 MiB to 65 MiB after the v1.34.0 image reached 64.08 MiB, while keeping the static binary limit unchanged.
+
+## 1.34.0
+
+### Minor Changes
+
+- [#2809](https://github.com/reddb-io/reddb/pull/2809) [`af9e669`](https://github.com/reddb-io/reddb/commit/af9e6695d04efbb3e803b6555fc487bd8a0f9c58) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Publish `reddb-io-mcu` as an experimental embedded integration package built on the canonical SQL/RQL executor, pager, record codecs, and `.rdb` format. Qualify bounded flash and restart behavior for the Arduino Nano ESP32 profile in an instruction-set emulator, keep the Pico 2 result scoped to the host flash model, and verify native `TEMPERATURE` data can move from the MCU writer to the canonical server without conversion.
+
+- [#2806](https://github.com/reddb-io/reddb/pull/2806) [`20e1f7d`](https://github.com/reddb-io/reddb/commit/20e1f7d07e824a2503cff04273289d015452f97d) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add the native `TEMPERATURE` type across SQL/RQL, storage codecs, comparison, JSON, and wire compatibility. Introduce required-capability bits in paged `.rdb` superblocks so readers reject unsupported codecs before scanning data, while preserving resident and disk-resident formats through restart, result caching, and offline compaction.
+
+- [#2804](https://github.com/reddb-io/reddb/pull/2804) [`db45cfc`](https://github.com/reddb-io/reddb/commit/db45cfc77ac7bb5007b984340b01c1bd7d0d1232) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add an explicit runtime integrity check for persisted HASH and BTREE indexes, comparing checkpoint postings with authoritative rows to detect missing entries even when page checksums remain valid. Qualify checksum-damaged index recovery and logical index rebuilds across MVCC updates, deletes, checkpoints and cold reopens.
+
+### Patch Changes
+
+- [#2807](https://github.com/reddb-io/reddb/pull/2807) [`c9c1052`](https://github.com/reddb-io/reddb/commit/c9c105285561b53d84e10afc6eecc0e628d93177) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Normalize keys stored inside `red.config` by removing redundant `red.` prefixes, migrate existing databases and logical dumps without losing winning history, and reject new prefixed writes across SQL, HTTP, storage, and bulk/versioned paths.
+
+- [#2803](https://github.com/reddb-io/reddb/pull/2803) [`2a608d2`](https://github.com/reddb-io/reddb/commit/2a608d221b14f274b75c753aa976888812dc0e05) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve correct BTREE range reads after a crash during checkpoint publication when WAL recovery retires a row still referenced by the previous index generation.
+
+- [#2810](https://github.com/reddb-io/reddb/pull/2810) [`319a990`](https://github.com/reddb-io/reddb/commit/319a990f7cd1c25af08df8671875285a118d6374) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reject new mutations and checkpoint retries after a page writeback failure until the database is reopened. Recovery uses the existing WAL and double-write buffer so a partial page or catalog write cannot leave later successful mutations queued behind an unpublishable checkpoint.
+
+- [#2805](https://github.com/reddb-io/reddb/pull/2805) [`48e5a55`](https://github.com/reddb-io/reddb/commit/48e5a5574e3b28046982a7aee9187472e2966548) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fence a WAL writer after a failed write or synchronous durability barrier, including disk exhaustion after a partial batch. Prevent retries and destructor flushes from corrupting WAL framing or publishing rejected buffered transactions. Stop the failed group-commit worker and require reopening for recovery before accepting further writes.
+
+  Roll back resident rows from failed single and bulk insert WAL publications so scans do not expose rejected inserts while the database remains open.
+
+- [#2800](https://github.com/reddb-io/reddb/pull/2800) [`8966574`](https://github.com/reddb-io/reddb/commit/8966574b708c3fa2609f62459bfb08ab964fafca) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fence serverless snapshot publication with immutable payloads and a conditional canonical head claimed by each writer lease. Hydrate the exact observed snapshot before serving, prevent stale uploads from replacing a successor's state, and publish flush/checkpoint/shutdown through the same fence. Operational serverless boots isolate their local cache from previous WAL tails.
+
+  Drain all writers before upgrading a shared database: older binaries do not understand the canonical head. This change protects snapshot publication; remote WAL durability before acknowledging writes remains separate work.
+
+- [#2799](https://github.com/reddb-io/reddb/pull/2799) [`3abf38b`](https://github.com/reddb-io/reddb/commit/3abf38b17d52232880d8fbc123b68393509ca157) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fence explicit runtime flushes with the serverless writer lease so a losing instance cannot overwrite the active writer's remote database snapshot.
+
+- [#2812](https://github.com/reddb-io/reddb/pull/2812) [`6d6cd80`](https://github.com/reddb-io/reddb/commit/6d6cd809e35fbc7a57eeb5d721639476ab1f72c7) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Reject checksummed pages whose embedded identity differs from the requested address or whose LSN cannot be proven by the completed checkpoint or the attached durable WAL. This prevents a misdirected collection page from being served as another table's rows. Complete double-write recovery can still restore a trusted current image before reads begin.
+
+## 1.33.5
+
+### Patch Changes
+
+- [#2795](https://github.com/reddb-io/reddb/pull/2795) [`f82ac20`](https://github.com/reddb-io/reddb/commit/f82ac208f409779eb34bc6c3005e187cfab7a4f4) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Use canonical `red.*` names for runtime-owned collections and new CLI dumps while continuing to accept legacy collection names during migration, WAL recovery, authorization, and restore.
+
+- [#2794](https://github.com/reddb-io/reddb/pull/2794) [`437dd32`](https://github.com/reddb-io/reddb/commit/437dd3229903b9191612dcdc4f8835f7a43a8443) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Canonicalize legacy internal collection aliases before IAM policy matching and system-schema DDL protection, preventing `red_*` aliases from bypassing `red.*` prefix rules.
+
+- [#2793](https://github.com/reddb-io/reddb/pull/2793) [`802996c`](https://github.com/reddb-io/reddb/commit/802996c21f1569dc28cb7a37659e0879c10d7841) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Prevent stale or reclaimed secondary-index postings from hiding live MVCC rows after restart, and publish the runtime index registry under its canonical `red.index.registry` name.
+
+## 1.33.4
+
+### Patch Changes
+
+- [#2791](https://github.com/reddb-io/reddb/pull/2791) [`09aa50f`](https://github.com/reddb-io/reddb/commit/09aa50f299f6fff5d02d892262497de2909b3cad) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Rebuild paged HASH and BTREE artifacts as current-state indexes so MVCC updates and deletes remain discoverable after checkpoint and cold reopen, and store runtime index metadata under the canonical `red.index.registry` control collection.
+
+## 1.33.3
+
+### Patch Changes
+
+- [#2785](https://github.com/reddb-io/reddb/pull/2785) [`9fb0855`](https://github.com/reddb-io/reddb/commit/9fb0855b27ee3bee790ccc3f8b307744a620b12d) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve disk-resident queue and secondary-index roots across result-cache format upgrades,
+  defer embedded L2 result-cache publication off the request path, and strengthen checkpoint,
+  retention, indexed-query, aggregation, startup-I/O, and memory-stat regressions.
+
+## 1.33.2
+
+### Patch Changes
+
+- [#2778](https://github.com/reddb-io/reddb/pull/2778) [`19a02b3`](https://github.com/reddb-io/reddb/commit/19a02b33a2dd57e0ab703e3f56237a6c5a7d4a75) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Stabilize RedWire query-summary bytes, include the auditable ASK planner trace
+  and final-query fields in typed gRPC replies, and make primary-replica WAL
+  publication idempotent when replaying a committed transaction outbox.
+
+  Bound HASH and index-intersection candidate memory, recover torn WAL tails before
+  new appends, preserve the first user entity ID when the durable result-cache epoch
+  is created, and keep non-read statements from initializing the result-cache format.
+  Promote resident cache files to the disk-resident cache format before checkpoint
+  publication so cold reopens retain queue and secondary-index roots instead of
+  rebuilding and growing them on every boot. Harden embedded WAL replay and
+  transactional reservation regression coverage.
+
+## 1.33.1
+
+### Patch Changes
+
+- [#2782](https://github.com/reddb-io/reddb/pull/2782) [`0b0a6a0`](https://github.com/reddb-io/reddb/commit/0b0a6a0e56d73e806282f67ecdd6d4766202cd02) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Prevent durable Blob Cache publication, result-cache promotion, and database
+  write invalidation from deadlocking under concurrent traffic.
+
+## 1.33.0
+
+### Minor Changes
+
+- [#2768](https://github.com/reddb-io/reddb/pull/2768) [`14b9ccf`](https://github.com/reddb-io/reddb/commit/14b9ccf3c5a67eeca281679c9e24bc19e313cdde) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Unify the runtime SQL result cache on the native Blob Cache L1/L2 engine with
+  durable recovery, collection-scoped invalidation, protocol-independent query
+  routing, and downgrade fencing for persisted cache epochs.
+
+## 1.32.1
+
+### Patch Changes
+
+- [#2779](https://github.com/reddb-io/reddb/pull/2779) [`db363d4`](https://github.com/reddb-io/reddb/commit/db363d448d82191509085c690fc8a7ce01ffc5f3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow offline compaction to discard page-aligned physical allocation beyond the
+  committed database high-water mark while still rejecting truncated or partial
+  pages.
+
+## 1.32.0
+
+### Minor Changes
+
+- [#2776](https://github.com/reddb-io/reddb/pull/2776) [`27db3a4`](https://github.com/reddb-io/reddb/commit/27db3a47d38737add018f33be10bf9d0373f5b95) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add transactional replication, byte-bounded binary WAL streaming, serverless
+  lease-expiry enforcement, and embedded writer identity fencing, with automated
+  crash/restart recovery coverage.
+
+## 1.31.0
+
+### Minor Changes
+
+- [#2762](https://github.com/reddb-io/reddb/pull/2762) [`11f9a0c`](https://github.com/reddb-io/reddb/commit/11f9a0c63e3085c8276135aa1c1d9ac3b0fa37d6) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add production L1/L2 cache APIs with single-file persistence and bounded automatic TTL reclamation.
+
 ## 1.30.1
 
 ### Patch Changes

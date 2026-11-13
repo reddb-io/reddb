@@ -22,7 +22,7 @@ pub(super) fn read(source: &Arc<Source>, catalog: &Catalog) -> Result<Option<Int
     if root.root_page == 0 {
         return Ok(None);
     }
-    let tree = BTree::with_root(Arc::clone(source), root.root_page);
+    let tree = source.tree(root.root_page)?;
     let mut cursor = tree.cursor_first()?;
     let mut latest = None;
     while let Some((key, value)) = cursor.next_with_budget(32 * 1024 * 1024)? {

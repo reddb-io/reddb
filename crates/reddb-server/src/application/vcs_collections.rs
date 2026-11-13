@@ -1,7 +1,7 @@
 //! Internal collection names for the VCS ("Git for Data") layer.
 //!
-//! All VCS-owned collections share the `red_*` prefix — matching existing
-//! internal stores like `red_config`, `red_stats`, and `red_queue_meta`.
+//! All VCS-owned collections share the `red.*` prefix — matching existing
+//! internal stores like `red.config`, `red.query.stats_catalog`, and `red.queue.meta`.
 //! Keeping every name in one file makes it obvious which collections are
 //! internal and prevents accidental divergence between bootstrap code,
 //! runtime access, and schema documentation.
@@ -65,7 +65,6 @@ pub const TAG_REF_PREFIX: &str = "refs/tags/";
 /// Ref id prefix for per-connection HEAD pointers (`HEAD:<connection_id>`).
 pub const HEAD_ID_PREFIX: &str = "HEAD:";
 
-/// `red_config` namespace for VCS configuration (retention, protected
-/// branches, merge policy). Matches the `red.logging.*` / `red.ml.*`
-/// namespacing convention.
-pub const CONFIG_NAMESPACE: &str = "red.vcs";
+/// `red.config` namespace for VCS configuration (retention, protected
+/// branches, merge policy).
+pub const CONFIG_NAMESPACE: &str = "vcs";

@@ -63,7 +63,7 @@ fn create_slo_descriptor_persists_and_reads_from_catalog() {
     assert_eq!(integer(row, "window_ms"), 30 * 86_400_000);
 
     // Durable through checkpoint + reopen — the catalog write goes
-    // through `red_config` so it inherits the same WAL behaviour the
+    // through `red.config` so it inherits the same WAL behaviour the
     // metric descriptor catalog has.
     let reopened = checkpoint_and_reopen(&path, rt);
     let persisted = exec(

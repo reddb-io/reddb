@@ -294,11 +294,11 @@ fn invalid_persisted_catalog_refuses_runtime_open() {
             .db()
             .store()
             .insert_auto(
-                "red_config",
+                "red.config",
                 UnifiedEntity::new(
                     EntityId::new(0),
                     EntityKind::TableRow {
-                        table: Arc::from("red_config"),
+                        table: Arc::from("red.config"),
                         row_id: 0,
                     },
                     EntityData::Row(RowData {
@@ -306,7 +306,7 @@ fn invalid_persisted_catalog_refuses_runtime_open() {
                         schema: None,
                         named: Some(
                             [
-                                ("key".to_string(), Value::text("red.rql.function_catalog")),
+                                ("key".to_string(), Value::text("rql.function_catalog")),
                                 ("value".to_string(), Value::text("not-json")),
                             ]
                             .into_iter()
@@ -422,13 +422,13 @@ fn configuration_surface_hides_and_protects_function_catalog() {
         "SELECT 42",
     );
     assert!(runtime
-        .execute_query("SET CONFIG red.rql.function_catalog = '[]'")
+        .execute_query("SET CONFIG rql.function_catalog = '[]'")
         .is_err());
     assert_eq!(
-        scalar(&runtime, "SELECT CONFIG('red.rql.function_catalog')"),
+        scalar(&runtime, "SELECT CONFIG('rql.function_catalog')"),
         Value::Null
     );
-    assert!(execute(&runtime, "SHOW CONFIG red.rql.function_catalog")
+    assert!(execute(&runtime, "SHOW CONFIG rql.function_catalog")
         .result
         .records
         .is_empty());

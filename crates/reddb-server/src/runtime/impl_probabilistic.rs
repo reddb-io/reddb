@@ -6,10 +6,10 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[path = "vcs_probabilistic.rs"]
 mod vcs;
 
-const PROB_HLL_STATE_PREFIX: &str = "red.probabilistic.hll.";
-const PROB_SKETCH_STATE_PREFIX: &str = "red.probabilistic.sketch.";
-const PROB_FILTER_STATE_PREFIX: &str = "red.probabilistic.filter.";
-const PROB_ENCODING_MARKER_KEY: &str = "red.probabilistic.state_encoding";
+const PROB_HLL_STATE_PREFIX: &str = "probabilistic.hll.";
+const PROB_SKETCH_STATE_PREFIX: &str = "probabilistic.sketch.";
+const PROB_FILTER_STATE_PREFIX: &str = "probabilistic.filter.";
+const PROB_ENCODING_MARKER_KEY: &str = "probabilistic.state_encoding";
 const PROB_ENCODING_RAW_V1: &str = "raw-v1";
 const PROB_WAL_KIND_HLL: u8 = 1;
 const PROB_WAL_KIND_SKETCH: u8 = 2;
@@ -35,6 +35,8 @@ fn probabilistic_collection_contract(
     crate::physical::CollectionContract {
         graph_contract: None,
         name: name.to_string(),
+        description: None,
+        description_generated: false,
         declared_model: model,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
         origin: crate::physical::ContractOrigin::Explicit,
@@ -200,7 +202,7 @@ impl RedDBRuntime {
         kind: &str,
         reject_legacy_hex: bool,
     ) -> RedDBResult<Vec<ProbabilisticStateEntry>> {
-        let Some(manager) = self.inner.db.store().get_collection("red_config") else {
+        let Some(manager) = self.inner.db.store().get_collection("red.config") else {
             return Ok(Vec::new());
         };
         let mut latest: std::collections::HashMap<String, (u64, Option<Value>)> =
@@ -275,7 +277,7 @@ impl RedDBRuntime {
     }
 
     fn probabilistic_raw_encoding_marker(&self) -> RedDBResult<bool> {
-        let Some(manager) = self.inner.db.store().get_collection("red_config") else {
+        let Some(manager) = self.inner.db.store().get_collection("red.config") else {
             return Ok(false);
         };
         let mut latest: Option<(u64, bool)> = None;
@@ -702,7 +704,7 @@ impl RedDBRuntime {
 
     fn compact_config_key(&self, key: &str) -> RedDBResult<()> {
         let store = self.inner.db.store();
-        let Some(manager) = store.get_collection("red_config") else {
+        let Some(manager) = store.get_collection("red.config") else {
             return Ok(());
         };
         let mut ids = Vec::new();
@@ -715,18 +717,18 @@ impl RedDBRuntime {
             true
         })?;
         for id in ids {
-            store.delete("red_config", id)?;
+            store.delete("red.config", id)?;
         }
         Ok(())
     }
 
     fn insert_config_value(&self, key: &str, value: Value) -> RedDBResult<()> {
         let store = self.inner.db.store();
-        let _ = store.get_or_create_collection("red_config");
+        let _ = store.get_or_create_collection("red.config");
         let entity = UnifiedEntity::new(
             EntityId::new(0),
             EntityKind::TableRow {
-                table: std::sync::Arc::from("red_config"),
+                table: std::sync::Arc::from("red.config"),
                 row_id: 0,
             },
             EntityData::Row(crate::storage::RowData {
@@ -743,7 +745,7 @@ impl RedDBRuntime {
             }),
         );
         store
-            .insert_auto("red_config", entity)
+            .insert_auto("red.config", entity)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         Ok(())
     }
@@ -763,7 +765,7 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         if let Some(tenant_id) = crate::runtime::impl_core::current_tenant() {
             store.set_config_tree(
-                &format!("red.collection_tenants.{name}"),
+                &format!("collection_tenants.{name}"),
                 &crate::serde_json::Value::String(tenant_id),
             );
         }

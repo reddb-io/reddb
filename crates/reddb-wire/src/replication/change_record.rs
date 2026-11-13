@@ -19,6 +19,8 @@ pub enum ChangeOperation {
     Update,
     Delete,
     Refresh,
+    /// One committed transaction; payload contains encoded member records.
+    Transaction,
 }
 
 impl ChangeOperation {
@@ -33,6 +35,7 @@ impl ChangeOperation {
             "update" => Some(Self::Update),
             "delete" => Some(Self::Delete),
             "refresh" => Some(Self::Refresh),
+            "transaction" => Some(Self::Transaction),
             _ => None,
         }
     }
@@ -43,6 +46,7 @@ impl ChangeOperation {
             Self::Update => "update",
             Self::Delete => "delete",
             Self::Refresh => "refresh",
+            Self::Transaction => "transaction",
         }
     }
 
@@ -78,6 +82,19 @@ pub struct ChangeRecord {
 }
 
 impl ChangeRecord {
+    /// Older peers reject the new operation before applying any member.
+    pub fn for_transaction(lsn: u64, timestamp: u64, records: Vec<ChangeRecord>) -> Self {
+        let mut record = Self::for_refresh(
+            lsn,
+            timestamp,
+            "",
+            records.iter().map(Self::encode).collect(),
+        );
+        record.operation = ChangeOperation::Transaction;
+        record.entity_kind = "transaction".into();
+        record
+    }
+
     pub fn for_refresh(
         lsn: u64,
         timestamp: u64,

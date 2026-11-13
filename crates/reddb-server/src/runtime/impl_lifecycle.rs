@@ -12,6 +12,23 @@
 use super::impl_config_secret::seed_storage_deploy_config;
 use super::*;
 
+fn boot_cache_u64(
+    store: &crate::storage::UnifiedStore,
+    env: &HashMap<String, String>,
+    key: &str,
+    default: u64,
+) -> u64 {
+    if let Some(value) = env.get(key).and_then(|value| value.parse::<u64>().ok()) {
+        return value;
+    }
+    match store.get_config(key) {
+        Some(reddb_types::Value::UnsignedInteger(value)) => value,
+        Some(reddb_types::Value::Integer(value)) => u64::try_from(value).unwrap_or(default),
+        Some(reddb_types::Value::Text(value)) => value.parse::<u64>().unwrap_or(default),
+        _ => default,
+    }
+}
+
 /// Convert the rows produced by a materialized-view body into
 /// `UnifiedEntity` table rows targeting the backing collection.
 /// Issue #595 slice 9c — feeds `UnifiedStore::refresh_collection`.
@@ -57,6 +74,8 @@ fn system_keyed_collection_contract(
     crate::physical::CollectionContract {
         graph_contract: None,
         name: name.to_string(),
+        description: None,
+        description_generated: false,
         declared_model: model,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
         origin: crate::physical::ContractOrigin::Implicit,
@@ -123,10 +142,15 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         self.index_store_ref().clear_paged_btree_overlays();
         drop(publication);
-        self.inner
-            .db
-            .upload_to_remote_backend()
-            .map_err(|err| RedDBError::Internal(err.to_string()))
+        if let Err(err) = self.assert_remote_write_allowed("flush") {
+            tracing::warn!(
+                target: "reddb::serverless::lease",
+                error = %err,
+                "flush: skipping remote upload — lease not held"
+            );
+            return Ok(());
+        }
+        self.publish_remote_snapshot()
     }
 
     /// Handle to the intent-lock manager for tests + introspection.
@@ -243,14 +267,72 @@ impl RedDBRuntime {
                 Err(err) => RedDBError::Internal(err.to_string()),
             }
         })?);
+        let env_config_overrides = crate::runtime::config_overlay::collect_env_overrides();
         // Query results are disposable. Do not create a second persistent
         // database outside the .rdb and its WAL for the cache.
+        let cache_l1_share = memory_shares.blob_cache_l1_bytes();
+        let cache_l1_default = u64::try_from(cache_l1_share).unwrap_or(u64::MAX);
+        let configured_l1 = usize::try_from(boot_cache_u64(
+            db.store().as_ref(),
+            &env_config_overrides,
+            "cache.blob.l1_bytes_max",
+            cache_l1_default,
+        ))
+        .map_err(|_| RedDBError::InvalidConfig("cache.blob.l1_bytes_max is too large".into()))?;
+        let configured_l2 = boot_cache_u64(
+            db.store().as_ref(),
+            &env_config_overrides,
+            "cache.blob.l2_bytes_max",
+            crate::storage::cache::DEFAULT_BLOB_L2_BYTES_MAX,
+        );
+        let configured_namespaces = usize::try_from(boot_cache_u64(
+            db.store().as_ref(),
+            &env_config_overrides,
+            "cache.blob.max_namespaces",
+            u64::try_from(crate::storage::cache::DEFAULT_BLOB_MAX_NAMESPACES).unwrap_or(u64::MAX),
+        ))
+        .map_err(|_| RedDBError::InvalidConfig("cache.blob.max_namespaces is too large".into()))?;
+        if configured_namespaces == 0 {
+            return Err(RedDBError::InvalidConfig(
+                "cache.blob.max_namespaces must be greater than zero".into(),
+            ));
+        }
+        let configured_namespace_bytes = usize::try_from(boot_cache_u64(
+            db.store().as_ref(),
+            &env_config_overrides,
+            "cache.blob.namespace_bytes_max",
+            u64::try_from(configured_l1).unwrap_or(u64::MAX),
+        ))
+        .map_err(|_| {
+            RedDBError::InvalidConfig("cache.blob.namespace_bytes_max is too large".into())
+        })?;
+        if configured_namespace_bytes == 0 {
+            return Err(RedDBError::InvalidConfig(
+                "cache.blob.namespace_bytes_max must be greater than zero".into(),
+            ));
+        }
         let result_blob_cache_config = crate::storage::cache::BlobCacheConfig::default()
-            .with_l1_bytes_max(memory_shares.blob_cache_l1_bytes());
-        let result_blob_cache =
-            crate::storage::cache::BlobCache::open_with_l2(result_blob_cache_config).map_err(
-                |err| RedDBError::Internal(format!("open result Blob Cache L2 failed: {err:?}")),
-            )?;
+            // The cache-specific setting may reserve less memory, but never
+            // escapes the process-wide memory budget.
+            .with_l1_bytes_max(configured_l1.min(cache_l1_share))
+            .with_namespace_bytes_max(
+                configured_namespace_bytes
+                    .min(configured_l1)
+                    .min(cache_l1_share),
+            )
+            // Zero is the explicit off switch. Read-only runtimes cannot
+            // maintain expiry/invalidation state in the internal collection.
+            .with_l2_bytes_max(if options.read_only { 0 } else { configured_l2 })
+            .with_max_namespaces(configured_namespaces);
+        let result_blob_cache = crate::storage::cache::BlobCache::open_with_internal_l2(
+            result_blob_cache_config,
+            db.store(),
+        )
+        .map_err(|err| {
+            RedDBError::Internal(format!(
+                "open single-file result Blob Cache failed: {err:?}"
+            ))
+        })?;
         let storage_ready_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -303,20 +385,22 @@ impl RedDBRuntime {
                 query_cache: parking_lot::RwLock::new(
                     crate::storage::query::planner::cache::PlanCache::new(1000),
                 ),
-                result_cache: parking_lot::RwLock::new((
-                    HashMap::new(),
-                    std::collections::VecDeque::new(),
-                )),
                 result_blob_cache,
+                result_cache_format_lock: parking_lot::Mutex::new(()),
+                result_blob_promotion: parking_lot::Mutex::new(()),
                 result_blob_entries: parking_lot::RwLock::new((
                     HashMap::new(),
                     std::collections::VecDeque::new(),
+                    true,
+                    0,
+                    HashSet::new(),
+                    None,
+                    db.store().result_cache_epoch().unwrap_or(0),
                 )),
                 ask_answer_cache_entries: parking_lot::RwLock::new((
                     HashSet::new(),
                     std::collections::VecDeque::new(),
                 )),
-                result_cache_shadow_divergences: std::sync::atomic::AtomicU64::new(0),
                 result_cache_hits: std::sync::atomic::AtomicU64::new(0),
                 result_cache_misses: std::sync::atomic::AtomicU64::new(0),
                 result_cache_evictions: std::sync::atomic::AtomicU64::new(0),
@@ -338,12 +422,12 @@ impl RedDBRuntime {
                     crate::runtime::retention_sweeper::RetentionSweeperState::new(),
                 ),
                 transaction_state: crate::runtime::transaction_state::TransactionState::new(),
-                env_config_overrides: crate::runtime::config_overlay::collect_env_overrides(),
+                env_config_overrides,
                 lock_manager: Arc::new({
                     // Sourced from the matrix: Tier B key
                     // `concurrency.locking.deadlock_timeout_ms`
                     // (default 5000). Env var wins at boot so
-                    // operators can tune without touching red_config.
+                    // operators can tune without touching red.config.
                     let env = crate::runtime::config_overlay::collect_env_overrides();
                     let timeout_ms = env
                         .get("concurrency.locking.deadlock_timeout_ms")
@@ -371,6 +455,10 @@ impl RedDBRuntime {
                 pending_kv_watch_events: parking_lot::RwLock::new(HashMap::new()),
                 pending_vault_writes: parking_lot::RwLock::new(HashMap::new()),
                 pending_store_wal_actions: parking_lot::RwLock::new(HashMap::new()),
+                pending_logical_records: parking_lot::Mutex::new(HashMap::new()),
+                pending_commit_policies: parking_lot::Mutex::new(HashMap::new()),
+                logical_publication: parking_lot::ReentrantMutex::new(()),
+                logical_allocated_lsn: std::sync::atomic::AtomicU64::new(0),
                 pending_claim_locks: parking_lot::RwLock::new(HashMap::new()),
                 queue_wait_registry: std::sync::Arc::new(
                     crate::runtime::queue_wait_registry::QueueWaitRegistry::new(),
@@ -466,6 +554,7 @@ impl RedDBRuntime {
                 schema_vocabulary: parking_lot::RwLock::new(
                     crate::runtime::schema_vocabulary::SchemaVocabulary::new(),
                 ),
+                description_enrichment: parking_lot::Mutex::new(Default::default()),
                 slow_query_logger: {
                     // Issue #205 — slow-query sink lives in the same
                     // directory the audit log uses, so backup/restore
@@ -593,6 +682,17 @@ impl RedDBRuntime {
             .lifecycle
             .set_wal_replay_ready_at_ms(storage_ready_ms);
 
+        let inherited_replication_lsn = if runtime.inner.db.replication.is_some() {
+            let promotion_lsn = runtime
+                .primary_replica_timeline_history()?
+                .and_then(|history| history.entries.last().map(|entry| entry.fork_lsn))
+                .unwrap_or(0);
+            runtime
+                .config_u64("replication.last_applied_lsn", 0)
+                .max(promotion_lsn)
+        } else {
+            0
+        };
         let restored_cdc_lsn = runtime
             .inner
             .db
@@ -605,8 +705,13 @@ impl RedDBRuntime {
                     .unwrap_or(0)
             })
             .unwrap_or(0)
-            .max(runtime.config_u64("red.config.timeline.last_archived_lsn", 0));
+            .max(runtime.config_u64("timeline.last_archived_lsn", 0))
+            .max(inherited_replication_lsn);
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
+        runtime
+            .inner
+            .logical_allocated_lsn
+            .store(restored_cdc_lsn, std::sync::atomic::Ordering::Release);
         runtime.rehydrate_snapshot_xid_floor()?;
         runtime.rehydrate_vcs_snapshot_pins()?;
         assert!(runtime
@@ -663,37 +768,44 @@ impl RedDBRuntime {
         runtime.recover_store_forks()?;
         if let Some(repl) = &runtime.inner.db.replication {
             repl.wal_buffer.set_current_lsn(restored_cdc_lsn);
+            if let Some(spool) = &repl.logical_wal_spool {
+                spool.restore_lsn_floor(restored_cdc_lsn);
+            }
         }
+        runtime.recover_transactional_replication()?;
 
-        // Save system info to red_config on boot
+        // Save system info to red.config on boot
         {
             let sys = SystemInfo::collect();
-            runtime.inner.db.store().set_config_tree(
-                "red.system",
-                &crate::serde_json::json!({
-                    "pid": sys.pid,
-                    "cpu_cores": sys.cpu_cores,
-                    "total_memory_bytes": sys.total_memory_bytes,
-                    "available_memory_bytes": sys.available_memory_bytes,
-                    "os": sys.os,
-                    "arch": sys.arch,
-                    "hostname": sys.hostname,
-                    "started_at": SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64
-                }),
-            );
+            let store = runtime.inner.db.store();
+            store.with_boot_system_info_update(|| {
+                store.set_config_tree(
+                    "system",
+                    &crate::serde_json::json!({
+                        "pid": sys.pid,
+                        "cpu_cores": sys.cpu_cores,
+                        "total_memory_bytes": sys.total_memory_bytes,
+                        "available_memory_bytes": sys.available_memory_bytes,
+                        "os": sys.os,
+                        "arch": sys.arch,
+                        "hostname": sys.hostname,
+                        "started_at": SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64
+                    }),
+                )
+            });
 
-            // Seed defaults on first boot (only if red_config is empty or missing defaults)
+            // Seed defaults on first boot (only if red.config is empty or missing defaults)
             let store = runtime.inner.db.store();
             if store
-                .get_collection("red_config")
+                .get_collection("red.config")
                 .map(|m| m.query_all(|_| true).len())
                 .unwrap_or(0)
                 <= 10
             {
-                store.set_config_tree("red.ai", &crate::json!({
+                store.set_config_tree("ai", &crate::json!({
                     "default": crate::json!({
                         "provider": "openai",
                         "model": crate::ai::DEFAULT_OPENAI_PROMPT_MODEL
@@ -703,7 +815,7 @@ impl RedDBRuntime {
                     "timeout": crate::json!({ "connect_secs": 10, "read_secs": 90, "write_secs": 30 })
                 }));
                 store.set_config_tree(
-                    "red.server",
+                    "server",
                     &crate::json!({
                         "max_scan_limit": 1000,
                         "max_body_size": 1048576,
@@ -712,7 +824,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.storage",
+                    "storage",
                     &crate::json!({
                         "page_size": 4096,
                         "page_cache_capacity": 100000,
@@ -730,7 +842,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.search",
+                    "search",
                     &crate::json!({
                         "rag": crate::json!({
                             "max_chunks_per_source": 10,
@@ -748,7 +860,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.auth",
+                    "auth",
                     &crate::json!({
                         "enabled": false,
                         "session_ttl_secs": 3600,
@@ -756,14 +868,14 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.query",
+                    "query",
                     &crate::json!({
                         "connection_pool": crate::json!({ "max_connections": 64, "max_idle": 16 }),
                         "max_recursion_depth": 1000
                     }),
                 );
                 store.set_config_tree(
-                    "red.indexes",
+                    "indexes",
                     &crate::json!({
                         "auto_select": true,
                         "bloom_filter": crate::json!({
@@ -777,7 +889,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.probabilistic",
+                    "probabilistic",
                     &crate::json!({
                         "hll_registers": 16384,
                         "sketch_default_width": 1000,
@@ -786,7 +898,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.timeseries",
+                    "timeseries",
                     &crate::json!({
                         "default_chunk_size": 1024,
                         "compression": crate::json!({
@@ -797,7 +909,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.queue",
+                    "queue",
                     &crate::json!({
                         "default_max_size": 0,
                         "default_max_attempts": 3,
@@ -806,7 +918,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.backup",
+                    "backup",
                     &crate::json!({
                         "enabled": false,
                         "interval_secs": 3600,
@@ -816,7 +928,7 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.wal",
+                    "wal",
                     &crate::json!({
                         "archive": crate::json!({
                             "enabled": false,
@@ -826,14 +938,14 @@ impl RedDBRuntime {
                     }),
                 );
                 store.set_config_tree(
-                    "red.cdc",
+                    "cdc",
                     &crate::json!({
                         "enabled": true,
                         "buffer_size": 100000
                     }),
                 );
                 store.set_config_tree(
-                    "red.config.secret",
+                    "secret",
                     &crate::json!({
                         "auto_encrypt": true,
                         "auto_decrypt": true
@@ -852,7 +964,7 @@ impl RedDBRuntime {
 
             // Phase 5 — Lehman-Yao runtime flag. Read the Tier A
             // `storage.btree.lehman_yao` value from the matrix (env
-            // > file > red_config > default) and publish it to the
+            // > file > red.config > default) and publish it to the
             // storage layer's atomic so the B-tree read / split
             // paths can branch without re-reading the config on
             // every hot-path call.
@@ -882,7 +994,7 @@ impl RedDBRuntime {
                 let _ = store.get_or_create_collection(*name);
             }
             // Seed VCS config namespace with sensible defaults on first
-            // boot, matching the pattern used by red.ai / red.storage.
+            // boot, matching the pattern used by ai / storage.
             store.set_config_tree(
                 crate::application::vcs_collections::CONFIG_NAMESPACE,
                 &crate::json!({
@@ -904,7 +1016,7 @@ impl RedDBRuntime {
             );
         }
 
-        // Migrations — create the `red_migrations` / `red_migration_deps`
+        // Migrations — create the `red.migration.definitions` / `red.migration.dependencies`
         // system collections on first boot. Idempotent.
         {
             let store = runtime.inner.db.store();
@@ -924,20 +1036,37 @@ impl RedDBRuntime {
         // checkpoint publishes the projection.
         runtime.prepare_paged_counts()?;
 
-        // #1369 — reserve a fixed internal-id floor so the first user-inserted
-        // entity always receives a stable, documented `rid` (FIRST_USER_ENTITY_ID),
-        // independent of how many internal collection-descriptor / config-default
-        // entities the boot sequence seeded above. `register_entity_id` only ever
-        // raises the allocator, so a database that already holds user data
-        // (counter past the floor) is untouched; a freshly-seeded database jumps
-        // straight to the floor.
-        runtime
-            .inner
-            .db
-            .store()
-            .register_entity_id(crate::storage::EntityId::new(
-                crate::storage::FIRST_USER_ENTITY_ID - 1,
-            ));
+        // Anonymous access is the most consequential posture an operator can
+        // choose. Record it before reserving the user-ID floor so the boot-time
+        // audit entity remains in the internal range.
+        if no_auth_boot {
+            use crate::runtime::control_events::{
+                ActorRef, ControlEvent, ControlEventCtx, EventKind, Outcome,
+            };
+            let ledger = std::sync::Arc::clone(&runtime.inner.control_event_ledger.read());
+            let ctx = ControlEventCtx {
+                actor: ActorRef::System("boot"),
+                scope: None,
+                request_id: None,
+                trace_id: None,
+            };
+            let event = ControlEvent {
+                kind: EventKind::AuthDisabled,
+                outcome: Outcome::Allowed,
+                action: std::borrow::Cow::Borrowed("auth.disabled"),
+                resource: Some("server".to_string()),
+                reason: Some("--no-auth / --dev".to_string()),
+                matched_policy_id: None,
+                fields: std::collections::HashMap::new(),
+            };
+            if let Err(err) = ledger.emit(&ctx, event) {
+                tracing::warn!(
+                    target: "reddb::security",
+                    error = %err,
+                    "could not record the auth-disabled boot in the control-event ledger"
+                );
+            }
+        }
 
         // Start background maintenance thread (context index refresh +
         // session purge). Held by a WEAK reference to `RuntimeInner`
@@ -991,13 +1120,50 @@ impl RedDBRuntime {
                 );
         }
 
-        // Start backup scheduler if enabled via red_config
+        // Blob Cache expiration is active maintenance, not a read-path side
+        // effect. Each pulse scans a rotating bounded slice so expired keys
+        // release their L1 budget even when they are never accessed again.
+        // A dedicated low-priority worker keeps this work isolated from query
+        // execution workers.
+        {
+            let weak = Arc::downgrade(&runtime.inner);
+            runtime
+                .background_tasks
+                .as_ref()
+                .expect("foreground runtime")
+                .spawn(
+                    std::thread::Builder::new().name("reddb-cache-sweeper".into()),
+                    move |stopped| loop {
+                        std::thread::park_timeout(std::time::Duration::from_millis(250));
+                        if stopped.load(AtomicOrdering::Acquire) {
+                            break;
+                        }
+                        let Some(inner) = weak.upgrade() else {
+                            break;
+                        };
+                        let _ = crate::storage::cache::sweeper::BlobCacheSweeper::sweep_expired(
+                            &inner.result_blob_cache,
+                            crate::storage::cache::sweeper::SweepLimit::Either {
+                                entries: 512,
+                                millis: 5,
+                            },
+                        );
+                        let rt = RedDBRuntime {
+                            background_tasks: None,
+                            inner,
+                        };
+                        rt.promote_volatile_result_cache_entry();
+                    },
+                );
+        }
+
+        // Start backup scheduler if enabled via red.config
         {
             let store = runtime.inner.db.store();
             let mut backup_enabled = false;
             let mut backup_interval = 3600u64;
 
-            if let Some(manager) = store.get_collection("red_config") {
+            if let Some(manager) = store.get_collection("red.config") {
                 manager.for_each_entity(|entity| {
                     if let Some(row) = entity.data.as_row() {
                         let key = row.get_field("key").and_then(|v| match v {
@@ -1005,13 +1171,13 @@ impl RedDBRuntime {
                             _ => None,
                         });
                         let val = row.get_field("value");
-                        if key == Some("red.config.backup.enabled") {
+                        if key == Some("backup.enabled") {
                             backup_enabled = match val {
                                 Some(reddb_types::Value::Boolean(true)) => true,
                                 Some(reddb_types::Value::Text(s)) => &**s == "true",
                                 _ => false,
                             };
-                        } else if key == Some("red.config.backup.interval_secs") {
+                        } else if key == Some("backup.interval_secs") {
                             if let Some(reddb_types::Value::Integer(n)) = val {
                                 backup_interval = *n as u64;
                             }
@@ -1031,7 +1197,7 @@ impl RedDBRuntime {
             }
         }
 
-        // Load EC registry from red_config and start worker
+        // Load EC registry from red.config and start worker
         {
             runtime
                 .inner
@@ -1155,37 +1321,18 @@ impl RedDBRuntime {
                 );
         }
 
-        // Anonymous access is the most consequential posture an operator can
-        // choose. It was only ever announced on stderr; leave it in the
-        // chained ledger too, so an audit of the store itself shows it.
-        if no_auth_boot {
-            use crate::runtime::control_events::{
-                ActorRef, ControlEvent, ControlEventCtx, EventKind, Outcome,
-            };
-            let ledger = std::sync::Arc::clone(&runtime.inner.control_event_ledger.read());
-            let ctx = ControlEventCtx {
-                actor: ActorRef::System("boot"),
-                scope: None,
-                request_id: None,
-                trace_id: None,
-            };
-            let event = ControlEvent {
-                kind: EventKind::AuthDisabled,
-                outcome: Outcome::Allowed,
-                action: std::borrow::Cow::Borrowed("auth.disabled"),
-                resource: Some("server".to_string()),
-                reason: Some("--no-auth / --dev".to_string()),
-                matched_policy_id: None,
-                fields: std::collections::HashMap::new(),
-            };
-            if let Err(err) = ledger.emit(&ctx, event) {
-                tracing::warn!(
-                    target: "reddb::security",
-                    error = %err,
-                    "could not record the auth-disabled boot in the control-event ledger"
-                );
-            }
-        }
+        // #1369 — reserve the fixed internal-id floor only after every boot
+        // stage has finished. Some persistent-only startup paths publish
+        // internal entities, so reserving it earlier lets those paths consume
+        // the first documented user `rid`. `register_entity_id` only raises
+        // the allocator, leaving databases already past the floor untouched.
+        runtime
+            .inner
+            .db
+            .store()
+            .register_entity_id(crate::storage::EntityId::new(
+                crate::storage::FIRST_USER_ENTITY_ID - 1,
+            ));
 
         Ok(runtime)
     }
@@ -1349,7 +1496,29 @@ impl RedDBRuntime {
         &self,
         event: crate::runtime::schema_vocabulary::DdlEvent,
     ) {
-        self.inner.schema_vocabulary.write().on_ddl(event);
+        self.inner.schema_vocabulary.write().on_ddl(event.clone());
+        self.schedule_collection_description_enrichment(&event);
+    }
+
+    pub(crate) fn schema_vocabulary_sync_descriptions(&self, collection: &str) {
+        let Some(contract) = self.inner.db.collection_contract(collection) else {
+            return;
+        };
+        let columns = contract
+            .declared_columns
+            .iter()
+            .filter_map(|column| {
+                column
+                    .description
+                    .as_ref()
+                    .map(|description| (column.name.clone(), description.clone()))
+            })
+            .collect::<Vec<_>>();
+        self.inner.schema_vocabulary.write().update_descriptions(
+            collection,
+            contract.description.as_deref(),
+            &columns,
+        );
     }
 
     /// Lookup `token` in the schema-vocabulary reverse index. Returns
@@ -1409,6 +1578,267 @@ impl RedDBRuntime {
         &self,
     ) -> Option<Arc<crate::auth::browser_token::BrowserTokenAuthority>> {
         self.inner.browser_token_authority.read().clone()
+    }
+}
+
+#[cfg(test)]
+mod cache_boot_tests {
+    use super::*;
+
+    #[test]
+    fn persisted_cache_limits_apply_on_next_boot_within_memory_budget() {
+        let directory = tempfile::tempdir().expect("cache config fixture");
+        let options = RedDBOptions::persistent(directory.path().join("cache-config.rdb"))
+            .with_memory_budget(64 * 1024 * 1024);
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("initial runtime");
+        runtime.db().store().set_config_tree(
+            "cache.blob",
+            &crate::json!({
+                "l1_bytes_max": 1024 * 1024,
+                "l2_bytes_max": 2 * 1024 * 1024,
+                "namespace_bytes_max": 256 * 1024,
+                "max_namespaces": 7
+            }),
+        );
+        runtime.flush().expect("persist cache config");
+        drop(runtime);
+
+        let reopened = RedDBRuntime::with_options(options).expect("configured runtime");
+        let stats = reopened.result_blob_cache().stats();
+        assert_eq!(stats.l1_bytes_max(), 1024 * 1024);
+        assert_eq!(stats.l2_bytes_max(), 2 * 1024 * 1024);
+        assert_eq!(stats.namespace_bytes_max(), 256 * 1024);
+        assert_eq!(stats.max_namespaces(), 7);
+    }
+
+    #[test]
+    fn single_file_l2_survives_runtime_restart_without_sidecar() {
+        let directory = tempfile::tempdir().expect("single-file L2 fixture");
+        let path = directory.path().join("cache-l2.rdb");
+        let options = RedDBOptions::persistent(&path);
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("initial runtime");
+        runtime
+            .result_blob_cache()
+            .put(
+                "tenant",
+                "key",
+                crate::storage::cache::BlobCachePut::new(b"durable".to_vec()).with_policy(
+                    crate::storage::cache::BlobCachePolicy::default()
+                        .l1_admission(crate::storage::cache::L1Admission::Never),
+                ),
+            )
+            .expect("write internal L2");
+        assert!(runtime.result_blob_cache().l2_path().is_none());
+        runtime.flush().expect("checkpoint internal L2");
+        drop(runtime);
+
+        let reopened = RedDBRuntime::with_options(options).expect("reopen runtime");
+        assert_eq!(
+            reopened
+                .result_blob_cache()
+                .get("tenant", "key")
+                .expect("L2 hit after restart")
+                .bytes()
+                .as_ref(),
+            b"durable"
+        );
+        drop(reopened);
+        let siblings: Vec<_> = std::fs::read_dir(directory.path())
+            .expect("list fixture")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(siblings, vec!["cache-l2.rdb"]);
+    }
+
+    #[test]
+    fn single_file_l2_deadline_survives_restart_and_sweeps_atomically() {
+        let directory = tempfile::tempdir().expect("single-file L2 TTL fixture");
+        let path = directory.path().join("cache-l2-ttl.rdb");
+        let options = RedDBOptions::persistent(&path);
+        let mut runtime = RedDBRuntime::with_options(options.clone()).expect("initial runtime");
+        drop(runtime.background_tasks.take());
+        runtime
+            .result_blob_cache()
+            .put(
+                "tenant",
+                "expired",
+                crate::storage::cache::BlobCachePut::new(b"expired".to_vec()).with_policy(
+                    crate::storage::cache::BlobCachePolicy::default()
+                        .expires_at_unix_ms(1)
+                        .l1_admission(crate::storage::cache::L1Admission::Never),
+                ),
+            )
+            .expect("write expiring L2 entry");
+        runtime.flush().expect("checkpoint L2 deadline");
+        drop(runtime);
+
+        let mut reopened = RedDBRuntime::with_options(options).expect("reopen runtime");
+        drop(reopened.background_tasks.take());
+        let manager = reopened
+            .db()
+            .store()
+            .get_collection(crate::storage::cache::blob::INTERNAL_L2_COLLECTION)
+            .expect("L2 collection");
+        assert_eq!(manager.scheduled_metadata_expiry_count(), 1);
+        let bytes_before = reopened.result_blob_cache().stats().l2_bytes_in_use();
+        assert!(bytes_before > 0);
+
+        // Generic row TTL must not bypass the cache's atomic byte-counter
+        // update. The dedicated cache sweeper owns this collection.
+        assert_eq!(reopened.sweep_individual_ttl_tick_at(64, u64::MAX), 0);
+        assert_eq!(
+            reopened.result_blob_cache().stats().l2_bytes_in_use(),
+            bytes_before
+        );
+        let report = crate::storage::cache::BlobCacheSweeper::sweep_expired(
+            reopened.result_blob_cache(),
+            crate::storage::cache::SweepLimit::Entries(1),
+        );
+        assert_eq!(report.entries_evicted, 1);
+        assert_eq!(reopened.result_blob_cache().stats().l2_bytes_in_use(), 0);
+        assert_eq!(manager.scheduled_metadata_expiry_count(), 0);
+    }
+
+    #[test]
+    fn expired_l2_payload_pages_are_reused() {
+        let directory = tempfile::tempdir().expect("L2 page reuse fixture");
+        let path = directory.path().join("cache-l2-reuse.rdb");
+        let options = RedDBOptions::persistent(&path)
+            .with_memory_budget(32 * 1024 * 1024)
+            .with_bounded_disk_residency(true);
+        let mut runtime = RedDBRuntime::with_options(options.clone()).expect("runtime");
+        drop(runtime.background_tasks.take());
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let payload: Vec<u8> = std::iter::repeat_with(|| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[0]
+        })
+        .take(64 * 1024)
+        .collect();
+        for id in 0..8 {
+            runtime
+                .result_blob_cache()
+                .put(
+                    "reuse",
+                    format!("expired-{id}"),
+                    crate::storage::cache::BlobCachePut::new(payload.clone()).with_policy(
+                        crate::storage::cache::BlobCachePolicy::default()
+                            .expires_at_unix_ms(1)
+                            .l1_admission(crate::storage::cache::L1Admission::Never),
+                    ),
+                )
+                .expect("expired L2 payload");
+        }
+        runtime.checkpoint().expect("initial L2 checkpoint");
+        let initial_pages = runtime
+            .db()
+            .store()
+            .pager()
+            .expect("pager")
+            .page_count()
+            .expect("initial page count");
+        drop(runtime);
+
+        let mut runtime = RedDBRuntime::with_options(options).expect("reopened runtime");
+        drop(runtime.background_tasks.take());
+        let store = runtime.db().store();
+        let pager = store.pager().expect("pager");
+        let report = crate::storage::cache::BlobCacheSweeper::sweep_expired(
+            runtime.result_blob_cache(),
+            crate::storage::cache::SweepLimit::Entries(64),
+        );
+        assert_eq!(report.entries_evicted, 8);
+        runtime.checkpoint().expect("expired L2 checkpoint");
+
+        let mut cursor = store
+            .mvcc_reclaim_cursor(crate::storage::cache::blob::INTERNAL_L2_COLLECTION.to_string())
+            .expect("L2 reclaim cursor");
+        for _ in 0..64 {
+            store
+                .reclaim_mvcc_tick(
+                    &mut cursor,
+                    &runtime.snapshot_manager(),
+                    runtime.mvcc_vacuum_cutoff_xid(),
+                    64,
+                    8,
+                )
+                .expect("L2 MVCC reclaim");
+            if cursor.finished() {
+                break;
+            }
+        }
+        assert!(cursor.finished());
+        drop(cursor);
+        for _ in 0..3 {
+            runtime.checkpoint().expect("publish reusable L2 pages");
+        }
+        let free_before_reuse = pager.free_page_count().expect("free pages");
+
+        for id in 0..8 {
+            runtime
+                .result_blob_cache()
+                .put(
+                    "reuse",
+                    format!("replacement-{id}"),
+                    crate::storage::cache::BlobCachePut::new(payload.clone()).with_policy(
+                        crate::storage::cache::BlobCachePolicy::default()
+                            .expires_at_unix_ms(u64::MAX)
+                            .l1_admission(crate::storage::cache::L1Admission::Never),
+                    ),
+                )
+                .expect("replacement L2 payload");
+        }
+        runtime.checkpoint().expect("replacement L2 checkpoint");
+        let pages_after_reuse = pager.page_count().expect("page count after reuse");
+        assert!(
+            pages_after_reuse <= initial_pages.saturating_add(16),
+            "expired L2 pages were not reused: initial={initial_pages}, free_before={free_before_reuse}, after={pages_after_reuse}"
+        );
+    }
+
+    #[test]
+    fn zero_cache_namespace_limit_is_rejected_on_boot() {
+        let directory = tempfile::tempdir().expect("cache config fixture");
+        let options = RedDBOptions::persistent(directory.path().join("cache-config-zero.rdb"));
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("initial runtime");
+        runtime
+            .db()
+            .store()
+            .set_config_tree("cache.blob.max_namespaces", &crate::json!(0));
+        runtime.flush().expect("persist cache config");
+        drop(runtime);
+
+        let error = match RedDBRuntime::with_options(options) {
+            Ok(_) => panic!("zero limit must fail boot"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("cache.blob.max_namespaces must be greater than zero"));
+    }
+
+    #[test]
+    fn zero_cache_namespace_memory_limit_is_rejected_on_boot() {
+        let directory = tempfile::tempdir().expect("cache config fixture");
+        let options = RedDBOptions::persistent(directory.path().join("cache-bytes-zero.rdb"));
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("initial runtime");
+        runtime
+            .db()
+            .store()
+            .set_config_tree("cache.blob.namespace_bytes_max", &crate::json!(0));
+        runtime.flush().expect("persist cache config");
+        drop(runtime);
+
+        let error = match RedDBRuntime::with_options(options) {
+            Ok(_) => panic!("zero namespace memory limit must fail boot"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("cache.blob.namespace_bytes_max must be greater than zero"));
     }
 }
 

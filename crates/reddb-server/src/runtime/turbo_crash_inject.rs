@@ -46,6 +46,10 @@ pub enum InjectionPoint {
 #[cfg(any(test, feature = "turbo-crash-inject"))]
 pub trait TurboCrashInjector: Send + Sync {
     fn before(&self, point: InjectionPoint);
+
+    fn io_error(&self, _point: InjectionPoint) -> Option<std::io::Error> {
+        None
+    }
 }
 
 #[cfg(any(test, feature = "turbo-crash-inject"))]
@@ -72,6 +76,20 @@ mod test_only {
 
 #[cfg(any(test, feature = "turbo-crash-inject"))]
 pub use test_only::install;
+
+/// Return an injected I/O failure at a durable-write boundary.
+#[inline]
+pub fn injected_io_error(point: InjectionPoint) -> Option<std::io::Error> {
+    #[cfg(any(test, feature = "turbo-crash-inject"))]
+    {
+        test_only::current().and_then(|injector| injector.io_error(point))
+    }
+    #[cfg(not(any(test, feature = "turbo-crash-inject")))]
+    {
+        let _ = point;
+        None
+    }
+}
 
 /// Fire a named injection point. No-op in production builds.
 #[inline]

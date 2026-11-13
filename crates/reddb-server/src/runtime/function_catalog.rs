@@ -12,7 +12,7 @@ use reddb_types::Value;
 
 use super::function_validation::{error, validate_definition};
 
-pub(crate) const REGISTRY_KEY: &str = "red.rql.function_catalog";
+pub(crate) const REGISTRY_KEY: &str = "rql.function_catalog";
 const CATALOG_BYTES_MAX: usize = 4 * 1024 * 1024;
 const FUNCTIONS_MAX: usize = 1024;
 type FunctionKey = (Option<String>, String);
@@ -43,7 +43,7 @@ pub(super) struct FunctionCatalog {
 
 impl FunctionCatalog {
     pub fn load(db: &RedDB) -> RedDBResult<Self> {
-        let Some(manager) = db.store().get_collection("red_config") else {
+        let Some(manager) = db.store().get_collection("red.config") else {
             return Ok(Self::default());
         };
         let latest = manager.query_all(|entity| {
@@ -205,11 +205,11 @@ impl FunctionCatalog {
 
     fn persist(db: &RedDB, source: String) -> RedDBResult<()> {
         let store = db.store();
-        store.get_or_create_collection("red_config");
+        store.get_or_create_collection("red.config");
         let entity = UnifiedEntity::new(
             EntityId::new(0),
             EntityKind::TableRow {
-                table: Arc::from("red_config"),
+                table: Arc::from("red.config"),
                 row_id: 0,
             },
             EntityData::Row(RowData {
@@ -225,7 +225,7 @@ impl FunctionCatalog {
                 ),
             }),
         );
-        store.insert_auto("red_config", entity).map_err(error)?;
+        store.insert_auto("red.config", entity).map_err(error)?;
         db.flush().map_err(error)?;
         Ok(())
     }

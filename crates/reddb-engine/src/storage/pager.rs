@@ -14,6 +14,8 @@ pub use reddb_file::{DatabaseHeader, PhysicalFileHeader};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 
+mod batch;
+
 /// Pager error types
 #[derive(Debug)]
 pub enum PagerError {
@@ -181,6 +183,18 @@ impl Default for PagerConfig {
 pub trait WalBarrier {
     fn flush_until(&self, lsn: u64) -> std::io::Result<()>;
 
+    /// A cold page must not claim changes beyond the host's durable WAL.
+    /// LSN zero and the completed physical checkpoint need no live WAL handle.
+    fn validate_page_lsn(&self, lsn: u64, checkpoint_lsn: u64) -> std::io::Result<()> {
+        if lsn <= checkpoint_lsn {
+            return Ok(());
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "page LSN has no durable WAL authority",
+        ))
+    }
+
     /// A checkpoint host can preserve the first image of an existing page
     /// before the cache accepts an overwrite. Newly reserved pages need no undo.
     fn needs_page_image(&self, _page_id: u32) -> std::io::Result<bool> {
@@ -231,6 +245,7 @@ pub struct Pager<F: VfsFile, W: WalBarrier> {
     file: Mutex<F>,
     /// Whether mutable pages are protected by the in-file DWB zone.
     dwb_enabled: bool,
+    staged_pages: Mutex<Option<pager_io::StagedPageBatch>>,
     /// A failed writeback may leave the only complete image in the DWB.
     /// Refuse further writes until reopen has recovered that image.
     writeback_failed: std::sync::atomic::AtomicBool,
@@ -310,6 +325,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             path,
             file: Mutex::new(file),
             dwb_enabled: config.double_write && !config.read_only,
+            staged_pages: Mutex::new(None),
             writeback_failed: std::sync::atomic::AtomicBool::new(false),
             cache: PageCache::new(config.cache_size),
             read_only_recovery: RwLock::new(std::collections::HashMap::new()),
@@ -450,18 +466,14 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     fn ensure_phase3_dwb_zone_layout(&self) -> Result<(), PagerError> {
         let (_, image) = self.newest_superblock()?;
-        let header = reddb_file::decode_database_header(&image)
+        let header = reddb_file::decode_published_database_header(&image)
             .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
-        if header.version == reddb_file::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION
-            && !self.config.read_only
-        {
+        if header.is_recovery_read_only() && !self.config.read_only {
             return Err(PagerError::InvalidDatabase(
                 "recovered database is read-only; export verified data into a new store".into(),
             ));
         }
-        if header.version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
-            && !self.config.disk_residency
-            && !self.config.read_only
+        if header.requires_disk_residency() && !self.config.disk_residency && !self.config.read_only
         {
             return Err(PagerError::InvalidDatabase(
                 "prepared disk-resident database requires a disk-resident writer".into(),
@@ -541,35 +553,163 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 "recovery read-only format is reserved".into(),
             ));
         }
-        if version >= reddb_file::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
-            && !self.config.disk_residency
-        {
-            return Err(PagerError::InvalidDatabase(
-                "disk-residency format requires a disk-resident writer".into(),
-            ));
-        }
         if !(PHASE3_DWB_ZONE_FILE_VERSION..=reddb_file::PAGE_FILE_VERSION).contains(&version) {
             return Err(PagerError::InvalidDatabase(
                 "unsupported file format fence".into(),
+            ));
+        }
+        let current = self.header_read()?.clone();
+        if version < current.version {
+            return Err(PagerError::InvalidDatabase(
+                "file format downgrade is not supported".into(),
+            ));
+        }
+        let legacy_disk_residency =
+            reddb_file::file_format::page_format_is_disk_resident(current.version);
+        let required_capabilities = current.required_capabilities
+            | if version >= reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION
+                && legacy_disk_residency
+            {
+                reddb_file::FILE_CAPABILITY_DISK_RESIDENCY
+            } else {
+                0
+            };
+        let requires_disk_residency =
+            if version < reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION {
+                reddb_file::file_format::page_format_is_disk_resident(version)
+            } else {
+                required_capabilities & reddb_file::FILE_CAPABILITY_DISK_RESIDENCY != 0
+            };
+        if requires_disk_residency && !self.config.disk_residency {
+            return Err(PagerError::InvalidDatabase(
+                "disk-residency format requires a disk-resident writer".into(),
             ));
         }
         let _publication = self
             .superblock_publication
             .lock()
             .map_err(|_| PagerError::LockPoisoned)?;
-        if version < self.header_read()?.version {
-            return Err(PagerError::InvalidDatabase(
-                "file format downgrade is not supported".into(),
-            ));
-        }
         let result = (|| {
             for _ in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
                 self.commit_superblock_locked(|image| {
                     reddb_file::set_database_header_version(image, version)
-                        .map_err(|error| PagerError::InvalidDatabase(error.to_string()))
+                        .map_err(|error| PagerError::InvalidDatabase(error.to_string()))?;
+                    if version >= reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION {
+                        reddb_file::set_database_header_required_capabilities(
+                            image,
+                            required_capabilities,
+                        )
+                        .map_err(|error| PagerError::InvalidDatabase(error.to_string()))?;
+                    }
+                    Ok(())
                 })?;
             }
-            self.header_write()?.version = version;
+            let mut header = self.header_write()?;
+            header.version = version;
+            if version >= reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION {
+                header.required_capabilities = required_capabilities;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.writeback_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+
+    /// Durably enable mandatory reader capabilities before dependent pages exist.
+    ///
+    /// The set only grows. Both superblock copies cross the fence before this
+    /// returns, so a crash can leave a conservatively declared unused feature,
+    /// never reachable bytes whose decoder requirement was not published.
+    pub fn fence_required_capabilities(&self, capabilities: u64) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        let unsupported = capabilities & !reddb_file::FILE_CAPABILITIES_SUPPORTED;
+        if unsupported != 0 {
+            return Err(PagerError::InvalidDatabase(format!(
+                "unsupported required database capabilities: {unsupported:#018x}"
+            )));
+        }
+
+        let current = self.header_read()?.clone();
+        if current.is_recovery_read_only() {
+            return Err(PagerError::InvalidDatabase(
+                "recovery read-only format cannot enable capabilities".into(),
+            ));
+        }
+        let legacy_disk_residency =
+            reddb_file::file_format::page_format_is_disk_resident(current.version);
+        let required = current.required_capabilities
+            | capabilities
+            | if legacy_disk_residency {
+                reddb_file::FILE_CAPABILITY_DISK_RESIDENCY
+            } else {
+                0
+            };
+        let version = current
+            .version
+            .max(reddb_file::PAGE_REQUIRED_CAPABILITIES_FILE_VERSION);
+        if required == current.required_capabilities && version == current.version {
+            return Ok(());
+        }
+        if required & reddb_file::FILE_CAPABILITY_DISK_RESIDENCY != 0 && !self.config.disk_residency
+        {
+            return Err(PagerError::InvalidDatabase(
+                "disk-residency capability requires a disk-resident writer".into(),
+            ));
+        }
+        if self.batch_active()? {
+            return Err(PagerError::InvalidDatabase(
+                "capability publication requires no active prepared batch".into(),
+            ));
+        }
+
+        let _publication = self
+            .superblock_publication
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?;
+        let result = (|| {
+            for _ in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+                self.commit_superblock_locked(|image| {
+                    reddb_file::set_database_header_version(image, version)
+                        .and_then(|()| {
+                            reddb_file::set_database_header_required_capabilities(image, required)
+                        })
+                        .map_err(|error| PagerError::InvalidDatabase(error.to_string()))?;
+                    if required & reddb_file::FILE_CAPABILITY_CATALOG_ROOT != 0
+                        && current.required_capabilities & reddb_file::FILE_CAPABILITY_CATALOG_ROOT
+                            == 0
+                    {
+                        reddb_file::file_format::set_database_header_manifest_reference(
+                            image,
+                            reddb_file::page_proof::PageReference::default(),
+                        )
+                        .map_err(|error| PagerError::InvalidDatabase(error.to_string()))?;
+                    }
+                    if required & reddb_file::file_format::FILE_CAPABILITY_DWB_PUBLICATION != 0
+                        && current.required_capabilities
+                            & reddb_file::file_format::FILE_CAPABILITY_DWB_PUBLICATION
+                            == 0
+                    {
+                        if !self.dwb_enabled {
+                            return Err(PagerError::InvalidDatabase(
+                                "DWB generation authority requires protected page writes".into(),
+                            ));
+                        }
+                        reddb_file::file_format::set_database_header_dwb_publication(image, None)
+                            .map_err(|error| PagerError::InvalidDatabase(error.to_string()))?;
+                    }
+                    Ok(())
+                })?;
+            }
+            let mut header = self.header_write()?;
+            header.version = version;
+            header.required_capabilities = required;
             Ok(())
         })();
         if result.is_err() {
@@ -583,7 +723,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     fn load_header(&self) -> Result<(), PagerError> {
         let (_, image) = self.newest_superblock()?;
 
-        let mut decoded_header = reddb_file::decode_database_header(&image)
+        let mut decoded_header = reddb_file::decode_published_database_header(&image)
             .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
         // Cache eviction (or DWB recovery) can persist pages before the next
         // superblock publication. After a crash the allocation counter may
@@ -650,11 +790,30 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// Read a page from disk (bypassing cache)
     fn read_page_raw(&self, page_id: u32) -> Result<Page, PagerError> {
         let mut file = self.file_lock()?;
-        Ok(pager_io::read_page(
-            &mut *file,
-            page_id,
-            self.config.verify_checksums,
-        )?)
+        let page = match self
+            .staged_pages
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?
+            .as_ref()
+        {
+            Some(batch) => match batch.read(&mut *file, page_id)? {
+                Some(page) => page,
+                None => pager_io::read_page(&mut *file, page_id, self.config.verify_checksums)?,
+            },
+            None => pager_io::read_page(&mut *file, page_id, self.config.verify_checksums)?,
+        };
+        drop(file);
+        if self.config.verify_checksums && page_id != 0 && page.lsn() != 0 {
+            self.wal
+                .validate_page_lsn(page.lsn(), self.header_read()?.checkpoint_lsn)
+                .map_err(|error| {
+                    PagerError::InvalidDatabase(format!(
+                        "page {page_id} has unverified LSN {}: {error}",
+                        page.lsn()
+                    ))
+                })?;
+        }
+        Ok(page)
     }
 
     fn ensure_writeback_available(&self) -> Result<(), PagerError> {
@@ -667,6 +826,15 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             )));
         }
         Ok(())
+    }
+
+    /// Reject new logical writes after a physical page writeback failed.
+    ///
+    /// The failed write may have reached disk partially. Reopening lets the
+    /// double-write buffer and WAL establish the durable generation before
+    /// the database accepts another mutation.
+    pub fn check_writeback_available(&self) -> Result<(), PagerError> {
+        self.ensure_writeback_available()
     }
 
     fn record_ownership(
@@ -688,6 +856,9 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         page: Page,
         pending_page: Option<u32>,
     ) -> Result<(), PagerError> {
+        if self.bounded_writeback()? {
+            return self.write_dirty_page_batch(&[(page.page_id(), page)]);
+        }
         let mut ids = self.cache.dirty_page_ids(pager_io::DWB_MAX_PAGES_PER_FRAME);
         // The admitting write must not join its predecessor's eviction batch.
         // Its image is dirty for readers, but publication still belongs to the
@@ -711,6 +882,14 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         }
         let mut file = self.file_lock()?;
         self.ensure_writeback_available()?;
+        if let Some(batch) = self
+            .staged_pages
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?
+            .as_mut()
+        {
+            return Ok(batch.stage(&mut *file, page_id, page)?);
+        }
         Ok(pager_io::write_page(&mut *file, page_id, page)?)
     }
 
@@ -801,6 +980,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             return Err(PagerError::ReadOnly);
         }
 
+        pager_io::check_page_identity(&page, page_id)?;
         self.capture_page_before_write(page_id)?;
 
         // Update checksum
@@ -861,7 +1041,17 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         }
 
         // Try to get from freelist first
-        let page_id = {
+        let page_id = if self.batch_active()? {
+            // Prepared frames may extend the file but cannot reuse allocator
+            // state whose published roots still name the old ownership.
+            let mut header = self.header_write()?;
+            let id = header.page_count;
+            header.page_count = id
+                .checked_add(1)
+                .ok_or_else(|| PagerError::InvalidDatabase("page count overflow".into()))?;
+            *self.header_dirty_lock()? = true;
+            id
+        } else {
             let mut freelist = self.freelist_write()?;
             // A previous fence can fail after loading the trunk into memory.
             // Retry it before the fast path can consume any of those pages.
@@ -1055,6 +1245,11 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Free a page (return to freelist)
     pub fn free_page(&self, page_id: u32) -> Result<(), PagerError> {
+        if self.batch_active()? {
+            return Err(PagerError::InvalidDatabase(
+                "prepared DWB batches cannot retire published pages".into(),
+            ));
+        }
         let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if self.config.read_only {
@@ -1452,13 +1647,21 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         // Physical order also avoids arbitrary seeks among each batch's homes.
         let mut page_ids = self.cache.dirty_page_ids(usize::MAX);
         page_ids.sort_unstable();
-        for ids in page_ids.chunks(FLUSH_BATCH_PAGES) {
-            let pages = self.cache.flush_dirty_pages(ids);
-            self.write_dirty_page_batch(&pages)?;
+        if self.bounded_writeback()? {
+            for id in page_ids {
+                if let Some(page) = self.cache.flush_dirty_page(id) {
+                    self.write_dirty_page_batch(&[(id, page)])?;
+                }
+            }
+        } else {
+            for ids in page_ids.chunks(FLUSH_BATCH_PAGES) {
+                let pages = self.cache.flush_dirty_pages(ids);
+                self.write_dirty_page_batch(&pages)?;
+            }
         }
 
         // Write header if dirty
-        if *self.header_dirty_lock()? {
+        if !self.batch_active()? && *self.header_dirty_lock()? {
             self.write_header()?;
         }
 
@@ -1587,6 +1790,14 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         &self.path
     }
 
+    /// Return the exclusively owned handle. Callers must complete their
+    /// publication boundary before consuming the pager.
+    pub fn into_inner(self) -> F {
+        self.file
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Check if database is read-only
     pub fn is_read_only(&self) -> bool {
         self.config.read_only
@@ -1604,13 +1815,80 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         Ok(pager_io::clear_dwb_zone(&mut *file)?)
     }
 
-    /// Read the internal manifest page (page 1), the zone the superblock roots.
+    /// Read catalog authority from the newest sealed slot, independently of the
+    /// cached ordinary header fields.
+    pub fn manifest_reference(&self) -> Result<reddb_file::page_proof::PageReference, PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        let (_, image) = self.newest_superblock()?;
+        reddb_file::file_format::database_header_manifest_reference(&image)
+            .map_err(|err| PagerError::InvalidDatabase(err.to_string()))
+    }
+
+    pub fn manifest_page_id(&self) -> Result<u32, PagerError> {
+        let reference = self.manifest_reference()?;
+        Ok(if reference.page_id == 0 {
+            1
+        } else {
+            reference.page_id
+        })
+    }
+
+    /// Read the sealed catalog root, or page 1 for a legacy bootstrap header.
     ///
     /// ADR 0074 §2: manifest corruption fails the open didactically, naming the
     /// zone — it never falls back to a sidecar and never returns garbage.
     pub fn read_manifest_page(&self) -> Result<Page, PagerError> {
-        self.read_page(1)
+        let _ownership = self.lock_ownership_mutations();
+        let root = self.manifest_page_id()?;
+        self.read_page(root)
             .map_err(|_| PagerError::ManifestZoneCorrupt(self.path.clone()))
+    }
+
+    /// The new catalog and all its children must already be durable. Both
+    /// fallback headers stop naming its predecessor before that root is freed.
+    pub fn publish_manifest_reference(
+        &self,
+        reference: reddb_file::page_proof::PageReference,
+    ) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        if reference.page_id < FIRST_ALLOCATABLE_PAGE
+            || reference.page_id >= self.page_count()?
+            || reference.digest == [0; 32]
+            || self.header_read()?.required_capabilities & reddb_file::FILE_CAPABILITY_CATALOG_ROOT
+                == 0
+        {
+            return Err(PagerError::InvalidDatabase(
+                "invalid catalog generation publication".into(),
+            ));
+        }
+        let header = self.header_read()?.clone();
+        let _publication = self
+            .superblock_publication
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?;
+        let result = (|| {
+            for _ in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+                self.commit_superblock_locked(|image| {
+                    reddb_file::encode_database_header(image, &header)
+                        .map_err(|err| PagerError::InvalidDatabase(err.to_string()))?;
+                    reddb_file::file_format::set_database_header_manifest_reference(
+                        image, reference,
+                    )
+                    .map_err(|err| PagerError::InvalidDatabase(err.to_string()))
+                })?;
+            }
+            *self.header_dirty_lock()? = false;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.writeback_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
     }
 
     /// Write pages through the double-write buffer for torn page protection.
@@ -1625,16 +1903,33 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         }
         // Keep the file locked through staging, home writes and clearing so
         // another page writer cannot interleave with a protected batch.
+        let _publication = self
+            .superblock_publication
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)?;
         let mut file = self.file_lock()?;
         self.ensure_writeback_available()?;
-        let result = pager_io::write_pages(&mut *file, pages, self.dwb_enabled);
+        let result: Result<(), PagerError> = (|| {
+            let mut staged = self
+                .staged_pages
+                .lock()
+                .map_err(|_| PagerError::LockPoisoned)?;
+            if let Some(batch) = staged.as_mut() {
+                for (id, page) in pages {
+                    batch.stage(&mut *file, *id, page)?;
+                }
+                Ok(())
+            } else {
+                Ok(pager_io::write_pages(&mut *file, pages, self.dwb_enabled)?)
+            }
+        })();
         if result.is_err() {
             // Set this while holding the file lock: a waiting writer must not
             // replace the recovery frame after an interrupted home write.
             self.writeback_failed
                 .store(true, std::sync::atomic::Ordering::Release);
         }
-        Ok(result?)
+        result
     }
 
     /// Recover from double-write buffer after a crash.
@@ -1643,6 +1938,14 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// interrupted writing to their home locations. Re-apply them.
     fn recover_from_dwb(&self) -> Result<(), PagerError> {
         let mut file = self.file_lock()?;
+        if !self.config.read_only
+            && !self.dwb_enabled
+            && pager_io::requires_dwb_publication(&mut *file)?
+        {
+            return Err(PagerError::InvalidDatabase(
+                "DWB generation authority requires protected page writes".into(),
+            ));
+        }
         if self.config.read_only {
             for (id, page) in pager_io::read_dwb_pages(&mut *file)? {
                 // The DWB checksum seals raw bytes, which may be ciphertext.

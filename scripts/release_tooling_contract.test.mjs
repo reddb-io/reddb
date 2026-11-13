@@ -48,6 +48,24 @@ test("gRPC compatibility runtimes are versioned and published before generated s
   }
 });
 
+test("the MCU package is versioned, qualified and published after its engine dependencies", () => {
+  const release = read(".github/workflows/release.yml");
+  const enginePublish = release.indexOf("publish_one reddb-io-engine");
+  const mcuPublish = release.indexOf("publish_one reddb-io-mcu");
+  assert.notEqual(enginePublish, -1);
+  assert.ok(enginePublish < mcuPublish, "the engine must reach crates.io before the MCU package");
+
+  const sync = read("scripts/sync-version.js");
+  assert.match(sync, /crates\/reddb-mcu\/Cargo\.toml/);
+  assert.match(sync, /'reddb-io-mcu'/);
+  assert.match(read("scripts/check-versions.sh"), /Cargo\.lock reddb-io-mcu/);
+  assert.match(
+    read(".github/workflows/ci.yml"),
+    /reddb-io-mcu --features host-flash-model/,
+  );
+  assert.doesNotMatch(read("crates/reddb-mcu/Cargo.toml"), /^publish = false$/m);
+});
+
 /**
  * Regex source matching `uses: <repo>@<tag>` in either of the forms the
  * workflows may use: the bare tag, or a commit SHA pinned with the tag kept in

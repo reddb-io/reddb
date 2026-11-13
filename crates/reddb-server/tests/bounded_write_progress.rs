@@ -73,6 +73,30 @@ fn verify(runtime: &RedDBRuntime, ids: impl IntoIterator<Item = usize>) {
     }
 }
 
+fn verify_all(runtime: &RedDBRuntime) {
+    // Validate every acknowledged payload with one ordered bounded scan. The
+    // storage contract is about recovering all rows; issuing ROWS distinct SQL
+    // strings also benchmarks planning, index restoration and durable result
+    // caching, and can exhaust the CI timeout without strengthening recovery
+    // coverage.
+    let result = runtime
+        .execute_query("SELECT id, payload FROM sustained_rows ORDER BY id")
+        .expect("all acknowledged rows are readable");
+    assert_eq!(result.result.records.len(), ROWS);
+    for (id, row) in result.result.records.iter().enumerate() {
+        assert_eq!(
+            row.get("id").map(Value::display_string),
+            Some(id.to_string()),
+            "row order at {id}",
+        );
+        assert_eq!(
+            row.get("payload"),
+            Some(&Value::text(payload(id).as_str())),
+            "row {id}",
+        );
+    }
+}
+
 #[test]
 fn bounded_write_crash_child() {
     let Some(path) = std::env::var_os(CHILD_PATH) else {
@@ -104,7 +128,7 @@ fn committed_data_can_outgrow_ram_without_manual_checkpoints() {
         "writer must acknowledge every row before crash"
     );
     let runtime = RedDBRuntime::with_options(options(&path)).expect("recover acknowledged writes");
-    verify(&runtime, 0..ROWS);
+    verify_all(&runtime);
     runtime.checkpoint().expect("checkpoint recovered state");
     drop(runtime);
     let runtime = RedDBRuntime::with_options(options(&path)).expect("reopen recovered checkpoint");
@@ -128,7 +152,7 @@ fn concurrent_committed_writers_can_outgrow_ram() {
     verify(&runtime, [0, ROWS / 2, ROWS - 1]);
     drop(runtime);
     let runtime = RedDBRuntime::with_options(options(&path)).unwrap();
-    verify(&runtime, 0..ROWS);
+    verify_all(&runtime);
 }
 
 #[test]

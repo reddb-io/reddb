@@ -89,6 +89,7 @@ fn embedded_runtime_replays_internal_wal_without_flush_or_drop() {
         .arg("embedded_runtime_replays_internal_wal_without_flush_or_drop")
         .arg("--nocapture")
         .env("REDDB_EMBEDDED_RDB_WAL_CHILD_PATH", &path)
+        .env("REDDB_RUNTIME_RESULT_CACHE_ENABLED", "false")
         .output()
         .expect("run child test process");
     assert!(
@@ -228,7 +229,7 @@ fn a_second_writer_process_cannot_open_an_open_embedded_store() {
     assert_eq!(rows.result.records.len(), 2);
 }
 
-/// Boot re-seeds `red.system.*` and other config keys. `red_config` used to
+/// Boot re-seeds `system.*` and other config keys. `red.config` used to
 /// append a row per write, so every open added ~22 rows (~2 KB) to the
 /// snapshot even when nothing else changed.
 #[test]

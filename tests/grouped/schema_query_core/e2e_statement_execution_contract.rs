@@ -27,6 +27,21 @@ fn temp_db_path(label: &str) -> support::TempDbFile {
     support::temp_db_file(label)
 }
 
+fn wait_for_result_blob_insertions(rt: &RedDBRuntime, before: u64, added: u64, message: &str) {
+    let expected = before + added;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while rt.result_blob_cache().stats().insertions() < expected
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert_eq!(
+        rt.result_blob_cache().stats().insertions(),
+        expected,
+        "{message}"
+    );
+}
+
 fn exec(rt: &RedDBRuntime, sql: &str) {
     rt.execute_query(sql)
         .unwrap_or_else(|err| panic!("{sql}: {err:?}"));
@@ -38,19 +53,6 @@ fn row_count(rt: &RedDBRuntime, sql: &str) -> usize {
         .result
         .records
         .len()
-}
-
-fn show_config_value(rt: &RedDBRuntime, key: &str) -> String {
-    let result = rt
-        .execute_query(&format!("SHOW CONFIG {key}"))
-        .unwrap_or_else(|err| panic!("SHOW CONFIG {key}: {err:?}"));
-    result
-        .result
-        .records
-        .first()
-        .and_then(|record| record.get("value"))
-        .map(|value| format!("{value:?}"))
-        .unwrap_or_else(|| "Null".to_string())
 }
 
 fn selected_ids(rt: &RedDBRuntime, sql: &str) -> Vec<i64> {
@@ -414,15 +416,6 @@ fn read_statement_context_observes_tenant_config_auth_and_policy_state() {
         1
     );
 
-    exec(
-        &rt,
-        "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
-    );
-    assert!(
-        show_config_value(&rt, "runtime.result_cache.backend").contains("blob_cache"),
-        "SHOW CONFIG should expose the current runtime config"
-    );
-
     set_current_auth_identity("reader".to_string(), Role::Read);
     let read = rt.execute_query("SELECT 1");
     assert!(read.is_ok(), "Role::Read should execute SELECT: {read:?}");
@@ -440,14 +433,9 @@ fn show_config_as_json_reconstructs_config_subtree() {
     let rt = runtime();
     exec(
         &rt,
-        "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
-    );
-    exec(
-        &rt,
         "SET CONFIG runtime.result_cache.capacity_entries = 128",
     );
     exec(&rt, "SET CONFIG runtime.result_cache.enabled = true");
-    exec(&rt, "SET CONFIG runtime.result_cache.backend = 'shadow'");
 
     let result = rt
         .execute_query("SHOW CONFIG runtime.result_cache AS JSON")
@@ -462,7 +450,6 @@ fn show_config_as_json_reconstructs_config_subtree() {
         panic!("expected JSON value, got {record:?}");
     };
     let json: reddb::json::Value = reddb::json::from_slice(bytes).expect("valid config json");
-    assert_eq!(json["backend"].as_str(), Some("shadow"));
     assert_eq!(json["capacity_entries"].as_u64(), Some(128));
     assert_eq!(json["enabled"].as_bool(), Some(true));
 }
@@ -475,10 +462,7 @@ fn blob_result_cache_rehydrates_after_restart_with_tenant_and_auth_isolation() {
 
     {
         let rt = persistent_runtime(&path);
-        exec(
-            &rt,
-            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
-        );
+        let before = rt.result_blob_cache().stats().insertions();
         set_current_auth_identity("alice".to_string(), Role::Read);
         set_current_tenant("acme".to_string());
         assert_eq!(selected_text(&rt, "SELECT CURRENT_TENANT()"), "acme");
@@ -488,6 +472,12 @@ fn blob_result_cache_rehydrates_after_restart_with_tenant_and_auth_isolation() {
         assert_eq!(selected_text(&rt, "SELECT CURRENT_USER()"), "alice");
         clear_current_tenant();
         clear_current_auth_identity();
+        wait_for_result_blob_insertions(
+            &rt,
+            before,
+            3,
+            "the isolated scalar results should reach durable L2",
+        );
         rt.checkpoint().expect("checkpoint before restart");
     }
 
@@ -530,15 +520,18 @@ fn blob_result_cache_write_after_restart_invalidates_unrehydrated_l2_entries() {
 
     {
         let rt = persistent_runtime(&path);
-        exec(
-            &rt,
-            "SET CONFIG runtime.result_cache.backend = 'blob_cache'",
-        );
         exec(&rt, "CREATE TABLE items (id INT)");
         exec(&rt, "INSERT INTO items (id) VALUES (1)");
+        let before = rt.result_blob_cache().stats().insertions();
         assert_eq!(
             selected_ids(&rt, "SELECT id FROM items ORDER BY id"),
             vec![1]
+        );
+        wait_for_result_blob_insertions(
+            &rt,
+            before,
+            1,
+            "the table result should reach durable L2 before restart",
         );
         rt.checkpoint().expect("checkpoint before restart");
     }
@@ -557,6 +550,299 @@ fn blob_result_cache_write_after_restart_invalidates_unrehydrated_l2_entries() {
             "the stale pre-restart result should have been invalidated before rehydrate"
         );
     }
+}
+
+#[test]
+fn blob_result_cache_recovers_table_result_after_restart() {
+    let path = temp_db_path("result-cache-table-rehydrate");
+    let query = "SELECT id FROM items ORDER BY id";
+    let expected = {
+        let rt = persistent_runtime(&path);
+        exec(&rt, "CREATE TABLE items (id INT)");
+        exec(&rt, "INSERT INTO items (id) VALUES (1)");
+        let before = rt.result_blob_cache().stats().insertions();
+        assert_eq!(selected_ids(&rt, query), vec![1]);
+        let result = rt.execute_query(query).expect("cached result");
+        let fields = result.result.records[0]
+            .iter_fields()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        wait_for_result_blob_insertions(
+            &rt,
+            before,
+            1,
+            "the table result should reach durable L2 before restart",
+        );
+        rt.checkpoint().expect("checkpoint result cache");
+        fields
+    };
+    {
+        let rt = persistent_runtime(&path);
+        let before = rt.result_cache_metrics();
+        let result = rt.execute_query(query).expect("rehydrated result");
+        let fields = result.result.records[0]
+            .iter_fields()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(fields, expected);
+        let after = rt.result_cache_metrics();
+        assert_eq!(after.0 - before.0, 1, "the result must rehydrate from L2");
+        assert_eq!(after.1 - before.1, 0);
+    }
+}
+
+#[test]
+fn blob_result_cache_recovers_join_result_after_restart() {
+    let path = temp_db_path("result-cache-join-rehydrate");
+    let query = "SELECT a.id AS id FROM items a JOIN items b ON a.id = b.id";
+    {
+        let rt = persistent_runtime(&path);
+        exec(&rt, "CREATE TABLE items (id INT)");
+        exec(&rt, "INSERT INTO items (id) VALUES (1)");
+        let insertions = rt.result_blob_cache().stats().insertions();
+        assert_eq!(selected_ids(&rt, query), vec![1]);
+        let before = rt.result_cache_metrics();
+        assert_eq!(selected_ids(&rt, query), vec![1]);
+        assert_eq!(rt.result_cache_metrics().0 - before.0, 1);
+        wait_for_result_blob_insertions(
+            &rt,
+            insertions,
+            1,
+            "the join result should reach durable L2 before restart",
+        );
+        rt.checkpoint().expect("checkpoint join result");
+    }
+    {
+        let rt = persistent_runtime(&path);
+        let before = rt.result_cache_metrics();
+        assert_eq!(selected_ids(&rt, query), vec![1]);
+        let after = rt.result_cache_metrics();
+        assert_eq!(after.0 - before.0, 1, "the join result must rehydrate");
+    }
+}
+
+#[test]
+fn blob_cache_recovers_new_entry_after_namespace_flush() {
+    use reddb::storage::cache::{BlobCachePolicy, BlobCachePut, L1Admission};
+    let path = temp_db_path("blob-cache-flush-rehydrate");
+    {
+        let rt = persistent_runtime(&path);
+        let cache = rt.result_blob_cache();
+        let put = || {
+            BlobCachePut::new(b"new value".to_vec())
+                .with_policy(BlobCachePolicy::default().l1_admission(L1Admission::Never))
+        };
+        cache.put("ns", "old", put()).expect("old entry");
+        cache.put("ns", "key", put()).expect("initial entry");
+        assert!(cache.invalidate_namespace("ns"));
+        cache.put("ns", "key", put()).expect("replacement entry");
+        assert_eq!(
+            cache
+                .get("ns", "key")
+                .expect("entry before restart")
+                .value(),
+            b"new value"
+        );
+        assert!(cache.get("ns", "old").is_none());
+        rt.checkpoint().expect("checkpoint blob cache");
+    }
+    {
+        let rt = persistent_runtime(&path);
+        assert_eq!(
+            rt.result_blob_cache()
+                .get("ns", "key")
+                .expect("entry after restart")
+                .value(),
+            b"new value"
+        );
+        assert!(rt.result_blob_cache().get("ns", "old").is_none());
+    }
+}
+
+#[test]
+fn blob_cache_standalone_l2_recovers_after_namespace_flush() {
+    use reddb::storage::cache::{BlobCache, BlobCacheConfig, BlobCachePut};
+    let path = temp_db_path("blob-cache-standalone-flush");
+    let open = || {
+        BlobCache::open_with_l2(BlobCacheConfig::default().with_l2_path(path.path()))
+            .expect("standalone blob cache")
+    };
+    {
+        let cache = open();
+        cache
+            .put("ns", "old", BlobCachePut::new(b"old".to_vec()))
+            .expect("old entry");
+        assert!(cache.invalidate_namespace("ns"));
+        cache
+            .put("ns", "new", BlobCachePut::new(b"new".to_vec()))
+            .expect("new entry");
+    }
+    let cache = open();
+    assert!(cache.get("ns", "old").is_none());
+    assert_eq!(
+        cache
+            .get("ns", "new")
+            .expect("new entry after restart")
+            .value(),
+        b"new"
+    );
+}
+
+#[test]
+fn blob_result_cache_keeps_unrelated_entries_after_table_write() {
+    let rt = runtime();
+    exec(&rt, "CREATE TABLE items (id INT)");
+    exec(&rt, "CREATE TABLE noise (id INT)");
+    exec(&rt, "INSERT INTO items (id) VALUES (1)");
+    exec(&rt, "INSERT INTO noise (id) VALUES (1)");
+    let query = "SELECT id FROM items ORDER BY id";
+    let insertions = rt.result_blob_cache().stats().insertions();
+    assert_eq!(selected_ids(&rt, query), vec![1]);
+    wait_for_result_blob_insertions(
+        &rt,
+        insertions,
+        1,
+        "the items result should reach L2 before the unrelated write",
+    );
+    exec(&rt, "UPDATE noise SET id = 2 WHERE id = 1");
+    let before = rt.result_cache_metrics();
+    let blob_hits = rt.result_blob_cache().stats().hits();
+    assert_eq!(selected_ids(&rt, query), vec![1]);
+    let after = rt.result_cache_metrics();
+    assert_eq!(
+        after.0 - before.0,
+        1,
+        "unrelated writes should preserve the result"
+    );
+    assert_eq!(after.1 - before.1, 0);
+    assert_eq!(rt.result_blob_cache().stats().hits() - blob_hits, 1);
+    exec(&rt, "INSERT INTO items (id) VALUES (2)");
+    assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+}
+
+#[test]
+fn blob_result_cache_defers_l2_for_frequently_written_tables() {
+    let path = temp_db_path("result-cache-changing-table");
+    let query = "SELECT id FROM items ORDER BY id";
+    {
+        let rt = persistent_runtime(&path);
+        exec(&rt, "CREATE TABLE items (id INT)");
+        exec(&rt, "INSERT INTO items (id) VALUES (1)");
+        assert_eq!(selected_ids(&rt, query), vec![1]);
+        exec(&rt, "INSERT INTO items (id) VALUES (2)");
+        let stats = rt.result_blob_cache().stats();
+        assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+        assert_eq!(
+            rt.result_blob_cache().stats().insertions(),
+            stats.insertions(),
+            "a result immediately following invalidation should stay in memory"
+        );
+        exec(&rt, "INSERT INTO items (id) VALUES (3)");
+        assert_eq!(
+            rt.result_blob_cache().stats().namespace_flushes(),
+            stats.namespace_flushes(),
+            "an in-memory-only entry should not trigger another L2 flush"
+        );
+        assert_eq!(selected_ids(&rt, query), vec![1, 2, 3]);
+        rt.checkpoint()
+            .expect("checkpoint while result is volatile");
+    }
+    {
+        let rt = persistent_runtime(&path);
+        let before = rt.result_cache_metrics();
+        assert_eq!(
+            selected_ids(&rt, query),
+            vec![1, 2, 3],
+            "restart must recompute instead of returning an older L2 result"
+        );
+        let after = rt.result_cache_metrics();
+        assert_eq!(
+            after.1 - before.1,
+            1,
+            "volatile result must not survive restart"
+        );
+    }
+}
+
+#[test]
+fn blob_result_cache_promotes_volatile_result_after_writes_stop() {
+    let path = temp_db_path("result-cache-quiet-table");
+    let query = "SELECT id FROM items ORDER BY id";
+    {
+        let rt = persistent_runtime(&path);
+        exec(&rt, "CREATE TABLE items (id INT)");
+        exec(&rt, "INSERT INTO items (id) VALUES (1)");
+        assert_eq!(selected_ids(&rt, query), vec![1]);
+        exec(&rt, "INSERT INTO items (id) VALUES (2)");
+        assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+        let before = rt.result_blob_cache().stats().insertions();
+        wait_for_result_blob_insertions(
+            &rt,
+            before,
+            1,
+            "the background worker should publish the result after the quiet period",
+        );
+        assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+        rt.checkpoint().expect("checkpoint promoted result");
+    }
+    {
+        let rt = persistent_runtime(&path);
+        let before = rt.result_cache_metrics();
+        assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+        assert_eq!(
+            rt.result_cache_metrics().0 - before.0,
+            1,
+            "promoted result should rehydrate after restart"
+        );
+    }
+}
+
+#[test]
+fn blob_result_cache_promotion_preserves_remaining_ttl() {
+    let rt = runtime();
+    exec(&rt, "SET CONFIG runtime.result_cache.ttl_seconds = 5");
+    exec(&rt, "CREATE TABLE items (id INT)");
+    exec(&rt, "INSERT INTO items (id) VALUES (1)");
+    let query = "SELECT id FROM items ORDER BY id";
+    assert_eq!(selected_ids(&rt, query), vec![1]);
+    exec(&rt, "INSERT INTO items (id) VALUES (2)");
+    assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+    let started = std::time::Instant::now();
+    let before = rt.result_blob_cache().stats().insertions();
+    let deadline = started + std::time::Duration::from_secs(4);
+    while rt.result_blob_cache().stats().insertions() == before
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert_eq!(rt.result_blob_cache().stats().insertions(), before + 1);
+    let remaining = std::time::Duration::from_millis(5300).saturating_sub(started.elapsed());
+    std::thread::sleep(remaining);
+    let before = rt.result_cache_metrics();
+    assert_eq!(selected_ids(&rt, query), vec![1, 2]);
+    assert_eq!(
+        rt.result_cache_metrics().1 - before.1,
+        1,
+        "promotion must not reset the TTL of the cached result"
+    );
+}
+
+#[test]
+fn blob_result_cache_invalidates_entries_evicted_from_tracking() {
+    let rt = runtime();
+    exec(&rt, "SET CONFIG runtime.result_cache.capacity_entries = 1");
+    exec(&rt, "CREATE TABLE items (id INT)");
+    exec(&rt, "CREATE TABLE other (id INT)");
+    exec(&rt, "INSERT INTO items (id) VALUES (1)");
+    exec(&rt, "INSERT INTO other (id) VALUES (1)");
+    let query = "SELECT id FROM items ORDER BY id";
+    assert_eq!(selected_ids(&rt, query), vec![1]);
+    assert_eq!(
+        selected_ids(&rt, "SELECT id FROM other ORDER BY id"),
+        vec![1]
+    );
+    exec(&rt, "INSERT INTO items (id) VALUES (2)");
+    assert_eq!(selected_ids(&rt, query), vec![1, 2]);
 }
 
 #[test]

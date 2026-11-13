@@ -143,10 +143,22 @@ fn graph_autocommit_joins_existing_wal_capture() {
     runtime
         .vcs_set_versioned("graph_nested_capture", true)
         .unwrap();
-    runtime.execute_query("SET CONFIG runtime.result_cache.enabled = true").unwrap();
+    runtime
+        .execute_query("SET CONFIG runtime.result_cache.enabled = true")
+        .unwrap();
     let query = "SELECT * FROM graph_nested_capture WHERE label = 'nested'";
-    assert!(runtime.execute_query(query).unwrap().result.records.is_empty());
-    assert!(runtime.execute_query(query).unwrap().result.records.is_empty());
+    assert!(runtime
+        .execute_query(query)
+        .unwrap()
+        .result
+        .records
+        .is_empty());
+    assert!(runtime
+        .execute_query(query)
+        .unwrap()
+        .result
+        .records
+        .is_empty());
     runtime
         .with_deferred_store_wal_for_dml(true, || {
             let result = runtime.execute_query(
@@ -165,12 +177,7 @@ fn graph_autocommit_joins_existing_wal_capture() {
         .unwrap();
     assert!(runtime.graph_insert_xid().is_none());
     assert_eq!(
-        runtime
-            .execute_query(query)
-            .unwrap()
-            .result
-            .records
-            .len(),
+        runtime.execute_query(query).unwrap().result.records.len(),
         1
     );
 }
@@ -279,6 +286,247 @@ fn graph_transaction_can_join_existing_wal_capture() {
             .len(),
         1
     );
+}
+
+#[test]
+fn autocommit_update_preserves_row_during_version_publication() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    runtime
+        .execute_query("SET CONFIG runtime.result_cache.enabled = false")
+        .expect("disable cache");
+    seed(&runtime, "table");
+    let (paused_tx, paused_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let resume_rx = Mutex::new(resume_rx);
+    *runtime.db().store().test_versioned_update_after_old.lock() = Some(Arc::new(move || {
+        paused_tx.send(()).expect("writer paused");
+        resume_rx
+            .lock()
+            .expect("receiver")
+            .recv_timeout(TIMEOUT)
+            .expect("resume writer");
+    }));
+
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            runtime.execute_query("UPDATE mutation_records SET record_key = 1 WHERE record_key = 1")
+        });
+        paused_rx
+            .recv_timeout(TIMEOUT)
+            .expect("writer reached publication");
+        let (read_tx, read_rx) = mpsc::channel();
+        let reader_runtime = &runtime;
+        scope.spawn(move || {
+            let result =
+                reader_runtime.execute_query("SELECT * FROM mutation_records WHERE record_key = 1");
+            read_tx
+                .send(result.map(|result| result.result.records.len()))
+                .expect("reader result");
+        });
+        let observed = read_rx.recv_timeout(TIMEOUT);
+        resume_tx.send(()).expect("resume writer");
+        writer.join().expect("writer thread").expect("update");
+        assert_eq!(
+            observed.expect("concurrent read completed").expect("query"),
+            1
+        );
+    });
+}
+
+#[test]
+fn deferred_update_wal_failure_preserves_indexed_preimage() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    runtime
+        .execute_query("SET CONFIG runtime.result_cache.enabled = false")
+        .expect("disable cache");
+    seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    runtime
+        .db()
+        .store()
+        .test_fail_deferred_wal_append
+        .store(true, Ordering::SeqCst);
+    let failure = runtime.with_deferred_store_wal_for_dml(true, || {
+        runtime.execute_query("UPDATE mutation_records SET record_key = 2 WHERE record_key = 1")?;
+        let visible =
+            runtime.execute_query("SELECT * FROM mutation_records WHERE record_key = 1")?;
+        assert_eq!(
+            visible.result.records.len(),
+            1,
+            "pending update must retain the indexed preimage"
+        );
+        Ok(())
+    });
+    assert!(failure.is_err(), "injected WAL failure");
+    assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
+    let old = runtime
+        .execute_query("SELECT * FROM mutation_records WHERE record_key = 1")
+        .expect("old row");
+    let new = runtime
+        .execute_query("SELECT * FROM mutation_records WHERE record_key = 2")
+        .expect("new row");
+    assert_eq!(
+        old.result.records.len(),
+        1,
+        "failed WAL must retain the indexed preimage"
+    );
+    assert_eq!(
+        new.result.records.len(),
+        0,
+        "failed WAL must not expose the new row"
+    );
+}
+
+#[test]
+fn incomplete_autocommit_update_restores_indexed_preimage() {
+    for phase in [1, 2] {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("SET CONFIG runtime.result_cache.enabled = false")
+            .expect("disable cache");
+        seed(&runtime, "table");
+        create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+        runtime
+            .db()
+            .store()
+            .test_fail_versioned_update_phase
+            .store(phase, Ordering::SeqCst);
+        assert!(runtime
+            .execute_query("UPDATE mutation_records SET record_key = 2 WHERE record_key = 1")
+            .is_err());
+        assert_eq!(runtime.snapshot_manager().oldest_active_xid(), None);
+        assert_eq!(
+            runtime
+                .execute_query("SELECT * FROM mutation_records WHERE record_key = 1")
+                .expect("old row")
+                .result
+                .records
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .execute_query("SELECT * FROM mutation_records WHERE record_key = 2")
+                .expect("new row")
+                .result
+                .records
+                .len(),
+            0
+        );
+    }
+}
+
+#[test]
+fn failed_autocommit_update_preserves_preimage_after_restart() {
+    for phase in [1, 2, 3] {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join("update-recovery.rdb");
+        let runtime =
+            RedDBRuntime::with_options(crate::RedDBOptions::persistent(&path)).expect("runtime");
+        runtime
+            .execute_query("SET CONFIG runtime.result_cache.enabled = false")
+            .expect("disable cache");
+        seed(&runtime, "table");
+        create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+        runtime.checkpoint().expect("checkpoint preimage");
+        let result = if phase < 3 {
+            runtime
+                .db()
+                .store()
+                .test_fail_versioned_update_phase
+                .store(phase, Ordering::SeqCst);
+            runtime
+                .execute_query("UPDATE mutation_records SET record_key = 2 WHERE record_key = 1")
+                .map(|_| ())
+        } else {
+            runtime
+                .db()
+                .store()
+                .test_fail_deferred_wal_append
+                .store(true, Ordering::SeqCst);
+            runtime.with_deferred_store_wal_for_dml(true, || {
+                runtime
+                    .execute_query(
+                        "UPDATE mutation_records SET record_key = 2 WHERE record_key = 1",
+                    )
+                    .map(|_| ())
+            })
+        };
+        assert!(result.is_err(), "failure injection {phase}");
+        drop(runtime);
+        let reopened =
+            RedDBRuntime::with_options(crate::RedDBOptions::persistent(&path)).expect("reopen");
+        assert_eq!(
+            reopened
+                .execute_query("SELECT * FROM mutation_records WHERE record_key = 1")
+                .expect("old row")
+                .result
+                .records
+                .len(),
+            1
+        );
+        assert_eq!(
+            reopened
+                .execute_query("SELECT * FROM mutation_records WHERE record_key = 2")
+                .expect("new row")
+                .result
+                .records
+                .len(),
+            0
+        );
+    }
+}
+
+#[test]
+fn deferred_update_rejects_competing_publication() {
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    runtime
+        .execute_query("SET CONFIG runtime.result_cache.enabled = false")
+        .expect("disable cache");
+    seed(&runtime, "table");
+    create_index(&runtime, COLLECTION, "mutation_lookup", true).expect("index");
+    let mut competing_committed = false;
+    let first = runtime.with_deferred_store_wal_for_dml(true, || {
+        assert_eq!(
+            runtime
+                .execute_query("UPDATE mutation_records SET record_key = 2 WHERE record_key = 1")?
+                .affected_rows,
+            1
+        );
+        let competitor = runtime.clone();
+        let competing = std::thread::spawn(move || {
+            competitor
+                .execute_query("UPDATE mutation_records SET record_key = 3 WHERE record_key = 1")
+        })
+        .join()
+        .expect("competing writer");
+        competing_committed = competing.is_ok_and(|result| result.affected_rows == 1);
+        Ok(())
+    });
+    let rows = runtime
+        .execute_query("SELECT * FROM mutation_records")
+        .expect("read rows");
+    assert_eq!(
+        rows.result.records.len(),
+        1,
+        "only one row version can be visible"
+    );
+    assert_ne!(
+        first.is_ok(),
+        competing_committed,
+        "exactly one competing update commits"
+    );
+    if first.is_err() {
+        assert_eq!(
+            runtime
+                .execute_query("SELECT * FROM mutation_records WHERE record_key = 3")
+                .expect("winner")
+                .result
+                .records
+                .len(),
+            1
+        );
+    }
 }
 
 #[test]

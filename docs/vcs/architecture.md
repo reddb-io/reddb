@@ -49,7 +49,7 @@ the [overview](./overview.md) first if you haven't.
    there are no exclusions, before releasing the temporary transaction.
    This horizon prevents reclamation of versions the snapshot can see.
 3. Mark the temporary xid committed.
-4. Build the canonical `red_commits` row with
+4. Build the canonical `red.vcs.commits` row with
    `id = sha256(...)`, `root_xid = xid`, the snapshot's in-progress xids,
    `parents`, `height`, `author`, `committer`, `message`, `timestamp_ms`.
 5. Publish the commit, branch reference and connection workset in one WAL
@@ -64,8 +64,8 @@ and hard reset install a fresh writer epoch so later writes cannot change
 the source branch or an already captured commit. Reads that cannot prove
 an index respects this view fall back to a snapshot-filtered scan.
 
-Versioned collections use native entity format V13 to persist provenance.
-The reader retains V1–V12 compatibility. Opting in upgrades the database;
+Versioned collections use native entity format V14 to persist provenance.
+The reader retains V1–V13 compatibility. Opting in upgrades the database;
 older binaries cannot read the upgraded format. Disabling history is
 rejected while versions retain shared branch provenance.
 
@@ -99,13 +99,13 @@ a different protocol can't transplant it here.
 ### Height
 
 `height = max(parents.height) + 1`, or `0` when no parents. Used
-for fast LCA queries: iterate `red_closure` in ascending height
+for fast LCA queries: iterate `red.vcs.closure` in ascending height
 and short-circuit on the first common ancestor.
 
 ## Per-collection opt-in (Phase 7)
 
 ```
-red_vcs_settings
+red.vcs.settings
   ┌─────────────────────────────────────────────────┐
   │ id = "users",     versioned = true,  ts_ms = … │
   │ id = "products",  versioned = true,  ts_ms = … │
@@ -121,7 +121,7 @@ red_vcs_settings
 ```
 
 `is_versioned(store, name)` is a cheap query on
-`red_vcs_settings` (presence of a row with `versioned = true`).
+`red.vcs.settings` (presence of a row with `versioned = true`).
 Gates three decisions:
 
 - `materialize_merge_conflicts` iterates only versioned
@@ -138,7 +138,7 @@ append-only VCS metadata and always accept `AS OF`. The
 ### Retroactive semantics
 
 Opting in stamps existing entities with the main epoch and persists the
-V13 format. It cannot recover versions already overwritten or reclaimed.
+V14 format. It cannot recover versions already overwritten or reclaimed.
 A collection that already has
 commits pinning xids *before* the opt-in becomes queryable at
 those commits the moment the flag lands — the xids are still
@@ -168,7 +168,7 @@ SELECT ... AS OF COMMIT '<hash>' WHERE ...
       │     Some(AsOfSpec::Commit(<hash>))
       │
       ├─ runtime.vcs_resolve_as_of(spec) -> Xid
-      │     load red_commits row, return commit.root_xid
+      │     load red.vcs.commits row, return commit.root_xid
       │
       ├─ stored snapshot { xid, in_progress } installed via
       │   CurrentSnapshotGuard::install(...)
@@ -262,7 +262,7 @@ collection reads do not yet apply graph MVCC visibility.
    - Run `three_way_merge(base, ours, theirs)` from
      `application::merge_json`
    - Clean merge → skip (Phase 6.2 will stage for apply)
-   - Conflicting → insert row in `red_conflicts` with
+   - Conflicting → insert row in `red.vcs.conflicts` with
      `conflicting_paths`, `base_json`, `ours_json`, `theirs_json`,
      `merge_state_id`
 
@@ -314,7 +314,7 @@ Reset modes:
 
 ## Closure index
 
-`red_closure` rows are `(height, commit_hash, ancestor_hash)`. Phase
+`red.vcs.closure` rows are `(height, commit_hash, ancestor_hash)`. Phase
 6 emits closure entries on commit; Phase 8 adds the optimised
 `vcs_lca` that iterates closures in parallel height-ascending order
 to find the first common ancestor in `O(log N)` ancestor steps.

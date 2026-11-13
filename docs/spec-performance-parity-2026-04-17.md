@@ -98,10 +98,10 @@ powerful by default. Users shape behaviour via two mechanisms:
    `REDDB_DURABILITY_MODE=sync`, `REDDB_STORAGE_BTREE_LEHMAN_YAO=true`.
    Dots map to underscores.
 2. **Mounted config file** — `/etc/reddb/config.toml` (or `.json`).
-   Parsed at boot, keys written into `red_config` only when absent.
+   Parsed at boot, keys written into `red.config` only when absent.
 
 **Precedence (highest wins):** env var → mounted file → persisted
-`red_config` value → hard-coded default. Env vars are re-evaluated on
+`red.config` value → hard-coded default. Env vars are re-evaluated on
 every boot; they override everything so operators can hot-fix a
 live-config mistake by restarting with `REDDB_X=Y`.
 
@@ -112,7 +112,7 @@ Two tiers. The distinction drives whether the value shows up in
 
 ### Tier A — critical / self-healing
 
-On boot, if missing, RedDB writes the default into `red_config`. Always
+On boot, if missing, RedDB writes the default into `red.config`. Always
 listed in `SHOW CONFIG`. Operators see them.
 
 | Key | Default | Effect |

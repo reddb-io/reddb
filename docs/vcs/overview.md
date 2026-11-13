@@ -187,18 +187,17 @@ on first boot:
 
 | Collection | Contents |
 |------------|----------|
-| `red_commits` | commit rows — hash, root_xid, parents[], height, author, committer, message, timestamp_ms, signature |
-| `red_refs` | branches (`refs/heads/*`), tags (`refs/tags/*`), per-connection `HEAD:<conn>` pointers |
-| `red_worksets` | per-connection working/staged state — branch, base_commit, working_xid, merge_state_id |
-| `red_closure` | commit ancestry index `(height, commit_hash, ancestor_hash)` for fast LCA |
-| `red_conflicts` | unresolved merge conflicts — base/ours/theirs JSON + conflicting paths |
-| `red_merge_state` | in-progress merge/cherry_pick/revert/rebase metadata |
-| `red_remotes` | remote repository configuration (Phase 7) |
-| `red_vcs_settings` | per-collection opt-in flag (`id = name`, `versioned = true`) |
+| `red.vcs.commits` | commit rows — hash, root_xid, parents[], height, author, committer, message, timestamp_ms, signature |
+| `red.vcs.refs` | branches (`refs/heads/*`), tags (`refs/tags/*`), per-connection `HEAD:<conn>` pointers |
+| `red.vcs.worksets` | per-connection working/staged state — branch, base_commit, working_xid, merge_state_id |
+| `red.vcs.closure` | commit ancestry index `(height, commit_hash, ancestor_hash)` for fast LCA |
+| `red.vcs.conflicts` | unresolved merge conflicts — base/ours/theirs JSON + conflicting paths |
+| `red.vcs.merge_state` | in-progress merge/cherry_pick/revert/rebase metadata |
+| `red.vcs.remotes` | remote repository configuration (Phase 7) |
+| `red.vcs.settings` | per-collection opt-in flag (`id = name`, `versioned = true`) |
 
-Config defaults live in `red_config` under `red.vcs.*` — inherits
-the same dot-notation patterns already used by `red.ai`,
-`red.storage`, and friends.
+Config defaults live in `red.config` under content keys `vcs.*` — inheriting
+the same bare dot-notation pattern used by `ai.*`, `storage.*`, and friends.
 
 ## Next steps
 

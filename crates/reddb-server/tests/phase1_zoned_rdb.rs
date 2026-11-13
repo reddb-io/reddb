@@ -276,6 +276,52 @@ fn migrate_and_revert_round_trip_preserves_a_populated_store_byte_for_byte() {
 }
 
 #[test]
+fn legacy_revert_preserves_guarded_stores_and_their_rollback_files() {
+    use reddb_engine::storage::pager::{NoWal, Pager as CorePager, PagerConfig};
+    use reddb_file::{OpenMode, StdVfs, Vfs};
+
+    for capability in [
+        reddb_file::file_format::FILE_CAPABILITY_CATALOG_ROOT,
+        reddb_file::file_format::FILE_CAPABILITY_RECOVERY_READ_ONLY,
+        reddb_file::file_format::FILE_CAPABILITY_TREE_PROOFS,
+        reddb_file::file_format::FILE_CAPABILITY_DWB_PUBLICATION,
+    ] {
+        let dir = temp_dir("guarded_revert");
+        let path = dir.path().join("data.rdb");
+        let page_id = populate(&path, 8);
+        let backup = backup_path_for(&path);
+        fs::copy(&path, &backup).expect("retain pre-upgrade backup");
+        let backup_bytes = fs::read(&backup).expect("original backup");
+        let pager = CorePager::open_owned(
+            StdVfs.open(&path, OpenMode::create_keep()).expect("file"),
+            path.clone(),
+            PagerConfig::default(),
+            NoWal,
+            false,
+        )
+        .expect("open native pager");
+        pager
+            .fence_required_capabilities(capability)
+            .expect("publish required reader capability");
+        drop(pager);
+        let source_bytes = fs::read(&path).expect("guarded source");
+
+        let error = revert_to_sidecars(&path).expect_err("legacy revert must refuse guarded files");
+        assert!(
+            matches!(error, ZoneMigrationError::Io(ref error) if error.kind() == std::io::ErrorKind::InvalidData),
+            "capability {capability:#x}: {error}"
+        );
+        assert_eq!(fs::read(&path).expect("source after refusal"), source_bytes);
+        assert_eq!(
+            fs::read(&backup).expect("backup after refusal"),
+            backup_bytes
+        );
+        assert_no_phase1_sidecars(dir.path(), "refusing a guarded revert");
+        assert_rows_readable(&backup, page_id, 8);
+    }
+}
+
+#[test]
 fn phase1_migration_refuses_unrecovered_dwb_without_modifying_files() {
     for contents in [&[][..], &b"unrecovered DWB bytes"[..]] {
         let dir = temp_dir("legacy_dwb");

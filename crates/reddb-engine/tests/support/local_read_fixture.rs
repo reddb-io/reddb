@@ -20,6 +20,8 @@ pub fn contract(name: &str) -> reddb_engine::catalog::CollectionContract {
     reddb_engine::catalog::codec::collection_contract_from_persisted(PhysicalCollectionContract {
         graph_contract: None,
         name: name.into(),
+        description: None,
+        description_generated: false,
         declared_model: "table".into(),
         schema_mode: "strict".into(),
         origin: "explicit".into(),
@@ -33,6 +35,8 @@ pub fn contract(name: &str) -> reddb_engine::catalog::CollectionContract {
         .into_iter()
         .map(|(name, data_type)| PhysicalDeclaredColumnContract {
             name: name.into(),
+            description: None,
+            description_generated: false,
             data_type: data_type.into(),
             ..Default::default()
         })

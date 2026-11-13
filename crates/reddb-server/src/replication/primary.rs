@@ -89,6 +89,33 @@ impl WalBuffer {
             .collect()
     }
 
+    /// Read shared records while bounding their aggregate payload bytes.
+    /// The first matching record is returned even when it exceeds the byte
+    /// budget so the transport can reject that indivisible record explicitly.
+    pub fn read_since_shared_bounded(
+        &self,
+        since_lsn: u64,
+        max_count: usize,
+        max_payload_bytes: usize,
+    ) -> Vec<(u64, Arc<[u8]>)> {
+        let records = self.records.read().unwrap_or_else(|e| e.into_inner());
+        let mut payload_bytes = 0usize;
+        records
+            .iter()
+            .filter(|(lsn, _)| *lsn > since_lsn)
+            .take(max_count)
+            .take_while(|(_, data)| {
+                let next_payload_bytes = payload_bytes.saturating_add(data.len());
+                let include = payload_bytes == 0 || next_payload_bytes <= max_payload_bytes;
+                if include {
+                    payload_bytes = next_payload_bytes;
+                }
+                include
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Current LSN.
     pub fn current_lsn(&self) -> u64 {
         *self.current_lsn.read().unwrap_or_else(|e| e.into_inner())
@@ -200,6 +227,7 @@ impl LogicalWalSpoolState {
 /// This is not the storage-engine WAL; it is a structured replication/PITR log.
 pub struct LogicalWalSpool {
     path: PathBuf,
+    // File contents and seek offsets must cross the same publication boundary.
     state: Mutex<LogicalWalSpoolState>,
 }
 
@@ -277,21 +305,16 @@ impl LogicalWalSpool {
         timestamp_ms: u64,
         data: &[u8],
     ) -> io::Result<()> {
+        // Encode before taking the lock, then retain exclusive file/index
+        // ownership through the durability barrier. Open after locking: a
+        // concurrent prune must not replace the inode we are about to append.
+        let frame =
+            reddb_file::encode_logical_wal_v3(term, ownership_epoch, lsn, timestamp_ms, data)?;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?;
-        // Pre-build the record in memory so a single write_all keeps
-        // the on-disk record contiguous. Two side-effects:
-        //   (a) crash recovery sees either a complete record or a torn
-        //       header, never an interleaved partial frame from two
-        //       writers (the spool is not multi-writer today, but the
-        //       single-write semantics make that future-safe);
-        //   (b) crc32 is computed exactly once over the same bytes the
-        //       reader will checksum, with zero risk of header/payload
-        //       drift from a partial flush.
-        let frame =
-            reddb_file::encode_logical_wal_v3(term, ownership_epoch, lsn, timestamp_ms, data)?;
 
         file.write_all(&frame)?;
         // PLAN.md Phase 2 mandates `sync_all` for logical WAL durability.
@@ -300,7 +323,6 @@ impl LogicalWalSpool {
         // acknowledged write supposedly committed.
         file.sync_all()?;
 
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.current_lsn = state.current_lsn.max(lsn);
         // The record we just wrote starts at the prior end-of-file.
         // Checkpoint it into the seek index if it lands on an interval
@@ -319,15 +341,36 @@ impl LogicalWalSpool {
         // (issue #832). The file was already repaired on `open`, so the
         // forward scan from the checkpoint is non-repairing and simply
         // stops at the first torn tail (left for the next `open` to fix).
-        let start_offset = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.seek_floor_offset(since_lsn)
-        };
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let start_offset = state.seek_floor_offset(since_lsn);
         let entries = reddb_file::read_logical_wal_entries_from(&self.path, start_offset)?;
+        drop(state);
         Ok(entries
             .into_iter()
             .filter(|entry| entry.lsn > since_lsn)
             .take(max_count)
+            .map(|entry| (entry.lsn, logical_wal_data_with_framing_term(&entry)))
+            .collect())
+    }
+
+    pub fn read_since_bounded(
+        &self,
+        since_lsn: u64,
+        max_count: usize,
+        max_payload_bytes: usize,
+    ) -> io::Result<Vec<(u64, Vec<u8>)>> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let start_offset = state.seek_floor_offset(since_lsn);
+        let entries = reddb_file::read_logical_wal_entries_from_bounded(
+            &self.path,
+            start_offset,
+            since_lsn,
+            max_count,
+            max_payload_bytes,
+        )?;
+        drop(state);
+        Ok(entries
+            .into_iter()
             .map(|entry| (entry.lsn, logical_wal_data_with_framing_term(&entry)))
             .collect())
     }
@@ -350,7 +393,15 @@ impl LogicalWalSpool {
             .current_lsn
     }
 
+    /// Restore the committed prefix already materialized in a promoted replica.
+    /// This advances the allocation frontier without inventing spool records.
+    pub(crate) fn restore_lsn_floor(&self, lsn: u64) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.current_lsn = state.current_lsn.max(lsn);
+    }
+
     pub fn oldest_lsn(&self) -> io::Result<Option<u64>> {
+        let _state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         Ok(reddb_file::read_and_repair_logical_wal_entries(&self.path)?
             .into_iter()
             .next()
@@ -358,7 +409,8 @@ impl LogicalWalSpool {
     }
 
     pub fn prune_through(&self, upto_lsn: u64) -> io::Result<()> {
-        let previous_lsn = self.current_lsn();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let previous_lsn = state.current_lsn;
         let mut retained: Vec<_> = reddb_file::read_and_repair_logical_wal_entries(&self.path)?
             .into_iter()
             .filter(|entry| entry.lsn > upto_lsn)
@@ -392,7 +444,6 @@ impl LogicalWalSpool {
         // seek index is stale — rebuild it from the compacted file.
         let (seek_index, write_offset, record_count) =
             reddb_file::build_logical_wal_seek_index(&self.path)?;
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.current_lsn = previous_lsn.max(current_lsn).max(upto_lsn);
         state.seek_index = seek_index;
         state.write_offset = write_offset;
@@ -470,6 +521,7 @@ pub struct PrimaryReplication {
     primary_replica_file_plan: Option<reddb_file::PrimaryReplicaFilePlan>,
     primary_replica_wal_lock: Mutex<()>,
     slots: RwLock<BTreeMap<String, ReplicationSlot>>,
+    slot_timeline: reddb_file::TimelineId,
     slot_retention_max_lag_lsn: u64,
     slot_idle_timeout_ms: u64,
     /// PLAN.md Phase 11.4 — ack-driven commit synchronization. Always
@@ -510,6 +562,101 @@ pub enum ResumeMode {
     FullRebootstrap {
         cause: ReplicationSlotInvalidationCause,
     },
+}
+
+const REBOOTSTRAP_PROOF_TOKEN_BYTES_MAX: usize = 1024;
+
+#[derive(Debug)]
+struct ReplicaRebootstrapProof {
+    replica_id: String,
+    timeline: u64,
+    checkpoint_lsn: u64,
+    token: String,
+}
+
+impl ReplicaRebootstrapProof {
+    const MAGIC: &'static [u8; 5] = b"RBRP1";
+
+    fn encode(&self) -> io::Result<Vec<u8>> {
+        let replica_id_bytes = self.replica_id.as_bytes();
+        let token_bytes = self.token.as_bytes();
+        let replica_id_len = u16::try_from(replica_id_bytes.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "replica identity is too long")
+        })?;
+        let token_len = u16::try_from(token_bytes.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "snapshot token is too long")
+        })?;
+        let mut bytes = Vec::with_capacity(25 + replica_id_bytes.len() + token_bytes.len());
+        bytes.extend_from_slice(Self::MAGIC);
+        bytes.extend_from_slice(&self.timeline.to_le_bytes());
+        bytes.extend_from_slice(&self.checkpoint_lsn.to_le_bytes());
+        bytes.extend_from_slice(&replica_id_len.to_le_bytes());
+        bytes.extend_from_slice(&token_len.to_le_bytes());
+        bytes.extend_from_slice(replica_id_bytes);
+        bytes.extend_from_slice(token_bytes);
+        Ok(bytes)
+    }
+
+    fn decode(bytes: &[u8]) -> io::Result<Self> {
+        if bytes.len() < 25 || &bytes[..5] != Self::MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid replica rebootstrap proof header",
+            ));
+        }
+        let timeline = u64::from_le_bytes(
+            bytes[5..13]
+                .try_into()
+                .expect("invariant: proof timeline slice has eight bytes"),
+        );
+        let checkpoint_lsn = u64::from_le_bytes(
+            bytes[13..21]
+                .try_into()
+                .expect("invariant: proof checkpoint slice has eight bytes"),
+        );
+        let replica_id_len = usize::from(u16::from_le_bytes(
+            bytes[21..23]
+                .try_into()
+                .expect("invariant: proof identity length slice has two bytes"),
+        ));
+        let token_len = usize::from(u16::from_le_bytes(
+            bytes[23..25]
+                .try_into()
+                .expect("invariant: proof token length slice has two bytes"),
+        ));
+        let expected_len = 25usize
+            .checked_add(replica_id_len)
+            .and_then(|len| len.checked_add(token_len))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "rebootstrap proof length overflow",
+                )
+            })?;
+        if bytes.len() != expected_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid replica rebootstrap proof length",
+            ));
+        }
+        let replica_id_end = 25 + replica_id_len;
+        let replica_id = std::str::from_utf8(&bytes[25..replica_id_end])
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+            .to_string();
+        let token = std::str::from_utf8(&bytes[replica_id_end..expected_len])
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+            .to_string();
+        Ok(Self {
+            replica_id,
+            timeline,
+            checkpoint_lsn,
+            token,
+        })
+    }
+}
+
+fn replica_rebootstrap_proof_key(replica_id: &str) -> String {
+    format!("replication.rebootstrap.proof.{}", hex::encode(replica_id))
 }
 
 impl PrimaryReplication {
@@ -591,6 +738,9 @@ impl PrimaryReplication {
             primary_replica_file_plan,
             primary_replica_wal_lock: Mutex::new(()),
             slots: RwLock::new(slots),
+            // Legacy JSON cannot encode a timeline. Native catalogs are
+            // rebound to authoritative history by new_with_store instead.
+            slot_timeline: reddb_file::TimelineId::initial(),
             slot_retention_max_lag_lsn: config.slot_retention_max_lag_lsn,
             slot_idle_timeout_ms: config.slot_idle_timeout_ms,
             commit_waiter: Arc::new(crate::replication::commit_waiter::CommitWaiter::new()),
@@ -606,7 +756,13 @@ impl PrimaryReplication {
         store: Arc<crate::storage::unified::UnifiedStore>,
     ) -> io::Result<Self> {
         let mut primary = Self::new_with_config(data_path, config);
-        if let Some(bytes) = super::metadata::read(&store, super::metadata::SLOTS)? {
+        if let Some(path) = data_path.filter(|_| primary.logical_wal_spool.is_none()) {
+            // A persistent primary must not silently downgrade to an in-memory
+            // stream when its durable spool cannot be opened.
+            primary.logical_wal_spool = Some(Arc::new(LogicalWalSpool::open(path)?));
+        }
+        let stored_catalog = super::metadata::read(&store, super::metadata::SLOTS)?;
+        if let Some(bytes) = &stored_catalog {
             let catalog =
                 reddb_file::ReplicationSlotCatalog::decode(&bytes).map_err(io::Error::other)?;
             primary.slots = RwLock::new(
@@ -645,14 +801,25 @@ impl PrimaryReplication {
                     return Err(io::Error::other(error));
                 }
             }
-            let slots = primary
+        }
+        {
+            let now_ms = crate::utils::now_unix_millis();
+            let history = match &primary.primary_replica_file_plan {
+                Some(plan) => super::metadata::timeline(&store, &plan.timeline_history_path())?,
+                None => reddb_file::TimelineHistory::new(now_ms),
+            };
+            let mut slots = primary
                 .slots
-                .read()
+                .write()
                 .unwrap_or_else(|error| error.into_inner());
-            let bytes = slots::slot_catalog_from_map(&slots)
+            primary.slot_timeline =
+                slots::align_slots_with_timeline(&mut slots, &history, u128::from(now_ms))?;
+            let bytes = slots::slot_catalog_from_map(&slots, primary.slot_timeline)
                 .and_then(|catalog| catalog.encode())
                 .map_err(io::Error::other)?;
-            super::metadata::write(&store, super::metadata::SLOTS, &bytes)?;
+            if stored_catalog.as_deref() != Some(bytes.as_slice()) {
+                super::metadata::write(&store, super::metadata::SLOTS, &bytes)?;
+            }
         }
         for path in [&primary.slot_catalog_path, &primary.slot_path]
             .into_iter()
@@ -684,41 +851,40 @@ impl PrimaryReplication {
     }
 
     pub fn append_logical_record(&self, lsn: u64, encoded: Vec<u8>) {
-        self.wal_buffer.append(lsn, encoded.clone());
-        if let Some(spool) = &self.logical_wal_spool {
-            let _ = spool.append(lsn, &encoded);
+        if let Err(error) = self.try_append_logical_record(lsn, encoded) {
+            warn!(%error, lsn, "failed to publish logical replication record");
         }
+    }
+
+    /// Publish durable projections before making a record available to readers.
+    /// Replaying a committed outbox is idempotent, including a crash between the
+    /// segment append and the spool append.
+    pub(crate) fn try_append_logical_record(&self, lsn: u64, encoded: Vec<u8>) -> io::Result<()> {
+        let _guard = self
+            .primary_replica_wal_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if let Some(plan) = &self.primary_replica_file_plan {
-            let _guard = self
-                .primary_replica_wal_lock
-                .lock()
-                .unwrap_or_else(|err| err.into_inner());
-            match self.current_timeline(&plan.root) {
-                Ok(timeline) => {
-                    let plan = reddb_file::PrimaryReplicaFilePlan::new(plan.root.clone(), timeline);
-                    if let Err(err) = plan.append_wal_record(lsn, &encoded) {
-                        warn!(
-                            target: "reddb::replication::primary",
-                            lsn,
-                            error = %err,
-                            "failed to append primary-replica WAL segment"
-                        );
-                    }
-                }
-                Err(err) => {
-                    warn!(
-                        target: "reddb::replication::primary",
-                        lsn,
-                        error = %err,
-                        "failed to read primary-replica timeline history; skipping WAL append"
-                    );
-                }
+            let timeline = self
+                .current_timeline(&plan.root)
+                .map_err(io::Error::other)?;
+            let plan = reddb_file::PrimaryReplicaFilePlan::new(plan.root.clone(), timeline);
+            plan.append_wal_record(lsn, &encoded)
+                .map_err(io::Error::other)?;
+        }
+        if let Some(spool) = &self.logical_wal_spool {
+            if spool.current_lsn() < lsn {
+                spool.append(lsn, &encoded)?;
             }
         }
+        if self.wal_buffer.current_lsn() < lsn {
+            self.wal_buffer.append(lsn, encoded);
+        }
         let (lock, cvar) = &self.wal_appended;
-        let mut latest = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut latest = lock.lock().unwrap_or_else(|error| error.into_inner());
         *latest = (*latest).max(lsn);
         cvar.notify_all();
+        Ok(())
     }
 
     pub fn wait_for_logical_lsn_after(&self, since_lsn: u64, timeout: Duration) -> bool {
@@ -836,10 +1002,10 @@ impl PrimaryReplication {
     /// its `replica_id` on a pull, the primary registers it so it is no
     /// longer blind to that replica's existence; subsequent pulls are
     /// idempotent no-ops. Returns `true` when a new registration was
-    /// created. A fresh slot starts at the replica's requested cursor rather
-    /// than the primary's current LSN, so an empty replica does not skip WAL
-    /// that was written before its first pull. Reconnects preserve existing
-    /// progress and do not bump the topology epoch.
+    /// created. A fresh slot starts at the replica's requested cursor, bounded
+    /// by the primary's current LSN, so an empty replica does not skip WAL and
+    /// a cursor from a different primary cannot publish future progress.
+    /// Reconnects preserve existing progress and do not bump the topology epoch.
     pub fn ensure_replica_registered(&self, id: &str, requested_since_lsn: u64) -> bool {
         let already = self
             .replicas
@@ -850,7 +1016,8 @@ impl PrimaryReplication {
         if already {
             return false;
         }
-        self.register_replica_with_region_at(id.to_string(), None, requested_since_lsn);
+        let initial_lsn = requested_since_lsn.min(self.current_logical_lsn());
+        self.register_replica_with_region_at(id.to_string(), None, initial_lsn);
         true
     }
 
@@ -1036,11 +1203,7 @@ impl PrimaryReplication {
             self.persist_slots_locked(&slots);
             return restart_lsn;
         }
-        let mut slot = ReplicationSlot::new(
-            id.to_string(),
-            reddb_file::TimelineId::initial(),
-            initial_lsn,
-        );
+        let mut slot = ReplicationSlot::new(id.to_string(), self.slot_timeline, initial_lsn);
         slot.last_seen_at_unix_ms = now_ms;
         slots.insert(id.to_string(), slot);
         let restart_lsn = initial_lsn;
@@ -1055,8 +1218,7 @@ impl PrimaryReplication {
             .map(|store| store.vault_publication_lock.lock());
         let mut slots = self.slots.write().unwrap_or_else(|e| e.into_inner());
         let slot = slots.entry(id.to_string()).or_insert_with(|| {
-            let mut slot =
-                ReplicationSlot::new(id.to_string(), reddb_file::TimelineId::initial(), 0);
+            let mut slot = ReplicationSlot::new(id.to_string(), self.slot_timeline, 0);
             slot.last_seen_at_unix_ms = now_ms;
             slot
         });
@@ -1157,6 +1319,171 @@ impl PrimaryReplication {
         None
     }
 
+    pub fn record_replica_rebootstrap_snapshot(
+        &self,
+        replica_id: &str,
+        token: &str,
+        timeline: reddb_file::TimelineId,
+        checkpoint_lsn: u64,
+        resumed_transfer: bool,
+    ) -> io::Result<bool> {
+        if token.is_empty() || token.len() > REBOOTSTRAP_PROOF_TOKEN_BYTES_MAX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid replica rebootstrap snapshot token",
+            ));
+        }
+        if timeline != self.slot_timeline || checkpoint_lsn > self.current_logical_lsn() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "replica rebootstrap snapshot is outside the primary frontier",
+            ));
+        }
+        let _publication = self
+            .metadata_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
+        let slots = self.slots.read().unwrap_or_else(|error| error.into_inner());
+        let Some(slot) = slots.get(replica_id) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "replica rebootstrap slot is not registered",
+            ));
+        };
+        if slot.invalidation_reason.is_none() {
+            return Ok(false);
+        }
+        let store = self.metadata_store.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "replica rebootstrap proof requires native metadata",
+            )
+        })?;
+        let key = replica_rebootstrap_proof_key(replica_id);
+        let proof = ReplicaRebootstrapProof {
+            replica_id: replica_id.to_string(),
+            timeline: timeline.0,
+            checkpoint_lsn,
+            token: token.to_string(),
+        };
+        if resumed_transfer {
+            let bytes = super::metadata::read(store, &key)?
+                .filter(|bytes| !bytes.is_empty())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "replica rebootstrap snapshot token is no longer active",
+                    )
+                })?;
+            let recorded = ReplicaRebootstrapProof::decode(&bytes)?;
+            if recorded.replica_id != proof.replica_id
+                || recorded.timeline != proof.timeline
+                || recorded.checkpoint_lsn != proof.checkpoint_lsn
+                || !crate::crypto::constant_time_eq(
+                    recorded.token.as_bytes(),
+                    proof.token.as_bytes(),
+                )
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "replica rebootstrap snapshot token does not match the issued snapshot",
+                ));
+            }
+            return Ok(true);
+        }
+        let bytes = proof.encode()?;
+        super::metadata::write(store, &key, &bytes)?;
+        Ok(true)
+    }
+
+    pub fn accept_replica_rebootstrap_snapshot(
+        &self,
+        replica_id: &str,
+        token: Option<&str>,
+        installed_lsn: u64,
+    ) -> io::Result<bool> {
+        let Some(token) = token else {
+            return Ok(false);
+        };
+        if token.is_empty() || token.len() > REBOOTSTRAP_PROOF_TOKEN_BYTES_MAX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid installed replica snapshot token",
+            ));
+        }
+        let current_lsn = self.current_logical_lsn();
+        let _publication = self
+            .metadata_store
+            .as_ref()
+            .map(|store| store.vault_publication_lock.lock());
+        let mut slots = self
+            .slots
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(slot) = slots.get(replica_id) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "installed replica snapshot has no registered slot",
+            ));
+        };
+        if slot.invalidation_reason.is_none() {
+            return Ok(false);
+        }
+        let store = self.metadata_store.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "installed replica snapshot proof requires native metadata",
+            )
+        })?;
+        let key = replica_rebootstrap_proof_key(replica_id);
+        let Some(bytes) = super::metadata::read(store, &key)?.filter(|bytes| !bytes.is_empty())
+        else {
+            // The proof is consumed before the repaired slot is published. If
+            // the primary crashed in that interval, keep the slot invalidated
+            // and let resume planning issue a new snapshot.
+            return Ok(false);
+        };
+        let proof = ReplicaRebootstrapProof::decode(&bytes)?;
+        if proof.replica_id != replica_id
+            || proof.timeline != self.slot_timeline.0
+            || slot.timeline != self.slot_timeline
+            || proof.checkpoint_lsn != installed_lsn
+            || installed_lsn > current_lsn
+            || !crate::crypto::constant_time_eq(proof.token.as_bytes(), token.as_bytes())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "installed replica snapshot does not match the issued checkpoint",
+            ));
+        }
+
+        // Consume the proof before publishing the repaired slot. A crash in
+        // between forces another snapshot instead of admitting an unproved
+        // cursor on the next boot.
+        super::metadata::write(store, &key, &[])?;
+        let mut repaired = slots.clone();
+        let repaired_slot = repaired
+            .get_mut(replica_id)
+            .expect("invariant: repaired slot was cloned from the registered slot map");
+        repaired_slot.timeline = self.slot_timeline;
+        repaired_slot.restart_lsn = installed_lsn;
+        repaired_slot.confirmed_write_lsn = installed_lsn;
+        repaired_slot.confirmed_flush_lsn = installed_lsn;
+        repaired_slot.confirmed_apply_lsn = installed_lsn;
+        repaired_slot.active = true;
+        repaired_slot.last_seen_at_unix_ms = crate::utils::now_unix_millis() as u128;
+        repaired_slot.invalidation_reason = None;
+        repaired_slot.invalidated_at_unix_ms = None;
+        let bytes = slots::slot_catalog_from_map(&repaired, self.slot_timeline)
+            .and_then(|catalog| catalog.encode())
+            .map_err(io::Error::other)?;
+        super::metadata::write(store, super::metadata::SLOTS, &bytes)?;
+        *slots = repaired;
+        drop(slots);
+        self.set_replica_rebootstrapping(replica_id, false);
+        Ok(true)
+    }
+
     /// Decide how a reconnecting replica's pull should be served
     /// (issue #832). If the slot is invalidated or the requested
     /// position has fallen behind the retained WAL floor, the replica
@@ -1206,7 +1533,7 @@ impl PrimaryReplication {
 
     fn persist_slots_locked(&self, slots: &BTreeMap<String, ReplicationSlot>) {
         if let Some(store) = &self.metadata_store {
-            let result = slots::slot_catalog_from_map(slots)
+            let result = slots::slot_catalog_from_map(slots, self.slot_timeline)
                 .and_then(|catalog| catalog.encode())
                 .map_err(io::Error::other)
                 .and_then(|bytes| super::metadata::write(store, super::metadata::SLOTS, &bytes));
@@ -1223,15 +1550,20 @@ impl PrimaryReplication {
             }
             return;
         }
-        if let Err(err) = persist_replication_slots(self.slot_path.as_deref(), slots) {
+        if let Err(err) =
+            persist_replication_slots(self.slot_path.as_deref(), slots, self.slot_timeline)
+        {
             warn!(
                 target: "reddb::replication::slots",
                 error = %err,
                 "failed to persist replication slots"
             );
         }
-        if let Err(err) = persist_replication_slot_catalog(self.slot_catalog_path.as_deref(), slots)
-        {
+        if let Err(err) = persist_replication_slot_catalog(
+            self.slot_catalog_path.as_deref(),
+            slots,
+            self.slot_timeline,
+        ) {
             warn!(
                 target: "reddb::replication::slots",
                 error = %err,

@@ -892,6 +892,7 @@ pub(crate) fn value_matches_declared_type(value: &Value, target: DataType) -> bo
             | (Value::Integer(_), DataType::Integer)
             | (Value::UnsignedInteger(_), DataType::UnsignedInteger)
             | (Value::Float(_), DataType::Float)
+            | (Value::Temperature(_), DataType::Temperature)
             | (Value::Text(_), DataType::Text)
             | (Value::Blob(_), DataType::Blob)
             | (Value::Boolean(_), DataType::Boolean)

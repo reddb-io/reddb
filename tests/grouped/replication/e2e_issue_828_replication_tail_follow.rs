@@ -10,9 +10,9 @@ use reddb::auth::policies::Policy;
 use reddb::auth::store::PrincipalRef;
 use reddb::auth::{AuthConfig, AuthStore, Role, UserId};
 use reddb::grpc::proto::red_db_client::RedDbClient;
-use reddb::grpc::proto::JsonPayloadRequest;
+use reddb::grpc::proto::{JsonPayloadRequest, WalStreamChunk, WalStreamRequest};
 use reddb::replication::cdc::ChangeRecord;
-use reddb::replication::logical::{ApplyMode, LogicalChangeApplier};
+use reddb::replication::logical::{ApplyMode, ApplyOutcome, LogicalChangeApplier};
 use reddb::replication::ReplicationConfig;
 use reddb::storage::RedDB;
 use reddb::{GrpcServerOptions, RedDBGrpcServer, RedDBOptions, RedDBRuntime};
@@ -101,6 +101,54 @@ fn ack_request(
         },
         token,
     )
+}
+
+fn binary_pull_request(
+    replica_id: &str,
+    token: &str,
+    since_lsn: u64,
+    await_data: bool,
+) -> tonic::Request<WalStreamRequest> {
+    let mut request = tonic::Request::new(WalStreamRequest {
+        version: 1,
+        since_lsn,
+        max_count: 10,
+        replica_id: Some(replica_id.to_string()),
+        term: 1,
+        await_data,
+        await_timeout_ms: 5_000,
+        routing_endpoints: Default::default(),
+        max_chunk_bytes: 1024 * 1024,
+        installed_snapshot_token: None,
+    });
+    let value: MetadataValue<_> = format!("Bearer {token}")
+        .parse()
+        .expect("bearer token is valid metadata");
+    request.metadata_mut().insert("authorization", value);
+    request
+}
+
+async fn first_binary_chunk(
+    client: &mut RedDbClient<tonic::transport::Channel>,
+    request: tonic::Request<WalStreamRequest>,
+) -> WalStreamChunk {
+    client
+        .stream_wal_records(request)
+        .await
+        .expect("binary WAL stream opens")
+        .into_inner()
+        .message()
+        .await
+        .expect("binary WAL stream remains valid")
+        .expect("binary WAL stream returns a metadata chunk")
+}
+
+fn decode_binary_records(chunk: &WalStreamChunk) -> Vec<ChangeRecord> {
+    chunk
+        .records
+        .iter()
+        .map(|record| ChangeRecord::decode(&record.data).expect("change record decodes"))
+        .collect()
 }
 
 fn parse_records(body: &serde_json::Value) -> Vec<ChangeRecord> {
@@ -267,6 +315,126 @@ async fn tail_follow_pull_waits_applies_and_resumes_from_slot() {
     applier
         .apply(&replica, &resumed_records[0], ApplyMode::Replica)
         .expect("replica applies resumed record");
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn binary_tail_follow_replays_idempotently_when_connection_drops_before_ack() {
+    let primary = RedDBRuntime::with_options(
+        RedDBOptions::in_memory().with_replication(ReplicationConfig::primary()),
+    )
+    .expect("primary runtime");
+    primary
+        .execute_query("CREATE TABLE issue_828_binary_tail (id INTEGER, name TEXT)")
+        .expect("create table");
+
+    let store = Arc::new(AuthStore::new(AuthConfig {
+        enabled: true,
+        require_auth: true,
+        ..AuthConfig::default()
+    }));
+    store
+        .create_user("replica_binary", "p", Role::Read)
+        .expect("create replica user");
+    let replica_key = store
+        .create_api_key("replica_binary", "replication-binary", Role::Read)
+        .expect("create replica API key");
+    install_replication_policy(&store, "replica_binary");
+
+    let port = pick_port();
+    let server = RedDBGrpcServer::with_options(
+        primary.clone(),
+        GrpcServerOptions {
+            bind_addr: format!("127.0.0.1:{port}"),
+            tls: None,
+        },
+        store,
+    );
+    let handle = tokio::spawn(async move {
+        let _ = server.serve().await;
+    });
+    wait_for_port(port).await;
+
+    let mut client = connect_client(port).await;
+    let registered = first_binary_chunk(
+        &mut client,
+        binary_pull_request("replica_binary", &replica_key.key, 0, false),
+    )
+    .await;
+    let slot_lsn = registered.current_lsn;
+
+    let token = replica_key.key.clone();
+    let mut tail_client = connect_client(port).await;
+    let pending = tokio::spawn(async move {
+        first_binary_chunk(
+            &mut tail_client,
+            binary_pull_request("replica_binary", &token, slot_lsn, true),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(
+        !pending.is_finished(),
+        "binary await-data stream must wait for the next WAL record"
+    );
+
+    primary
+        .execute_query("INSERT INTO issue_828_binary_tail (id, name) VALUES (1, 'one')")
+        .expect("insert row");
+    let pushed = tokio::time::timeout(Duration::from_secs(2), pending)
+        .await
+        .expect("binary tail-follow returns after primary write")
+        .expect("binary tail task joins");
+    let records = decode_binary_records(&pushed);
+    assert_eq!(records.len(), 1, "binary stream returns the live record");
+    assert_eq!(records[0].lsn, slot_lsn + 1);
+
+    let replica = RedDB::new();
+    let applier = LogicalChangeApplier::new(slot_lsn);
+    assert_eq!(
+        applier
+            .apply(&replica, &records[0], ApplyMode::Replica)
+            .expect("replica applies binary record"),
+        ApplyOutcome::Applied
+    );
+
+    // Simulate a process/connection loss after apply but before relay/cursor/ACK.
+    // The primary slot has not advanced, so reconnecting must replay the same
+    // record and the stateful applier must reject it as a duplicate no-op.
+    let retried = first_binary_chunk(
+        &mut client,
+        binary_pull_request("replica_binary", &replica_key.key, slot_lsn, false),
+    )
+    .await;
+    let retried_records = decode_binary_records(&retried);
+    assert_eq!(retried_records.len(), 1, "unacked record must be replayed");
+    assert_eq!(retried_records[0].lsn, records[0].lsn);
+    assert_eq!(
+        applier
+            .apply(&replica, &retried_records[0], ApplyMode::Replica)
+            .expect("duplicate replay remains valid"),
+        ApplyOutcome::Idempotent
+    );
+
+    client
+        .ack_replica_lsn(ack_request(
+            "replica_binary",
+            &replica_key.key,
+            records[0].lsn,
+        ))
+        .await
+        .expect("ack replayed binary record");
+    let (status, metrics) = get(primary.clone(), "/metrics");
+    assert_eq!(status, 200, "unexpected metrics response: {metrics}");
+    assert_eq!(
+        metric_value(
+            &metrics,
+            "reddb_replica_lag_records{replica_id=\"replica_binary\"} "
+        ),
+        0,
+        "ACK after idempotent retry must advance the primary slot"
+    );
 
     handle.abort();
 }

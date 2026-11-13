@@ -149,6 +149,9 @@ struct AutocommitPool {
 struct ManagerState {
     /// xids that have started but not yet committed/rolled back.
     active: HashSet<Xid>,
+    /// Active autocommit updates whose publication is fenced by the durable
+    /// result-cache epoch. They remain active for MVCC and vacuum.
+    cache_coherent_updates: HashSet<Xid>,
     /// Oldest version required by each active transaction's captured snapshot.
     /// A newer reader can exclude an older writer even after that writer commits.
     snapshot_horizons: HashMap<Xid, Xid>,
@@ -221,6 +224,18 @@ impl SnapshotManager {
     /// `active` (or already finished), so `in_progress` is never short a
     /// concurrent writer.
     pub fn begin(&self) -> Xid {
+        self.begin_inner(false)
+    }
+
+    /// Begin an autocommit update whose data publication is fenced by the
+    /// durable result-cache epoch. Callers must retain that fence through WAL
+    /// publication and finish the xid only after durable publication.
+    #[doc(hidden)]
+    pub fn begin_cache_coherent_update(&self) -> Xid {
+        self.begin_inner(true)
+    }
+
+    fn begin_inner(&self, cache_coherent: bool) -> Xid {
         let mut state = self.state.write();
         // A real writer advances beyond the reserved autocommit range. Retire
         // its unused slots so later inserts cannot receive older identities
@@ -229,6 +244,9 @@ impl SnapshotManager {
         pool.next = pool.end;
         let xid = self.next_xid.fetch_add(1, Ordering::Relaxed);
         state.active.insert(xid);
+        if cache_coherent {
+            state.cache_coherent_updates.insert(xid);
+        }
         self.visibility_revision.fetch_add(1, Ordering::Release);
         xid
     }
@@ -330,6 +348,7 @@ impl SnapshotManager {
     pub fn commit(&self, xid: Xid) {
         let mut state = self.state.write();
         let was_active = state.active.remove(&xid);
+        state.cache_coherent_updates.remove(&xid);
         state.snapshot_horizons.remove(&xid);
         // Also clear from aborted set in case of prior rollback_to call
         // that touched this xid (defensive; normally a no-op).
@@ -392,6 +411,7 @@ impl SnapshotManager {
         let mut state = self.state.write();
         state.snapshot_horizons.remove(&xid);
         let was_active = state.active.remove(&xid);
+        state.cache_coherent_updates.remove(&xid);
         let newly_aborted = state.aborted.insert(xid);
         if newly_aborted && !was_active {
             state.untracked_visibility_revision = state
@@ -576,6 +596,13 @@ impl SnapshotManager {
     /// calculation — any row with `xmax < min(active)` is reclaimable).
     pub fn oldest_active_xid(&self) -> Option<Xid> {
         self.state.read().active.iter().copied().min()
+    }
+
+    /// Whether an active writer lacks the durable result-cache epoch fence.
+    #[doc(hidden)]
+    pub fn has_cache_unsafe_active_xids(&self) -> bool {
+        let state = self.state.read();
+        state.active.len() != state.cache_coherent_updates.len()
     }
 
     /// GC must preserve writers excluded by an active reader's snapshot, even
@@ -911,6 +938,21 @@ mod tests {
         assert_eq!(m.oldest_active_xid(), Some(b));
         m.commit(b);
         assert_eq!(m.oldest_active_xid(), None);
+    }
+
+    #[test]
+    fn cache_coherent_updates_remain_active_without_hiding_other_writers() {
+        let manager = SnapshotManager::new();
+        let update = manager.begin_cache_coherent_update();
+        assert_eq!(manager.oldest_active_xid(), Some(update));
+        assert!(!manager.has_cache_unsafe_active_xids());
+        let transaction = manager.begin();
+        assert!(manager.has_cache_unsafe_active_xids());
+        manager.commit(transaction);
+        assert!(!manager.has_cache_unsafe_active_xids());
+        manager.rollback(update);
+        assert_eq!(manager.oldest_active_xid(), None);
+        assert!(!manager.has_cache_unsafe_active_xids());
     }
     #[test]
     fn read_snapshot_excludes_first_future_writer_and_deleter() {

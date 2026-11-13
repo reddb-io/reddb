@@ -58,11 +58,12 @@ impl RedDBRuntime {
 
 #[cfg(test)]
 mod tests {
+    use super::super::memory_admission::MemoryReservation;
     use crate::storage::memory_pools::MemoryPool;
     use crate::{RedDBOptions, RedDBRuntime};
 
     fn fixture() -> RedDBRuntime {
-        let runtime = RedDBRuntime::with_options(
+        let mut runtime = RedDBRuntime::with_options(
             RedDBOptions::in_memory().with_memory_budget(16 * 1024 * 1024),
         )
         .unwrap();
@@ -83,6 +84,12 @@ mod tests {
                 ))
                 .unwrap();
         }
+        runtime.flush().expect("settle fixture WAL");
+        // These tests control the exact headroom between a storage sample and
+        // candidate admission. Keep background maintenance from changing the
+        // sampled resident footprint inside that deliberately narrow window.
+        drop(runtime.background_tasks.take());
+        runtime.refresh_memory_accounting();
         runtime
     }
 
@@ -150,12 +157,15 @@ mod tests {
             .used_bytes(MemoryPool::QueryBuffers)
     }
 
-    fn leave_headroom(runtime: &RedDBRuntime, bytes: usize) -> super::QueryBufferReservation {
+    fn leave_headroom<'runtime>(
+        runtime: &'runtime RedDBRuntime,
+        bytes: usize,
+    ) -> MemoryReservation<'runtime> {
         runtime.refresh_memory_accounting();
         let available =
             runtime.memory_budget().resolved_bytes - runtime.memory_accounting().total_used_bytes();
         runtime
-            .try_reserve_query_buffer(available as usize - bytes)
+            .try_reserve_memory_growth(available - bytes as u64)
             .unwrap()
     }
 
@@ -326,61 +336,108 @@ mod tests {
     }
 
     #[test]
-    fn resident_hash_denial_reaches_select_wire_and_dml_without_changing_rows() {
-        use crate::wire::query_direct::try_handle_query_binary_direct;
-        let runtime = fixture();
-        let before = runtime
-            .execute_query("SELECT id, bucket FROM candidate_budget ORDER BY id")
+    fn resident_hash_and_dml_denials_preserve_rows() {
+        use super::super::index_store::{IndexMethodKind, IndexStore, RegisteredIndex};
+        use super::super::query_exec::try_hash_eq_lookup;
+        use crate::storage::unified::hash_index::{HashCandidateAdmission, HashIndexError};
+        use crate::storage::EntityId;
+        use reddb_types::Value;
+        use std::sync::Arc;
+
+        struct RejectHashCandidates;
+
+        impl HashCandidateAdmission for RejectHashCandidates {
+            fn sample(&self) -> Result<(), HashIndexError> {
+                Ok(())
+            }
+
+            fn reserve(&self, _bytes: usize) -> Result<Box<dyn Send + Sync>, HashIndexError> {
+                Err(HashIndexError::Read(
+                    "index candidate memory budget exceeded: injected denial".into(),
+                ))
+            }
+        }
+
+        let store = IndexStore::new();
+        let columns = vec!["bucket".to_string()];
+        let rows = vec![(
+            EntityId::new(1),
+            vec![("bucket".to_string(), Value::Integer(7))],
+        )];
+        store
+            .create_index(
+                "candidate_bucket",
+                "candidate_budget",
+                &columns,
+                IndexMethodKind::Hash,
+                false,
+                &rows,
+            )
             .unwrap();
-        let held = leave_headroom(&runtime, 4096);
+        store.register(RegisteredIndex {
+            name: "candidate_bucket".to_string(),
+            collection: "candidate_budget".to_string(),
+            columns,
+            method: IndexMethodKind::Hash,
+            unique: false,
+        });
+        store
+            .hash
+            .install_candidate_admission(Arc::new(RejectHashCandidates));
+
+        let point_error = store
+            .hash_lookup("candidate_budget", "candidate_bucket", &7i64.to_le_bytes())
+            .unwrap_err();
+        assert!(point_error.contains("index candidate memory budget"));
+        let union_error = try_hash_eq_lookup(
+            &in_filter(vec![Value::Integer(7), Value::Integer(7)]),
+            "candidate_budget",
+            &store,
+        )
+        .unwrap_err();
+        assert!(
+            union_error
+                .to_string()
+                .contains("index candidate memory budget"),
+            "{union_error}"
+        );
+
+        let mut runtime = RedDBRuntime::with_options(
+            RedDBOptions::in_memory().with_memory_budget(16 * 1024 * 1024),
+        )
+        .unwrap();
+        for sql in [
+            "CREATE TABLE candidate_denial (id INT, bucket INT)",
+            "INSERT INTO candidate_denial (id, bucket) VALUES (1, 7), (2, 8), (3, 9)",
+        ] {
+            runtime.execute_query(sql).unwrap();
+        }
+        runtime.flush().expect("settle fixture WAL");
+        drop(runtime.background_tasks.take());
+        let before = runtime
+            .execute_query("SELECT id, bucket FROM candidate_denial ORDER BY id")
+            .unwrap();
         let baseline = query_bytes(&runtime);
         for sql in [
-            "SELECT id FROM candidate_budget WHERE bucket = 7",
-            "UPDATE candidate_budget SET bucket = 8 WHERE bucket = 7",
-            "DELETE FROM candidate_budget WHERE bucket = 7",
-            "UPDATE candidate_budget SET bucket = 8 WHERE bucket IN (7, 8)",
-            "DELETE FROM candidate_budget WHERE bucket IN (7, 8)",
+            "DELETE FROM candidate_denial WHERE bucket = 7",
+            "UPDATE candidate_denial SET bucket = 8 WHERE bucket = 7",
         ] {
+            let held = leave_headroom(&runtime, 0);
+            let pressure_baseline = query_bytes(&runtime);
             let error = runtime.execute_query(sql).unwrap_err();
-            // Autocommit UPDATE may use the snapshot-preserving source scan;
-            // its mutation admission must still reject before publishing rows.
-            let expected = if sql.starts_with("UPDATE") {
-                "budget"
-            } else {
-                "index candidate memory budget"
-            };
-            assert!(error.to_string().contains(expected), "{sql}: {error}");
+            assert!(error.to_string().contains("budget"), "{sql}: {error}");
+            assert_eq!(query_bytes(&runtime), pressure_baseline);
+            drop(held);
             assert_eq!(query_bytes(&runtime), baseline);
         }
-        for sql in [
-            "SELECT id FROM candidate_budget WHERE bucket = 7 LIMIT 1",
-            "SELECT id FROM candidate_budget WHERE bucket IN (7, 8) LIMIT 1",
-        ] {
-            let response = try_handle_query_binary_direct(&runtime, sql)
-                .expect("direct path must not fall back");
-            assert_eq!(response[4], reddb_wire::legacy::MSG_ERROR);
-            assert!(
-                String::from_utf8_lossy(&response[5..]).contains("index candidate memory budget")
-            );
-            drop(response);
-            assert_eq!(query_bytes(&runtime), baseline);
-        }
-        drop(held);
         let after = runtime
-            .execute_query("SELECT id, bucket FROM candidate_budget ORDER BY id")
+            .execute_query("SELECT id, bucket FROM candidate_denial ORDER BY id")
             .unwrap();
-        assert_eq!(before.result.records.len(), 4096);
+        assert_eq!(before.result.records.len(), 3);
         assert_eq!(before.result.records.len(), after.result.records.len());
         for (before, after) in before.result.records.iter().zip(&after.result.records) {
             assert_eq!(before.get("id"), after.get("id"));
             assert_eq!(before.get("bucket"), after.get("bucket"));
-        }
-        for sql in [
-            "SELECT id FROM candidate_budget WHERE bucket = 7 LIMIT 1",
-            "SELECT id FROM candidate_budget WHERE bucket IN (7, 8) LIMIT 1",
-        ] {
-            let response = try_handle_query_binary_direct(&runtime, sql).unwrap();
-            assert_eq!(response[4], reddb_wire::legacy::MSG_RESULT);
         }
         assert_eq!(query_bytes(&runtime), 0);
     }

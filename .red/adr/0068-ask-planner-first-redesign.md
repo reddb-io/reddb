@@ -2,6 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-07-04
+**Amended:** 2026-11-11 — config paths below are content keys inside `red.config`
 **Supersedes:** ADR 0013 §15 (MVP single-shot, no agentic loop); amends ADR 0013 (ASK contract) and ADR 0057 (credential path shape)
 
 ## Context
@@ -27,7 +28,7 @@ Every `ASK 'question'` runs a **planning step** before anything else:
    self-critique ("does this grounding sustain the question?") and may emit at most
    **one** `refine_retrieval` retry — mirroring ADR 0013's single citation retry.
 3. The planner emits a **typed plan** (steps: retrieve / query / synthesize) validated
-   by the production parser before execution. Step budget: `red.config.ai.ask.max_plan_steps`
+   by the production parser before execution. Step budget: `ai.ask.max_plan_steps`
    (default 3); per-query `STEPS N` never exceeds the config cap.
 4. Within that hard budget, the planner may call the same bounded read-only schema tools
    exposed by MCP: `reddb_catalog`, `reddb_describe_collection`, and
@@ -66,7 +67,7 @@ Every `ASK 'question'` runs a **planning step** before anything else:
   parameter returns the plan and candidate query without executing.
 - A mutating candidate is **never** auto-executed under any flag; it can only travel
   in the `suggestion` envelope.
-- The planner LLM has its own config slot (`red.config.ai.ask.planner_model`, effort,
+- The planner LLM has its own config slot (`ai.ask.planner_model` in `red.config`, effort,
   etc.) so a cheap/fast model can plan while the user-chosen model synthesizes.
 
 ### 4. Provider posture — the user chooses
@@ -85,18 +86,23 @@ enforcement. ADR 0057's "no in-process model runtime" stance stands.
 
 ```
 red.secret.ai.providers.$provider.tokens.$alias         # vault-only; alias "default" implicit
-red.config.ai.ask.{provider,model,planner_model,effort,max_plan_steps,…}
-red.config.ai.providers.$provider.{base_url}
-red.config.ai.providers.$provider.models.{inference,embeddings}
-red.config.ai.inference.provider                        # which provider generates
-red.config.ai.embeddings.provider                       # which provider embeds
+ai.default.{provider,model}                              # global fallbacks
+ai.ask.{provider,model,planner_model,effort,max_plan_steps,…}
+ai.providers.$provider.{base_url}
+ai.providers.$provider.models.{inference,embeddings}
+ai.inference.provider                        # which provider generates
+ai.embeddings.provider                       # which provider embeds
 ```
 
-Resolution: ASK-specific → task pointer → provider block. A task whose pointed
-provider lacks the modality fails with a didactic error — no silent re-route (the
+Provider resolution is ASK-specific → task pointer → global default. Model
+resolution is ASK-specific → provider block → global default → provider built-in.
+A task whose pointed provider lacks the modality fails with a didactic error — no silent re-route (the
 Anthropic-embeddings rule generalized). The legacy plaintext path
-`red.config.ai.<provider>.<alias>.key` is **removed**; resolution rejects it with an
+`ai.<provider>.<alias>.key` is **removed**; resolution rejects it with an
 error naming the vault path.
+
+All config paths in this ADR are keys stored inside the physical `red.config`
+collection. They never carry a `red.` or `red.config.` prefix in storage.
 
 ## Rejected, and why
 

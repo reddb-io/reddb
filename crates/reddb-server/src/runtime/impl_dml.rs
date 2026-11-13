@@ -1395,7 +1395,7 @@ impl RedDBRuntime {
                         &ids,
                     );
                 }
-                self.cdc_emit_insert_batch_no_cache_invalidate(&query.table, &ids, entity_kind);
+                self.cdc_emit_insert_batch_no_cache_invalidate(&query.table, &ids, entity_kind)?;
                 let store = self.inner.db.store();
                 entity_outputs.extend(ids.iter().map(|id| {
                     crate::application::entity::CreateEntityOutput {
@@ -1957,7 +1957,7 @@ impl RedDBRuntime {
             collection,
             id.raw(),
             "timeseries",
-        );
+        )?;
 
         Ok(id)
     }
@@ -3265,10 +3265,10 @@ mod tests {
         let store = runtime.db().store();
         store.persist().expect("publish recheck configuration");
         let root = store
-            .collection_root_page("red_config")
+            .collection_root_page("red.config")
             .expect("configuration root");
         let manager = store
-            .get_collection("red_config")
+            .get_collection("red.config")
             .expect("configuration collection");
         let install = |limit| {
             let tree = BTree::with_root(Arc::clone(store.pager().expect("pager")), root);

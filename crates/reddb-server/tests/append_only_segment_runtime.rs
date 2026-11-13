@@ -49,31 +49,26 @@ fn append_only_retention_deletes_expired_rows_without_external_segments() {
     let path = dir.path().join("retention.rdb");
     let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).unwrap();
     runtime
-        .execute_query("CREATE TABLE events (id INT, msg TEXT) WITH timestamps = true APPEND ONLY")
+        .execute_query("CREATE TABLE events (id INT, msg TEXT, ts TIMESTAMP) APPEND ONLY")
         .unwrap();
     runtime
-        .execute_query("INSERT INTO events (id, msg) VALUES (1, 'expired')")
+        .execute_query("INSERT INTO events (id, msg, ts) VALUES (1, 'expired', 1)")
         .unwrap();
-    let manager = runtime.db().store().get_collection("events").unwrap();
-    let mut entity = manager.query_all(|_| true).remove(0);
-    entity.created_at = 1;
-    if let reddb_server::storage::EntityData::Row(row) = &mut entity.data {
-        if let Some(named) = &mut row.named {
-            named.insert("created_at".into(), Value::UnsignedInteger(1));
-        }
-        if let Some(schema) = &row.schema {
-            let index = schema.iter().position(|name| name == "created_at").unwrap();
-            row.columns[index] = Value::UnsignedInteger(1);
-        }
-    }
-    manager.update(entity).unwrap();
     runtime.flush().unwrap();
     runtime
         .execute_query("ALTER COLLECTION events SET RETENTION 1 d")
         .unwrap();
+    let live_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
     runtime
-        .execute_query("INSERT INTO events (id, msg) VALUES (2, 'live')")
+        .execute_query(&format!(
+            "INSERT INTO events (id, msg, ts) VALUES (2, 'live', {live_ts})"
+        ))
         .unwrap();
+    runtime.flush().expect("live row checkpoint");
+    let manager = runtime.db().store().get_collection("events").unwrap();
     // A tick deliberately yields when a background checkpoint owns the
     // publication fence. Retry bounded work instead of assuming immediate entry.
     for _ in 0..100 {

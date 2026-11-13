@@ -1022,7 +1022,7 @@ pub fn graph_search_scoped(
 /// `None` as "Stage 3 yielded zero hits" and continues.
 fn embed_question(runtime: &RedDBRuntime, question: &str) -> Option<Vec<f32>> {
     let kv_getter = |key: &str| -> RedDBResult<Option<String>> {
-        match runtime.inner.db.get_kv("red_config", key) {
+        match runtime.inner.db.get_kv("red.config", key) {
             Some((Value::Text(value), _)) => Ok(Some(value.to_string())),
             Some(_) => Ok(None),
             None => Ok(None),

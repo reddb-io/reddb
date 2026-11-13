@@ -8,13 +8,25 @@ pub(super) struct Catalog {
     retired_roots: Vec<u32>,
     deferred_pages: Vec<u32>,
     pub resume: Option<f::native_resume::CatalogResume>,
+    proofs: Option<Arc<f::page_proof::CatalogProofs>>,
 }
 impl Catalog {
     pub fn has_cross_references(&self) -> bool {
         !self.references.is_empty()
     }
     pub fn read(source: &Source) -> Result<Self> {
-        let page = source.raw_page(1, true)?;
+        let reference = source.manifest_reference;
+        let root = if reference.page_id == 0 {
+            1
+        } else {
+            reference.page_id
+        };
+        if root >= FIRST_ALLOCATABLE_PAGE {
+            source.claim(root)?;
+        }
+        let page = source.raw_page(root, true)?;
+        let mut digest = f::page_proof::CatalogDigest::default();
+        digest.add_page(page.as_bytes());
         ensure(
             page.page_type()? == PageType::Header,
             "invalid catalog page",
@@ -32,6 +44,7 @@ impl Catalog {
             while next != 0 {
                 source.claim(next)?;
                 let page = source.raw_page(next, true)?;
+                digest.add_page(page.as_bytes());
                 ensure(
                     page.page_type()? == PageType::Overflow,
                     "invalid catalog continuation",
@@ -51,6 +64,10 @@ impl Catalog {
             ensure(payload.len() == total, "incomplete catalog")?;
             data = payload;
         }
+        ensure(
+            reference.page_id == 0 || digest.finish() == reference.digest,
+            "catalog generation proof does not match the superblock",
+        )?;
         let header = f::decode_native_paged_metadata_header(&data)?
             .ok_or("source is not a native paged catalog")?;
         ensure(
@@ -87,6 +104,15 @@ impl Catalog {
         let retired_roots = f::decode_native_paged_retired_trees(&data, &mut position)?;
         let deferred_pages = f::decode_native_paged_deferred_pages(&data, &mut position)?;
         let epoch = f::native_store::decode_native_paged_ownership_epoch(&data, &mut position)?;
+        let proofs = f::page_proof::decode_catalog(&data, &mut position)?.map(Arc::new);
+        ensure(
+            proofs.is_none()
+                || (source.header.required_capabilities
+                    & f::file_format::FILE_CAPABILITY_TREE_PROOFS
+                    != 0
+                    && reference.page_id != 0),
+            "tree proofs require independent catalog authority",
+        )?;
         let resume = f::native_resume::decode_catalog_resume(&data)?;
         if let Some(resume) = &resume {
             let mut canonical = Vec::new();
@@ -101,6 +127,41 @@ impl Catalog {
             data[position..].iter().all(|byte| *byte == 0),
             "unknown catalog extension",
         )?;
+        if let Some(proofs) = &proofs {
+            let live = roots
+                .iter()
+                .map(|root| root.root_page)
+                .chain(
+                    resume
+                        .iter()
+                        .flat_map(|resume| resume.collections.values())
+                        .flat_map(|state| {
+                            state.key_index_root.into_iter().chain(
+                                state
+                                    .secondary_indices
+                                    .values()
+                                    .map(|index| index.root_page),
+                            )
+                        }),
+                )
+                .filter(|root| *root != 0)
+                .collect::<std::collections::BTreeSet<_>>();
+            ensure(
+                live.iter()
+                    .chain(retired_roots.iter())
+                    .all(|root| proofs.contains_key(root)),
+                "published tree has no generation proof",
+            )?;
+            ensure(
+                proofs.iter().all(|(root, proof)| {
+                    (live.contains(root) || retired_roots.contains(root))
+                        && *root < source.header.page_count
+                        && proof.reference.page_id < source.header.page_count
+                }),
+                "unowned catalog tree proof",
+            )?;
+        }
+        source.install_tree_proofs(proofs.clone())?;
         Ok(Self {
             header,
             roots,
@@ -109,6 +170,7 @@ impl Catalog {
             retired_roots,
             deferred_pages,
             resume,
+            proofs,
         })
     }
 
@@ -116,7 +178,7 @@ impl Catalog {
     /// ownership proof. Never treat arbitrary unclassified pages as garbage.
     pub fn claim_retired(&self, source: &Arc<Source>) -> Result<()> {
         for root in &self.retired_roots {
-            let tree = BTree::with_root(Arc::clone(source), *root);
+            let tree = source.tree(*root)?;
             for page in tree.retired_pages()? {
                 source.claim(page)?;
             }
@@ -173,6 +235,14 @@ impl Catalog {
     }
 
     pub fn encode(&self, roots: &BTreeMap<u32, u32>) -> Result<Vec<u8>> {
+        self.encode_with_proofs(roots, self.proofs.as_deref())
+    }
+
+    pub fn encode_with_proofs(
+        &self,
+        roots: &BTreeMap<u32, u32>,
+        proofs: Option<&f::page_proof::CatalogProofs>,
+    ) -> Result<Vec<u8>> {
         let remap = |root: u32| -> Result<u32> {
             if root == 0 {
                 Ok(0)
@@ -207,6 +277,9 @@ impl Catalog {
         if let Some(epoch) = self.epoch {
             f::native_store::encode_native_paged_ownership_epoch(&mut data, epoch)?;
         }
+        if let Some(proofs) = proofs {
+            f::page_proof::encode_catalog(&mut data, proofs)?;
+        }
         if let Some(mut resume) = self.resume.clone() {
             for state in resume.collections.values_mut() {
                 state.root_page = remap(state.root_page)?;
@@ -222,38 +295,7 @@ impl Catalog {
 }
 
 pub(super) fn write_catalog(target: &Pager, data: &[u8]) -> Result<()> {
-    let mut root = Page::new(PageType::Header, 1);
-    if data.len() <= PAGE_SIZE - HEADER_SIZE {
-        root.content_mut()[..data.len()].copy_from_slice(data);
-    } else {
-        let first = PAGE_SIZE - HEADER_SIZE - 16;
-        let chunks: Vec<_> = data[first..].chunks(PAGE_SIZE - HEADER_SIZE - 8).collect();
-        let mut next = 0;
-        for chunk in chunks.into_iter().rev() {
-            let mut page = target.allocate_page(PageType::Overflow)?;
-            f::encode_native_metadata_overflow_continuation_header(
-                page.content_mut(),
-                f::NativeMetadataOverflowContinuationHeader {
-                    next_overflow_page_id: next,
-                    chunk_bytes: u32::try_from(chunk.len())?,
-                },
-            )?;
-            page.content_mut()[8..8 + chunk.len()].copy_from_slice(chunk);
-            next = page.page_id();
-            target.write_page(next, page)?;
-        }
-        f::encode_native_metadata_overflow_header(
-            root.content_mut(),
-            f::NativeMetadataOverflowHeader {
-                format_version: number(data, 4)?,
-                total_payload_bytes: u32::try_from(data.len())?,
-                next_overflow_page_id: next,
-            },
-        )?;
-        root.content_mut()[16..16 + first].copy_from_slice(&data[..first]);
-    }
-    target.sync()?;
-    target.write_page(1, root)?;
+    crate::storage::unified::UnifiedStore::publish_native_catalog(target, data)?;
     Ok(())
 }
 
@@ -276,6 +318,7 @@ mod tests {
 
     fn duplicate_config_catalog() -> Catalog {
         Catalog {
+            proofs: None,
             header: f::NativePagedMetadataHeader {
                 format_version: 11,
                 collection_count: 3,

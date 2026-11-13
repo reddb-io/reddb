@@ -593,7 +593,53 @@ impl<'a> QueryRequestExecutor<'a> {
     /// data is immutable: result clones share the complete allocation and keep
     /// materialized-read admission alive until their last owner drops.
     pub fn execute_bound(&self, bound: BoundRequest) -> RedDBResult<OwnedQueryResult> {
-        let commit_policy = bound.commit_policy;
+        let connection = super::execution_context::current_connection_id();
+        let in_transaction = self.runtime.current_xid().is_some();
+        let sql = match &bound.statement {
+            BoundStatement::Sql { sql, .. } | BoundStatement::Prepared { sql, .. } => sql,
+        };
+        let (is_write, is_commit) = commit_statement_kind(sql, bound.prepared_expr())?;
+        let is_commit = in_transaction && is_commit;
+        let mut effective = None;
+        if is_write || is_commit {
+            let mut policy = self
+                .runtime
+                .validated_request_commit_policy(bound.commit_policy)?;
+            let pinned = self
+                .runtime
+                .inner
+                .pending_commit_policies
+                .lock()
+                .get(&connection)
+                .copied();
+            if let Some(pinned) = pinned {
+                super::impl_replication_commit::reject_incomparable_commit_policies(
+                    pinned, policy,
+                )?;
+                let floor = crate::cluster::CommitPolicyResolution {
+                    effective: pinned,
+                    source: crate::cluster::ResolutionSource::ClusterDefault,
+                    guardrail: crate::cluster::GuardrailDisposition::NotApplicable,
+                };
+                match crate::cluster::resolve_request_commit_policy(floor, Some(policy)) {
+                    Ok(resolution) => policy = resolution.effective,
+                    Err(_) if bound.commit_policy.is_none() => policy = pinned,
+                    Err(error) => {
+                        return Err(
+                            super::impl_replication_commit::commit_policy_violation_error(error),
+                        )
+                    }
+                }
+            }
+            if in_transaction && is_write {
+                self.runtime
+                    .inner
+                    .pending_commit_policies
+                    .lock()
+                    .insert(connection, policy);
+            }
+            effective = Some(policy);
+        }
         let result = match bound.statement {
             BoundStatement::Sql { sql, params } => {
                 self.runtime.execute_query_with_params(&sql, &params)
@@ -601,10 +647,38 @@ impl<'a> QueryRequestExecutor<'a> {
             BoundStatement::Prepared { sql, expr } => {
                 self.runtime.execute_prepared_query(&sql, *expr)
             }
-        }?;
-        if matches!(result.statement_type, "insert" | "update" | "delete") {
+        };
+        let still_in_transaction = self.runtime.current_xid().is_some();
+        if !still_in_transaction {
             self.runtime
-                .enforce_commit_policy_for_request(self.runtime.cdc_current_lsn(), commit_policy)?;
+                .inner
+                .pending_commit_policies
+                .lock()
+                .remove(&connection);
+        }
+        let result = result?;
+        if !still_in_transaction
+            && matches!(
+                result.statement_type,
+                "insert" | "update" | "delete" | "commit"
+            )
+        {
+            let lsn = result
+                .bookmark
+                .as_deref()
+                .map(|bookmark| {
+                    crate::replication::CausalBookmark::decode(bookmark)
+                        .expect("runtime produced a valid commit bookmark")
+                        .commit_lsn()
+                })
+                .unwrap_or(0);
+            let policy = match effective {
+                Some(policy) => policy,
+                None => self
+                    .runtime
+                    .validated_request_commit_policy(bound.commit_policy)?,
+            };
+            self.runtime.enforce_commit_policy_for_policy(lsn, policy)?;
         }
         self.runtime.own_query_result(result)
     }
@@ -618,22 +692,53 @@ impl<'a> QueryRequestExecutor<'a> {
     ///
     /// Gated on mutating statements: a read never consulted the commit path
     /// before this seam existed, and must not start failing because a client
-    /// attached a weak policy to a SELECT. Requests that carry no override
-    /// resolve to the floor by definition, so they skip the classifier
-    /// entirely and the hot text-query path stays free.
+    /// attached a weak policy to a SELECT. Writes also validate the configured
+    /// default so unsupported durability fails before mutation.
     fn reject_weaker_commit_policy(
         &self,
         sql: &str,
         commit_policy: Option<crate::replication::CommitPolicy>,
     ) -> RedDBResult<()> {
-        if commit_policy.is_none() || !super::statement_frame::statement_is_write(sql) {
+        if !commit_statement_kind(sql, None)?.0 {
             return Ok(());
         }
         self.runtime
-            .resolve_request_commit_policy(commit_policy)
+            .validated_request_commit_policy(commit_policy)
             .map(|_| ())
-            .map_err(super::impl_replication_commit::commit_policy_violation_error)
     }
+}
+
+// Durability cannot rely on the first token: comments and WITHIN wrappers
+// must have the same contract as the statement that the runtime executes.
+fn commit_statement_kind(sql: &str, prepared: Option<&QueryExpr>) -> RedDBResult<(bool, bool)> {
+    let mut inner = sql;
+    while let Some((_, statement)) =
+        super::within_clause::try_strip_within_prefix(inner).map_err(RedDBError::Query)?
+    {
+        inner = statement;
+    }
+    let parsed = if prepared.is_some() {
+        None
+    } else if super::impl_core::has_with_prefix(inner) {
+        reddb_rql::parser::parse(inner)
+            .ok()
+            .and_then(|query| crate::storage::query::executors::inline_ctes(query).ok())
+    } else {
+        parse_multi(inner).ok()
+    };
+    let expr = prepared.or(parsed.as_ref());
+    let write = matches!(expr, Some(QueryExpr::Insert(_) | QueryExpr::Update(_) | QueryExpr::Delete(_)))
+        || super::statement_frame::statement_is_write(inner)
+        // Extension dispatch may accept a statement absent from parse_multi.
+        // Validate conservatively before such a statement can mutate data.
+        || expr.is_none();
+    let commit = matches!(
+        expr,
+        Some(QueryExpr::TransactionControl(
+            reddb_rql::ast::TxnControl::Commit
+        ))
+    );
+    Ok((write, commit))
 }
 
 #[cfg(test)]

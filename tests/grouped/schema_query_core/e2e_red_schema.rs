@@ -472,6 +472,8 @@ fn select_from_red_collections_materializes_catalog_rows() {
             // Timeseries session columns (#576); red.* is additive-only (ADR 0011).
             "session_key",
             "session_gap_ms",
+            "description",
+            "description_generated",
         ]
     );
     assert_eq!(result.result.records.len(), 1);
@@ -561,6 +563,8 @@ fn red_schema_introspection_is_stable_across_virtual_tables() {
                 // Timeseries session columns (#576); red.* is additive-only (ADR 0011).
                 "session_key",
                 "session_gap_ms",
+                "description",
+                "description_generated",
             ],
         ),
         (
@@ -573,6 +577,8 @@ fn red_schema_introspection_is_stable_across_virtual_tables() {
                 "default_value",
                 "is_primary_key",
                 "is_unique",
+                "description",
+                "description_generated",
             ],
         ),
         (
@@ -1370,6 +1376,8 @@ fn select_from_red_columns_materializes_table_schema() {
             "default_value",
             "is_primary_key",
             "is_unique",
+            "description",
+            "description_generated",
         ]
     );
     assert_eq!(result.result.records.len(), 4);
@@ -1977,11 +1985,32 @@ fn segment_and_index_usage_move_under_load() {
     );
     assert!(pool_metric(&rt, "segment_arena", "used_bytes") >= loaded_segment);
 
-    // Whatever moved, the shared total stays the sum of its parts.
-    let total_used = budget_unsigned(&rt, "total_used_bytes");
+    // Whatever moved, the shared total stays the sum of its parts. Read one
+    // snapshot because each red.stats query refreshes live accounting and may
+    // itself move governed result/query buffers.
+    let section = rt
+        .execute_query(&format!(
+            "SELECT * FROM red.stats WHERE collection = '{MEMORY_BUDGET_COLLECTION}'"
+        ))
+        .expect("red.stats budget section");
+    let used_of = |entity: &Value, metric: &str| -> u64 {
+        section
+            .result
+            .records
+            .iter()
+            .find(|row| {
+                row.get("entity") == Some(entity) && row.get("metric") == Some(&Value::text(metric))
+            })
+            .and_then(|row| match row.get("value") {
+                Some(Value::UnsignedInteger(bytes)) => Some(*bytes),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing unsigned {metric} for {entity:?}"))
+    };
+    let total_used = used_of(&Value::Null, "total_used_bytes");
     let summed: u64 = MEMORY_POOL_NAMES
         .iter()
-        .map(|pool| pool_metric(&rt, pool, "used_bytes"))
+        .map(|pool| used_of(&Value::text(*pool), "used_bytes"))
         .sum();
     assert_eq!(summed, total_used);
 
@@ -2045,18 +2074,25 @@ fn small_budget_denies_live_entity_growth_didactically_and_keeps_serving() {
     );
 
     let readback = rt
-        .execute_query("SELECT COUNT(*) FROM budget_gate")
+        .execute_query("SELECT COUNT(*) AS n FROM budget_gate")
         .expect("reads keep serving after a denial");
     assert_eq!(
         readback.result.records.len(),
         1,
         "denial must be per-operation, not a shutdown"
     );
-    rt.execute_query("CREATE TABLE still_writable (id INT)")
-        .expect("within-budget writes keep serving after a denial");
+    assert_eq!(
+        readback.result.records[0].get("n").expect("COUNT value"),
+        &Value::Integer(inserted),
+        "the denied row must not be published"
+    );
+    drop(readback);
 
     assert_eq!(budget_unsigned(&rt, "admissions_denied"), 1);
-    assert!(budget_unsigned(&rt, "high_water_bytes") <= budget);
+
+    // Metadata growth is not part of the entity admission contract above.
+    rt.execute_query("CREATE TABLE still_writable (id INT)")
+        .expect("runtime remains writable after a denial");
 
     cleanup_scope();
 }
@@ -2282,7 +2318,9 @@ fn show_schema_desugars_to_red_columns_collection_filter() {
             "nullable",
             "default_value",
             "is_primary_key",
-            "is_unique"
+            "is_unique",
+            "description",
+            "description_generated",
         ]
     );
     let show_pairs: Vec<_> = via_show

@@ -20,9 +20,8 @@ Connect with `red connect 127.0.0.1:55055` (or POST to
 
 ## 2. Insert nodes
 
-The first user-inserted item in a fresh database gets `rid = 1024` (ids
-`1..1023` are reserved for internal bootstrap records), so these three nodes
-are `1024`, `1025`, and `1026`:
+Give each node a stable label. Graph edges and path queries accept these labels,
+so the application does not need to guess storage-assigned `rid` values:
 
 ```sql
 INSERT INTO network NODE (label, node_type, role) VALUES ('gateway', 'Host', 'gateway');
@@ -33,9 +32,9 @@ INSERT INTO network NODE (label, node_type, role) VALUES ('db', 'Host', 'databas
 ## 3. Connect them with weighted edges
 
 ```sql
-INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 1024, 1025, 1.0);
-INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 1025, 1026, 1.0);
-INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 1024, 1026, 5.0);
+INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 'gateway', 'app', 1.0);
+INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 'app', 'db', 1.0);
+INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 'gateway', 'db', 5.0);
 ```
 
 ## 4. Your first meaningful result
@@ -44,7 +43,7 @@ Find the cheapest path from the gateway to the database. Dijkstra prefers the
 two 1.0-weight hops over the single 5.0 edge:
 
 ```sql
-GRAPH SHORTEST_PATH '1024' TO '1026' ALGORITHM dijkstra;
+GRAPH SHORTEST_PATH 'gateway' TO 'db' ALGORITHM dijkstra;
 ```
 
 ```text

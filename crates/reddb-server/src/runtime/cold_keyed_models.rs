@@ -405,10 +405,23 @@ fn complete_runtime_cold_reopen_restores_unique_secondary_indexes() {
         RedDBRuntime::with_options(options)
     })
     .expect("real indexed cold constructor");
+    let collection_names = cold.db().store().list_collections();
+    assert!(
+        collection_names
+            .iter()
+            .any(|name| name == "red.index.registry"),
+        "the canonical registry identity must be published: {collection_names:?}"
+    );
+    assert!(
+        collection_names
+            .iter()
+            .all(|name| name != "red_index_registry"),
+        "the legacy registry name is an input alias, not a second authority: {collection_names:?}"
+    );
     let registry = cold
         .db()
         .store()
-        .get_collection("red_index_registry")
+        .get_collection("red.index.registry")
         .expect("persisted index registry");
     let mut persisted = false;
     registry
@@ -467,6 +480,646 @@ fn complete_runtime_cold_reopen_restores_unique_secondary_indexes() {
         .execute_query("SELECT COUNT(*) AS n FROM cold_indexed_rows")
         .expect("unchanged source rows");
     assert_eq!(result.result.records[0].get("n"), Some(&Value::Integer(2)));
+}
+
+#[test]
+fn cold_mvcc_indexes_restore_visible_heads_before_and_after_vacuum() {
+    let directory = tempfile::tempdir().expect("MVCC index restart fixture");
+    let options = RedDBOptions::persistent(directory.path().join("mvcc-indexes.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_storage_profile(
+            crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+        )
+        .expect("profile");
+    let seed = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+    for sql in [
+        "CREATE TABLE mvcc_indexed_rows (id TEXT, org_id TEXT, payload TEXT)",
+        "CREATE UNIQUE INDEX mvcc_by_id ON mvcc_indexed_rows (id) USING HASH",
+        "CREATE INDEX mvcc_by_org ON mvcc_indexed_rows (org_id) USING BTREE",
+        "INSERT INTO mvcc_indexed_rows (id, org_id, payload) VALUES ('db-1', 'org-a', 'v0')",
+    ] {
+        seed.execute_query(sql).expect(sql);
+    }
+    for version in 1..=3 {
+        seed.execute_query("BEGIN").expect("begin update");
+        seed.execute_query(&format!(
+            "UPDATE mvcc_indexed_rows SET payload = 'v{version}' WHERE id = 'db-1'"
+        ))
+        .expect("versioned update");
+        seed.execute_query("COMMIT").expect("commit update");
+    }
+    let manager = seed
+        .db()
+        .store()
+        .get_collection("mvcc_indexed_rows")
+        .expect("seed table");
+    assert_eq!(
+        manager
+            .query_all(|entity| entity.logical_id() != entity.id || entity.xmax != 0)
+            .len(),
+        4,
+        "fixture must retain the full physical MVCC chain"
+    );
+    seed.flush().expect("MVCC checkpoint");
+    drop(seed);
+
+    let open = || {
+        crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options.clone())
+        })
+        .expect("cold MVCC runtime")
+    };
+    let assert_reads = |runtime: &RedDBRuntime, phase: &str| {
+        runtime.invalidate_result_cache();
+        for sql in [
+            "SELECT payload FROM mvcc_indexed_rows WHERE id = 'db-1'",
+            "SELECT payload FROM mvcc_indexed_rows WHERE org_id >= 'org-a'",
+            "SELECT payload FROM mvcc_indexed_rows WHERE payload = 'v3'",
+        ] {
+            let result = runtime.execute_query(sql).unwrap_or_else(|error| {
+                panic!("{phase}: {sql}: {error}");
+            });
+            assert_eq!(result.result.records.len(), 1, "{phase}: {sql}");
+            assert_eq!(
+                result.result.records[0].get("payload"),
+                Some(&Value::text("v3")),
+                "{phase}: {sql}"
+            );
+        }
+    };
+
+    let cold = open();
+    assert!(cold
+        .index_store_ref()
+        .hash
+        .is_paged("mvcc_indexed_rows", "mvcc_by_id"));
+    assert!(cold
+        .index_store_ref()
+        .paged_btree_lookup(
+            "mvcc_indexed_rows",
+            &reddb_rql::ast::Filter::Compare {
+                field: reddb_rql::ast::FieldRef::column("mvcc_indexed_rows", "org_id"),
+                op: reddb_rql::ast::CompareOp::Ge,
+                value: Value::text("org-a"),
+            },
+        )
+        .expect("cold BTREE probe")
+        .is_some());
+    assert_reads(&cold, "cold before scan");
+    cold.execute_query("VACUUM mvcc_indexed_rows")
+        .expect("vacuum history");
+    cold.flush().expect("post-vacuum checkpoint");
+    drop(cold);
+
+    let reopened = open();
+    assert_reads(&reopened, "cold after vacuum and reopen");
+}
+
+#[test]
+fn committed_mvcc_index_reads_survive_crash_during_checkpoint_publication() {
+    const CHILD_PATH: &str = "REDDB_MVCC_INDEX_CRASH_PATH";
+    const CHILD_HOOK: &str = "REDDB_MVCC_INDEX_CRASH_HOOK";
+    let options = |path: std::path::PathBuf| {
+        RedDBOptions::persistent(path)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile")
+    };
+    let open = |path| {
+        crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options(path))
+        })
+        .expect("open runtime")
+    };
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        let runtime = open(path.into());
+        for sql in [
+            "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+            "BEGIN",
+            "UPDATE crash_index_rows SET payload = 'committed' WHERE id = 'db-1'",
+            "COMMIT",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        // The crash hook is set only after opening and committing, so it
+        // cannot fire in an unrelated startup checkpoint.
+        let hook = std::env::var(CHILD_HOOK).expect("child crash hook");
+        std::env::set_var(hook, "1");
+        runtime.checkpoint().expect("checkpoint reaches crash hook");
+        panic!("checkpoint crash hook was not reached");
+    }
+
+    for (hook, exit_code) in [
+        ("REDDB_TEST_EXIT_AFTER_SECONDARY_INDEX_BUILD", 196),
+        ("REDDB_TEST_EXIT_AFTER_UNDO_CATALOG_PUBLICATION", 195),
+    ] {
+        let directory = tempfile::tempdir().expect("crash fixture");
+        let path = directory.path().join("index-crash.rdb");
+        {
+            let runtime = open(path.clone());
+            for sql in [
+                "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+                "CREATE TABLE crash_index_rows (id TEXT, org_id TEXT, payload TEXT)",
+                "CREATE UNIQUE INDEX crash_by_id ON crash_index_rows (id) USING HASH",
+                "CREATE INDEX crash_by_org ON crash_index_rows (org_id) USING BTREE",
+                "INSERT INTO crash_index_rows (id,org_id,payload) VALUES ('db-1','org-a','original')",
+            ] {
+                runtime.execute_query(sql).expect(sql);
+            }
+            runtime.checkpoint().expect("baseline checkpoint");
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "runtime::cold_keyed_models::committed_mvcc_index_reads_survive_crash_during_checkpoint_publication",
+                "--nocapture",
+            ])
+            .env(CHILD_PATH, &path)
+            .env(CHILD_HOOK, hook)
+            .output()
+            .expect("run crash child");
+        assert_eq!(
+            output.status.code(),
+            Some(exit_code),
+            "{hook}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for phase in ["recovery", "second reopen"] {
+            let runtime = open(path.clone());
+            // Query each index before the unindexed scan can warm it.
+            for sql in [
+                "SELECT payload FROM crash_index_rows WHERE id = 'db-1'",
+                "SELECT payload FROM crash_index_rows WHERE org_id >= 'org-a'",
+                "SELECT payload FROM crash_index_rows WHERE payload = 'committed'",
+            ] {
+                let result = runtime.execute_query(sql).expect(sql);
+                assert_eq!(result.result.records.len(), 1, "{hook}: {phase}: {sql}");
+                assert_eq!(
+                    result.result.records[0].get("payload"),
+                    Some(&Value::text("committed")),
+                    "{hook}: {phase}: {sql}"
+                );
+            }
+            runtime.checkpoint().expect("checkpoint recovered state");
+        }
+    }
+}
+
+#[test]
+fn unique_indexes_survive_process_death_during_private_rebuild() {
+    const CHILD_PATH: &str = "REDDB_UNIQUE_REBUILD_CRASH_PATH";
+    const CHILD_HOOK: &str = "REDDB_TEST_EXIT_DURING_UNIQUE_INDEX_REBUILD";
+    const CRASH_EXIT: i32 = 215;
+    let options = |path: std::path::PathBuf| {
+        RedDBOptions::persistent(path).with_memory_budget(128 * 1024 * 1024)
+    };
+    let open = |path| RedDBRuntime::with_options(options(path)).expect("open runtime");
+
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        let runtime = open(path.into());
+        runtime
+            .background_tasks
+            .as_ref()
+            .expect("background tasks")
+            .shutdown();
+        assert_eq!(
+            runtime
+                .index_store_ref()
+                .list_indices("unique_rebuild_rows")
+                .len(),
+            2,
+            "fixture must rebuild two indexes"
+        );
+        std::env::set_var(CHILD_HOOK, "unique_rebuild_rows");
+        runtime
+            .rebuild_runtime_indexes_for_table("unique_rebuild_rows")
+            .expect("rebuild reaches crash hook");
+        panic!("unique rebuild crash hook was not reached");
+    }
+
+    let directory = tempfile::tempdir().expect("unique rebuild crash fixture");
+    let path = directory.path().join("unique-rebuild.rdb");
+    {
+        let runtime = open(path.clone());
+        for sql in [
+            "CREATE TABLE unique_rebuild_rows (id INTEGER, email TEXT, payload TEXT)",
+            "CREATE UNIQUE INDEX unique_rebuild_id ON unique_rebuild_rows (id) USING HASH",
+            "CREATE UNIQUE INDEX unique_rebuild_email ON unique_rebuild_rows (email) USING BTREE",
+            "INSERT INTO unique_rebuild_rows (id,email,payload) VALUES (1,'alpha','one'),(2,'beta','two'),(3,'gamma','three')",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        runtime.checkpoint().expect("baseline checkpoint");
+    }
+
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "runtime::cold_keyed_models::unique_indexes_survive_process_death_during_private_rebuild",
+            "--nocapture",
+        ])
+        .env(CHILD_PATH, &path)
+        .output()
+        .expect("run rebuild crash child");
+    assert_eq!(
+        output.status.code(),
+        Some(CRASH_EXIT),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    for (phase, rows_before, new_id, new_email) in [
+        ("recovery", 3, 4, "delta"),
+        ("second reopen", 4, 5, "epsilon"),
+    ] {
+        let runtime = open(path.clone());
+        for (sql, payload) in [
+            (
+                "SELECT payload FROM unique_rebuild_rows WHERE id = 2",
+                "two",
+            ),
+            (
+                "SELECT payload FROM unique_rebuild_rows WHERE email = 'gamma'",
+                "three",
+            ),
+        ] {
+            let result = runtime.execute_query(sql).expect(sql);
+            assert_eq!(result.result.records.len(), 1, "{phase}: {sql}");
+            assert_eq!(
+                result.result.records[0].get("payload"),
+                Some(&Value::text(payload)),
+                "{phase}: {sql}"
+            );
+        }
+        if phase == "second reopen" {
+            let result = runtime
+                .execute_query("SELECT payload FROM unique_rebuild_rows WHERE email = 'delta'")
+                .expect("read post-recovery insert through UNIQUE index");
+            assert_eq!(result.result.records.len(), 1);
+            assert_eq!(
+                result.result.records[0].get("payload"),
+                Some(&Value::text("after-recovery"))
+            );
+        }
+        let duplicate_id = format!(
+            "INSERT INTO unique_rebuild_rows (id,email,payload) VALUES (2,'{new_email}-id-probe','duplicate-id')"
+        );
+        let duplicate_email = format!(
+            "INSERT INTO unique_rebuild_rows (id,email,payload) VALUES ({},'beta','duplicate-email')",
+            new_id + 100
+        );
+        for duplicate in [duplicate_id, duplicate_email] {
+            let error = runtime
+                .execute_query(&duplicate)
+                .err()
+                .expect("UNIQUE must reject duplicate after crash");
+            assert!(
+                error.to_string().to_lowercase().contains("unique"),
+                "{phase}: {error}"
+            );
+        }
+        let count = runtime
+            .execute_query("SELECT COUNT(*) AS n FROM unique_rebuild_rows")
+            .expect("count authoritative rows");
+        assert_eq!(
+            count.result.records[0].get("n"),
+            Some(&Value::Integer(rows_before)),
+            "{phase}"
+        );
+        runtime
+            .execute_query(&format!(
+                "INSERT INTO unique_rebuild_rows (id,email,payload) VALUES ({new_id},'{new_email}','after-recovery')"
+            ))
+            .expect("non-conflicting write after rebuild crash");
+        let count = runtime
+            .execute_query("SELECT COUNT(*) AS n FROM unique_rebuild_rows")
+            .expect("count accepted row");
+        assert_eq!(
+            count.result.records[0].get("n"),
+            Some(&Value::Integer(rows_before + 1)),
+            "{phase}"
+        );
+        runtime
+            .rebuild_runtime_indexes_for_table("unique_rebuild_rows")
+            .expect("rebuild remains retryable");
+        runtime.checkpoint().expect("checkpoint recovered indexes");
+    }
+}
+
+#[test]
+fn disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry() {
+    use crate::api::DurabilityMode;
+    const CHILD_PATH: &str = "REDDB_DISK_FULL_PATH";
+    const CHILD_MODE: &str = "REDDB_DISK_FULL_MODE";
+    const CHILD_BYTES: &str = "REDDB_DISK_FULL_BYTES";
+    const CHILD_BATCH: &str = "REDDB_DISK_FULL_BATCH";
+    const CHILD_BOUNDED: &str = "REDDB_DISK_FULL_BOUNDED";
+    let open = |path: std::path::PathBuf, mode, bounded| {
+        let create = || {
+            RedDBRuntime::with_options(
+                RedDBOptions::persistent(path)
+                    .with_memory_budget(64 * 1024 * 1024)
+                    .with_storage_profile(
+                        crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+                    )
+                    .expect("profile")
+                    .with_durability_mode(mode),
+            )
+        };
+        let runtime = if bounded {
+            crate::storage::RedDB::with_disk_residency_for_qualification(create)
+        } else {
+            create()
+        }
+        .expect("open runtime");
+        runtime
+            .background_tasks
+            .as_ref()
+            .expect("workers")
+            .shutdown();
+        runtime
+    };
+    let assert_rows = |runtime: &RedDBRuntime, retried: bool| {
+        // Probe each index before an unindexed scan can warm stale postings.
+        for predicate in [
+            "id = 1",
+            "org_id >= 'org-a' AND org_id < 'org-b'",
+            "payload = 'committed'",
+        ] {
+            let result = runtime
+                .execute_query(&format!(
+                    "SELECT id,payload FROM disk_full_rows WHERE {predicate}"
+                ))
+                .expect("read confirmed row");
+            assert_eq!(result.result.records.len(), 1, "{predicate}");
+            assert_eq!(
+                result.result.records[0].get("payload"),
+                Some(&Value::text("committed"))
+            );
+        }
+        let result = runtime
+            .execute_query("SELECT id FROM disk_full_rows")
+            .expect("scan rows");
+        assert_eq!(result.result.records.len(), if retried { 2 } else { 1 });
+        for predicate in ["id = 2", "org_id >= 'org-b'"] {
+            let result = runtime
+                .execute_query(&format!(
+                    "SELECT id,payload FROM disk_full_rows WHERE {predicate}"
+                ))
+                .expect("retried row by index");
+            assert_eq!(result.result.records.len(), usize::from(retried));
+            if retried {
+                assert_eq!(
+                    result.result.records[0].get("payload"),
+                    Some(&Value::text("retry"))
+                );
+            }
+        }
+    };
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        let mode = if std::env::var(CHILD_MODE).expect("mode") == "strict" {
+            DurabilityMode::Strict
+        } else {
+            DurabilityMode::WalDurableGrouped
+        };
+        let bounded = std::env::var(CHILD_BOUNDED).expect("residency") == "true";
+        let runtime = open(path.into(), mode, bounded);
+        for sql in [
+            "BEGIN",
+            "UPDATE disk_full_rows SET payload = 'committed' WHERE id = 1",
+            "COMMIT",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        // The confirmed update above has no checkpoint; it must survive WAL replay.
+        let bytes = std::env::var(CHILD_BYTES)
+            .expect("prefix")
+            .parse()
+            .expect("byte count");
+        runtime.db().store().test_fail_wal_flush_after(bytes);
+        let sql = if std::env::var(CHILD_BATCH).expect("batch mode") == "true" {
+            "INSERT INTO disk_full_rows (id,org_id,payload) VALUES (2,'org-b','retry'),(3,'org-c','rejected')"
+        } else {
+            "INSERT INTO disk_full_rows (id,org_id,payload) VALUES (2,'org-b','retry')"
+        };
+        let error = runtime
+            .execute_query(sql)
+            .err()
+            .expect("disk full must reject INSERT");
+        assert!(error.to_string().contains("disk full"), "{error}");
+        assert_rows(&runtime, false);
+        // The one-shot fault is gone, but this writer cannot safely continue.
+        assert!(runtime.execute_query(sql).is_err());
+        assert!(runtime.checkpoint().is_err());
+        assert_rows(&runtime, false);
+        // Exercise Drop as well: it must not flush the rejected batch. Exiting
+        // then ensures the parent validates a genuinely cold recovery.
+        drop(runtime);
+        std::process::exit(197);
+    }
+
+    for (mode_name, mode) in [
+        ("strict", DurabilityMode::Strict),
+        ("grouped", DurabilityMode::WalDurableGrouped),
+    ] {
+        for (bytes, batch, bounded) in [false, true].into_iter().flat_map(|bounded| {
+            [(0, false), (17, false), (0, true), (17, true)]
+                .map(|(bytes, batch)| (bytes, batch, bounded))
+        }) {
+            let directory = tempfile::tempdir().expect("disk full fixture");
+            let path = directory.path().join("disk-full.rdb");
+            {
+                let runtime = open(path.clone(), mode, bounded);
+                for sql in [
+                    "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+                    "CREATE TABLE disk_full_rows (id INT, org_id TEXT, payload TEXT)",
+                    "CREATE UNIQUE INDEX disk_full_id ON disk_full_rows (id) USING HASH",
+                    "CREATE INDEX disk_full_org ON disk_full_rows (org_id) USING BTREE",
+                    "INSERT INTO disk_full_rows (id,org_id,payload) VALUES (1,'org-a','original')",
+                ] {
+                    runtime.execute_query(sql).expect(sql);
+                }
+                runtime.checkpoint().expect("baseline checkpoint");
+            }
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", "runtime::cold_keyed_models::disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry", "--nocapture"])
+                .env(CHILD_PATH, &path)
+                .env(CHILD_MODE, mode_name)
+                .env(CHILD_BYTES, bytes.to_string())
+                .env(CHILD_BATCH, batch.to_string())
+                .env(CHILD_BOUNDED, bounded.to_string())
+                .output().expect("disk full child");
+            assert_eq!(
+                output.status.code(),
+                Some(197),
+                "{mode_name}/{bytes}/batch={batch}/bounded={bounded}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            {
+                let runtime = open(path.clone(), mode, bounded);
+                assert_rows(&runtime, false);
+                runtime
+                    .execute_query(
+                        "INSERT INTO disk_full_rows (id,org_id,payload) VALUES (2,'org-b','retry')",
+                    )
+                    .expect("space restored and WAL recovered");
+                assert_rows(&runtime, true);
+                runtime.checkpoint().expect("checkpoint recovered state");
+                if bounded {
+                    assert!(runtime
+                        .verify_persisted_indexes("disk_full_rows")
+                        .expect("index integrity")
+                        .is_empty());
+                }
+            }
+            let runtime = open(path.clone(), mode, bounded);
+            assert_rows(&runtime, true);
+        }
+    }
+}
+
+#[test]
+fn disk_full_checkpoint_recovers_pages_catalog_and_indexes() {
+    const CHILD_PATH: &str = "REDDB_CHECKPOINT_FULL_PATH";
+    const CHILD_TARGET: &str = "REDDB_CHECKPOINT_FULL_TARGET";
+    const CHILD_PREFIX: &str = "REDDB_CHECKPOINT_FULL_PREFIX";
+    let open = |path: std::path::PathBuf| {
+        let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(
+                RedDBOptions::persistent(path)
+                    .with_memory_budget(64 * 1024 * 1024)
+                    .with_storage_profile(
+                        crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+                    )
+                    .expect("profile"),
+            )
+        })
+        .expect("open runtime");
+        runtime
+            .background_tasks
+            .as_ref()
+            .expect("workers")
+            .shutdown();
+        runtime
+    };
+    let assert_rows = |runtime: &RedDBRuntime| {
+        // Exercise both index methods before an authoritative scan can warm them.
+        let by_id = runtime
+            .execute_query("SELECT payload FROM checkpoint_full_rows WHERE id = 1")
+            .expect("HASH read");
+        assert_eq!(by_id.result.records.len(), 1);
+        assert_eq!(
+            by_id.result.records[0].get("payload"),
+            Some(&Value::text("committed"))
+        );
+        let by_org = runtime
+            .execute_query(
+                "SELECT id FROM checkpoint_full_rows WHERE org_id >= 'org-a' AND org_id < 'org-d'",
+            )
+            .expect("BTREE read");
+        assert_eq!(by_org.result.records.len(), 3);
+        let rejected = runtime
+            .execute_query("SELECT id FROM checkpoint_full_rows WHERE id = 4")
+            .expect("rejected row read");
+        assert!(rejected.result.records.is_empty());
+        let scan = runtime
+            .execute_query("SELECT id FROM checkpoint_full_rows")
+            .expect("authoritative scan");
+        assert_eq!(scan.result.records.len(), 3);
+    };
+
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        let runtime = open(path.into());
+        for sql in [
+            "BEGIN",
+            "UPDATE checkpoint_full_rows SET payload = 'committed' WHERE id = 1",
+            "INSERT INTO checkpoint_full_rows (id,org_id,payload) VALUES (3,'org-c','new')",
+            "COMMIT",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        let offset = match std::env::var(CHILD_TARGET).expect("target").as_str() {
+            "catalog" => Some(crate::storage::engine::PAGE_SIZE as u64),
+            "page" => None,
+            target => panic!("unknown checkpoint target {target}"),
+        };
+        let prefix_bytes = std::env::var(CHILD_PREFIX)
+            .expect("prefix")
+            .parse()
+            .expect("prefix bytes");
+        crate::storage::engine::pager::test_fail_next_pager_write(offset, prefix_bytes);
+        let error = runtime
+            .checkpoint()
+            .expect_err("disk full must fail checkpoint");
+        assert!(
+            error.to_string().contains("injected pager disk full"),
+            "{error}"
+        );
+        let fenced = runtime
+            .checkpoint()
+            .expect_err("failed writeback requires reopen");
+        assert!(fenced.to_string().contains("reopen"), "{fenced}");
+        let rejected = runtime
+            .execute_query(
+                "INSERT INTO checkpoint_full_rows (id,org_id,payload) VALUES (4,'org-d','rejected')",
+            )
+            .expect_err("writes must remain fenced after failed checkpoint");
+        assert!(rejected.to_string().contains("reopen"), "{rejected}");
+        assert_rows(&runtime);
+        drop(runtime);
+        std::process::exit(198);
+    }
+
+    for target in ["page", "catalog"] {
+        for prefix_bytes in [0, 17] {
+            let directory = tempfile::tempdir().expect("checkpoint full fixture");
+            let path = directory.path().join("checkpoint-full.rdb");
+            {
+                let runtime = open(path.clone());
+                for sql in [
+                    "SET CONFIG runtime.mvcc.autovacuum.enabled = false",
+                    "CREATE TABLE checkpoint_full_rows (id INT, org_id TEXT, payload TEXT)",
+                    "CREATE UNIQUE INDEX checkpoint_full_id ON checkpoint_full_rows (id) USING HASH",
+                    "CREATE INDEX checkpoint_full_org ON checkpoint_full_rows (org_id) USING BTREE",
+                    "INSERT INTO checkpoint_full_rows (id,org_id,payload) VALUES (1,'org-a','original'),(2,'org-b','keep')",
+                ] {
+                    runtime.execute_query(sql).expect(sql);
+                }
+                runtime.checkpoint().expect("baseline checkpoint");
+            }
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", "runtime::cold_keyed_models::disk_full_checkpoint_recovers_pages_catalog_and_indexes", "--nocapture"])
+                .env(CHILD_PATH, &path)
+                .env(CHILD_TARGET, target)
+                .env(CHILD_PREFIX, prefix_bytes.to_string())
+                .output()
+                .expect("checkpoint full child");
+            assert_eq!(
+                output.status.code(),
+                Some(198),
+                "target={target} prefix={prefix_bytes}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            {
+                let runtime = open(path.clone());
+                assert_rows(&runtime);
+                runtime
+                    .checkpoint()
+                    .expect("checkpoint after space returns");
+                assert!(runtime
+                    .verify_persisted_indexes("checkpoint_full_rows")
+                    .expect("index integrity")
+                    .is_empty());
+            }
+            let runtime = open(path.clone());
+            assert_rows(&runtime);
+        }
+    }
 }
 
 #[test]
@@ -902,8 +1555,8 @@ fn cold_indexed_store_config_reads_and_replaces_only_the_target_key() {
         )
         .expect("seed store config");
     store.persist().expect("publish store config");
-    install_indexed_cold(&runtime, "red_config", 4096);
-    insert_unrelated_overlay(&runtime, "red_config");
+    install_indexed_cold(&runtime, "red.config", 4096);
+    insert_unrelated_overlay(&runtime, "red.config");
     assert_eq!(
         store
             .try_get_config("fixture.wanted")
@@ -1207,12 +1860,12 @@ fn cold_store_config_reads_and_idempotent_boot_reseed() {
         Some(Value::Boolean(true))
     );
     store.persist().expect("publish bootstrap marker");
-    install_cold(&runtime, "red_config", 128 * 1024);
+    install_cold(&runtime, "red.config", 128 * 1024);
     assert_eq!(
         store.get_config("system.bootstrap.completed"),
         Some(Value::Boolean(true))
     );
-    let manager = store.get_collection("red_config").expect("config");
+    let manager = store.get_collection("red.config").expect("config");
     let count = manager.count();
     assert_eq!(
         store.set_config_tree("system.bootstrap.completed", &marker),
@@ -1223,7 +1876,7 @@ fn cold_store_config_reads_and_idempotent_boot_reseed() {
         count,
         "boot reseeding must not duplicate paged config"
     );
-    install_cold(&runtime, "red_config", 1);
+    install_cold(&runtime, "red.config", 1);
     assert!(store.try_get_config("system.bootstrap.completed").is_err());
     assert!(store
         .try_set_config_tree("system.bootstrap.completed", &marker)
@@ -1347,7 +2000,7 @@ fn cold_signed_write_registry_preserves_allowed_signers() {
         1
     );
     store.persist().expect("publish signer registry");
-    install_cold(&runtime, "red_config", 128 * 1024);
+    install_cold(&runtime, "red.config", 128 * 1024);
     assert_eq!(
         super::signed_writes_kind::registry(&store, "signed_events").allowed_len(),
         1,
@@ -1367,7 +2020,7 @@ fn cold_unreadable_signature_policy_blocks_an_unsigned_insert() {
         .execute_query("INSERT INTO signed_events (id) VALUES (1)")
         .is_err());
     store.persist().expect("publish signature policy");
-    install_cold(&runtime, "red_config", 1);
+    install_cold(&runtime, "red.config", 1);
     let error = runtime
         .execute_query("INSERT INTO signed_events (id) VALUES (2)")
         .expect_err("unreadable policy must not become an unsigned collection");
@@ -1479,7 +2132,7 @@ fn cold_integrity_tombstones_filter_persisted_rows() {
         )
         .expect("tombstones");
     store.persist().expect("publish tombstones");
-    install_indexed_cold(&runtime, "red_config", 128 * 1024);
+    install_indexed_cold(&runtime, "red.config", 128 * 1024);
     // The seed SELECT initialized the empty cache; simulate first load after boot.
     runtime
         .inner
@@ -1521,7 +2174,7 @@ fn cold_integrity_read_failure_is_not_cached_as_an_empty_list() {
         )
         .expect("tombstones");
     store.persist().expect("publish tombstones");
-    install_indexed_cold(&runtime, "red_config", 1);
+    install_indexed_cold(&runtime, "red.config", 1);
     runtime
         .inner
         .integrity_tombstones_state
@@ -1541,7 +2194,7 @@ fn cold_integrity_read_failure_is_not_cached_as_an_empty_list() {
             "failed hydration must remain retryable"
         );
     }
-    install_indexed_cold(&runtime, "red_config", 128 * 1024);
+    install_indexed_cold(&runtime, "red.config", 128 * 1024);
     runtime.invalidate_result_cache();
     assert_eq!(
         runtime
@@ -1570,7 +2223,7 @@ fn cold_integrity_malformed_persisted_list_refuses_reads() {
             .try_set_config_tree(super::integrity_tombstone::TOMBSTONE_KEY, &invalid)
             .expect("seed corrupt list");
         store.persist().expect("publish fixture");
-        install_indexed_cold(&runtime, "red_config", 128 * 1024);
+        install_indexed_cold(&runtime, "red.config", 128 * 1024);
         runtime
             .inner
             .integrity_tombstones_state
@@ -1603,7 +2256,7 @@ fn cold_integrity_persist_failure_is_reported_and_keeps_local_quarantine() {
         )
         .expect("seed config");
     store.persist().expect("publish config");
-    install_indexed_cold(&runtime, "red_config", 1);
+    install_indexed_cold(&runtime, "red.config", 1);
     assert!(
         runtime
             .record_integrity_tombstone("cold_ingest", id, id)
@@ -1644,7 +2297,7 @@ fn cold_stream_config_keeps_persisted_limits_and_integrity_mode() {
             .expect("stream setting");
     }
     store.persist().expect("publish settings");
-    install_indexed_cold(&runtime, "red_config", 128 * 1024);
+    install_indexed_cold(&runtime, "red.config", 128 * 1024);
     let config =
         crate::server::output_stream::StreamConfig::load(&runtime).expect("cold stream config");
     assert_eq!(
@@ -1691,9 +2344,9 @@ fn cold_stream_config_read_failure_remains_retryable() {
         )
         .expect("verification setting");
     store.persist().expect("publish setting");
-    install_indexed_cold(&runtime, "red_config", 1);
+    install_indexed_cold(&runtime, "red.config", 1);
     assert!(crate::server::output_stream::StreamConfig::load(&runtime).is_err());
-    install_indexed_cold(&runtime, "red_config", 128 * 1024);
+    install_indexed_cold(&runtime, "red.config", 128 * 1024);
     assert_eq!(
         crate::server::output_stream::StreamConfig::load(&runtime)
             .expect("recovered config")
@@ -1729,7 +2382,7 @@ fn cold_stream_config_rejects_invalid_limits_and_verification_modes() {
             .try_set_config_tree(key, &value)
             .expect("invalid persisted setting");
         store.persist().expect("publish fixture");
-        install_indexed_cold(&runtime, "red_config", 128 * 1024);
+        install_indexed_cold(&runtime, "red.config", 128 * 1024);
         let error = crate::server::output_stream::StreamConfig::load(&runtime)
             .expect_err("must not silently fall back");
         assert!(error.to_string().contains(key), "{error}");
@@ -1748,7 +2401,7 @@ async fn cold_stream_config_redwire_refuses_before_open_ack() {
         )
         .expect("verification setting");
     store.persist().expect("publish setting");
-    install_indexed_cold(&runtime, "red_config", 1);
+    install_indexed_cold(&runtime, "red.config", 1);
     let (send, mut receive) = tokio::sync::mpsc::channel(8);
     let (_cancel, cancel) = tokio::sync::oneshot::channel();
     let runtime = Arc::new(runtime);
@@ -1831,7 +2484,7 @@ fn cold_chain_broken_integrity_flag_must_keep_blocking_appends() {
     super::blockchain_kind::persist_integrity_flag(&store, "cold_chain", true);
     runtime.inner.chain_integrity_broken.lock().clear();
     store.persist().expect("publish broken flag");
-    install_indexed_cold(&runtime, "red_config", 128 * 1024);
+    install_indexed_cold(&runtime, "red.config", 128 * 1024);
     let error = runtime
         .execute_query("INSERT INTO cold_chain (actor) VALUES ('must-remain-blocked')")
         .expect_err("persisted broken chain must remain locked");
@@ -1955,7 +2608,7 @@ fn cold_chain_failed_reads_leave_tip_and_integrity_caches_retryable() {
         .lock()
         .insert("cold_chain".into(), true);
     store.persist().expect("publish flag");
-    install_indexed_cold(&runtime, "red_config", 1);
+    install_indexed_cold(&runtime, "red.config", 1);
     assert!(runtime
         .try_clear_chain_integrity_flag("cold_chain")
         .is_err());
@@ -1967,7 +2620,7 @@ fn cold_chain_failed_reads_leave_tip_and_integrity_caches_retryable() {
             .get("cold_chain"),
         Some(&true)
     );
-    install_indexed_cold(&runtime, "red_config", 128 * 1024);
+    install_indexed_cold(&runtime, "red.config", 128 * 1024);
     assert_eq!(
         super::blockchain_kind::try_is_integrity_broken_persisted(&store, "cold_chain")
             .expect("recover flag"),
@@ -2044,7 +2697,7 @@ fn seed_expression_config(runtime: &RedDBRuntime) {
 }
 
 fn expression_probe_ids(runtime: &RedDBRuntime) -> Vec<Value> {
-    // Inspect DML effects while red_config is still unreadable. SQL ORDER BY
+    // Inspect DML effects while red.config is still unreadable. SQL ORDER BY
     // must read its materialization ceiling, so sort only the test observation.
     let mut ids: Vec<_> = observe(runtime, "SELECT id FROM expression_probe")
         .into_iter()
@@ -2068,7 +2721,7 @@ fn cold_config_expressions_retain_the_published_value() {
         .get("v")
         .is_some_and(|value| !value.is_null() && value != &Value::text("fallback")));
     runtime.db().store().persist().expect("publish config");
-    install_indexed_cold(&runtime, "red_config", 4096);
+    install_indexed_cold(&runtime, "red.config", 4096);
     runtime.invalidate_result_cache();
     assert_eq!(
         observe(&runtime, query),
@@ -2084,7 +2737,7 @@ fn unreadable_config_expressions_return_errors_instead_of_defaults() {
     let query = "SELECT CONFIG('fixture.flag', 'fallback') AS v FROM expression_probe";
     runtime.execute_query(query).expect("resident value");
     runtime.db().store().persist().expect("publish config");
-    install_indexed_cold(&runtime, "red_config", 1);
+    install_indexed_cold(&runtime, "red.config", 1);
     runtime.invalidate_result_cache();
     assert!(
         runtime.db().store().try_get_config("fixture.flag").is_err(),
@@ -2103,7 +2756,7 @@ fn cold_config_expressions_preserve_aliases_nested_calls_and_predicates() {
     let queries = [
         "SELECT $config.fixture.flag AS v FROM expression_probe",
         "SELECT CONFIG(fixture.flag, 'fallback') AS v FROM expression_probe",
-        "SELECT KV('red_config', 'fixture.flag', 'fallback') AS v FROM expression_probe",
+        "SELECT KV('red.config', 'fixture.flag', 'fallback') AS v FROM expression_probe",
         "SELECT LENGTH(CONFIG('fixture.flag')) AS v FROM expression_probe",
         "SELECT CASE WHEN CONFIG('fixture.flag') = 'ready' THEN 7 ELSE 8 END AS v FROM expression_probe",
         "SELECT id FROM expression_probe WHERE CONFIG('fixture.flag') = 'ready'",
@@ -2118,7 +2771,7 @@ fn cold_config_expressions_preserve_aliases_nested_calls_and_predicates() {
         .store()
         .persist()
         .expect("publish expression config");
-    install_indexed_cold(&runtime, "red_config", 4096);
+    install_indexed_cold(&runtime, "red.config", 4096);
     for (query, expected) in queries.into_iter().zip(expected) {
         assert_eq!(observe(&runtime, query), expected, "{query}");
     }
@@ -2129,7 +2782,7 @@ fn unreadable_config_expressions_propagate_nested_and_predicate_errors_and_retry
     let (_directory, runtime) = runtime();
     seed_expression_config(&runtime);
     let queries = [
-        "SELECT KV('red_config', 'fixture.flag', 'fallback') AS v FROM expression_probe",
+        "SELECT KV('red.config', 'fixture.flag', 'fallback') AS v FROM expression_probe",
         "SELECT LENGTH(CONFIG('fixture.flag')) AS v FROM expression_probe",
         "SELECT CONFIG('fixture.flag') IS NULL AS v FROM expression_probe",
         "SELECT CASE WHEN CONFIG('fixture.flag') = 'ready' THEN 7 ELSE 8 END AS v FROM expression_probe",
@@ -2144,7 +2797,7 @@ fn unreadable_config_expressions_propagate_nested_and_predicate_errors_and_retry
         .store()
         .persist()
         .expect("publish expression config");
-    install_indexed_cold(&runtime, "red_config", 1);
+    install_indexed_cold(&runtime, "red.config", 1);
     for query in queries {
         runtime.invalidate_result_cache();
         assert!(
@@ -2152,7 +2805,7 @@ fn unreadable_config_expressions_propagate_nested_and_predicate_errors_and_retry
             "read failure became successful NULL/default/empty result: {query}"
         );
     }
-    install_indexed_cold(&runtime, "red_config", 4096);
+    install_indexed_cold(&runtime, "red.config", 4096);
     for (query, expected) in queries.into_iter().zip(expected) {
         assert_eq!(
             observe(&runtime, query),
@@ -2171,10 +2824,10 @@ fn denied_config_expressions_do_not_load_an_unreadable_snapshot() {
         .store()
         .persist()
         .expect("publish expression config");
-    install_indexed_cold(&runtime, "red_config", 1);
+    install_indexed_cold(&runtime, "red.config", 1);
     for query in [
         "SELECT CONFIG('red.config.private') AS v FROM expression_probe",
-        "SELECT KV('red_config', 'red.config.private') AS v FROM expression_probe",
+        "SELECT KV('red.config', 'red.config.private') AS v FROM expression_probe",
     ] {
         let result = observe(&runtime, query);
         assert_eq!(result.len(), 1);
@@ -2253,7 +2906,7 @@ fn unreadable_config_update_expressions_do_not_publish_fallback_values() {
             .execute_query("INSERT INTO expression_probe (id) VALUES (2)")
             .expect("second update target");
         runtime.db().store().persist().expect("publish config");
-        install_indexed_cold(&runtime, "red_config", 1);
+        install_indexed_cold(&runtime, "red.config", 1);
         runtime.invalidate_result_cache();
         assert!(runtime.db().store().try_get_config("fixture.flag").is_err());
         assert!(
@@ -2264,7 +2917,7 @@ fn unreadable_config_update_expressions_do_not_publish_fallback_values() {
             expression_probe_ids(&runtime),
             vec![Value::Integer(1), Value::Integer(2)]
         );
-        install_indexed_cold(&runtime, "red_config", 4096);
+        install_indexed_cold(&runtime, "red.config", 4096);
         runtime.execute_query(query).expect("retry config UPDATE");
         assert_eq!(expression_probe_ids(&runtime), expected.map(Value::Integer));
     }
@@ -2281,7 +2934,7 @@ fn verify_config_expression_read_failure_and_retry(queries: &[&str]) {
         .map(|query| observe(&runtime, query))
         .collect();
     runtime.db().store().persist().expect("publish config");
-    install_indexed_cold(&runtime, "red_config", 1);
+    install_indexed_cold(&runtime, "red.config", 1);
     assert!(runtime.db().store().try_get_config("fixture.flag").is_err());
     for query in queries {
         runtime.invalidate_result_cache();
@@ -2290,7 +2943,7 @@ fn verify_config_expression_read_failure_and_retry(queries: &[&str]) {
             "an operating read failure became a successful ordered result: {query}"
         );
     }
-    install_indexed_cold(&runtime, "red_config", 4096);
+    install_indexed_cold(&runtime, "red.config", 4096);
     for (query, expected) in queries.iter().zip(expected) {
         runtime.invalidate_result_cache();
         assert_eq!(observe(&runtime, query), expected, "retry: {query}");
@@ -2335,7 +2988,7 @@ fn unreadable_config_blocks_materialization_even_with_unvisited_expression_branc
         .map(|query| observe(&runtime, query))
         .collect();
     runtime.db().store().persist().expect("publish lazy config");
-    install_indexed_cold(&runtime, "red_config", 1);
+    install_indexed_cold(&runtime, "red.config", 1);
     assert!(runtime.db().store().try_get_config("fixture.flag").is_err());
     // A streaming expression still skips its unvisited CONFIG branch. Sort
     // and window admission must independently read the configured ceiling.
@@ -2364,7 +3017,7 @@ fn unreadable_config_blocks_materialization_even_with_unvisited_expression_branc
             "{query}: {error}"
         );
     }
-    install_indexed_cold(&runtime, "red_config", 4096);
+    install_indexed_cold(&runtime, "red.config", 4096);
     for (query, expected) in queries.iter().zip(expected) {
         runtime.invalidate_result_cache();
         assert_eq!(
@@ -2439,7 +3092,7 @@ fn unreadable_config_dml_predicates_fail_before_publication_and_retry() {
                 .store()
                 .persist()
                 .expect("publish predicate config");
-            install_indexed_cold(&runtime, "red_config", 1);
+            install_indexed_cold(&runtime, "red.config", 1);
             assert!(runtime.db().store().try_get_config("fixture.flag").is_err());
             let query = format!("{statement} WHERE {predicate}");
             runtime.invalidate_result_cache();
@@ -2452,7 +3105,7 @@ fn unreadable_config_dml_predicates_fail_before_publication_and_retry() {
                 vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)],
                 "failed predicate published a mutation: {query}"
             );
-            install_indexed_cold(&runtime, "red_config", 4096);
+            install_indexed_cold(&runtime, "red.config", 4096);
             runtime.execute_query(&query).expect("retry DML predicate");
             assert_eq!(
                 expression_probe_ids(&runtime),
@@ -2493,7 +3146,7 @@ fn dml_identity_candidates_recheck_the_entire_predicate() {
             .store()
             .persist()
             .expect("publish identity config");
-        install_indexed_cold(&runtime, "red_config", 1);
+        install_indexed_cold(&runtime, "red.config", 1);
         let query = format!("{statement} WHERE rid = {rid} AND CONFIG('fixture.flag') = 'ready'");
         assert!(
             runtime.execute_query(&query).is_err(),
@@ -2503,7 +3156,7 @@ fn dml_identity_candidates_recheck_the_entire_predicate() {
             observe(&runtime, "SELECT id FROM expression_probe")[0].get("id"),
             Some(&Value::Integer(1))
         );
-        install_indexed_cold(&runtime, "red_config", 4096);
+        install_indexed_cold(&runtime, "red.config", 4096);
         let retried = runtime
             .execute_query(&query)
             .expect("retry identity predicate");
@@ -2529,7 +3182,7 @@ fn unreadable_config_dml_predicates_preserve_lazy_branches_and_limit() {
         .store()
         .persist()
         .expect("publish lazy DML config");
-    install_indexed_cold(&runtime, "red_config", 1);
+    install_indexed_cold(&runtime, "red.config", 1);
     for query in [
         "UPDATE expression_probe SET id = 99 WHERE id < 0 AND CONFIG('fixture.flag') = 'ready'",
         "DELETE FROM expression_probe WHERE id < 0 AND CONFIG('fixture.flag') = 'ready'",
@@ -3529,6 +4182,10 @@ fn cold_dml_delete_events_abort_with_the_source() {
                 }
             };
             let runtime = RedDBRuntime::with_options(options()).expect("event runtime");
+            // This fixture owns the store-global WAL fault injector. Periodic
+            // workers must not consume the one-shot failure between arming it
+            // and publishing the DELETE under test.
+            runtime.background_tasks.as_ref().unwrap().shutdown();
             if bounded {
                 runtime
                     .execute_query("CREATE QUEUE delete_events_outbox MAX_SIZE 1")
@@ -3549,9 +4206,12 @@ fn cold_dml_delete_events_abort_with_the_source() {
                     .store()
                     .test_fail_deferred_wal_append
                     .store(true, std::sync::atomic::Ordering::SeqCst);
-                let error = runtime
-                    .execute_query("DELETE FROM delete_events_probe")
-                    .expect_err("real event WAL append must fail");
+                let error = match runtime.execute_query("DELETE FROM delete_events_probe") {
+                    Err(error) => error,
+                    Ok(result) => panic!(
+                        "real event WAL append must fail: paged={paged} bounded={bounded} cycle={cycle}: {result:?}"
+                    ),
+                };
                 assert!(error
                     .to_string()
                     .contains("injected deferred WAL append failure"));
@@ -3831,7 +4491,7 @@ fn cold_queue_group_and_wait_cap_survive_checkpoint() {
         .execute_query("QUEUE GROUP CREATE cold_queue_metadata workers")
         .expect("consumer group");
     runtime
-        .execute_query("SET CONFIG red.config.queue.max_wait_ms = 1")
+        .execute_query("SET CONFIG queue.max_wait_ms = 1")
         .expect("queue wait cap");
     runtime.checkpoint().expect("publish queue metadata");
 

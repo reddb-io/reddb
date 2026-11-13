@@ -339,7 +339,7 @@ fn change_touches_embed_fields(
                 .any(|column| policy.fields.iter().any(|field| field == column)),
             None => true,
         },
-        ChangeOperation::Delete | ChangeOperation::Refresh => false,
+        ChangeOperation::Delete | ChangeOperation::Refresh | ChangeOperation::Transaction => false,
     }
 }
 
@@ -360,7 +360,7 @@ fn change_touches_vision_field(
             Some(columns) => columns.iter().any(|column| column == &policy.image_field),
             None => true,
         },
-        ChangeOperation::Delete | ChangeOperation::Refresh => false,
+        ChangeOperation::Delete | ChangeOperation::Refresh | ChangeOperation::Transaction => false,
     }
 }
 
@@ -384,7 +384,7 @@ fn change_touches_moderate_fields(
                 .any(|column| policy.fields.iter().any(|field| field == column)),
             None => true,
         },
-        ChangeOperation::Delete | ChangeOperation::Refresh => false,
+        ChangeOperation::Delete | ChangeOperation::Refresh | ChangeOperation::Transaction => false,
     }
 }
 

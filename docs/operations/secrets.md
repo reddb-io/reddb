@@ -33,7 +33,7 @@ Pair this with:
 | `RED_D1_TOKEN`               | Cloud secret manager                  | Cloudflare D1 backend                        | Low (rotate token)       | Backup tier integrity  |
 | `RED_BACKEND_HTTP_AUTH`      | Cloud secret manager                  | Generic HTTP backend                         | Low                      | Same — backup tier     |
 | Pager / data-volume encryption keys (LUKS, KMS, EBS, EFS) | Cloud KMS / LUKS keystore | Filesystem layer below RedDB | KMS-managed              | Full read of `.rdb` file (vault still encrypted within it) |
-| AI provider keys (`red.ai.*`) | Inside `red_config` or `red.secret.*` | AI providers via `EMBED`, `ASK`             | Low                      | Provider quota theft   |
+| AI provider settings (`ai.*`) and credentials (`red.secret.ai.*`) | Settings in `red.config`; credentials in the vault | AI providers via `EMBED`, `ASK` | Low | Provider quota theft |
 
 `Value::Secret` columns and `Value::Password` columns are **derived
 secrets** — keyed by `red.secret.aes_key` inside the vault. They share

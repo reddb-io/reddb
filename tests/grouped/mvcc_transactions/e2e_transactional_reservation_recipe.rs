@@ -13,6 +13,7 @@ use reddb::api::DurabilityMode;
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
 use reddb::storage::wal::{WalReader, WalRecord};
 use reddb::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
+use reddb_engine::storage::store_wal::StoreWalAction;
 use reddb_types::Value;
 
 const TRANSACTIONS_DOC: &str = include_str!("../../../docs/query/transactions.md");
@@ -167,6 +168,26 @@ fn store_commit_batches(wal_path: &Path) -> Vec<Vec<Vec<u8>>> {
         .collect()
 }
 
+fn commit_batch_span_containing(wal_path: &Path, needle: &str) -> (u64, u64) {
+    let records = WalReader::open(wal_path)
+        .expect("wal opens")
+        .iter()
+        .collect::<std::io::Result<Vec<_>>>()
+        .expect("wal records decode");
+    let index = records
+        .iter()
+        .position(|(_, record)| {
+            matches!(record, WalRecord::TxCommitBatch { actions, .. } if batch_contains_text(actions, needle))
+        })
+        .unwrap_or_else(|| panic!("missing commit batch containing {needle}"));
+    let start = records[index].0;
+    let end = records
+        .get(index + 1)
+        .map(|(lsn, _)| *lsn)
+        .unwrap_or_else(|| std::fs::metadata(wal_path).expect("wal metadata").len());
+    (start, end)
+}
+
 fn action_contains_text(action: &[u8], needle: &str) -> bool {
     action
         .windows(needle.len())
@@ -179,17 +200,70 @@ fn batch_contains_text(actions: &[Vec<u8>], needle: &str) -> bool {
         .any(|action| action_contains_text(action, needle))
 }
 
-/// Corrupt the final WAL record by dropping its last byte, simulating a
-/// crash that tore the commit batch before it was fully durable.
-fn truncate_wal_tail(path: &Path, bytes: u64) {
+fn batch_entity_payload_contains_text(actions: &[Vec<u8>], needle: &str) -> bool {
+    actions.iter().any(|bytes| {
+        let action = StoreWalAction::decode(bytes).expect("store WAL action decodes");
+        match action {
+            StoreWalAction::UpsertEntityRecord { record, .. } => {
+                action_contains_text(&record, needle)
+            }
+            StoreWalAction::BulkUpsertEntityRecords { records, .. } => records
+                .iter()
+                .any(|record| action_contains_text(record, needle)),
+            _ => false,
+        }
+    })
+}
+
+fn batch_mutates_collection(actions: &[Vec<u8>], expected: &str) -> bool {
+    actions.iter().any(|bytes| {
+        let action = StoreWalAction::decode(bytes).expect("store WAL action decodes");
+        match action {
+            StoreWalAction::UpsertEntityRecord { collection, .. }
+            | StoreWalAction::DeleteEntityRecord { collection, .. }
+            | StoreWalAction::BulkUpsertEntityRecords { collection, .. }
+            | StoreWalAction::RefreshCollection { collection, .. } => collection == expected,
+            _ => false,
+        }
+    })
+}
+
+/// Corrupt one selected WAL record by dropping its last byte and every later
+/// record, simulating a crash that tore that commit batch before durability.
+fn tear_wal_record_at(path: &Path, record_start: u64, record_end: u64) {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)
         .expect("open wal");
     let len = file.metadata().expect("wal metadata").len();
-    file.set_len(len - bytes).expect("truncate wal");
+    assert!(record_end <= len && record_end > reddb_file::WAL_FILE_HEADER_BYTES as u64);
+    file.set_len(record_end - 1).expect("truncate wal");
     file.sync_all().expect("sync truncated wal");
+    drop(file);
+
+    let mut saw_torn_record = false;
+    for item in WalReader::open(path).expect("truncated wal opens").iter() {
+        match item {
+            Ok((lsn, _)) => assert!(
+                lsn < record_start,
+                "the selected commit batch remained complete after truncation"
+            ),
+            Err(error) => {
+                assert_eq!(
+                    error.kind(),
+                    std::io::ErrorKind::UnexpectedEof,
+                    "truncated commit batch must decode as an incomplete WAL tail: {error}"
+                );
+                saw_torn_record = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_torn_record,
+        "truncated WAL must expose an incomplete tail"
+    );
 }
 
 fn units_reserved_for(rt: &RedDBRuntime, key: &str) -> usize {
@@ -358,22 +432,24 @@ fn reservation_commit_has_no_wal_prefix_with_claim_without_key_or_work() {
 
     let batches = store_commit_batches(&wal_path);
     let new_batches = &batches[before_batches..];
-    assert_eq!(
-        new_batches.len(),
-        1,
-        "one reservation transaction should append exactly one durable commit batch"
-    );
-    let reservation_batch = &new_batches[0];
+    let reservation_batch = new_batches
+        .iter()
+        .filter(|actions| {
+            batch_entity_payload_contains_text(actions, "reserve-wal")
+                && batch_mutates_collection(actions, "inventory_units")
+        })
+        .next()
+        .expect("the reservation transaction must create a durable commit batch");
     assert!(
-        batch_contains_text(reservation_batch, "inventory_units"),
+        batch_mutates_collection(reservation_batch, "inventory_units"),
         "commit batch must include the claimed resource table"
     );
     assert!(
-        batch_contains_text(reservation_batch, "reservation_idempotency"),
+        batch_mutates_collection(reservation_batch, "reservation_idempotency"),
         "commit batch must include the idempotency key table"
     );
     assert!(
-        batch_contains_text(reservation_batch, "reservation_work"),
+        batch_mutates_collection(reservation_batch, "reservation_work"),
         "commit batch must include downstream queue work"
     );
 }
@@ -426,6 +502,7 @@ fn reservation_commit_recovers_all_three_effects_after_reopen() {
 fn torn_reservation_commit_batch_recovers_none_of_the_three_effects() {
     let db = support::temp_db_file("transactional-reservation-recipe-torn");
     let stable_db_image = db.path().with_extension("stable-copy");
+    let wal_path = reddb_file::unified_wal_path(db.path());
 
     {
         let rt = persistent_runtime(&db);
@@ -434,8 +511,13 @@ fn torn_reservation_commit_batch_recovers_none_of_the_three_effects() {
         // schema, three available units, an empty idempotency table, and an
         // empty queue.
         rt.checkpoint().expect("checkpoint stable prefix");
-        std::fs::copy(db.path(), &stable_db_image).expect("copy stable db image");
+    }
+    // Windows holds a writer range lock for the runtime lifetime. Copy only
+    // after close so the same crash fixture is portable across CI platforms.
+    std::fs::copy(db.path(), &stable_db_image).expect("copy stable db image");
 
+    {
+        let rt = persistent_runtime(&db);
         set_current_connection_id(145608);
         let outcome = reserve_units(&rt, "reserve-crash", 2);
         assert_eq!(
@@ -447,13 +529,15 @@ fn torn_reservation_commit_batch_recovers_none_of_the_three_effects() {
         );
         clear_current_connection_id();
     }
+    let (reservation_record_start, reservation_record_end) =
+        commit_batch_span_containing(&wal_path, "reserve-crash");
 
     // Simulate a crash that tore the commit batch before it fully landed:
     // restore the pre-transaction image and drop the tail byte of the WAL so
     // the reservation commit record can no longer be decoded.
     std::fs::copy(&stable_db_image, db.path()).expect("restore stable db image");
     let _ = std::fs::remove_file(&stable_db_image);
-    truncate_wal_tail(&reddb_file::unified_wal_path(db.path()), 1);
+    tear_wal_record_at(&wal_path, reservation_record_start, reservation_record_end);
 
     {
         let rt = persistent_runtime(&db);

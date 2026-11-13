@@ -34,7 +34,7 @@ fn recovery_page_fixture(path: &std::path::Path) -> (u32, Page) {
         store.persist().unwrap();
     }
     let pager = Pager::open_default(path).unwrap();
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let header = reddb_file::decode_native_paged_metadata_header(catalog.content())
         .unwrap()
         .unwrap();
@@ -46,8 +46,7 @@ fn recovery_page_fixture(path: &std::path::Path) -> (u32, Page) {
         .find(|entry| entry.collection == "rows")
         .unwrap()
         .root_page;
-    let page = pager.read_page(root).unwrap();
-    (root, page)
+    (root, pager.read_page(root).unwrap())
 }
 
 fn damage_page(path: &std::path::Path, page_id: u32) {
@@ -64,6 +63,42 @@ fn damage_page(path: &std::path::Path, page_id: u32) {
     file.seek(SeekFrom::Current(-1)).unwrap();
     file.write_all(&[byte[0] ^ 1]).unwrap();
     file.sync_all().unwrap();
+}
+
+fn authorize_fixture_dwb(
+    path: &std::path::Path,
+    frame: &[u8],
+    phase: reddb_file::file_format::DwbPhase,
+) {
+    use reddb_file::{file_format as f, PAGED_SUPERBLOCK_SLOT_SIZE};
+    use std::io::{Seek, SeekFrom, Write};
+    let bytes = std::fs::read(path).expect("fixture headers");
+    let selected = reddb_file::select_paged_superblock(&bytes).expect("valid fixture superblock");
+    let start = selected.copy_index * PAGED_SUPERBLOCK_SLOT_SIZE;
+    let mut image = [0; PAGED_SUPERBLOCK_SLOT_SIZE];
+    image.copy_from_slice(&bytes[start..start + PAGED_SUPERBLOCK_SLOT_SIZE]);
+    let authority = f::DwbPublication {
+        phase,
+        frame_bytes: u32::try_from(frame.len()).expect("bounded fixture frame"),
+        digest: f::dwb_frame_digest(frame),
+    };
+    f::set_database_header_dwb_publication(&mut image, Some(authority))
+        .expect("known-current authority");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("fixture header writer");
+    for step in 1..=reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+        let copy = (selected.copy_index + step) % reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT;
+        reddb_file::seal_paged_superblock_slot(&mut image, copy, selected.generation + step as u64)
+            .expect("fixture header seal");
+        file.seek(SeekFrom::Start(reddb_file::paged_superblock_slot_offset(
+            copy,
+        )))
+        .expect("header offset");
+        file.write_all(&image).expect("persist fixture authority");
+        file.sync_all().expect("durable fixture authority");
+    }
 }
 
 fn assert_recovered_fixture(path: &std::path::Path) {
@@ -90,7 +125,15 @@ fn recover_pending_double_write_repairs_only_the_staged_copy() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source.rdb");
     let (root, page) = recovery_page_fixture(&source);
-    let frame = reddb_file::encode_paged_dwb_frame([(root, page.as_bytes())]);
+    let tail = {
+        let pager = Pager::open_default(&source).unwrap();
+        pager.read_page(pager.page_count().unwrap() - 1).unwrap()
+    };
+    assert_ne!(root, tail.page_id(), "the COW catalog follows its data");
+    let frame = reddb_file::encode_paged_dwb_frame([
+        (root, page.as_bytes()),
+        (tail.page_id(), tail.as_bytes()),
+    ]);
     {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -103,19 +146,49 @@ fn recover_pending_double_write_repairs_only_the_staged_copy() {
         file.write_all(&frame).unwrap();
         file.sync_all().unwrap();
     }
+    authorize_fixture_dwb(&source, &frame, reddb_file::file_format::DwbPhase::Ready);
     damage_page(&source, root);
     let before = std::fs::read(&source).unwrap();
     let output = directory.path().join("recovered");
     recover_paged_wal(&source, &output).unwrap();
     assert_eq!(std::fs::read(&source).unwrap(), before);
     assert_recovered_fixture(&output.join("source.rdb"));
+    for phase in [
+        reddb_file::file_format::DwbPhase::Preparing,
+        reddb_file::file_format::DwbPhase::Consumed,
+    ] {
+        // A crash can interrupt staging before homes are eligible, or clearing
+        // after both Consumed headers. Neither phase may replay partial bytes.
+        let mut interrupted = before.clone();
+        let offset = root as usize * 16384;
+        interrupted[offset..offset + 16384].copy_from_slice(page.as_bytes());
+        let start = reddb_engine::storage::pager_io::dwb_zone_offset() as usize;
+        if phase == reddb_file::file_format::DwbPhase::Preparing {
+            interrupted[start + 17..start + frame.len()].fill(0);
+        } else {
+            let mut clear = Page::new(
+                PageType::Header,
+                reddb_engine::storage::pager_io::DWB_ZONE_START_PAGE,
+            );
+            clear.update_checksum();
+            interrupted[start..start + 17].copy_from_slice(&clear.as_bytes()[..17]);
+        }
+        let input = directory.path().join(format!("interrupted-{phase:?}.rdb"));
+        std::fs::write(&input, interrupted).expect("interrupted frame fixture");
+        authorize_fixture_dwb(&input, &frame, phase);
+        let evidence = std::fs::read(&input).expect("interrupted source evidence");
+        let output = directory.path().join(format!("recovered-{phase:?}"));
+        recover_paged_wal(&input, &output).expect("discard safely interrupted staging/clearing");
+        assert!(std::fs::read(&input).expect("source retained") == evidence);
+        assert_recovered_fixture(&output.join(input.file_name().expect("source name")));
+    }
     assert_eq!(
-        u64::from(root) + 1,
+        u64::from(tail.page_id()) + 1,
         before.len() as u64 / 16384,
-        "fixture must place the damaged page last"
+        "DWB must include the torn final catalog page"
     );
     let mut partial = before.clone();
-    partial.truncate(root as usize * 16384 + 1024);
+    partial.truncate(tail.page_id() as usize * 16384 + 1024);
     let partial_source = directory.path().join("partial.rdb");
     std::fs::write(&partial_source, &partial).unwrap();
     let partial_output = directory.path().join("partial-recovered");
@@ -177,19 +250,10 @@ fn recovery_refuses_stale_legacy_pager_wal_without_losing_newer_data() {
     let source = directory.path().join("source.rdb");
     let (root, old_page) = recovery_page_fixture(&source);
     {
-        let pager = Arc::new(Pager::open_default(&source).unwrap());
-        let catalog = pager.read_page(1).unwrap();
-        let format = reddb_file::decode_native_paged_metadata_header(catalog.content())
-            .unwrap()
-            .unwrap()
-            .format_version;
+        let store = UnifiedStore::open(&source).unwrap();
         let newer = UnifiedEntity::table_row(EntityId::new(2), "rows", 2, vec![Value::Integer(29)]);
-        let encoded =
-            reddb_engine::storage::metadata_codec::serialize_entity_record(&newer, None, format);
-        let tree = BTree::with_root(Arc::clone(&pager), root);
-        tree.insert(&2u64.to_be_bytes(), &encoded).unwrap();
-        assert_eq!(tree.root_page_id(), root);
-        pager.sync().unwrap();
+        store.insert_auto("rows", newer).unwrap();
+        store.persist().unwrap();
     }
     let wal = reddb_file::pager_legacy_wal_path(&source);
     {
@@ -478,6 +542,11 @@ fn recover_interrupted_engine_checkpoint_from_committed_wal() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source.rdb");
     let (root, page) = recovery_page_fixture(&source);
+    let tail = {
+        let pager = Pager::open_default(&source).unwrap();
+        pager.read_page(pager.page_count().unwrap() - 1).unwrap()
+    };
+    assert_ne!(root, tail.page_id());
     let wal = reddb_file::engine_wal_path(&source);
     let checkpoint_lsn;
     {
@@ -486,7 +555,9 @@ fn recover_interrupted_engine_checkpoint_from_committed_wal() {
         obsolete_page.set_cell_count(0);
         obsolete_page.update_checksum();
         let mut latest_page = page.clone();
-        latest_page.as_bytes_mut()[100] ^= 1;
+        // The content is the published generation; only its stale checksum
+        // needs refreshing during physical redo.
+        latest_page.as_bytes_mut()[28] ^= 1;
         assert!(
             latest_page.verify_checksum().is_err(),
             "engine WAL captures pages before checksum refresh"
@@ -504,6 +575,13 @@ fn recover_interrupted_engine_checkpoint_from_committed_wal() {
                 tx_id: 7,
                 page_id: root,
                 data: latest_page.as_bytes().to_vec(),
+            })
+            .unwrap();
+        writer
+            .append(&WalRecord::PageWrite {
+                tx_id: 7,
+                page_id: tail.page_id(),
+                data: tail.as_bytes().to_vec(),
             })
             .unwrap();
         checkpoint_lsn = writer.append(&WalRecord::Commit { tx_id: 7 }).unwrap();
@@ -542,15 +620,21 @@ fn recover_interrupted_engine_checkpoint_from_committed_wal() {
     let combined_source = directory.path().join("combined.rdb");
     let combined_wal = reddb_file::engine_wal_path(&combined_source);
     std::fs::write(&combined_source, &combined).unwrap();
+    authorize_fixture_dwb(
+        &combined_source,
+        &frame,
+        reddb_file::file_format::DwbPhase::Ready,
+    );
+    let combined = std::fs::read(&combined_source).expect("authorized recovery fixture");
     std::fs::write(&combined_wal, &wal_before).unwrap();
     let combined_output = directory.path().join("combined-recovery");
     recover_paged_wal(&combined_source, &combined_output).unwrap();
     assert_eq!(std::fs::read(&combined_source).unwrap(), combined);
     assert_eq!(std::fs::read(&combined_wal).unwrap(), wal_before);
     assert_recovered_fixture(&combined_output.join("combined.rdb"));
-    assert_eq!(u64::from(root) + 1, before.len() as u64 / 16384);
+    assert_eq!(u64::from(tail.page_id()) + 1, before.len() as u64 / 16384);
     let mut partial = before.clone();
-    partial.truncate(root as usize * 16384 + 1024);
+    partial.truncate(tail.page_id() as usize * 16384 + 1024);
     let partial_source = directory.path().join("partial-checkpoint.rdb");
     let partial_wal = reddb_file::engine_wal_path(&partial_source);
     std::fs::write(&partial_source, &partial).unwrap();
@@ -576,6 +660,103 @@ fn recover_interrupted_engine_checkpoint_from_committed_wal() {
     assert!(!output.join("source.rdb").exists());
     assert_eq!(std::fs::read(&source).unwrap(), before);
     assert_eq!(std::fs::read(&wal).unwrap(), truncated);
+}
+
+// Prepare an interrupted physical redo with independently published authority
+// for its replacement image. A bare WAL image cannot redefine a sealed tree.
+fn publish_fixture_tree_proof(pager: &Pager, mut catalog: Page, tree: &BTree) {
+    let data = catalog.content();
+    let header = reddb_file::decode_native_paged_metadata_header(data)
+        .expect("decode fixture catalog")
+        .expect("native fixture catalog");
+    let mut pos = reddb_file::METADATA_HEADER_BYTES;
+    for _ in 0..header.collection_count {
+        reddb_file::decode_native_paged_collection_root(data, &mut pos).expect("fixture root");
+    }
+    let count = u32::from_le_bytes(data[pos..pos + 4].try_into().expect("reference count"));
+    pos += 4;
+    for _ in 0..count {
+        reddb_file::decode_native_paged_cross_ref(data, &mut pos).expect("fixture reference");
+    }
+    reddb_file::decode_native_paged_retired_trees(data, &mut pos).expect("fixture retired roots");
+    reddb_file::decode_native_paged_deferred_pages(data, &mut pos).expect("fixture deferred pages");
+    reddb_file::native_store::decode_native_paged_ownership_epoch(data, &mut pos)
+        .expect("fixture ownership epoch");
+    let start = pos;
+    let mut proofs = reddb_file::page_proof::decode_catalog(data, &mut pos)
+        .expect("decode fixture proofs")
+        .expect("fixture has published proofs");
+    let (root, proof) = tree
+        .seal_page_proofs()
+        .expect("seal replacement tree")
+        .expect("verified replacement tree");
+    assert!(proofs.insert(root, proof).is_some());
+    let mut encoded = Vec::new();
+    reddb_file::page_proof::encode_catalog(&mut encoded, &proofs).expect("encode fixture proofs");
+    assert_eq!(encoded.len(), pos - start);
+    catalog.content_mut()[start..pos].copy_from_slice(&encoded);
+    catalog.update_checksum();
+    let reference = reddb_file::page_proof::PageReference {
+        page_id: catalog.page_id(),
+        digest: reddb_file::page_proof::page_digest(catalog.as_bytes()),
+    };
+    pager
+        .write_page(catalog.page_id(), catalog)
+        .expect("write fixture catalog");
+    pager.sync().expect("sync replacement generation");
+    pager
+        .publish_manifest_reference(reference)
+        .expect("seal fixture authority");
+}
+
+fn restore_fixture_home(path: &std::path::Path, page: &Page) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("fixture file");
+    file.seek(SeekFrom::Start(u64::from(page.page_id()) * 16384))
+        .expect("fixture home");
+    file.write_all(page.as_bytes())
+        .expect("inject incomplete physical redo");
+    file.sync_all().expect("sync injected fault");
+}
+
+#[test]
+fn physical_wal_without_published_generation_is_rejected() {
+    use reddb_server::storage::wal::{WalRecord, WalWriter};
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source.rdb");
+    let (root, mut page) = recovery_page_fixture(&source);
+    page.set_cell_count(0);
+    page.update_checksum();
+    let wal = reddb_file::engine_wal_path(&source);
+    {
+        let mut writer = WalWriter::open(&wal).expect("physical WAL");
+        writer
+            .append(&WalRecord::Begin { tx_id: 42 })
+            .expect("begin");
+        writer
+            .append(&WalRecord::PageWrite {
+                tx_id: 42,
+                page_id: root,
+                data: page.as_bytes().to_vec(),
+            })
+            .expect("unproven replacement image");
+        writer
+            .append(&WalRecord::Commit { tx_id: 42 })
+            .expect("commit");
+        writer.sync().expect("durable WAL");
+    }
+    let before = std::fs::read(&source).expect("source image");
+    let wal_before = std::fs::read(&wal).expect("WAL image");
+    let output = directory.path().join("rejected");
+    let error = recover_paged_wal(&source, &output).expect_err("WAL cannot replace tree authority");
+    assert!(error.to_string().contains("generation proof"), "{error}");
+    assert!(!output.join("source.rdb").exists());
+    assert_eq!(std::fs::read(&source).expect("preserved source"), before);
+    assert_eq!(std::fs::read(&wal).expect("preserved WAL"), wal_before);
+    assert_recovered_fixture(&source);
 }
 
 #[test]
@@ -617,7 +798,7 @@ fn physical_wal_recovery_advances_xid_floor_for_changed_existing_root() {
         )
         .unwrap(),
     );
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
         .unwrap()
         .unwrap();
@@ -638,12 +819,21 @@ fn physical_wal_recovery_advances_xid_floor_for_changed_existing_root() {
     entity.sequence_id = 70_000;
     let encoded =
         reddb_engine::storage::metadata_codec::serialize_entity_record(&entity, None, format);
-    let tree = BTree::with_root(Arc::clone(&pager), root);
+    let proof =
+        reddb_file::native_store::decode_native_paged_catalog_tree_proofs(catalog.content())
+            .expect("fixture proofs")
+            .expect("verified fixture")[&root];
+    let original_page = pager.read_page(root).expect("previous generation image");
+    let tree = BTree::with_verified_root(Arc::clone(&pager), root, proof)
+        .expect("restore verified fixture tree");
     tree.insert(&50_000u64.to_be_bytes(), &encoded).unwrap();
     assert_eq!(tree.root_page_id(), root);
     let page = pager.read_page(root).unwrap();
+    publish_fixture_tree_proof(&pager, catalog, &tree);
     drop(tree);
     drop(pager);
+    std::fs::copy(&copy, &source).expect("copy published replacement authority");
+    restore_fixture_home(&source, &original_page);
     let wal = reddb_file::engine_wal_path(&source);
     {
         let mut writer = WalWriter::open(&wal).unwrap();
@@ -671,7 +861,7 @@ fn physical_wal_recovery_advances_xid_floor_for_changed_existing_root() {
         },
     )
     .unwrap();
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
         .unwrap()
         .unwrap();
@@ -724,7 +914,7 @@ fn physical_wal_recovery_keeps_secondary_index_consistent_with_changed_data() {
         )
         .unwrap(),
     );
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
         .unwrap()
         .unwrap();
@@ -733,7 +923,13 @@ fn physical_wal_recovery_keeps_secondary_index_consistent_with_changed_data() {
         .unwrap()
         .unwrap()
         .format_version;
-    let tree = BTree::with_root(Arc::clone(&pager), root);
+    let proof =
+        reddb_file::native_store::decode_native_paged_catalog_tree_proofs(catalog.content())
+            .expect("fixture proofs")
+            .expect("verified fixture")[&root];
+    let original_page = pager.read_page(root).expect("previous generation image");
+    let tree = BTree::with_verified_root(Arc::clone(&pager), root, proof)
+        .expect("restore verified fixture tree");
     let mut cursor = tree.cursor_first().unwrap();
     let (key, bytes) = cursor.next_with_budget(1024 * 1024).unwrap().unwrap();
     let id = reddb_server::storage::EntityId::new(u64::from_be_bytes(
@@ -761,8 +957,11 @@ fn physical_wal_recovery_keeps_secondary_index_consistent_with_changed_data() {
     tree.upsert(&key, &encoded).unwrap();
     assert_eq!(tree.root_page_id(), root);
     let page = pager.read_page(root).unwrap();
+    publish_fixture_tree_proof(&pager, catalog, &tree);
     drop(tree);
     drop(pager);
+    std::fs::copy(&modified, &source).expect("copy published replacement authority");
+    restore_fixture_home(&source, &original_page);
     let wal = reddb_file::engine_wal_path(&source);
     {
         let mut writer = WalWriter::open(&wal).unwrap();
@@ -1727,7 +1926,7 @@ fn compact_rewrites_live_records_and_preserves_source() {
         )
         .expect("reopen"),
     );
-    let page = pager.read_page(1).expect("catalog");
+    let page = pager.read_manifest_page().expect("catalog");
     let mut offset = reddb_file::METADATA_HEADER_BYTES;
     let root =
         reddb_file::decode_native_paged_collection_root(page.content(), &mut offset).expect("root");
@@ -1741,6 +1940,77 @@ fn compact_rewrites_live_records_and_preserves_source() {
 }
 
 #[test]
+fn compact_rewrites_a_source_with_page_aligned_trailing_allocation() {
+    use std::io::Write;
+
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source.rdb");
+    fixture(&source);
+    let committed_bytes = std::fs::metadata(&source).expect("source metadata").len();
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&source)
+            .expect("open source tail");
+        file.write_all(&vec![0xA5; 2 * 16384])
+            .expect("append stale page-aligned allocation");
+        file.sync_all().expect("sync source tail");
+    }
+    let before = std::fs::read(&source).expect("source image");
+    let destination = directory.path().join("compacted");
+
+    let report = compact_paged(&source, &destination).expect("compact trailing allocation");
+
+    assert_eq!(report.source_bytes, committed_bytes + 2 * 16384);
+    assert_eq!(std::fs::read(&source).expect("preserved source"), before);
+    assert!(report.destination_bytes < committed_bytes);
+    let pager = Pager::open(
+        destination.join("source.rdb"),
+        PagerConfig {
+            read_only: true,
+            create: false,
+            ..PagerConfig::default()
+        },
+    )
+    .expect("reopen compacted source");
+    assert_eq!(
+        pager.page_count().expect("compacted page count") as u64 * 16384,
+        report.destination_bytes
+    );
+}
+
+#[test]
+fn compact_rejects_truncated_or_partial_trailing_allocation() {
+    let directory = tempfile::tempdir().expect("directory");
+    for (name, length_adjustment) in [("truncated", -16384_i64), ("partial-tail", 1_i64)] {
+        let source = directory.path().join(format!("{name}.rdb"));
+        fixture(&source);
+        let committed_bytes = std::fs::metadata(&source).expect("source metadata").len();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .expect("open source")
+            .set_len(
+                committed_bytes
+                    .checked_add_signed(length_adjustment)
+                    .expect("fixture length"),
+            )
+            .expect("resize source");
+        let destination = directory.path().join(format!("{name}-compacted"));
+
+        let error = compact_paged(&source, &destination).expect_err("reject unsafe boundary");
+
+        assert!(
+            error
+                .to_string()
+                .contains("source allocation boundary differs from file length"),
+            "unexpected {name} error: {error}"
+        );
+        assert!(!destination.exists());
+    }
+}
+
+#[test]
 fn scrub_paged_trees_reports_corruption_without_changing_source() {
     use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -1749,7 +2019,7 @@ fn scrub_paged_trees_reports_corruption_without_changing_source() {
     fixture(&source);
     {
         let pager = Arc::new(Pager::open_default(&source).expect("open source"));
-        let catalog = pager.read_page(1).expect("catalog");
+        let catalog = pager.read_manifest_page().expect("catalog");
         let mut offset = reddb_file::METADATA_HEADER_BYTES;
         let first = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
             .expect("first root");
@@ -1787,7 +2057,7 @@ fn scrub_paged_trees_reports_corruption_without_changing_source() {
     assert_eq!(std::fs::read(&source).expect("preserved image"), before);
 
     let pager = Pager::open_default(&source).expect("open source");
-    let catalog = pager.read_page(1).expect("catalog");
+    let catalog = pager.read_manifest_page().expect("catalog");
     let mut offset = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
         .expect("root")
@@ -2045,7 +2315,7 @@ fn salvage_authenticates_vault_before_and_after_relocation() {
         .kv
         .insert("red.secret.large".into(), "private-secret".repeat(9000));
     vault.save(&pager, &state).unwrap();
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
         .unwrap()
         .unwrap();
@@ -2209,7 +2479,7 @@ fn salvage_preserves_healthy_collection_and_reports_lost_data_page() {
         },
     )
     .unwrap();
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let header = reddb_file::decode_native_paged_metadata_header(catalog.content())
         .unwrap()
         .unwrap();
@@ -2272,15 +2542,12 @@ fn salvage_preserves_healthy_collection_and_reports_lost_data_page() {
         )
         .expect("open fenced result read-only"),
     );
-    assert_eq!(
-        pager.header().unwrap().version,
-        reddb_file::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION
-    );
+    assert!(pager.header().unwrap().is_recovery_read_only());
     assert!(
         reddb_file::file_format::PAGE_RECOVERY_READ_ONLY_FILE_VERSION
             > reddb_file::file_format::PAGE_SECONDARY_INDEX_FILE_VERSION
     );
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let header = reddb_file::decode_native_paged_metadata_header(catalog.content())
         .unwrap()
         .unwrap();
@@ -2365,7 +2632,7 @@ fn collection_salvage_refuses_a_damaged_interior_root() {
     let source = directory.path().join("source.rdb");
     fixture(&source);
     let pager = Pager::open_default(&source).unwrap();
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let mut pos = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut pos)
         .unwrap()
@@ -2407,7 +2674,7 @@ fn salvage_recovers_readable_leaves_of_a_multi_page_collection() {
     compact_paged(&initial, &compacted).unwrap();
     let source = compacted.join("source.rdb");
     let pager = Arc::new(Pager::open_default(&source).unwrap());
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let mut offset = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
         .unwrap()
@@ -2483,7 +2750,7 @@ fn salvage_recovers_readable_leaves_of_a_multi_page_collection() {
         )
         .unwrap(),
     );
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let mut offset = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
         .unwrap()
@@ -2547,7 +2814,7 @@ fn salvage_recovers_tree_with_multiple_interior_levels() {
     compact_paged(&source, &compacted).unwrap();
     let source = compacted.join("deep.rdb");
     let pager = Arc::new(Pager::open_default(&source).unwrap());
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let mut offset = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
         .unwrap()
@@ -2604,7 +2871,7 @@ fn salvage_recovers_tree_with_multiple_interior_levels() {
         )
         .unwrap(),
     );
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let mut offset = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(catalog.content(), &mut offset)
         .unwrap()
@@ -2628,7 +2895,7 @@ fn collection_salvage_refuses_catalog_cross_references() {
     let source = directory.path().join("source.rdb");
     fixture(&source);
     let pager = Pager::open_default(&source).unwrap();
-    let page = pager.read_page(1).unwrap();
+    let page = pager.read_manifest_page().unwrap();
     let mut pos = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(page.content(), &mut pos).unwrap();
     let mut metadata = Vec::new();
@@ -2663,7 +2930,7 @@ fn collection_salvage_never_discards_damaged_system_collections() {
     let source = directory.path().join("source.rdb");
     fixture(&source);
     let pager = Pager::open_default(&source).unwrap();
-    let page = pager.read_page(1).unwrap();
+    let page = pager.read_manifest_page().unwrap();
     let mut pos = reddb_file::METADATA_HEADER_BYTES;
     let root = reddb_file::decode_native_paged_collection_root(page.content(), &mut pos)
         .unwrap()
@@ -2928,7 +3195,7 @@ fn salvage_rebuilds_corrupt_secondary_index_from_verified_rows() {
     let healthy = scrub_paged(&source).expect("physical scrub");
     assert!(healthy.assets_verified);
     assert!(healthy.trees.findings.is_empty());
-    let catalog = pager.read_page(1).expect("catalog");
+    let catalog = pager.read_manifest_page().expect("catalog");
     let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
         .expect("decode catalog")
         .expect("resume");
@@ -3027,7 +3294,7 @@ fn salvage_rebuilds_corrupt_secondary_index_from_verified_rows() {
                 },
             )
             .expect("read recovered catalog");
-            let page = pager.read_page(1).expect("catalog");
+            let page = pager.read_manifest_page().expect("catalog");
             let resume = reddb_file::native_resume::decode_catalog_resume(page.content())
                 .unwrap()
                 .expect("resume");
@@ -3142,6 +3409,132 @@ fn salvage_rebuilds_corrupt_secondary_index_from_verified_rows() {
 }
 
 #[test]
+fn salvage_rebuilds_valid_crc_indexes_only_with_intact_generation_authority() {
+    use reddb_server::{RedDBOptions, RedDBRuntime};
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source.rdb");
+    {
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(&source)
+                .with_memory_budget(64 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE records (id INT, value TEXT)")
+            .expect("table");
+        runtime
+            .execute_query("CREATE INDEX record_hash ON records (value) USING HASH")
+            .expect("hash index");
+        runtime
+            .execute_query("CREATE INDEX record_tree ON records (id) USING BTREE")
+            .expect("B-tree index");
+        for id in 1..=3 {
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO records (id, value) VALUES ({id}, 'value-{id}')"
+                ))
+                .expect("row");
+        }
+        runtime.graceful_shutdown(false).expect("checkpoint");
+    }
+    let pager = Pager::open(
+        &source,
+        PagerConfig {
+            read_only: true,
+            create: false,
+            ..PagerConfig::default()
+        },
+    )
+    .expect("read checkpoint");
+    let catalog = pager.read_manifest_page().expect("catalog");
+    let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
+        .expect("resume")
+        .expect("disk catalog");
+    let proofs =
+        reddb_file::native_store::decode_native_paged_catalog_tree_proofs(catalog.content())
+            .expect("proofs")
+            .expect("sealed catalog");
+    let healthy = std::fs::read(&source).expect("healthy source");
+    for index in ["record_hash", "record_tree"] {
+        let root = resume.collections["records"].secondary_indices[index].root_page;
+        let mut damaged_page = pager.read_page(root).expect("index image");
+        assert_eq!(
+            damaged_page.page_type().expect("index type"),
+            PageType::BTreeLeaf
+        );
+        damaged_page.set_cell_count(0);
+        damaged_page.update_checksum();
+        damaged_page
+            .verify_checksum()
+            .expect("fault has a valid CRC");
+        let mut damaged = healthy.clone();
+        let offset = root as usize * 16384;
+        damaged[offset..offset + 16384].copy_from_slice(damaged_page.as_bytes());
+        let input = directory.path().join(format!("{index}.rdb"));
+        std::fs::write(&input, &damaged).expect("stale valid-CRC index");
+        let scrub = scrub_paged(&input).expect("detect wrong index generation");
+        assert_eq!(scrub.trees.findings.len(), 1);
+        let output = directory.path().join(format!("{index}-recovered"));
+        let report = salvage_paged_indexes(&input, &output).expect("rebuild from verified rows");
+        assert_eq!(report.indexes.len(), 1);
+        assert_eq!(report.indexes[0].index, index);
+        assert_eq!(std::fs::read(&input).expect("preserved source"), damaged);
+        let options = RedDBOptions::persistent(output.join(format!("{index}.rdb")))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true);
+        for _ in 0..2 {
+            let runtime =
+                RedDBRuntime::with_options(options.clone()).expect("cold recovered runtime");
+            for id in 1..=3 {
+                let result = runtime
+                    .execute_query(&format!(
+                        "SELECT id FROM records WHERE value = 'value-{id}'"
+                    ))
+                    .expect("hash lookup");
+                assert_eq!(result.result.records.len(), 1);
+                assert_eq!(
+                    result.result.records[0]
+                        .get("id")
+                        .expect("id")
+                        .display_string(),
+                    id.to_string()
+                );
+                let result = runtime
+                    .execute_query(&format!("SELECT value FROM records WHERE id = {id}"))
+                    .expect("B-tree lookup");
+                assert_eq!(result.result.records.len(), 1);
+                assert_eq!(
+                    result.result.records[0].get("value"),
+                    Some(&reddb_types::Value::text(format!("value-{id}")))
+                );
+            }
+            runtime
+                .graceful_shutdown(false)
+                .expect("checkpoint rebuilt indexes");
+        }
+
+        // Corrupting the independent map cannot turn it into permission to
+        // discard unknown pages, even when both page CRCs remain valid.
+        let proof_root = proofs[&root].reference.page_id;
+        let mut proof_page = pager.read_page(proof_root).expect("proof node");
+        proof_page.as_bytes_mut()[100] ^= 1;
+        proof_page.update_checksum();
+        let offset = proof_root as usize * 16384;
+        damaged[offset..offset + 16384].copy_from_slice(proof_page.as_bytes());
+        let input = directory.path().join(format!("{index}-unproven.rdb"));
+        std::fs::write(&input, &damaged).expect("damaged proof source");
+        let output = directory.path().join(format!("{index}-rejected"));
+        assert!(salvage_paged_indexes(&input, &output).is_err());
+        assert!(!output.join(format!("{index}-unproven.rdb")).exists());
+        assert_eq!(
+            std::fs::read(&input).expect("preserved unproven source"),
+            damaged
+        );
+    }
+}
+
+#[test]
 fn salvage_rebuilds_a_multi_page_secondary_index_after_leaf_damage() {
     use reddb_server::{RedDBOptions, RedDBRuntime};
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -3180,7 +3573,7 @@ fn salvage_rebuilds_a_multi_page_secondary_index_after_leaf_damage() {
         )
         .unwrap(),
     );
-    let catalog = pager.read_page(1).unwrap();
+    let catalog = pager.read_manifest_page().unwrap();
     let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
         .unwrap()
         .unwrap();
@@ -3321,7 +3714,7 @@ fn compact_rejects_unknown_catalog_extension_and_preserves_bytes() {
     fixture(&source);
     {
         let pager = Pager::open_default(&source).expect("pager");
-        let mut page = pager.read_page(1).expect("catalog");
+        let mut page = pager.read_manifest_page().expect("catalog");
         page.content_mut()[28..32].copy_from_slice(b"FUTR");
         pager.write_page(1, page).expect("future catalog extension");
         pager.sync().expect("sync");
@@ -3466,7 +3859,7 @@ fn compact_repairs_historical_backlinks_but_refuses_forward_omissions() {
         fixture(&source);
         {
             let pager = Arc::new(Pager::open_default(&source).expect("pager"));
-            let page = pager.read_page(1).expect("catalog");
+            let page = pager.read_manifest_page().expect("catalog");
             let mut offset = reddb_file::METADATA_HEADER_BYTES;
             let root = reddb_file::decode_native_paged_collection_root(page.content(), &mut offset)
                 .expect("root");
@@ -3500,7 +3893,7 @@ fn compact_repairs_historical_backlinks_but_refuses_forward_omissions() {
                 .contains("\"repaired_leaf_backlinks\":1"));
             let pager =
                 Arc::new(Pager::open_default(destination.join("source.rdb")).expect("reopen"));
-            let page = pager.read_page(1).expect("catalog");
+            let page = pager.read_manifest_page().expect("catalog");
             let mut offset = reddb_file::METADATA_HEADER_BYTES;
             let root = reddb_file::decode_native_paged_collection_root(page.content(), &mut offset)
                 .expect("root");

@@ -189,6 +189,44 @@ impl SchemaVocabulary {
         }
     }
 
+    pub fn update_descriptions(
+        &mut self,
+        collection: &str,
+        description: Option<&str>,
+        columns: &[(String, String)],
+    ) {
+        for hits in self.inverted.values_mut() {
+            hits.retain(|hit| {
+                hit.collection != collection || hit.type_tag.as_deref() != Some("description")
+            });
+        }
+        self.inverted.retain(|_, hits| !hits.is_empty());
+        if let Some(text) = description {
+            for word in tokenise_description(text) {
+                self.insert_token(
+                    &word,
+                    VocabHit {
+                        collection: collection.to_string(),
+                        column: None,
+                        type_tag: Some("description".to_string()),
+                    },
+                );
+            }
+        }
+        for (column, text) in columns {
+            for word in tokenise_description(text) {
+                self.insert_token(
+                    &word,
+                    VocabHit {
+                        collection: collection.to_string(),
+                        column: Some(column.clone()),
+                        type_tag: Some("description".to_string()),
+                    },
+                );
+            }
+        }
+    }
+
     fn insert_collection(
         &mut self,
         collection: &str,
@@ -704,6 +742,30 @@ mod tests {
         let hits = vocab.lookup("customer");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].collection, "users");
+    }
+
+    #[test]
+    fn replacing_descriptions_removes_old_words_and_indexes_column_words() {
+        let mut vocabulary = SchemaVocabulary::new();
+        vocabulary.on_ddl(DdlEvent::CreateCollection {
+            collection: "readings".to_string(),
+            columns: vec!["email".to_string()],
+            type_tags: Vec::new(),
+            description: None,
+        });
+        vocabulary.update_descriptions(
+            "readings",
+            Some("Legacy readings"),
+            &[("email".to_string(), "Contact address".to_string())],
+        );
+        assert_eq!(
+            vocabulary.lookup("contact")[0].column.as_deref(),
+            Some("email")
+        );
+        vocabulary.update_descriptions("readings", Some("Current readings"), &[]);
+        assert!(vocabulary.lookup("legacy").is_empty());
+        assert!(vocabulary.lookup("contact").is_empty());
+        assert!(!vocabulary.lookup("current").is_empty());
     }
 
     // -- Property test (issue #120 acceptance row) --

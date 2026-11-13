@@ -109,6 +109,19 @@ array — `[]byte` ships as `{"$bytes": "<base64>"}`, `time.Time` as
 `Query(ctx, sql)` with no params stays byte-identical to the legacy path —
 old servers and the embedded fast path don't see the new frame at all.
 
+For a SQL-free single-row insert, the RedWire client also exposes a typed frame:
+
+```go
+result, err := c.TypedInsert(ctx, "users", []redwire.Field{
+    {Name: "name", Value: "Ada"},
+    {Name: "age", Value: int64(37)},
+})
+```
+
+This uses `TypedInsert` (`0x33`) and the same ten-value binary vocabulary.
+The server must advertise `FEATURE_TYPED_MUTATIONS`; otherwise the driver fails
+before writing a frame, leaving the connection usable.
+
 ## Authentication options
 
 ```go

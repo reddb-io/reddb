@@ -24,5 +24,6 @@ pub mod execution;
 pub mod geo;
 pub mod query;
 pub mod storage;
+#[cfg(feature = "full")]
 pub mod transaction;
 pub use reddb_types::{json, serde_json};

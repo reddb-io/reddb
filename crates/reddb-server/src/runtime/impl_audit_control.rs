@@ -264,7 +264,7 @@ pub(crate) fn query_control_event_specs(expr: &QueryExpr) -> Vec<QueryControlEve
             specs.push(QueryControlEventSpec {
                 kind: EventKind::ConfigWrite,
                 action: "config:write",
-                resource: Some(format!("config:{key}")),
+                resource: Some(format!("config:red.config/{key}")),
                 fields: vec![("key".to_string(), Sensitivity::raw(key))],
             });
         }

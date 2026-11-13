@@ -76,7 +76,9 @@ impl RedDBRuntime {
             return Ok(None);
         };
         self.flush()?;
-        let checkpoint_lsn = self.primary_logical_head_lsn().max(self.cdc_current_lsn());
+        let checkpoint_lsn = self
+            .primary_logical_head_lsn()
+            .max(self.replication_commit_lsn());
         let snapshot = self.inner.db.store().to_binary_dump_bytes();
         let backup = reddb_file::BaseBackupPlan::new(plan.timeline, 0, checkpoint_lsn);
         let manifest = plan
@@ -94,6 +96,23 @@ impl RedDBRuntime {
         parts_root: impl AsRef<std::path::Path>,
         destination: impl AsRef<std::path::Path>,
     ) -> RedDBResult<u64> {
+        self.materialize_primary_replica_basebackup_snapshot_for_replica(
+            manifest,
+            parts_root,
+            destination,
+            None,
+            None,
+        )
+    }
+
+    fn materialize_primary_replica_basebackup_snapshot_for_replica(
+        &self,
+        manifest: &reddb_file::PrimaryReplicaBaseBackupManifest,
+        parts_root: impl AsRef<std::path::Path>,
+        destination: impl AsRef<std::path::Path>,
+        replica_id: Option<&str>,
+        snapshot_token: Option<&str>,
+    ) -> RedDBResult<u64> {
         let snapshot = manifest
             .read_snapshot_parts(parts_root)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
@@ -102,14 +121,33 @@ impl RedDBRuntime {
             crate::storage::unified::UnifiedStoreConfig::default(),
         )
         .map_err(|err| RedDBError::Internal(format!("validate basebackup snapshot: {err}")))?;
+        loaded
+            .normalize_red_config_keys()
+            .map_err(RedDBError::from)?;
         loaded.set_config_tree(
-            "red.replication",
+            "replication",
             &crate::json!({
                 "last_applied_lsn": manifest.checkpoint_lsn,
                 "state": "healthy",
                 "last_error": "",
             }),
         );
+        if let Some(replica_id) = replica_id {
+            loaded.set_config_tree(
+                "replication",
+                &crate::json!({
+                    "replica_id": replica_id,
+                }),
+            );
+        }
+        if let Some(snapshot_token) = snapshot_token {
+            loaded.set_config_tree(
+                "replication",
+                &crate::json!({
+                    "rebootstrap_snapshot_token": snapshot_token,
+                }),
+            );
+        }
         let snapshot = loaded.to_binary_dump_bytes();
         let destination = destination.as_ref();
         if let Some(parent) = destination.parent() {
@@ -153,7 +191,7 @@ impl RedDBRuntime {
         let replica_id = self.resolve_replica_id();
         let bootstrapper =
             crate::replication::replica::ReplicaBootstrapper::new(replica_id.clone());
-        let source_lsn = self.config_u64("red.replication.last_applied_lsn", 0);
+        let source_lsn = self.config_u64("replication.last_applied_lsn", 0);
         let _ = std::fs::remove_file(&pending_path);
 
         let chunk_bytes = chunk_bytes.max(1);
@@ -259,20 +297,19 @@ impl RedDBRuntime {
                 current
                     .verify_snapshot_parts(&parts_root)
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
-                let checkpoint_lsn = self.materialize_primary_replica_basebackup_snapshot(
-                    current,
-                    &parts_root,
-                    &pending_path,
-                )?;
-                self.inner.db.store().set_config_tree(
-                    "red.replication",
-                    &crate::json!({
-                        "state": "rebootstrap_ready",
-                        "rebootstrap_pending_path": pending_path.display().to_string(),
-                        "rebootstrap_checkpoint_lsn": checkpoint_lsn,
-                        "rebootstrap_timeline": current.timeline.0,
-                    }),
-                );
+                let snapshot_token = token.as_deref().ok_or_else(|| {
+                    RedDBError::Internal(
+                        "replication snapshot omitted its installation token".into(),
+                    )
+                })?;
+                let checkpoint_lsn = self
+                    .materialize_primary_replica_basebackup_snapshot_for_replica(
+                        current,
+                        &parts_root,
+                        &pending_path,
+                        Some(&replica_id),
+                        Some(snapshot_token),
+                    )?;
                 let data_path =
                     self.inner.db.options().data_path.as_ref().ok_or_else(|| {
                         RedDBError::Internal("replica data path unavailable".into())
@@ -286,6 +323,15 @@ impl RedDBRuntime {
                     },
                 )
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                self.inner.db.store().set_config_tree(
+                    "replication",
+                    &crate::json!({
+                        "state": "rebootstrap_ready",
+                        "rebootstrap_pending_path": pending_path.display().to_string(),
+                        "rebootstrap_checkpoint_lsn": checkpoint_lsn,
+                        "rebootstrap_timeline": current.timeline.0,
+                    }),
+                );
                 bootstrap_handle
                     .complete(current.chunks.len() as u64, 0)
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
@@ -366,7 +412,9 @@ impl RedDBRuntime {
         let Some(catalog) = self.primary_replica_slot_catalog()? else {
             return Ok(None);
         };
-        let current_lsn = self.primary_logical_head_lsn().max(self.cdc_current_lsn());
+        let current_lsn = self
+            .primary_logical_head_lsn()
+            .max(self.replication_commit_lsn());
         let fork_lsns = self.primary_replica_fork_lsns()?;
         Ok(Some(
             plan.plan_wal_retention_with_fork_lsns(&catalog, &fork_lsns, current_lsn)
@@ -463,7 +511,7 @@ impl RedDBRuntime {
             reddb_file::RejoinDecision::Reclone => ("reclone_required", 0, 0, 0),
         };
         self.inner.db.store().set_config_tree(
-            "red.replication",
+            "replication",
             &crate::json!({
                 "state": state,
                 "rejoin_node_timeline": node_timeline.0,
@@ -483,7 +531,9 @@ impl RedDBRuntime {
     pub fn prune_primary_replica_wal_segments(
         &self,
     ) -> RedDBResult<Option<reddb_file::WalPruneResult>> {
-        let current_lsn = self.primary_logical_head_lsn().max(self.cdc_current_lsn());
+        let current_lsn = self
+            .primary_logical_head_lsn()
+            .max(self.replication_commit_lsn());
         self.prune_primary_replica_wal_segments_at(current_lsn)
     }
 
@@ -525,7 +575,7 @@ impl RedDBRuntime {
         self.refresh_replication_flow_control();
         let current_lsn = self
             .primary_logical_head_lsn()
-            .max(self.cdc_current_lsn())
+            .max(self.replication_commit_lsn())
             .max(applied_lsn)
             .max(durable_lsn);
         self.prune_primary_replica_wal_segments_at(current_lsn)
@@ -557,6 +607,33 @@ impl RedDBRuntime {
         let promoted = history
             .promotion_history(&candidate, parent.next(), now_ms)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        if let Some(mut catalog) = self.primary_replica_slot_catalog()? {
+            if !history
+                .entries
+                .iter()
+                .any(|entry| entry.timeline == catalog.timeline)
+            {
+                return Err(RedDBError::Internal(format!(
+                    "slot catalog timeline {} is outside the promotion history",
+                    catalog.timeline.0
+                )));
+            }
+            let previous_count = catalog.slots.len();
+            catalog.slots.retain(|slot| slot.replica_id != replica_id);
+            if catalog.slots.len() != previous_count {
+                // The candidate is becoming the writer, not a downstream
+                // consumer of itself. Retire its old slot durably before
+                // publishing the timeline so a crash cannot resurrect the pin.
+                crate::replication::metadata::write(
+                    &store,
+                    crate::replication::metadata::SLOTS,
+                    &catalog
+                        .encode()
+                        .map_err(|err| RedDBError::Internal(err.to_string()))?,
+                )
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            }
+        }
         crate::replication::metadata::write(
             &self.inner.db.store(),
             crate::replication::metadata::TIMELINE,

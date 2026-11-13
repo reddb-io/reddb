@@ -91,8 +91,7 @@ pub fn scrub_paged_trees(path: &Path) -> Result<PagedTreeScrubReport> {
 fn inspect_all_trees(source: &Arc<Source>) -> Result<(PagedTreeScrubReport, Catalog)> {
     let catalog = Catalog::read(source)?;
     ensure(
-        source.header.version < f::file_format::PAGE_DISK_RESIDENCY_FILE_VERSION
-            || catalog.resume.is_some(),
+        !source.header.requires_disk_residency() || catalog.resume.is_some(),
         "prepared disk-resident file has no resume catalog",
     )?;
     let mut report = PagedTreeScrubReport::default();
@@ -159,7 +158,7 @@ fn inspect_tree(
             )?;
             return Ok(0);
         }
-        let tree = BTree::with_root(Arc::clone(source), root);
+        let tree = source.tree(root)?;
         let (expected, _) = inventory_tree(source, &tree, true)?;
         let mut cursor = tree.cursor_first()?;
         let mut previous: Option<Vec<u8>> = None;

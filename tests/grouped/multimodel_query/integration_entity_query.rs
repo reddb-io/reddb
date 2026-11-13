@@ -1652,6 +1652,7 @@ fn test_sql_insert_row_ttl_ms_expiration() {
         "row INSERT with _ttl_ms should succeed: {:?}",
         inserted.err()
     );
+    std::thread::sleep(std::time::Duration::from_millis(10));
 
     let before = query
         .execute(ExecuteQueryInput {
@@ -1660,8 +1661,8 @@ fn test_sql_insert_row_ttl_ms_expiration() {
         .expect("SELECT before retention should succeed");
     assert_eq!(
         before.result.records.len(),
-        1,
-        "row should exist before retention sweep"
+        0,
+        "an expired row must be hidden before physical retention cleanup"
     );
 
     native
@@ -1699,7 +1700,6 @@ fn test_sql_insert_node_ttl_expiration() {
         "node INSERT with ttl should succeed: {:?}",
         inserted.err()
     );
-
     let before_scan = query
         .scan(ScanCollectionInput {
             collection: "ttl_nodes".into(),
@@ -1791,7 +1791,6 @@ fn test_sql_insert_edge_ttl_expiration() {
         "edge INSERT with _ttl_ms should succeed: {:?}",
         inserted.err()
     );
-
     let before_scan = query
         .scan(ScanCollectionInput {
             collection: "ttl_edges".into(),
@@ -1866,8 +1865,8 @@ fn test_sql_update_ttl_after_insert() {
         .expect("SELECT before retention should succeed");
     assert_eq!(
         before.result.records.len(),
-        1,
-        "row should exist before retention sweep"
+        0,
+        "an expired row must be hidden before physical retention cleanup"
     );
 
     native
@@ -2049,8 +2048,8 @@ fn test_create_table_with_ttl_applies_default_to_api_insert() {
         .expect("SELECT before retention should succeed");
     assert_eq!(
         before.result.records.len(),
-        1,
-        "row should exist before retention sweep"
+        0,
+        "a row with the table's 0s default TTL must be hidden before physical cleanup"
     );
 
     native
@@ -2245,7 +2244,7 @@ fn test_secret_encrypt_and_compute_without_implicit_reveal() {
     // (bytes) which formatters mask.
     query
         .execute(ExecuteQueryInput {
-            query: "SET CONFIG red.config.secret.auto_decrypt = false".into(),
+            query: "SET CONFIG secret.auto_decrypt = false".into(),
         })
         .expect("SET CONFIG should succeed");
 
@@ -2268,7 +2267,7 @@ fn test_secret_encrypt_and_compute_without_implicit_reveal() {
 
     query
         .execute(ExecuteQueryInput {
-            query: "SET CONFIG red.config.secret.auto_decrypt = true".into(),
+            query: "SET CONFIG secret.auto_decrypt = true".into(),
         })
         .expect("SET CONFIG auto_decrypt=true should succeed");
     query
@@ -2301,7 +2300,7 @@ fn test_secret_encrypt_and_compute_without_implicit_reveal() {
 
     query
         .execute(ExecuteQueryInput {
-            query: "SET CONFIG red.config.secret.auto_decrypt = false".into(),
+            query: "SET CONFIG secret.auto_decrypt = false".into(),
         })
         .expect("SET CONFIG auto_decrypt=false should succeed");
     let updated_masked = query
@@ -3126,13 +3125,13 @@ fn test_select_config_function_accepts_bare_path_and_default() {
 
     query
         .execute(ExecuteQueryInput {
-            query: "SET CONFIG red.ai.default.provider = 'groq'".into(),
+            query: "SET CONFIG ai.default.provider = 'groq'".into(),
         })
         .expect("SET CONFIG should succeed");
 
     let configured = query
         .execute(ExecuteQueryInput {
-            query: "SELECT CONFIG(red.ai.default.provider, openai) AS provider".into(),
+            query: "SELECT CONFIG(ai.default.provider, openai) AS provider".into(),
         })
         .expect("scalar CONFIG() select should succeed");
 
@@ -3144,7 +3143,7 @@ fn test_select_config_function_accepts_bare_path_and_default() {
 
     let fallback = query
         .execute(ExecuteQueryInput {
-            query: "SELECT CONFIG(red.ai.default.missing, openai) AS provider".into(),
+            query: "SELECT CONFIG(ai.default.missing, openai) AS provider".into(),
         })
         .expect("CONFIG() fallback select should succeed");
 

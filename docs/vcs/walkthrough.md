@@ -61,9 +61,9 @@ What happened under the hood:
 - `snapshot_manager.begin()` + `commit()` allocated xid 1.
 - SHA-256 of `("reddb-commit-v1" || 1 || "" || "alice" ||
   "alice@example.com" || "initial" || now_ms)` → commit hash.
-- Row inserted into `red_commits`.
+- Row inserted into `red.vcs.commits`.
 - `refs/heads/main` created, pointing at the new hash.
-- `red_worksets` row for connection 1 updated.
+- `red.vcs.worksets` row for connection 1 updated.
 
 ## 2. Branch off and add more commits
 
@@ -149,12 +149,12 @@ merge_state ms:<16-hex>
 ```
 
 A merge commit with two parents (`main`'s previous tip and
-`feature-x`'s tip) was created. `red_merge_state` holds the
+`feature-x`'s tip) was created. `red.vcs.merge_state` holds the
 metadata for any conflicts that arose.
 
 On an empty database there are no user-data conflicts, so
 `outcome.conflicts == []`. When user rows diverge on both sides,
-`red_conflicts` gets populated — see §10.
+`red.vcs.conflicts` gets populated — see §10.
 
 ## 7. Cherry-pick a single commit
 
@@ -302,12 +302,11 @@ red vcs tag v1.0 main
 
 ## 13. What's still manual
 
-- **Data-level conflict resolution** — `vcs_conflict_resolve` cannot
-  yet apply a resolved value to the user collection. It returns an error
-  and retains the conflict; commits on that workset are rejected while a
-  merge remains pending.
-- **Hard reset** — Phase 6.2. Current workaround: `reset --soft`
-  + manual DELETE of the unwanted rows.
+Conflict resolution persists the selected base, ours, theirs or deletion choice.
+After every conflict is resolved, committing applies the merged data and moves
+HEAD atomically. Hard reset restores the chosen historical data view and starts
+a fresh writer epoch.
+
 - **Remote push/pull** — Phase 7. Today the VCS is single-node;
   replication of commits/refs rides on the existing WAL + CDC
   pipeline, but there's no high-level `vcs push`/`vcs pull` yet.

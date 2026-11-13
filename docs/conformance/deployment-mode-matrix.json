@@ -25,7 +25,8 @@
           "status": "partial",
           "tests": [
             "crates/reddb-client/tests/conformance.rs",
-            "crates/reddb-server/tests/serverless_file_runtime.rs"
+            "crates/reddb-server/tests/serverless_file_runtime.rs",
+            "crates/reddb-server/tests/serverless_multi_writer_runtime_e2e.rs"
           ],
           "gap": "Client and serverless runtime are tested separately; no managed attach/warm/cold journey crosses the public client."
         },
@@ -46,7 +47,8 @@
           "status": "partial",
           "tests": [
             "crates/reddb-client/tests/topology_e2e.rs",
-            "crates/reddb-server/tests/multi_writer_cluster_drill_e2e.rs"
+            "crates/reddb-server/tests/multi_writer_cluster_drill_e2e.rs",
+            "crates/reddb-server/tests/cluster_multi_writer_runtime_e2e.rs"
           ],
           "gap": "Topology and server drill tests are separate; range-owner redirects and idempotent client retry are not exercised end to end."
         }

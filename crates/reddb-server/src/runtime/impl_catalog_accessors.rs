@@ -77,10 +77,7 @@ impl RedDBRuntime {
             );
             return Ok(());
         }
-        self.inner
-            .db
-            .upload_to_remote_backend()
-            .map_err(|err| RedDBError::Engine(err.to_string()))
+        self.publish_remote_snapshot()
     }
 
     pub(super) fn checkpoint_local(&self) -> RedDBResult<()> {
@@ -121,22 +118,28 @@ impl RedDBRuntime {
         self.index_store_ref().clear_paged_btree_overlays();
         self.inner.probabilistic.replayed_names.lock().clear();
         drop(publication);
-        let checkpoint_lsn = self.cdc_current_lsn();
+        let checkpoint_lsn = self.replication_commit_lsn();
         self.inner
             .checkpoint_projection_stats
             .record_checkpoint(checkpoint_lsn, started.elapsed().as_millis() as u64);
         Ok(())
     }
 
-    /// Guard remote-mutating operations on the writer lease.
-    /// Returns `Ok(())` when no remote backend is configured (the
-    /// lease is irrelevant) or the lease state is `NotRequired` /
-    /// `Held`. Returns `RedDBError::ReadOnly` when the lease is
-    /// `NotHeld`, with an audit-friendly action label so the caller
-    /// can record the rejection.
+    /// Guard remote mutations on replication role and writer lease.
+    /// With a backend configured, replicas cannot publish and other nodes
+    /// require a `NotRequired` or `Held` lease state. Local checkpoints can
+    /// still finish when this guard returns `RedDBError::ReadOnly`.
     pub(crate) fn assert_remote_write_allowed(&self, action: &str) -> RedDBResult<()> {
         if self.inner.db.remote_backend.is_none() {
             return Ok(());
+        }
+        if matches!(
+            self.inner.write_gate.role(),
+            crate::replication::ReplicationRole::Replica { .. }
+        ) {
+            return Err(RedDBError::ReadOnly(format!(
+                "replica cannot publish remote data — {action} blocked"
+            )));
         }
         match self.inner.write_gate.lease_state() {
             crate::runtime::write_gate::LeaseGateState::NotHeld => {
@@ -153,6 +156,77 @@ impl RedDBRuntime {
             }
             _ => Ok(()),
         }
+    }
+
+    pub(super) fn publish_remote_snapshot(&self) -> RedDBResult<()> {
+        self.assert_remote_write_allowed("snapshot publication")?;
+        if let Some(lifecycle) = self.lease_lifecycle() {
+            let store = self.inner.db.store();
+            // Other snapshot entrypoints already hold this reentrant lock.
+            // Keep a consistent publication -> lease transition lock order.
+            let _publication = store.vault_publication_lock.lock();
+            if lifecycle.publish_snapshot(|| self.capture_serverless_snapshot())? {
+                return Ok(());
+            }
+        }
+        if self.inner.db.is_paged()
+            && self.inner.db.remote_backend.is_some()
+            && self.inner.db.remote_key.is_some()
+        {
+            // Native writers hold a lifetime file lock. Copy through the
+            // pager's own handle before handing the checkpoint to a backend.
+            let snapshot = self.capture_serverless_snapshot()?;
+            self.assert_remote_write_allowed("checkpoint upload")?;
+            return self
+                .inner
+                .db
+                .upload_checkpoint_to_remote_backend(snapshot.path())
+                .map_err(|err| RedDBError::Engine(err.to_string()));
+        }
+        self.inner
+            .db
+            .upload_to_remote_backend()
+            .map_err(|err| RedDBError::Engine(err.to_string()))
+    }
+
+    pub(crate) fn capture_serverless_snapshot(
+        &self,
+    ) -> RedDBResult<reddb_file::ServerlessWriterLeaseTempFile> {
+        use reddb_file::VfsFile;
+        use std::io::Write;
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        self.checkpoint_local()?;
+        let snapshot = reddb_file::ServerlessWriterLeaseTempFile::new("snapshot-payload");
+        if let Some(pager) = store.pager() {
+            // Use the pager's own handle: Windows excludes reads through any
+            // second handle while the native writer owns the file lock.
+            pager
+                .with_file(|source| -> std::io::Result<()> {
+                    let mut output = std::fs::File::create(snapshot.path())?;
+                    source.seek(std::io::SeekFrom::Start(0))?;
+                    let mut buffer = [0u8; 65536];
+                    loop {
+                        let count = source.read(&mut buffer)?;
+                        if count == 0 {
+                            break;
+                        }
+                        output.write_all(&buffer[..count])?;
+                    }
+                    output.sync_all()
+                })
+                .map_err(|err| RedDBError::Internal(err.to_string()))?
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        } else {
+            let path = self.inner.db.path().ok_or_else(|| {
+                RedDBError::InvalidOperation(
+                    "serverless snapshots require persistent local storage".into(),
+                )
+            })?;
+            std::fs::copy(path, snapshot.path())
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
+        Ok(snapshot)
     }
 
     pub fn run_maintenance(&self) -> RedDBResult<()> {
@@ -183,7 +257,7 @@ impl RedDBRuntime {
             .clamp(1, 16 * 1024 * 1024);
         let (snapshot, _retention) = self.native_read_snapshot()?;
         let _snapshot_guard = super::impl_core::CurrentSnapshotGuard::install(snapshot.clone());
-        let (total, items) = manager.try_page_in_id_order_at_snapshot(
+        let (total, items) = manager.try_page_in_id_order_where_at_snapshot(
             Some(&snapshot),
             offset,
             limit,
@@ -522,6 +596,36 @@ mod security_boundary_tests {
         });
 
         assert!(runtime.db().store().get("docs", foreign_id).is_some());
+    }
+
+    #[test]
+    fn scan_collection_pages_the_mvcc_view_across_rollback() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE docs (id INT, body TEXT)")
+            .expect("table");
+        runtime
+            .execute_query("INSERT INTO docs (id, body) VALUES (1, 'kept')")
+            .expect("seed row");
+
+        runtime.execute_query("BEGIN").expect("begin");
+        runtime
+            .execute_query("DELETE FROM docs WHERE id = 1")
+            .expect("delete in transaction");
+        let deleted = runtime
+            .scan_collection("docs", None, 1)
+            .expect("scan own transaction");
+        assert_eq!(deleted.total, 0);
+        assert!(deleted.items.is_empty());
+
+        runtime.execute_query("ROLLBACK").expect("rollback");
+        let restored = runtime
+            .scan_collection("docs", None, 1)
+            .expect("scan after rollback");
+        assert_eq!(restored.total, 1);
+        assert_eq!(restored.items.len(), 1);
+        assert_eq!(text_field(&restored.items[0], "body"), Some("kept"));
+        assert_eq!(restored.next, None);
     }
 
     #[test]

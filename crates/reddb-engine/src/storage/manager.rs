@@ -3536,51 +3536,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "diagnostic of segment fragmentation and retained history; no timing assertions"]
-    fn key_lookup_fragmentation_history_diagnostic() {
-        use std::{hint::black_box, time::Instant};
-        for segments in [1, 16, 64] {
-            for versions in [1, 100, 1000] {
-                let manager = SegmentManager::new("keys");
-                let mut id = 1;
-                for segment in 0..segments {
-                    let mut rows: Vec<_> = (0..128)
-                        .map(|_| {
-                            let entity = lookup_version(id, &format!("other-{id}"), 1, 0);
-                            id += 1;
-                            entity
-                        })
-                        .collect();
-                    for version in (segment..versions).step_by(segments) {
-                        rows.push(lookup_version(
-                            id,
-                            "history",
-                            version as u64 + 1,
-                            if version + 1 == versions {
-                                0
-                            } else {
-                                version as u64 + 2
-                            },
-                        ));
-                        id += 1;
-                    }
-                    manager.bulk_insert(rows).expect("rows");
-                    manager.force_seal().expect("seal");
-                }
-                let started = Instant::now();
-                for _ in 0..2000 {
-                    let xmin =
-                        manager.project_key_entity(black_box("history"), None, true, |entity| {
-                            entity.xmin
-                        });
-                    assert_eq!(xmin, Some(versions as u64));
-                }
-                eprintln!("segments={segments} versions={versions} reads=2000 elapsed_us={} resident_bytes={}", started.elapsed().as_micros(), manager.resident_bytes());
-            }
-        }
-    }
-
-    #[test]
     fn ordered_fingerprint_scan_matches_legacy_sort_without_cloning_rows() {
         let manager = SegmentManager::new("fingerprint");
         let row = |id, label: &str| {
@@ -4535,54 +4490,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "qualification: one million TTL deadlines"]
-    fn qualification_million_ttl_backlog_drains_in_bounded_batches() {
-        const ROWS: u64 = 1_000_000;
-        const BATCH: usize = 1_000;
-        const LOAD_BATCH: u64 = 10_000;
-        let manager = SegmentManager::new("ttl_million");
-        for first in (1..=ROWS).step_by(LOAD_BATCH as usize) {
-            let last = first.saturating_add(LOAD_BATCH - 1).min(ROWS);
-            manager
-                .bulk_insert(
-                    (first..=last)
-                        .map(|id| {
-                            UnifiedEntity::table_row(EntityId::new(id), "ttl_million", id, vec![])
-                        })
-                        .collect(),
-                )
-                .expect("million-row TTL fixture");
-        }
-        assert_eq!(manager.count(), ROWS as usize);
-        let entries = (1..=ROWS)
-            .map(|id| (1, EntityId::new(id)))
-            .collect::<Vec<_>>();
-        manager.restore_metadata_expiry_projection(&entries, true);
-        assert_eq!(manager.scheduled_metadata_expiry_count(), ROWS as usize);
-
-        let started = std::time::Instant::now();
-        let mut drained = 0u64;
-        loop {
-            let batch = manager.expired_metadata_ids(1, BATCH);
-            assert!(batch.len() <= BATCH);
-            if batch.is_empty() {
-                break;
-            }
-            drained += batch.len() as u64;
-            for entity_id in batch {
-                manager.remove_metadata_expiry(entity_id);
-            }
-        }
-
-        assert_eq!(drained, ROWS);
-        assert_eq!(manager.scheduled_metadata_expiry_count(), 0);
-        eprintln!(
-            "ttl_deadlines={ROWS} batch={BATCH} drain_ms={}",
-            started.elapsed().as_millis()
-        );
-    }
-
-    #[test]
     fn test_manager_query_by_kind() {
         let manager = SegmentManager::new("test");
 
@@ -5429,29 +5336,5 @@ mod tests {
             .get_metadata(ids[9])
             .expect("metadata survives the merge")
             .has("os"));
-    }
-
-    #[test]
-    #[ignore = "lifecycle events intentionally no-op since the emit-channel refactor; drain_events returns empty — see SegmentManager::emit"]
-    fn test_lifecycle_events() {
-        let manager = SegmentManager::new("test");
-
-        manager
-            .insert(UnifiedEntity::vector(
-                manager.next_entity_id(),
-                "v",
-                vec![0.1],
-            ))
-            .unwrap();
-
-        let events = manager.drain_events();
-
-        // Should have: SegmentCreated, EntityInserted
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, LifecycleEvent::SegmentCreated(_))));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, LifecycleEvent::EntityInserted(_, _))));
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-file"
-version = "1.30.1"
+version = "1.35.0"
 edition.workspace = true
 authors.workspace = true
 description = "RedDB file artifact layer: single-file .rdb layout, WAL, snapshots, checkpoints, locks, and recovery."
@@ -14,6 +14,10 @@ categories = ["database-implementations", "filesystem"]
 [lib]
 name = "reddb_file"
 path = "src/lib.rs"
+
+[features]
+default = ["full"]
+full = ["dep:fs2"]
 
 [dependencies]
 reddb-types = { workspace = true }
@@ -30,14 +34,14 @@ zstd = { version = "0.14.3", default-features = false }
 toml = "1.1"
 tempfile = "3"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-fs2 = "0.4"
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "espidf")))'.dependencies]
+fs2 = { version = "0.4", optional = true }
 
 [lints]
 workspace = true

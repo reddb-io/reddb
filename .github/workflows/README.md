@@ -1,8 +1,8 @@
 # Workflow cost policy
 
-Requested by the maintainer on 2026-11-05: keep automatic CI small and make
-expensive validation optional. `quick-checks.yml` is the only automatic
-quality workflow. It checks changed whitespace, workflow syntax, root/workspace
+Requested by the maintainer on 2026-11-11: keep automatic CI small and make
+expensive validation optional. `quick-checks.yml` is the only automatic quality
+workflow. It checks changed whitespace, workflow syntax, root/workspace
 manifests and this trigger policy on one standard Ubuntu runner, with a
 three-minute limit. It does not compile products or run full test suites.
 
@@ -123,7 +123,8 @@ The lightweight `Select platforms` job filters matrices before platform runners
 are allocated. Disabled platforms create no build/test runner. All native
 platforms can be disabled; jobs that require their artifacts then skip. Portable
 web packages and platform-independent orchestration keep their existing behavior. The
-three-minute automatic Quick checks policy and manual heavy-suite triggers remain.
+the automatic Quick checks lane remains separate from manual release-adjacent
+jobs.
 
 Example (change only future runs):
 

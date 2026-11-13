@@ -1,5 +1,6 @@
 //! Canonical storage errors shared by native and browser hosts.
 use super::entity::EntityId;
+#[cfg(feature = "full")]
 use super::segment::SegmentError;
 use std::fmt;
 
@@ -57,6 +58,7 @@ pub enum StoreError {
     /// Too many cross-references
     TooManyRefs(EntityId),
     /// Segment error
+    #[cfg(feature = "full")]
     Segment(SegmentError),
     /// I/O error
     Io(std::io::Error),
@@ -80,6 +82,7 @@ impl std::fmt::Display for StoreError {
             Self::CollectionNotFound(name) => write!(f, "Collection not found: {}", name),
             Self::EntityNotFound(id) => write!(f, "Entity not found: {}", id),
             Self::TooManyRefs(id) => write!(f, "Too many cross-references for entity: {}", id),
+            #[cfg(feature = "full")]
             Self::Segment(e) => write!(f, "Segment error: {:?}", e),
             Self::Io(e) => write!(f, "I/O error: {}", e),
             Self::StorageIntegrity(e) => write!(f, "{e}"),
@@ -98,6 +101,7 @@ impl std::fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
+#[cfg(feature = "full")]
 impl From<SegmentError> for StoreError {
     fn from(e: SegmentError) -> Self {
         Self::Segment(e)

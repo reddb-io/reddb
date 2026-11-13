@@ -162,7 +162,7 @@ path landed inside the 24h window:
   after the underlying row is actually gone, not on best-effort
   intent. Stops phantom CDC events.
 - **Flat-path metadata cleanup** — drop-collection now reaps
-  `partition.*` and `tenant_tables.*` markers from `red_config`.
+  `partition.*` and `tenant_tables.*` markers from `red.config`.
 - **Canonical sealed-segment mutations + durable bulk persist** —
   bulk write paths flush to the pager before acknowledging.
 - **Sealed-mutation, delete-ordering, unsafe-flag-rename, and

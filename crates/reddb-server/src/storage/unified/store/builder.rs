@@ -157,57 +157,6 @@ mod tests {
         assert!(store.get_refs_to(vuln_id).is_empty());
     }
 
-    /// Manual perf check for the #113 fast path. Pollutes `reverse_refs`
-    /// with a large dictionary of unrelated entries, then deletes a fresh
-    /// batch of cross-ref-free rows. The pre-fix code paid O(|reverse_refs|)
-    /// in `values_mut()` per call; the fast path makes it O(|batch|).
-    /// `cargo test --release -p reddb-server -- --ignored unindex_cross_refs_batch_fast_path_perf --nocapture`.
-    #[test]
-    #[ignore]
-    fn unindex_cross_refs_batch_fast_path_perf() {
-        let store = UnifiedStore::new();
-
-        // Seed a fat reverse_refs dictionary by creating cross-refs in
-        // a *separate* set of entities. These entries will be untouched
-        // by the delete batch below.
-        const SEED: usize = 50_000;
-        let mut sources = Vec::with_capacity(SEED);
-        let mut targets = Vec::with_capacity(SEED);
-        for i in 0..SEED {
-            let s = UnifiedEntity::table_row(store.next_entity_id(), "src", (i + 1) as u64, vec![]);
-            sources.push(store.insert_auto("src", s).unwrap());
-            let t = UnifiedEntity::table_row(store.next_entity_id(), "tgt", (i + 1) as u64, vec![]);
-            targets.push(store.insert_auto("tgt", t).unwrap());
-        }
-        for (s, t) in sources.iter().zip(targets.iter()) {
-            store
-                .add_cross_ref("src", *s, "tgt", *t, RefType::RelatedTo, 1.0)
-                .unwrap();
-        }
-
-        // Now insert a fresh batch of plain rows (no cross-refs at all).
-        const BATCH: usize = 100;
-        let mut victims = Vec::with_capacity(BATCH);
-        for i in 0..BATCH {
-            let row =
-                UnifiedEntity::table_row(store.next_entity_id(), "rows", (i + 1) as u64, vec![]);
-            victims.push(store.insert_auto("rows", row).unwrap());
-        }
-
-        let before_hits = store.unindex_cross_refs_fast_path_hits();
-        let start = std::time::Instant::now();
-        store.delete_batch("rows", &victims).unwrap();
-        let elapsed = start.elapsed();
-        let after_hits = store.unindex_cross_refs_fast_path_hits();
-
-        eprintln!(
-            "delete_batch({BATCH}) over {SEED} unrelated reverse-refs: \
-             {elapsed:?}, fast_path_hits +{}",
-            after_hits - before_hits,
-        );
-        assert_eq!(after_hits - before_hits, 1);
-    }
-
     #[test]
     fn test_expand_refs() {
         let store = UnifiedStore::new();
@@ -468,7 +417,7 @@ mod tests {
 
         let store = UnifiedStore::open(&path).unwrap();
         store.set_config_tree(
-            "red.system",
+            "system",
             &crate::json!({
                 "hostname": "test-host",
                 "arch": "x86_64",
@@ -476,7 +425,7 @@ mod tests {
             }),
         );
         let initial = store
-            .get_collection("red_config")
+            .get_collection("red.config")
             .map(|m| m.query_all(|_| true).len())
             .unwrap_or(0);
         assert!(initial >= 3);
@@ -484,7 +433,7 @@ mod tests {
 
         let reopened = UnifiedStore::open(&path).unwrap();
         let first_reopen = reopened
-            .get_collection("red_config")
+            .get_collection("red.config")
             .map(|m| m.query_all(|_| true).len())
             .unwrap_or(0);
         assert_eq!(first_reopen, initial);
@@ -492,7 +441,7 @@ mod tests {
 
         let reopened_again = UnifiedStore::open(&path).unwrap();
         let second_reopen = reopened_again
-            .get_collection("red_config")
+            .get_collection("red.config")
             .map(|m| m.query_all(|_| true).len())
             .unwrap_or(0);
         assert_eq!(second_reopen, initial);
@@ -503,20 +452,20 @@ mod tests {
         let store = UnifiedStore::new();
         let config_rows = |store: &UnifiedStore| {
             store
-                .get_collection("red_config")
+                .get_collection("red.config")
                 .map(|m| m.query_all(|_| true).len())
                 .unwrap_or(0)
         };
 
-        store.set_config_tree("red.system", &crate::json!({ "pid": 1_u64, "os": "linux" }));
+        store.set_config_tree("system", &crate::json!({ "pid": 1_u64, "os": "linux" }));
         let after_first = config_rows(&store);
         for pid in 2..=5_u64 {
-            store.set_config_tree("red.system", &crate::json!({ "pid": pid, "os": "linux" }));
+            store.set_config_tree("system", &crate::json!({ "pid": pid, "os": "linux" }));
         }
 
         assert_eq!(config_rows(&store), after_first);
         assert_eq!(
-            store.get_config("red.system.pid"),
+            store.get_config("system.pid"),
             Some(reddb_types::Value::UnsignedInteger(5))
         );
     }
@@ -524,10 +473,10 @@ mod tests {
     #[test]
     fn set_config_tree_skips_keys_that_already_hold_the_value() {
         let store = UnifiedStore::new();
-        store.set_config_tree("red.system", &crate::json!({ "os": "linux", "pid": 1_u64 }));
+        store.set_config_tree("system", &crate::json!({ "os": "linux", "pid": 1_u64 }));
         let ids_of = |store: &UnifiedStore| {
             let mut ids: Vec<u64> = store
-                .get_collection("red_config")
+                .get_collection("red.config")
                 .map(|m| m.query_all(|_| true).iter().map(|e| e.id.raw()).collect())
                 .unwrap_or_default();
             ids.sort_unstable();
@@ -535,34 +484,34 @@ mod tests {
         };
         let before = ids_of(&store);
 
-        store.set_config_tree("red.system", &crate::json!({ "os": "linux", "pid": 1_u64 }));
+        store.set_config_tree("system", &crate::json!({ "os": "linux", "pid": 1_u64 }));
         assert_eq!(
             ids_of(&store),
             before,
             "identical values must not rewrite rows"
         );
 
-        store.set_config_tree("red.system", &crate::json!({ "os": "linux", "pid": 2_u64 }));
+        store.set_config_tree("system", &crate::json!({ "os": "linux", "pid": 2_u64 }));
         let after = ids_of(&store);
         assert_eq!(after.len(), before.len());
         assert_ne!(after, before, "a changed value is rewritten");
         assert_eq!(
-            store.get_config("red.system.pid"),
+            store.get_config("system.pid"),
             Some(reddb_types::Value::UnsignedInteger(2))
         );
         assert_eq!(
-            store.get_config("red.system.os"),
+            store.get_config("system.os"),
             Some(reddb_types::Value::text("linux"))
         );
     }
 
     fn add_duplicate_system_value(store: &UnifiedStore) {
-        let mut row = UnifiedEntity::table_row(EntityId::new(0), "red_config", 0, vec![]);
+        let mut row = UnifiedEntity::table_row(EntityId::new(0), "red.config", 0, vec![]);
         row.data = EntityData::Row(RowData::with_names(
-            vec![Value::text("red.system.value"), Value::text("duplicate")],
+            vec![Value::text("system.value"), Value::text("duplicate")],
             vec!["key".into(), "value".into()],
         ));
-        store.insert_auto("red_config", row).unwrap();
+        store.insert_auto("red.config", row).unwrap();
     }
 
     #[test]
@@ -572,7 +521,7 @@ mod tests {
             let path = directory.path().join("config.rdb");
             let mut store = UnifiedStore::new();
             store
-                .try_set_config_tree("red.system", &crate::json!({"value": "old", "other": 1}))
+                .try_set_config_tree("system", &crate::json!({"value": "old", "other": 1}))
                 .unwrap();
             add_duplicate_system_value(&store);
             let snapshot = store.to_binary_dump_bytes();
@@ -582,7 +531,7 @@ mod tests {
             store.config.embedded_wal_path = Some(path.clone());
             store.config.durability_mode = mode;
             store
-                .try_set_config_tree("red.system", &crate::json!({"value": "new", "other": 2}))
+                .try_set_config_tree("system", &crate::json!({"value": "new", "other": 2}))
                 .unwrap();
             let open = crate::storage::EmbeddedRdbArtifact::open(&path).unwrap();
             assert_eq!(
@@ -594,19 +543,19 @@ mod tests {
                 replay.apply_encoded_store_wal_action(&payload).unwrap();
             }
             assert_eq!(
-                replay.get_config("red.system.value"),
+                replay.get_config("system.value"),
                 Some(reddb_types::Value::text("new"))
             );
             assert_eq!(
                 replay
-                    .get_collection("red_config")
+                    .get_collection("red.config")
                     .unwrap()
                     .query_all(|_| true)
                     .len(),
                 2
             );
             assert_eq!(
-                replay.get_config("red.system.other"),
+                replay.get_config("system.other"),
                 Some(reddb_types::Value::UnsignedInteger(2))
             );
         }
@@ -618,29 +567,29 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let mut store = UnifiedStore::new();
             store
-                .try_set_config_tree("red.system", &crate::json!({"value": "old", "other": 1}))
+                .try_set_config_tree("system", &crate::json!({"value": "old", "other": 1}))
                 .unwrap();
             add_duplicate_system_value(&store);
             // A directory cannot be opened as the embedded WAL artifact.
             store.config.embedded_wal_path = Some(directory.path().to_path_buf());
             store.config.durability_mode = mode;
             assert!(store
-                .try_set_config_tree("red.system", &crate::json!({"value": "new", "other": 2}))
+                .try_set_config_tree("system", &crate::json!({"value": "new", "other": 2}))
                 .is_err());
             assert_eq!(
-                store.get_config("red.system.value"),
+                store.get_config("system.value"),
                 Some(reddb_types::Value::text("duplicate"))
             );
             assert_eq!(
                 store
-                    .get_collection("red_config")
+                    .get_collection("red.config")
                     .unwrap()
                     .query_all(|_| true)
                     .len(),
                 3
             );
             assert_eq!(
-                store.get_config("red.system.other"),
+                store.get_config("system.other"),
                 Some(reddb_types::Value::UnsignedInteger(1))
             );
             assert!(!UnifiedStore::deferred_store_wal_capture_active());
@@ -663,7 +612,7 @@ mod tests {
                     DurabilityMode::Strict
                 };
             store
-                .try_set_config_tree("red.system", &crate::json!({"value": "new", "other": 2}))
+                .try_set_config_tree("system", &crate::json!({"value": "new", "other": 2}))
                 .unwrap();
             panic!("crash point was not reached");
         }
@@ -677,7 +626,7 @@ mod tests {
                 let path = directory.path().join(format!("{mode:?}-{point}.rdb"));
                 let store = UnifiedStore::new();
                 store
-                    .try_set_config_tree("red.system", &crate::json!({"value": "old", "other": 1}))
+                    .try_set_config_tree("system", &crate::json!({"value": "old", "other": 1}))
                     .unwrap();
                 let snapshot = store.to_binary_dump_bytes();
                 crate::storage::EmbeddedRdbArtifact::create_with_snapshot(&path, &snapshot)
@@ -704,8 +653,8 @@ mod tests {
                     recovered.apply_encoded_store_wal_action(&payload).unwrap();
                 }
                 let values = (
-                    recovered.get_config("red.system.value"),
-                    recovered.get_config("red.system.other"),
+                    recovered.get_config("system.value"),
+                    recovered.get_config("system.other"),
                 );
                 assert!(
                     values
@@ -722,7 +671,7 @@ mod tests {
                 );
                 assert_eq!(
                     recovered
-                        .get_collection("red_config")
+                        .get_collection("red.config")
                         .unwrap()
                         .query_all(|_| true)
                         .len(),

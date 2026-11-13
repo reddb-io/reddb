@@ -1040,6 +1040,7 @@ fn engine_and_server_do_not_redeclare_core_file_format_constants() {
     let pager = read(root.join("crates/reddb-server/src/storage/engine/pager.rs"));
     let pager_impl = read(root.join("crates/reddb-server/src/storage/engine/pager/impl.rs"));
     let pager_io = read(root.join("crates/reddb-engine/src/storage/pager_io.rs"));
+    let pager_io_staging = read(root.join("crates/reddb-engine/src/storage/pager_io/staging.rs"));
     let shared_pager = read(root.join("crates/reddb-engine/src/storage/pager.rs"));
     let column_block = read(root.join("crates/reddb-server/src/storage/unified/column_block.rs"));
     let bloom_segment = read(root.join("crates/reddb-server/src/storage/index/bloom_segment.rs"));
@@ -1535,9 +1536,9 @@ fn engine_and_server_do_not_redeclare_core_file_format_constants() {
             && shared_pager.contains("pager_io::recover_from_dwb")
             && shared_pager.contains("pager_io::write_superblock_slot")
             && pager_io.contains("reddb_file::encode_paged_dwb_frame")
-            && pager_io.contains("reddb_file::decode_paged_dwb_frame")
+            && pager_io_staging.contains("reddb_file::decode_paged_dwb_header")
             && pager_io.contains("reddb_file::seal_paged_superblock_slot")
-            && shared_pager.contains("reddb_file::decode_database_header")
+            && shared_pager.contains("reddb_file::decode_published_database_header")
             && shared_pager.contains("reddb_file::encode_database_header")
             && pager_impl.contains("reddb_file::paged_encryption_marker_present")
             && pager_impl.contains("reddb_file::write_paged_encryption_marker_and_header")

@@ -16,7 +16,7 @@
 //! - threading [`Applied::temperature`] / [`Applied::seed`] into the
 //!   provider request,
 //! - writing what was *actually* applied (not what was requested) into
-//!   `red_ask_audit` per AC.
+//!   `red.ask.audit` per AC.
 //!
 //! ## Policy
 //!

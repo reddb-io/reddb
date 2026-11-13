@@ -260,7 +260,7 @@ fn try_evaluate_runtime_config_function(
         if super::execution_context::config_read_permitted(&key) {
             let bare = key.strip_prefix("red.config/").unwrap_or(&key);
             for candidate in [key.as_str(), bare] {
-                if let Some(value) = try_lookup_latest_kv_value(db, "red_config", candidate)? {
+                if let Some(value) = try_lookup_latest_kv_value(db, "red.config", candidate)? {
                     return Ok(Some(value));
                 }
             }
@@ -444,7 +444,7 @@ pub(super) fn try_lookup_latest_kv_value(
     // The parser rebuilds dotted paths by concatenating token display
     // strings; any segment that collides with a SQL keyword (DEFAULT,
     // LEFT, IN, …) comes back uppercase, but SET CONFIG stores keys
-    // lowercase. Normalise here so CONFIG(red.ai.default.provider)
+    // lowercase. Normalise here so CONFIG(ai.default.provider)
     // matches the key persisted by SET CONFIG.
     let key_lc = key.to_ascii_lowercase();
     super::function_budget::try_scan(
@@ -477,7 +477,7 @@ fn evaluate_runtime_config_function(
         return Some(value);
     }
     if let Some(db) = db {
-        // #1743 — gate the raw `red_config` fallback on `config:read`; without
+        // #1743 — gate the raw `red.config` fallback on `config:read`; without
         // it a principal denied by `current_config_value` would leak the value
         // through this bypass path.
         if crate::runtime::impl_core::config_read_permitted(&key) {
@@ -485,8 +485,8 @@ fn evaluate_runtime_config_function(
             // stores under the bare key — so try the stripped key too (#1370).
             let key_str: &str = key.as_ref();
             let bare = key_str.strip_prefix("red.config/").unwrap_or(key_str);
-            if let Some(value) = lookup_latest_kv_value(db, "red_config", &key)
-                .or_else(|| lookup_latest_kv_value(db, "red_config", bare))
+            if let Some(value) = lookup_latest_kv_value(db, "red.config", &key)
+                .or_else(|| lookup_latest_kv_value(db, "red.config", bare))
             {
                 return Some(value);
             }
@@ -505,7 +505,7 @@ fn evaluate_runtime_kv_function(
     let collection = expr_path_text(args.first()?)?;
     let key = expr_path_text(args.get(1)?)?;
     if let Some(db) = db {
-        // #1743 — `KV('red_config', …)` is the same leak surface as `$config`;
+        // #1743 — `KV('red.config', …)` is the same leak surface as `$config`;
         // gate config-collection reads on `config:read`. Other collections are
         // unaffected.
         if crate::runtime::impl_core::kv_read_permitted(&collection, &key) {
@@ -683,12 +683,12 @@ pub(super) fn embed_text_public(
 
 fn embed_text(db: &RedDB, text: &str, provider_hint: Option<&str>) -> Option<Value> {
     // Resolve provider from explicit hint, then fall back to the
-    // runtime-wide default captured in `red_config`. Ollama and other
+    // runtime-wide default captured in `red.config`. Ollama and other
     // OpenAI-compatible endpoints share the same embeddings wire shape;
     // only the api_base and model differ.
     let kv_getter = |k: &str| -> Result<Option<String>, crate::RedDBError> {
         Ok(
-            lookup_latest_kv_value(db, "red_config", k).and_then(|v| match v {
+            lookup_latest_kv_value(db, "red.config", k).and_then(|v| match v {
                 Value::Text(s) => Some(s.to_string()),
                 _ => None,
             }),
@@ -709,7 +709,7 @@ fn embed_text(db: &RedDB, text: &str, provider_hint: Option<&str>) -> Option<Val
     let crate::ai::AiConnection { api_key, api_base } =
         crate::ai::resolve_connection(&provider, None, &|kv_key| {
             Ok(
-                lookup_latest_kv_value(db, "red_config", kv_key).and_then(|v| match v {
+                lookup_latest_kv_value(db, "red.config", kv_key).and_then(|v| match v {
                     Value::Text(s) => Some(s.to_string()),
                     _ => None,
                 }),

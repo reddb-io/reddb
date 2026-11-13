@@ -1,6 +1,7 @@
-//! Canonical logical entity adapter for native store versions V1 through V13.
+//! Canonical logical entity adapter for native store versions V1 through V14.
 //! Physical record framing and value bytes remain owned by `reddb-file`.
 use super::entity::*;
+use crate::catalog::CollectionContract;
 use reddb_file::native_store::{
     write_native_varu32 as write_varu32, write_native_varu64 as write_varu64,
 };
@@ -11,8 +12,44 @@ use reddb_file::{
 };
 use std::collections::HashMap;
 
+/// Mandatory paged-file capabilities promised by a persisted collection schema.
+pub fn required_file_capabilities_for_contract(contract: &CollectionContract) -> u64 {
+    contract
+        .declared_columns
+        .iter()
+        .fold(0, |required, column| {
+            required
+                | reddb_types::DataType::from_sql_name(&column.data_type).map_or(0, |data_type| {
+                    reddb_file::native_value::required_file_capabilities_for_data_type(data_type)
+                })
+        })
+}
+
 fn persistent_name(name: &str) -> &str {
     super::system_collection_names::canonical_or_self(name)
+}
+
+/// Mandatory paged-file capabilities needed by an encoded entity.
+pub fn required_file_capabilities(entity: &UnifiedEntity) -> u64 {
+    fn values<'a>(values: impl Iterator<Item = &'a reddb_types::Value>) -> u64 {
+        values.fold(0, |required, value| {
+            required | reddb_file::native_value::required_file_capabilities(value)
+        })
+    }
+
+    match &entity.data {
+        EntityData::Row(row) => row.named.as_ref().map_or_else(
+            || values(row.columns.iter()),
+            |named| values(named.values()),
+        ),
+        EntityData::Node(node) => values(node.properties.values()),
+        EntityData::Edge(edge) => values(edge.properties.values()),
+        EntityData::TimeSeries(series) => values(series.fields.values()),
+        EntityData::QueueMessage(message) => {
+            reddb_file::native_value::required_file_capabilities(&message.payload)
+        }
+        EntityData::Vector(_) => 0,
+    }
 }
 
 /// Write entity to binary buffer
@@ -263,7 +300,7 @@ pub fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_ver
         write_varu64(buf, entity.xmin);
         write_varu64(buf, entity.xmax);
     }
-    if format_version >= STORE_VERSION_V13 {
+    if format_version >= STORE_VERSION_V14 {
         buf.push(u8::from(entity.branch_version().is_some()));
         if let Some(branch) = entity.branch_version() {
             write_varu64(buf, branch.origin);
@@ -474,7 +511,7 @@ fn read_entity_from_reader(
         entity.set_xmin(reader.variable_u64()?);
         entity.set_xmax(reader.variable_u64()?);
     }
-    if format_version >= STORE_VERSION_V13 {
+    if format_version >= STORE_VERSION_V14 {
         match reader.byte()? {
             0 => {}
             1 => {

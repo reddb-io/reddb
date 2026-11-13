@@ -3,7 +3,7 @@ use crate::application::SearchContextInput;
 use crate::storage::unified::context_index::{entity_tokens_for_search, tokenize_query};
 use reddb_rql::ast::Expr;
 
-const ASK_AUDIT_COLLECTION: &str = "red_ask_audit";
+const ASK_AUDIT_COLLECTION: &str = "red.ask.audit";
 const ASK_SYNTHESIS_SYSTEM_PROMPT: &str = include_str!("ai/prompts/ask_synthesis.txt");
 
 fn mark_table_scan_as_index_seek(
@@ -918,8 +918,11 @@ impl RedDBRuntime {
         let _scope = if crate::runtime::impl_core::capture_current_snapshot().is_none() {
             use super::statement_frame::{StatementExecutionFrame, StatementIdentity};
             Some(
-                StatementExecutionFrame::build(self, StatementIdentity::Text("SEARCH CONTEXT"))?
-                    .install(self),
+                StatementExecutionFrame::build(
+                    self,
+                    StatementIdentity::UncachedText("SEARCH CONTEXT"),
+                )?
+                .install(self),
             )
         } else {
             None
@@ -1362,7 +1365,7 @@ impl RedDBRuntime {
         // ADR 0068 / #1751: `ASK ... PLAN` returns the typed plan (routed
         // intent + candidate query) without executing the candidate and
         // without the synthesis call. It always runs the planner — even when
-        // the `red.config.ai.ask.planner` gate is off — because it is an
+        // the `ai.ask.planner` gate is off — because it is an
         // explicit request to inspect the plan. Zero execution, zero synthesis.
         if ask.plan_only {
             match self.execute_ask_planner_prepass(raw_query, ask, true)? {
@@ -1861,7 +1864,7 @@ impl RedDBRuntime {
     /// this slice can land the factual path without flipping the default
     /// RAG contract (a later slice makes planner-first the default).
     fn ask_planner_enabled(&self) -> bool {
-        self.config_bool("red.config.ai.ask.planner", false)
+        self.config_bool("ai.ask.planner", false)
     }
 
     /// ADR 0068 / #1747 / #1749 — the planner-first pre-pass, end-to-end.
@@ -1903,7 +1906,7 @@ impl RedDBRuntime {
         // Plan budget: a per-query `STEPS N` request clamped to the config
         // cap; total executed plan steps can never exceed it (ADR 0068 §4).
         let max_plan_steps = self.config_u64(
-            "red.config.ai.ask.max_plan_steps",
+            "ai.ask.max_plan_steps",
             ask_planner::DEFAULT_MAX_PLAN_STEPS as u64,
         ) as usize;
         let mut budget = ask_planner::PlanBudget::new(ask.steps, max_plan_steps);
@@ -3400,20 +3403,30 @@ impl RedDBRuntime {
             return false;
         }
 
-        let mut entries = self.inner.ask_answer_cache_entries.write();
-        let (ref mut keys, ref mut order) = *entries;
-        if keys.insert(key.to_string()) {
-            order.push_back(key.to_string());
-        }
-        while keys.len() > max_entries {
-            let Some(old_key) = order.pop_front() else {
-                break;
-            };
-            if keys.remove(&old_key) {
-                self.inner
-                    .result_blob_cache
-                    .invalidate_key(ASK_ANSWER_CACHE_NAMESPACE, &old_key);
+        let evicted = {
+            let mut entries = self.inner.ask_answer_cache_entries.write();
+            let (ref mut keys, ref mut order) = *entries;
+            if keys.insert(key.to_string()) {
+                order.push_back(key.to_string());
             }
+            let mut evicted = Vec::new();
+            while keys.len() > max_entries {
+                let Some(old_key) = order.pop_front() else {
+                    break;
+                };
+                if keys.remove(&old_key) {
+                    evicted.push(old_key);
+                }
+            }
+            evicted
+        };
+        // Durable invalidation enters the store publication fence. Never
+        // retain the Ask entry index across that I/O: database writes hold the
+        // fence before clearing this same index.
+        for old_key in evicted {
+            self.inner
+                .result_blob_cache
+                .invalidate_key(ASK_ANSWER_CACHE_NAMESPACE, &old_key);
         }
         true
     }
@@ -4180,7 +4193,7 @@ fn latest_config_value(runtime: &RedDBRuntime, key: &str) -> Option<reddb_types:
     use crate::application::ports::RuntimeEntityPort;
 
     runtime
-        .get_kv("red_config", key)
+        .get_kv("red.config", key)
         .ok()
         .flatten()
         .map(|(value, _)| value)
@@ -4337,6 +4350,8 @@ fn ask_audit_collection_contract() -> crate::physical::CollectionContract {
     crate::physical::CollectionContract {
         graph_contract: None,
         name: ASK_AUDIT_COLLECTION.to_string(),
+        description: None,
+        description_generated: false,
         declared_model: crate::catalog::CollectionModel::Table,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
         origin: crate::physical::ContractOrigin::Implicit,
@@ -4519,7 +4534,7 @@ fn call_ask_chat(
     }
 }
 
-fn call_ask_llm(
+pub(super) fn call_ask_llm(
     provider: &crate::ai::AiProvider,
     transport: crate::runtime::ai::transport::AiTransport,
     api_key: String,

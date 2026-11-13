@@ -249,7 +249,7 @@ impl CatalogStatsProvider {
     }
 
     /// Build a provider from the live database, overlaying persisted
-    /// `red_stats` column statistics onto the catalog's fresh row counts.
+    /// `red.query.stats_catalog` column statistics onto the catalog's fresh row counts.
     pub fn from_db(db: &crate::storage::RedDB) -> Self {
         let mut provider = Self::from_catalog(&db.catalog_snapshot());
         let persisted = load_persisted_stats(&db.store(), &db.catalog_snapshot());

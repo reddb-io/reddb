@@ -2552,6 +2552,11 @@ mod tests {
                 .attempts,
             1
         );
+        // Publish the one-time result-cache metadata before repeated cold
+        // boots start comparing queue index roots. The queue contract is that
+        // unchanged queue data reuses its roots; a store-format activation is
+        // an unrelated structural checkpoint.
+        assert!(runtime.result_cache_snapshot().0.is_some());
         runtime.flush().expect("queue checkpoint");
         drop(seed);
         drop(runtime);
@@ -2591,6 +2596,19 @@ mod tests {
             1
         );
         store.runtime.flush().expect("ack checkpoint");
+        assert!(
+            store
+                .runtime
+                .db()
+                .store()
+                .pager()
+                .expect("paged queue store")
+                .header()
+                .expect("queue file header")
+                .version
+                >= reddb_file::file_format::PAGE_RESULT_CACHE_DISK_FILE_VERSION,
+            "disk-resident checkpoint must promote the cache-aware file format"
+        );
         drop(store);
 
         let mut warmed_pages = 0;

@@ -1083,14 +1083,12 @@ impl<'a> KvAtomicOps<'a> {
                 keyed_model_name(model)
             )));
         }
-        // Check config gate: red.config.kv.default_collection (default = true).
-        let auto_create = self
-            .runtime
-            .config_bool("red.config.kv.default_collection", true);
+        // Check red.config content key `kv.default_collection` (default = true).
+        let auto_create = self.runtime.config_bool("kv.default_collection", true);
         if !auto_create {
             return Err(RedDBError::NotFound(format!(
                 "kv collection '{collection}' does not exist and auto-create is disabled \
-                 (red.config.kv.default_collection = false)"
+                 (kv.default_collection = false)"
             )));
         }
         store
@@ -1120,7 +1118,7 @@ impl<'a> KvAtomicOps<'a> {
     /// Whether `collection` retains MVCC history (opted into versioning).
     ///
     /// Versioned KV reads must do MVCC version-selection; non-versioned
-    /// collections (config `red_config`, the secrets vault) keep the
+    /// collections (config `red.config`, the secrets vault) keep the
     /// last-writer-wins fast path. Internal `red_*` collections are
     /// never versioned, so this stays cheap for them.
     fn is_versioned_collection(
@@ -3971,6 +3969,8 @@ fn kv_collection_contract(name: &str) -> crate::physical::CollectionContract {
     crate::physical::CollectionContract {
         graph_contract: None,
         name: name.to_string(),
+        description: None,
+        description_generated: false,
         declared_model: crate::catalog::CollectionModel::Kv,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
         origin: crate::physical::ContractOrigin::Implicit,
@@ -5235,7 +5235,7 @@ mod tests {
     #[test]
     fn watch_stream_idle_timeout_closes_subscription() {
         let r = rt();
-        r.execute_query("SET CONFIG red.config.kv.watch.idle_timeout_ms = 1")
+        r.execute_query("SET CONFIG kv.watch.idle_timeout_ms = 1")
             .unwrap();
 
         let mut stream = r.kv_watch_subscribe("kv_default", "idle", None);

@@ -56,6 +56,46 @@ const DEFAULT_CACHE_SIZE: usize = 10_000;
 #[cfg(test)]
 static COW_ATOMIC_WRITE_TEST_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct PagerWriteFault {
+    offset: Option<u64>,
+    prefix_bytes: usize,
+}
+
+#[cfg(test)]
+fn pager_write_fault() -> &'static Mutex<Option<PagerWriteFault>> {
+    static FAULT: std::sync::OnceLock<Mutex<Option<PagerWriteFault>>> = std::sync::OnceLock::new();
+    FAULT.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) fn test_fail_next_pager_write(offset: Option<u64>, prefix_bytes: usize) {
+    let mut fault = pager_write_fault()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(fault.is_none(), "pager write fault is already armed");
+    *fault = Some(PagerWriteFault {
+        offset,
+        prefix_bytes,
+    });
+}
+
+#[cfg(test)]
+fn pager_sync_fault() -> &'static Mutex<Option<usize>> {
+    static FAULT: std::sync::OnceLock<Mutex<Option<usize>>> = std::sync::OnceLock::new();
+    FAULT.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) fn test_fail_pager_sync_after(successful_syncs: usize) {
+    let mut fault = pager_sync_fault()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(fault.is_none(), "pager sync fault is already armed");
+    *fault = Some(successful_syncs);
+}
+
 /// Pager configuration
 #[derive(Debug, Clone)]
 pub struct PagerConfig {
@@ -151,6 +191,28 @@ impl reddb_file::VfsFile for NativePagerFile {
         self.0.set_len(len)
     }
     fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        #[cfg(test)]
+        {
+            let offset = std::io::Seek::stream_position(&mut self.0)?;
+            let fault = {
+                let mut fault = pager_write_fault()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if fault.is_some_and(|fault| fault.offset.is_none_or(|target| target == offset)) {
+                    fault.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(fault) = fault {
+                let prefix_bytes = fault.prefix_bytes.min(bytes.len().saturating_sub(1));
+                std::io::Write::write_all(&mut self.0, &bytes[..prefix_bytes])?;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "injected pager disk full",
+                ));
+            }
+        }
         std::io::Write::write_all(&mut self.0, bytes)
     }
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
@@ -172,6 +234,19 @@ impl reddb_file::VfsFile for NativePagerFile {
         std::io::Seek::seek(&mut self.0, pos)
     }
     fn sync_all(&self) -> std::io::Result<()> {
+        #[cfg(test)]
+        {
+            let mut fault = pager_sync_fault()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(remaining) = fault.as_mut() {
+                if *remaining == 0 {
+                    *fault = None;
+                    return Err(std::io::Error::other("injected pager fsync failure"));
+                }
+                *remaining -= 1;
+            }
+        }
         self.0.sync_all()
     }
 }
@@ -207,6 +282,31 @@ impl NativeWalBarrier {
 }
 
 impl WalBarrier for NativeWalBarrier {
+    fn validate_page_lsn(&self, lsn: u64, checkpoint_lsn: u64) -> std::io::Result<()> {
+        if lsn <= checkpoint_lsn {
+            return Ok(());
+        }
+        let wal = self
+            .0
+            .read()
+            .map_err(|_| std::io::Error::other("WAL slot lock poisoned"))?
+            .clone();
+        let durable_lsn = match wal {
+            Some(wal) => wal
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .durable_lsn(),
+            None => checkpoint_lsn,
+        };
+        if lsn > durable_lsn {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("page LSN {lsn} exceeds durable WAL boundary {durable_lsn}"),
+            ));
+        }
+        Ok(())
+    }
+
     fn has_page_ownership_journal(&self) -> std::io::Result<bool> {
         Ok(self.ownership_recorder()?.is_some())
     }
@@ -284,6 +384,9 @@ impl reddb_engine::storage::page_store::PageStore for Pager {
     }
     fn page_count(&self) -> Result<u32, PagerError> {
         self.core.page_count()
+    }
+    fn enable_deferred_reclamation(&self) -> Result<(), PagerError> {
+        self.core.enable_deferred_reclamation()
     }
     fn prefetch_hint(&self, id: u32) {
         self.prefetch_hint(id)
@@ -1247,8 +1350,9 @@ mod tests {
             .expect("insert_cell() should succeed");
         // Use the public Page API to set the LSN.
         page.set_lsn(stamped_lsn);
+        let page_id = page.page_id();
         pager
-            .write_page(page.page_id(), page)
+            .write_page(page_id, page)
             .expect("write_page() should succeed");
         pager.flush().expect("flush() should succeed");
 
@@ -1264,6 +1368,16 @@ mod tests {
             stamped_lsn
         );
 
+        drop(pager);
+        let pager = Pager::open(&db_path, PagerConfig::default()).expect("cold reopen");
+        pager.set_wal_writer(Arc::clone(&wal));
+        assert_eq!(
+            pager
+                .read_page(page_id)
+                .expect("durable WAL authorizes cold page")
+                .lsn(),
+            stamped_lsn
+        );
         drop(pager);
         let _ = fs::remove_file(&wal_path);
         cleanup(&db_path);

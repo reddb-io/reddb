@@ -162,6 +162,48 @@ fn scrape_metrics(runtime: &RedDBRuntime) -> String {
 }
 
 #[test]
+fn legacy_slot_registrations_survive_restart_with_a_timeline_file() {
+    let data_path = temp_data_path("legacy_slot_timeline_restart");
+    let mut history = reddb_file::TimelineHistory::new(1);
+    history
+        .fork(
+            reddb_file::TimelineId(2),
+            reddb_file::TimelineId(1),
+            0,
+            2,
+            "empty promotion",
+        )
+        .expect("empty timeline fork");
+    let plan = reddb_file::PrimaryReplicaFilePlan::new(
+        PrimaryReplication::primary_replica_root_for(&data_path),
+        reddb_file::TimelineId(2),
+    );
+    history
+        .write_to_path(plan.timeline_history_path())
+        .expect("legacy timeline file");
+    {
+        let primary = PrimaryReplication::new(Some(&data_path));
+        assert_eq!(primary.register_replica("replica-a".to_string()), 0);
+    }
+    {
+        let primary = PrimaryReplication::new(Some(&data_path));
+        assert_eq!(primary.register_replica("replica-b".to_string()), 0);
+    }
+    let catalog = reddb_file::ReplicationSlotCatalog::read_from_path(plan.slots_path())
+        .expect("cold slot catalog");
+    let ids: Vec<_> = catalog
+        .slots
+        .iter()
+        .map(|slot| slot.replica_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["replica-a", "replica-b"],
+        "restart must not lose registered consumers"
+    );
+}
+
+#[test]
 fn primary_persists_reddb_file_replication_slot_catalog() {
     let data_path = temp_data_path("primary_replica_slot_catalog");
 
@@ -350,7 +392,7 @@ fn http_mutation_ack_n_commit_policy_fails_closed_without_replica_ack() {
     let _env = EnvGuard::set(&[
         ("RED_PRIMARY_COMMIT_POLICY", "ack_n=1"),
         ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
-        ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+        ("RED_COMMIT_FAIL_ON_TIMEOUT", "false"),
     ]);
     let data_path = temp_data_path("primary_replica_http_ack_n_timeout");
 
@@ -368,7 +410,7 @@ fn http_mutation_ack_n_commit_policy_fails_closed_without_replica_ack() {
         "ack_n without replica ack must fail closed, body={body}"
     );
     assert!(
-        body.contains("commit policy timed out") && body.contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+        body.contains("commit policy timed out") && body.contains("local commit is durable"),
         "error body should identify commit policy timeout, got {body}"
     );
     assert!(
@@ -383,7 +425,7 @@ fn http_request_commit_policy_can_strengthen_and_wait_for_ack() {
     let _env = EnvGuard::set(&[
         ("RED_PRIMARY_COMMIT_POLICY", "local"),
         ("RED_REPLICATION_ACK_TIMEOUT_MS", "20"),
-        ("RED_COMMIT_FAIL_ON_TIMEOUT", "true"),
+        ("RED_COMMIT_FAIL_ON_TIMEOUT", "false"),
     ]);
     let data_path = temp_data_path("primary_replica_http_request_ack_n_timeout");
 
@@ -402,7 +444,7 @@ fn http_request_commit_policy_can_strengthen_and_wait_for_ack() {
         "request ack_n without replica ack must fail closed, body={body}"
     );
     assert!(
-        body.contains("commit policy timed out") && body.contains("RED_COMMIT_FAIL_ON_TIMEOUT"),
+        body.contains("commit policy timed out") && body.contains("local commit is durable"),
         "error body should identify request commit wait, got {body}"
     );
 }
@@ -593,11 +635,25 @@ fn runtime_prunes_primary_replica_redwal_segments_after_replica_ack() {
     let plan = runtime
         .primary_replica_file_plan()
         .expect("primary-replica file plan");
+    let mut segment_bytes = Vec::new();
     for index in 0..=18 {
-        let path = plan.wal_segment_path(index * plan.segment_bytes);
-        fs::create_dir_all(path.parent().expect("wal parent")).expect("create wal dir");
-        fs::write(&path, [index as u8]).expect("write fake redwal segment");
+        let lsn = index * plan.segment_bytes;
+        let payload = format!("committed-segment-{index}");
+        let path = plan
+            .append_wal_record(lsn, payload.as_bytes())
+            .expect("append valid redwal record");
+        segment_bytes.push(fs::metadata(path).expect("redwal metadata").len());
     }
+    let retained_before: u64 = segment_bytes.iter().sum();
+
+    let pinned = runtime
+        .ack_primary_replica_lsn_and_prune("replica-a", 0, 0, 0, 0)
+        .expect("pin replica slot")
+        .expect("pinned retention result");
+    assert_eq!(pinned.oldest_required_lsn, Some(0));
+    assert_eq!(pinned.retained_bytes_before_prune, retained_before);
+    assert_eq!(pinned.retained_bytes_after_prune, retained_before);
+    assert!(pinned.removed_segments.is_empty());
 
     let ack_lsn = 18 * plan.segment_bytes;
     let pruned = runtime
@@ -606,8 +662,11 @@ fn runtime_prunes_primary_replica_redwal_segments_after_replica_ack() {
         .expect("prune result");
 
     assert_eq!(pruned.oldest_required_lsn, Some(ack_lsn));
-    assert_eq!(pruned.retained_bytes_before_prune, 19);
-    assert_eq!(pruned.retained_bytes_after_prune, 16);
+    assert_eq!(pruned.retained_bytes_before_prune, retained_before);
+    assert_eq!(
+        pruned.retained_bytes_after_prune,
+        segment_bytes[3..].iter().sum::<u64>()
+    );
     assert_eq!(pruned.removed_segments.len(), 3);
     for index in 0..3 {
         assert!(
@@ -616,9 +675,20 @@ fn runtime_prunes_primary_replica_redwal_segments_after_replica_ack() {
         );
     }
     for index in 3..=18 {
+        let lsn = index * plan.segment_bytes;
+        let path = plan.wal_segment_path(lsn);
         assert!(
-            plan.wal_segment_path(index * plan.segment_bytes).exists(),
+            path.exists(),
             "segment {index} should remain inside the minimum retention window"
+        );
+        let segment = reddb_file::PrimaryReplicaWalSegment::read_from_path(path)
+            .expect("retained redwal remains decodable");
+        assert_eq!(segment.timeline, reddb_file::TimelineId::initial());
+        assert_eq!(segment.records.len(), 1);
+        assert_eq!(segment.records[0].lsn, lsn);
+        assert_eq!(
+            segment.records[0].payload,
+            format!("committed-segment-{index}").as_bytes()
         );
     }
 }

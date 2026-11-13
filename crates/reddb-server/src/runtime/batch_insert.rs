@@ -1,13 +1,13 @@
 //! Issue #582 — Analytics slice 4: `BatchInsertEndpoint` HTTP support.
 //!
-//! Owns the config + in-memory idempotency cache that the
+//! Owns the config + durable idempotency receipts that the
 //! `POST /collections/:name/batch` handler uses to:
 //!
 //! * reject batches exceeding `red.batch.max_rows` with `413
 //!   BatchTooLarge` before any storage work,
 //! * deduplicate requests carrying the same `Idempotency-Key` within
 //!   `red.batch.idempotency_window_secs`, returning the previously
-//!   cached response body verbatim,
+//!   committed response body verbatim across process failover,
 //! * report row-level validation failures by index so the caller can
 //!   pinpoint the row that broke the all-or-nothing commit.
 //!
@@ -16,14 +16,20 @@
 //! module only owns the pieces that need to be unit-testable without
 //! booting a full HTTP server.
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use reddb_types::Value;
+
+use crate::storage::unified::entity::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
+use crate::storage::unified::{Metadata, MetadataValue};
+use crate::{RedDBError, RedDBResult, RedDBRuntime};
 
 const DEFAULT_MAX_ROWS: usize = 10_000;
 const DEFAULT_IDEMPOTENCY_WINDOW_SECS: u64 = 300;
 const ENV_MAX_ROWS: &str = "RED_BATCH_MAX_ROWS";
 const ENV_IDEMPOTENCY_WINDOW_SECS: &str = "RED_BATCH_IDEMPOTENCY_WINDOW_SECS";
+const RECEIPT_COLLECTION: &str = "red.batch.idempotency";
 
 /// Knobs for the batch endpoint. Read from `RED_BATCH_*` env vars at
 /// process start; the `red.batch.*` config keys in the brief route to
@@ -52,80 +58,188 @@ impl BatchInsertConfig {
     }
 }
 
-/// A response previously served for a given `(collection,
-/// idempotency-key)`. Stored verbatim so a replay returns byte-for-byte
-/// what the caller would have seen the first time, even if the
-/// underlying state has since drifted.
+/// A committed response for a `(collection, idempotency-key)` pair.
 #[derive(Debug, Clone)]
-pub struct CachedResponse {
+pub struct DurableReceipt {
     pub status: u16,
     pub body: Vec<u8>,
-    expires_at: Instant,
 }
 
-/// In-memory `(collection, idempotency-key) → CachedResponse` map.
-/// Pruned lazily on every `lookup`/`store` rather than via a background
-/// task — the working set is bounded by the `idempotency_window` and a
-/// `Mutex` is cheap enough at the batch-insert call rate.
-pub struct BatchInsertCache {
-    inner: Mutex<HashMap<(String, String), CachedResponse>>,
+pub fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
-impl Default for BatchInsertCache {
-    fn default() -> Self {
-        Self::new()
+fn receipt_key(collection: &str, idempotency_key: &str) -> String {
+    let principal = crate::runtime::execution_context::current_auth_principal()
+        .map(|principal| principal.to_string())
+        .unwrap_or_default();
+    let tenant = crate::runtime::execution_context::current_tenant().unwrap_or_default();
+    let parts = [
+        principal.as_str(),
+        tenant.as_str(),
+        collection,
+        idempotency_key,
+    ];
+    let mut material = Vec::new();
+    for part in parts {
+        material.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        material.extend_from_slice(part.as_bytes());
     }
+    hex::encode(crate::crypto::sha256(&material))
 }
 
-impl BatchInsertCache {
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(HashMap::new()),
-        }
-    }
+pub fn lock_durable_commit(collection: &str, idempotency_key: &str) -> MutexGuard<'static, ()> {
+    const STRIPES: usize = 64;
+    static LOCKS: OnceLock<Vec<Mutex<()>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| (0..STRIPES).map(|_| Mutex::new(())).collect());
+    let digest = crate::crypto::sha256(receipt_key(collection, idempotency_key).as_bytes());
+    let stripe = usize::from(digest[0]) % STRIPES;
+    locks[stripe]
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
-    pub fn lookup(&self, collection: &str, key: &str, now: Instant) -> Option<CachedResponse> {
-        let mut guard = self.inner.lock().ok()?;
-        guard.retain(|_, v| v.expires_at > now);
-        guard
-            .get(&(collection.to_string(), key.to_string()))
-            .cloned()
-    }
-
-    pub fn store(
-        &self,
-        collection: &str,
-        key: &str,
-        status: u16,
-        body: Vec<u8>,
-        window: Duration,
-        now: Instant,
-    ) {
-        let Ok(mut guard) = self.inner.lock() else {
-            return;
-        };
-        guard.retain(|_, v| v.expires_at > now);
-        guard.insert(
-            (collection.to_string(), key.to_string()),
-            CachedResponse {
-                status,
-                body,
-                expires_at: now + window,
-            },
-        );
-    }
-
-    #[cfg(test)]
-    pub fn len(&self) -> usize {
-        self.inner.lock().map(|g| g.len()).unwrap_or(0)
+fn row_u64(row: &RowData, field: &str) -> Option<u64> {
+    match row.get_field(field)? {
+        Value::UnsignedInteger(value) => Some(*value),
+        Value::Integer(value) if *value >= 0 => Some(*value as u64),
+        _ => None,
     }
 }
 
-/// Process-wide cache. The brief states the dedup window is "in-memory
-/// per primary" — one process, one cache.
-pub fn global_cache() -> &'static BatchInsertCache {
-    static CACHE: OnceLock<BatchInsertCache> = OnceLock::new();
-    CACHE.get_or_init(BatchInsertCache::new)
+fn row_text(row: &RowData, field: &str) -> Option<String> {
+    match row.get_field(field)? {
+        Value::Text(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn receipt_is_committed(runtime: &RedDBRuntime, entity: &UnifiedEntity) -> bool {
+    let snapshots = runtime.snapshot_manager();
+    let inserted = entity.xmin == 0
+        || (!snapshots.is_active(entity.xmin) && !snapshots.is_aborted(entity.xmin));
+    let deleted =
+        entity.xmax != 0 && !snapshots.is_active(entity.xmax) && !snapshots.is_aborted(entity.xmax);
+    inserted && !deleted
+}
+
+pub fn lookup_durable_receipt(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    idempotency_key: &str,
+    now_ms: u64,
+) -> RedDBResult<Option<DurableReceipt>> {
+    let store = runtime.db().store();
+    let Some(manager) = store.get_collection(RECEIPT_COLLECTION) else {
+        return Ok(None);
+    };
+    let _publication = manager
+        .has_backing()
+        .then(|| store.vault_publication_lock.lock());
+    let key = receipt_key(collection, idempotency_key);
+    let mut latest = None;
+    manager
+        .try_for_each_key_entity(&key, |entity| {
+            if !receipt_is_committed(runtime, entity) {
+                return true;
+            }
+            let Some(row) = entity.data.as_row() else {
+                return true;
+            };
+            let Some(expires_at_ms) = row_u64(row, "expires_at_ms") else {
+                return true;
+            };
+            if expires_at_ms <= now_ms {
+                return true;
+            }
+            let Some(status) = row_u64(row, "status").and_then(|value| u16::try_from(value).ok())
+            else {
+                return true;
+            };
+            let Some(body) = row_text(row, "body") else {
+                return true;
+            };
+            if latest
+                .as_ref()
+                .is_none_or(|(latest_id, _): &(EntityId, DurableReceipt)| entity.id > *latest_id)
+            {
+                latest = Some((
+                    entity.id,
+                    DurableReceipt {
+                        status,
+                        body: body.into_bytes(),
+                    },
+                ));
+            }
+            true
+        })
+        .map_err(|error| RedDBError::Internal(error.to_string()))?;
+    Ok(latest.map(|(_, receipt)| receipt))
+}
+
+pub fn insert_durable_receipt(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    idempotency_key: &str,
+    status: u16,
+    body: &[u8],
+    expires_at_ms: u64,
+) -> RedDBResult<()> {
+    let body = std::str::from_utf8(body)
+        .map_err(|_| RedDBError::Internal("batch response is not UTF-8".to_string()))?;
+    let store = runtime.db().store();
+    let key = receipt_key(collection, idempotency_key);
+    let fields = [
+        ("key".to_string(), Value::text(key)),
+        ("collection".to_string(), Value::text(collection)),
+        (
+            "status".to_string(),
+            Value::UnsignedInteger(u64::from(status)),
+        ),
+        ("body".to_string(), Value::text(body)),
+        (
+            "expires_at_ms".to_string(),
+            Value::UnsignedInteger(expires_at_ms),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let mut entity = UnifiedEntity::new(
+        EntityId::new(0),
+        EntityKind::TableRow {
+            table: RECEIPT_COLLECTION.into(),
+            row_id: 0,
+        },
+        EntityData::Row(RowData {
+            columns: Vec::new(),
+            named: Some(fields),
+            schema: None,
+        }),
+    );
+    if let Some(xid) = runtime.current_xid() {
+        entity.set_xmin(xid);
+    }
+    let id = store
+        .insert_auto(RECEIPT_COLLECTION, entity)
+        .map_err(|error| RedDBError::Internal(error.to_string()))?;
+    store
+        .set_metadata(
+            RECEIPT_COLLECTION,
+            id,
+            Metadata::with_fields(
+                [(
+                    "_expires_at".to_string(),
+                    MetadataValue::Timestamp(expires_at_ms),
+                )]
+                .into_iter()
+                .collect(),
+            ),
+        )
+        .map_err(|error| RedDBError::Internal(error.to_string()))?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -194,62 +308,6 @@ mod tests {
         };
         assert_eq!(cfg.max_rows, 10_000);
         assert_eq!(cfg.idempotency_window, Duration::from_secs(300));
-    }
-
-    #[test]
-    fn cache_returns_stored_within_window() {
-        let cache = BatchInsertCache::new();
-        let now = Instant::now();
-        cache.store(
-            "events",
-            "abc",
-            200,
-            b"{\"ok\":true,\"count\":3}".to_vec(),
-            Duration::from_secs(60),
-            now,
-        );
-        let hit = cache
-            .lookup("events", "abc", now + Duration::from_secs(30))
-            .expect("cached entry should still be live");
-        assert_eq!(hit.status, 200);
-        assert_eq!(hit.body, b"{\"ok\":true,\"count\":3}");
-    }
-
-    #[test]
-    fn cache_evicts_after_window() {
-        let cache = BatchInsertCache::new();
-        let now = Instant::now();
-        cache.store(
-            "events",
-            "abc",
-            200,
-            b"{}".to_vec(),
-            Duration::from_secs(60),
-            now,
-        );
-        assert!(cache
-            .lookup("events", "abc", now + Duration::from_secs(61))
-            .is_none());
-        // Lookup after expiry also prunes the entry from the map.
-        assert_eq!(cache.len(), 0);
-    }
-
-    #[test]
-    fn cache_misses_for_unknown_key() {
-        let cache = BatchInsertCache::new();
-        assert!(cache
-            .lookup("events", "never-stored", Instant::now())
-            .is_none());
-    }
-
-    #[test]
-    fn cache_namespaced_by_collection() {
-        let cache = BatchInsertCache::new();
-        let now = Instant::now();
-        cache.store("c1", "k", 200, b"a".to_vec(), Duration::from_secs(60), now);
-        cache.store("c2", "k", 200, b"b".to_vec(), Duration::from_secs(60), now);
-        assert_eq!(cache.lookup("c1", "k", now).unwrap().body, b"a");
-        assert_eq!(cache.lookup("c2", "k", now).unwrap().body, b"b");
     }
 
     #[test]

@@ -12,7 +12,7 @@
 //!    them.
 //! 3. `total_pending` rises when a message is delivered (read) and
 //!    `oldest_pending_age` becomes non-NULL — derived from
-//!    `red_queue_meta`, not the catalog descriptor's hot fields.
+//!    `red.queue.meta`, not the catalog descriptor's hot fields.
 
 #[path = "../../support/mod.rs"]
 mod support;
@@ -201,7 +201,7 @@ fn total_pending_and_oldest_age_reflect_live_meta_state() {
     assert_eq!(uint(row, "total_pending"), 0);
     assert!(matches!(row.get("oldest_pending_age"), Some(Value::Null)));
 
-    // Push + read marks a delivery pending in `red_queue_meta`,
+    // Push + read marks a delivery pending in `red.queue.meta`,
     // which the snapshot scans.
     exec(&rt, &format!("QUEUE PUSH {jobs_name} 'first-job'"));
     let read = exec(

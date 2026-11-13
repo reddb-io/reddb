@@ -392,6 +392,11 @@ const GRPC_COMMAND_BINDINGS: &[GrpcCommandBinding] = &[
     ),
     binding!("CreateRow", "collections.rows.create", GrpcAuthClass::Write),
     binding!(
+        "CreateRowTyped",
+        "collections.rows.create",
+        GrpcAuthClass::Write
+    ),
+    binding!(
         "CreateNode",
         "collections.nodes.create",
         GrpcAuthClass::Write
@@ -484,6 +489,11 @@ const GRPC_COMMAND_BINDINGS: &[GrpcCommandBinding] = &[
         "ReplicationStatus",
         "ops.replication.status",
         GrpcAuthClass::Read
+    ),
+    binding!(
+        "StreamWalRecords",
+        "ops.replication.snapshot",
+        GrpcAuthClass::Replication(REPLICATION_STREAM_ACTION)
     ),
     binding!(
         "PullWalRecords",
@@ -987,6 +997,7 @@ mod tests {
         guard!("GraphCycles", Read),
         guard!("GraphTopologicalSort", Read),
         guard!("CreateRow", Write),
+        guard!("CreateRowTyped", Write),
         guard!("CreateNode", Write),
         guard!("CreateEdge", Write),
         guard!("CreateVector", Write),
@@ -1013,6 +1024,7 @@ mod tests {
         guard!("Checkpoint", Write),
         guard!("Topology", NoGuard),
         guard!("ReplicationStatus", Read),
+        guard!("StreamWalRecords", ReplicationStream),
         guard!("PullWalRecords", ReplicationStream),
         guard!("ReplicationSnapshot", ReplicationStream),
         guard!("SubmitAskSideEffects", Read),
@@ -1329,7 +1341,7 @@ mod tests {
             REPLICATION_ACK_ACTION,
         );
 
-        for rpc in ["PullWalRecords", "ReplicationSnapshot"] {
+        for rpc in ["StreamWalRecords", "PullWalRecords", "ReplicationSnapshot"] {
             assert_eq!(
                 harness.decide(binding(rpc), Principal::Read),
                 Outcome::Allow,
@@ -1366,7 +1378,12 @@ mod tests {
             oauth_validator: None,
         };
 
-        for rpc in ["PullWalRecords", "ReplicationSnapshot", "AckReplicaLsn"] {
+        for rpc in [
+            "StreamWalRecords",
+            "PullWalRecords",
+            "ReplicationSnapshot",
+            "AckReplicaLsn",
+        ] {
             let context = authorize_binding(&grpc, binding(rpc), &MetadataMap::new(), None)
                 .unwrap_or_else(|error| panic!("{rpc} rejected in --no-auth mode: {error}"));
             assert_eq!(context.identity, None, "{rpc} must stay anonymous");
@@ -1385,7 +1402,12 @@ mod tests {
             .collect();
         assert_eq!(
             peer_bound,
-            vec!["PullWalRecords", "ReplicationSnapshot", "AckReplicaLsn"]
+            vec![
+                "StreamWalRecords",
+                "PullWalRecords",
+                "ReplicationSnapshot",
+                "AckReplicaLsn",
+            ]
         );
 
         let harness = Harness::new();
