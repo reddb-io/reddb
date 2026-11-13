@@ -681,10 +681,17 @@ impl RedDBRuntime {
             .lifecycle
             .set_wal_replay_ready_at_ms(storage_ready_ms);
 
-        let promotion_lsn = runtime
-            .primary_replica_timeline_history()?
-            .and_then(|history| history.entries.last().map(|entry| entry.fork_lsn))
-            .unwrap_or(0);
+        let inherited_replication_lsn = if runtime.inner.db.replication.is_some() {
+            let promotion_lsn = runtime
+                .primary_replica_timeline_history()?
+                .and_then(|history| history.entries.last().map(|entry| entry.fork_lsn))
+                .unwrap_or(0);
+            runtime
+                .config_u64("replication.last_applied_lsn", 0)
+                .max(promotion_lsn)
+        } else {
+            0
+        };
         let restored_cdc_lsn = runtime
             .inner
             .db
@@ -698,8 +705,7 @@ impl RedDBRuntime {
             })
             .unwrap_or(0)
             .max(runtime.config_u64("timeline.last_archived_lsn", 0))
-            .max(runtime.config_u64("replication.last_applied_lsn", 0))
-            .max(promotion_lsn);
+            .max(inherited_replication_lsn);
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
         runtime
             .inner
