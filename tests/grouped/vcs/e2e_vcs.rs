@@ -277,7 +277,7 @@ fn fast_forward_merge_advances_branch() {
 }
 
 #[test]
-fn non_fast_forward_merge_creates_merge_state() {
+fn non_fast_forward_merge_creates_commit_without_pending_state() {
     let rt = rt();
     let _root = vcs(&rt).commit(commit_input(1, "root")).unwrap();
     vcs(&rt)
@@ -319,7 +319,7 @@ fn non_fast_forward_merge_creates_merge_state() {
     assert!(!outcome.fast_forward);
     let merge_commit = outcome.merge_commit.expect("merge commit created");
     assert_eq!(merge_commit.parents.len(), 2);
-    assert!(outcome.merge_state_id.is_some());
+    assert!(outcome.merge_state_id.is_none());
 }
 
 #[test]
@@ -395,18 +395,24 @@ fn reset_soft_moves_branch_back() {
 }
 
 #[test]
-fn reset_hard_is_phase_4() {
+fn reset_hard_restores_target_head() {
     let rt = rt();
     let c1 = vcs(&rt).commit(commit_input(1, "c1")).unwrap();
     let _c2 = vcs(&rt).commit(commit_input(1, "c2")).unwrap();
-    let err = vcs(&rt)
+    vcs(&rt)
         .reset(ResetInput {
             connection_id: 1,
             target: c1.hash.clone(),
             mode: ResetMode::Hard,
         })
-        .expect_err("reset --hard not yet implemented");
-    assert!(format!("{err}").contains("reset --hard"));
+        .expect("reset --hard");
+    assert_eq!(
+        vcs(&rt)
+            .status(StatusInput { connection_id: 1 })
+            .expect("status")
+            .head_commit,
+        Some(c1.hash)
+    );
 }
 
 #[test]

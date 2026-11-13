@@ -171,6 +171,7 @@ mod tests {
 
     fn snapshot_context(xid: u64) -> super::super::impl_core::SnapshotContext {
         super::super::impl_core::SnapshotContext {
+            branch: None,
             snapshot: Snapshot {
                 xid,
                 in_progress: HashSet::new(),

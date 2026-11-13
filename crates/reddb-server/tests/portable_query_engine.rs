@@ -593,6 +593,7 @@ fn shared_entity_reads_use_native_persisted_rows_and_timestamps() {
         };
         let runtime = RedDBRuntime::with_options(options).expect("native database reopens");
         let context: reddb_server::runtime::mvcc::SnapshotContext = SnapshotContext {
+            branch: None,
             snapshot: runtime.current_snapshot(),
             manager: runtime.snapshot_manager(),
             own_xids: HashSet::new(),
@@ -636,6 +637,7 @@ fn native_moderation_gate_stays_ahead_of_shared_mvcc_reads() {
 
     let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("native runtime");
     let context = SnapshotContext {
+        branch: None,
         snapshot: runtime.current_snapshot(),
         manager: runtime.snapshot_manager(),
         own_xids: HashSet::new(),

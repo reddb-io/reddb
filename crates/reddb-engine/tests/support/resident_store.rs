@@ -71,6 +71,7 @@ fn cross_collection_snapshot() {
         }
     }
     let snapshot = SnapshotContext {
+        branch: None,
         snapshot: Snapshot {
             xid: 10,
             in_progress: HashSet::from([4]),

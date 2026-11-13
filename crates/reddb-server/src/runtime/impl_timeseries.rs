@@ -163,6 +163,8 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        self.vcs_reject_destructive_ddl(&query.name)?;
         if super::impl_ddl::is_system_schema_name(&query.name) {
             return Err(RedDBError::Query("system schema is read-only".to_string()));
         }
@@ -268,7 +270,7 @@ impl RedDBRuntime {
         max_chunks: usize,
         include_tail_chunk: bool,
     ) -> RedDBResult<SealHypertableChunksOutcome> {
-        if max_chunks == 0 {
+        if max_chunks == 0 || self.vcs_is_versioned(collection)? {
             return Ok(SealHypertableChunksOutcome::default());
         }
 
@@ -390,6 +392,9 @@ impl RedDBRuntime {
         start_ns: u64,
         end_ns: u64,
     ) -> Option<Vec<(u64, f64)>> {
+        if self.vcs_is_versioned(collection).ok()? {
+            return None;
+        }
         let id = crate::storage::timeseries::ChunkId {
             hypertable: collection.to_string(),
             start_ns: chunk_start_ns,
@@ -413,6 +418,9 @@ impl RedDBRuntime {
         start_ns: u64,
         end_ns: u64,
     ) -> Option<crate::storage::timeseries::chunk::PrunedColumnScan> {
+        if self.vcs_is_versioned(collection).ok()? {
+            return None;
+        }
         let id = crate::storage::timeseries::ChunkId {
             hypertable: collection.to_string(),
             start_ns: chunk_start_ns,
@@ -427,6 +435,9 @@ impl RedDBRuntime {
         chunk_start_ns: u64,
         target: f64,
     ) -> Option<crate::storage::timeseries::chunk::PrunedColumnScan> {
+        if self.vcs_is_versioned(collection).ok()? {
+            return None;
+        }
         let id = crate::storage::timeseries::ChunkId {
             hypertable: collection.to_string(),
             start_ns: chunk_start_ns,
@@ -466,12 +477,35 @@ impl RedDBRuntime {
         };
 
         let registry = self.inner.db.hypertables();
-        let Some(spec) = registry.get(collection) else {
+        let spec = registry.get(collection);
+
+        // Shared column blocks have no branch lineage or MVCC stamps. Read
+        // canonical versions instead, including chunks sealed before opt-in.
+        if self.vcs_is_versioned(collection)? {
+            let mut points: Vec<_> = self
+                .scan_collection(collection, None, usize::MAX)?
+                .items
+                .into_iter()
+                .filter_map(|entity| match entity.data {
+                    EntityData::TimeSeries(point) => Some((point.timestamp_ns, point.value)),
+                    EntityData::Row(row) => Some((
+                        row.get_field(&spec.as_ref()?.time_column)
+                            .and_then(field_as_u64)?,
+                        row.get_field("value").and_then(field_as_f64).unwrap_or(0.0),
+                    )),
+                    _ => None,
+                })
+                .filter(|(timestamp, _)| *timestamp >= start_ns && *timestamp <= end_ns)
+                .collect();
+            points.sort_by_key(|(timestamp, _)| *timestamp);
+            return Ok(points);
+        }
+
+        let Some(spec) = spec else {
             return Ok(Vec::new());
         };
         let time_col = spec.time_column.clone();
         let store = self.inner.db.store();
-
         let mut out: Vec<(u64, f64)> = Vec::new();
         for meta in registry.show_chunks(collection) {
             // Skip chunks whose observed window cannot intersect the query.
@@ -1194,6 +1228,7 @@ fn hypertable_collection_contract(
         .map(|ht| ht.time_column.as_str())
         .unwrap_or("timestamp");
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: query.name.clone(),
         description: None,
         description_generated: false,
@@ -1239,6 +1274,7 @@ fn timeseries_collection_contract(
 ) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: query.name.clone(),
         description: None,
         description_generated: false,

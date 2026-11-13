@@ -23,6 +23,47 @@ use super::*;
 
 thread_local! {
     static DEFERRED_UPDATES: std::cell::RefCell<Option<Vec<DeferredUpdate>>> = const { std::cell::RefCell::new(None) };
+    static GRAPH_INSERT_WRITER: std::cell::Cell<Option<(usize, u64, u64)>> = const { std::cell::Cell::new(None) };
+    static DML_CAPTURE_OWNER: std::cell::Cell<Option<(usize, u64, bool)>> = const { std::cell::Cell::new(None) };
+    static DML_CAPTURE_GRAPH_WRITER: std::cell::RefCell<Option<GraphInsertWriter>> = const { std::cell::RefCell::new(None) };
+}
+
+struct GraphInsertWriter {
+    manager: std::sync::Arc<crate::storage::transaction::snapshot::SnapshotManager>,
+    xid: u64,
+    finished: bool,
+}
+
+impl GraphInsertWriter {
+    fn begin(runtime: &RedDBRuntime) -> Self {
+        let manager = runtime.snapshot_manager();
+        let xid = manager.begin();
+        let identity = std::sync::Arc::as_ptr(&runtime.inner) as usize;
+        GRAPH_INSERT_WRITER.with(|slot| {
+            assert!(slot
+                .replace(Some((identity, current_connection_id(), xid)))
+                .is_none());
+        });
+        Self {
+            manager,
+            xid,
+            finished: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.manager.commit(self.xid);
+        self.finished = true;
+    }
+}
+
+impl Drop for GraphInsertWriter {
+    fn drop(&mut self) {
+        GRAPH_INSERT_WRITER.with(|slot| slot.set(None));
+        if !self.finished {
+            self.manager.rollback(self.xid);
+        }
+    }
 }
 
 struct DeferredUpdate {
@@ -86,10 +127,15 @@ impl DeferredUpdates {
                         "updated collection disappeared".into(),
                     ));
                 };
+                let epoch = manager
+                    .try_get(pending.new_id, usize::MAX)?
+                    .and_then(|entity| entity.branch_version().map(|version| version.origin));
                 let old_owned = manager
                     .try_get(pending.old_id, usize::MAX)
                     .map_err(|error| RedDBError::Internal(error.to_string()))?
-                    .is_some_and(|old| old.xmax == pending.update.xid);
+                    .is_some_and(|old| {
+                        epoch.map_or(old.xmax, |epoch| old.branch_xmax(epoch)) == pending.update.xid
+                    });
                 let new_owned = manager
                     .try_get(pending.new_id, usize::MAX)
                     .map_err(|error| RedDBError::Internal(error.to_string()))?
@@ -150,31 +196,223 @@ pub(crate) fn publish_autocommit_update(
 /// An unwinding DML callback must not leave a thread-local capture installed.
 struct DmlWalCapture(bool);
 
+struct CapturedDmlWal {
+    actions: crate::storage::unified::DeferredStoreWalActions,
+    graph_writer: Option<GraphInsertWriter>,
+}
+
 impl DmlWalCapture {
-    fn begin() -> Self {
+    fn begin(runtime: &RedDBRuntime, transactional: bool) -> Self {
         assert!(
             !UnifiedStore::deferred_store_wal_capture_active(),
             "DML WAL captures cannot nest"
         );
+        let identity = std::sync::Arc::as_ptr(&runtime.inner) as usize;
+        DML_CAPTURE_OWNER.with(|slot| {
+            assert!(slot
+                .replace(Some((identity, current_connection_id(), transactional)))
+                .is_none());
+        });
         UnifiedStore::begin_deferred_store_wal_capture();
         Self(true)
     }
 
-    fn finish(mut self) -> crate::storage::unified::DeferredStoreWalActions {
+    fn finish(mut self) -> CapturedDmlWal {
         self.0 = false;
-        UnifiedStore::take_deferred_store_wal_capture()
+        DML_CAPTURE_OWNER.with(|slot| slot.set(None));
+        CapturedDmlWal {
+            actions: UnifiedStore::take_deferred_store_wal_capture(),
+            graph_writer: DML_CAPTURE_GRAPH_WRITER.with(|slot| slot.borrow_mut().take()),
+        }
     }
 }
 
 impl Drop for DmlWalCapture {
     fn drop(&mut self) {
         if self.0 {
+            DML_CAPTURE_OWNER.with(|slot| slot.set(None));
             let _ = UnifiedStore::take_deferred_store_wal_capture();
+            DML_CAPTURE_GRAPH_WRITER.with(|slot| drop(slot.borrow_mut().take()));
         }
     }
 }
 
 impl RedDBRuntime {
+    /// Refresh an autocommit state mutation after acquiring its publication
+    /// fence. Explicit transactions retain their original read snapshot.
+    pub(super) fn vcs_state_write_snapshot(
+        &self,
+        collection: &str,
+    ) -> RedDBResult<(
+        super::execution_context::SnapshotContext,
+        crate::storage::transaction::snapshot::SnapshotRetentionGuard,
+    )> {
+        self.vcs_writer_epoch(collection)?;
+        let (mut context, retention) = self.native_read_snapshot()?;
+        if self.current_xid().is_none() {
+            context.snapshot = self.snapshot_manager().fresh_read_snapshot();
+            context.branch = self.vcs_branch_read_view(&context.snapshot, None)?;
+        }
+        Ok((context, retention))
+    }
+
+    /// Append one native state version. The caller serializes its logical key
+    /// before taking the publication fence and owns the enclosing WAL capture.
+    pub(crate) fn insert_vcs_state_version(
+        &self,
+        collection: &str,
+        mut entity: UnifiedEntity,
+        previous: Option<EntityId>,
+    ) -> RedDBResult<EntityId> {
+        let store = self.db().store();
+        let epoch = self.vcs_writer_epoch(collection)?.ok_or_else(|| {
+            RedDBError::InvalidOperation("state version requires a versioned collection".into())
+        })?;
+        let xid = self
+            .current_xid()
+            .or_else(|| self.graph_insert_xid())
+            .ok_or_else(|| {
+                RedDBError::InvalidOperation("state version requires a WAL writer".into())
+            })?;
+        entity.id = store.next_entity_id();
+        entity.set_xmin(xid);
+        entity.set_xmax(0);
+        entity.clear_branch_version();
+        entity.set_branch_origin(epoch);
+        let id = entity.id;
+        if let Some(previous) = previous {
+            let mut old = store
+                .try_get(collection, previous, usize::MAX)?
+                .ok_or_else(|| RedDBError::NotFound(previous.to_string()))?;
+            entity.set_logical_id(old.logical_id());
+            if let (
+                crate::storage::EntityKind::TableRow {
+                    row_id: destination,
+                    ..
+                },
+                crate::storage::EntityKind::TableRow { row_id: source, .. },
+            ) = (&mut entity.kind, &old.kind)
+            {
+                *destination = *source;
+            }
+            let previous_xmax = old.branch_xmax(epoch);
+            old.set_branch_xmax(epoch, xid);
+            store.install_versioned_table_row_update(collection, old, entity, None)?;
+            if self.current_xid().is_some() {
+                self.record_pending_versioned_update(
+                    current_connection_id(),
+                    collection,
+                    previous,
+                    id,
+                    xid,
+                    previous_xmax,
+                );
+            }
+        } else {
+            store.insert_auto(collection, entity)?;
+        }
+        Ok(id)
+    }
+
+    pub(crate) fn graph_insert_xid(&self) -> Option<u64> {
+        let identity = std::sync::Arc::as_ptr(&self.inner) as usize;
+        GRAPH_INSERT_WRITER.with(|slot| {
+            slot.get().and_then(|(owner, conn, xid)| {
+                (owner == identity && conn == current_connection_id()).then_some(xid)
+            })
+        })
+    }
+
+    /// Publish a versioned graph or vector insert after its WAL batch.
+    pub(crate) fn with_versioned_graph_insert<T>(
+        &self,
+        f: impl FnOnce() -> RedDBResult<T>,
+    ) -> RedDBResult<T> {
+        let identity = std::sync::Arc::as_ptr(&self.inner) as usize;
+        let connection_id = current_connection_id();
+        if self.current_xid().is_some() {
+            if UnifiedStore::deferred_store_wal_capture_active() {
+                if DML_CAPTURE_OWNER.with(|slot| slot.get())
+                    == Some((identity, connection_id, true))
+                {
+                    return f();
+                }
+                return Err(RedDBError::InvalidOperation(
+                    "versioned entity insertion cannot join an unrelated WAL capture".to_string(),
+                ));
+            }
+            return self.with_deferred_store_wal_if_transaction(f);
+        }
+        if self.graph_insert_xid().is_some() {
+            return f();
+        }
+        if UnifiedStore::deferred_store_wal_capture_active() {
+            if DML_CAPTURE_OWNER.with(|slot| slot.get()) != Some((identity, connection_id, false))
+                || GRAPH_INSERT_WRITER.with(|slot| slot.get().is_some())
+            {
+                return Err(RedDBError::InvalidOperation(
+                    "versioned entity insertion cannot join an unrelated WAL capture".to_string(),
+                ));
+            }
+            let writer = GraphInsertWriter::begin(self);
+            let result = f();
+            DML_CAPTURE_GRAPH_WRITER.with(|slot| {
+                assert!(slot.borrow_mut().replace(writer).is_none());
+            });
+            return result;
+        }
+        self.drain_committed_writes_under_pressure(0)?;
+        let deletions = super::delete_publication::DeletePublicationScope::begin();
+        let updates = DeferredUpdates::begin();
+        let mut writer = GraphInsertWriter::begin(self);
+        let capture = DmlWalCapture::begin(self, false);
+        let result = f();
+        let CapturedDmlWal {
+            actions,
+            mut graph_writer,
+        } = capture.finish();
+        if result.is_err() {
+            self.flush_deferred_cache_invalidation();
+            return result;
+        }
+        let published = deletions.publish(self, || {
+            updates.prepare()?;
+            self.inner
+                .db
+                .store()
+                .append_deferred_store_wal_actions(actions)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            if let Some(writer) = &mut graph_writer {
+                writer.commit();
+            }
+            writer.commit();
+            updates.commit();
+            Ok(())
+        });
+        self.flush_deferred_cache_invalidation();
+        published?;
+        result
+    }
+
+    pub(crate) fn with_graph_insert_for_dml<T>(
+        &self,
+        query: &InsertQuery,
+        f: impl FnOnce() -> RedDBResult<T>,
+    ) -> RedDBResult<T> {
+        if matches!(
+            query.entity_type,
+            InsertEntityType::Node
+                | InsertEntityType::Edge
+                | InsertEntityType::Vector
+                | InsertEntityType::Document
+        ) && (self.vcs_is_versioned(&query.table)? || self.has_graph_contract(&query.table))
+        {
+            self.with_versioned_graph_insert(f)
+        } else {
+            self.with_deferred_store_wal_for_dml(self.insert_may_emit_events(query), f)
+        }
+    }
+
     pub(crate) fn rollback_connection(
         &self,
         connection_id: u64,
@@ -207,13 +445,20 @@ impl RedDBRuntime {
         id: crate::storage::unified::entity::EntityId,
         stamper_xid: crate::storage::transaction::snapshot::Xid,
         previous_xmax: crate::storage::transaction::snapshot::Xid,
+        branch_epoch: Option<u64>,
     ) {
         self.inner
             .pending_tombstones
             .write()
             .entry(conn_id)
             .or_default()
-            .push((collection.to_string(), id, stamper_xid, previous_xmax));
+            .push((
+                collection.to_string(),
+                id,
+                stamper_xid,
+                previous_xmax,
+                branch_epoch,
+            ));
     }
 
     pub(crate) fn record_pending_versioned_update(
@@ -269,13 +514,21 @@ impl RedDBRuntime {
             .lock()
             .get(&conn_id)
             .map_or(0, |pending| pending.len());
-        let capture = DmlWalCapture::begin();
+        let capture = DmlWalCapture::begin(self, true);
         let result = f();
-        let captured = capture.finish();
+        let CapturedDmlWal {
+            actions,
+            graph_writer,
+        } = capture.finish();
+        if graph_writer.is_some() {
+            return Err(RedDBError::InvalidOperation(
+                "autocommit graph writer cannot join a transaction WAL capture".to_string(),
+            ));
+        }
         self.flush_deferred_cache_invalidation();
         match result {
             Ok(value) => {
-                self.record_pending_store_wal_actions(conn_id, captured);
+                self.record_pending_store_wal_actions(conn_id, actions);
                 Ok(value)
             }
             Err(err) => {
@@ -303,10 +556,13 @@ impl RedDBRuntime {
 
         let deletions = super::delete_publication::DeletePublicationScope::begin();
         let updates = DeferredUpdates::begin();
-        let capture = DmlWalCapture::begin();
+        let capture = DmlWalCapture::begin(self, false);
         let result = f();
-        let captured = capture.finish();
-        if result.is_err() && deletions.has_pending() {
+        let CapturedDmlWal {
+            actions,
+            mut graph_writer,
+        } = capture.finish();
+        if result.is_err() && (deletions.has_pending() || graph_writer.is_some()) {
             self.flush_deferred_cache_invalidation();
             return result;
         }
@@ -315,8 +571,11 @@ impl RedDBRuntime {
             self.inner
                 .db
                 .store()
-                .append_deferred_store_wal_actions(captured)
+                .append_deferred_store_wal_actions(actions)
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            if let Some(writer) = &mut graph_writer {
+                writer.commit();
+            }
             updates.commit();
             Ok(())
         });
@@ -443,6 +702,7 @@ impl RedDBRuntime {
         excluded_ids: &[crate::storage::unified::entity::EntityId],
         snapshot: &crate::storage::transaction::snapshot::Snapshot,
         own_xids: &std::collections::HashSet<crate::storage::transaction::snapshot::Xid>,
+        branch_epoch: Option<u64>,
     ) -> RedDBResult<()> {
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection(collection) else {
@@ -450,6 +710,14 @@ impl RedDBRuntime {
         };
 
         for candidate in manager.query_all(|_| true) {
+            if let Some(epoch) = branch_epoch {
+                if candidate
+                    .branch_version()
+                    .is_some_and(|version| version.origin != epoch)
+                {
+                    continue;
+                }
+            }
             if excluded_ids.contains(&candidate.id) || candidate.logical_id() != logical_id {
                 continue;
             }
@@ -495,12 +763,16 @@ impl RedDBRuntime {
                 continue;
             };
             let logical_id = old.logical_id();
+            let epoch = manager
+                .get(new_id)
+                .and_then(|entity| entity.branch_version().map(|version| version.origin));
+            let old_xmax = epoch.map_or(old.xmax, |epoch| old.branch_xmax(epoch));
             serializable_write_set.insert((collection.clone(), logical_id));
             if self.xid_conflicts_with_snapshot(previous_xmax, snapshot, own_xids) {
                 return Err(Self::conflict_error(&collection, logical_id, previous_xmax));
             }
-            if old.xmax != xid && self.xid_conflicts_with_snapshot(old.xmax, snapshot, own_xids) {
-                return Err(Self::conflict_error(&collection, logical_id, old.xmax));
+            if old_xmax != xid && self.xid_conflicts_with_snapshot(old_xmax, snapshot, own_xids) {
+                return Err(Self::conflict_error(&collection, logical_id, old_xmax));
             }
             self.check_logical_row_conflict(
                 &collection,
@@ -508,10 +780,11 @@ impl RedDBRuntime {
                 &[old_id, new_id],
                 snapshot,
                 own_xids,
+                epoch,
             )?;
         }
 
-        for (collection, id, xid, previous_xmax) in tombstones {
+        for (collection, id, xid, previous_xmax, epoch) in tombstones {
             let Some(manager) = store.get_collection(&collection) else {
                 continue;
             };
@@ -519,16 +792,22 @@ impl RedDBRuntime {
                 continue;
             };
             let logical_id = entity.logical_id();
+            let xmax = epoch.map_or(entity.xmax, |epoch| entity.branch_xmax(epoch));
             serializable_write_set.insert((collection.clone(), logical_id));
             if self.xid_conflicts_with_snapshot(previous_xmax, snapshot, own_xids) {
                 return Err(Self::conflict_error(&collection, logical_id, previous_xmax));
             }
-            if entity.xmax != xid
-                && self.xid_conflicts_with_snapshot(entity.xmax, snapshot, own_xids)
-            {
-                return Err(Self::conflict_error(&collection, logical_id, entity.xmax));
+            if xmax != xid && self.xid_conflicts_with_snapshot(xmax, snapshot, own_xids) {
+                return Err(Self::conflict_error(&collection, logical_id, xmax));
             }
-            self.check_logical_row_conflict(&collection, logical_id, &[id], snapshot, own_xids)?;
+            self.check_logical_row_conflict(
+                &collection,
+                logical_id,
+                &[id],
+                snapshot,
+                own_xids,
+                epoch,
+            )?;
         }
 
         if isolation == crate::storage::transaction::IsolationLevel::Serializable
@@ -620,18 +899,30 @@ impl RedDBRuntime {
             .unwrap_or_default();
 
         let store = self.inner.db.store();
-        for (collection, old_id, _new_id, xid, _previous_xmax) in versioned_updates {
+        let _publication = store.vault_publication_lock.lock();
+        for (collection, old_id, new_id, xid, _previous_xmax) in versioned_updates {
             if let Some(manager) = store.get_collection(&collection) {
+                let epoch = manager
+                    .get(new_id)
+                    .and_then(|entity| entity.branch_version().map(|version| version.origin));
                 if let Some(mut entity) = manager.get(old_id) {
-                    entity.set_xmax(xid);
+                    if let Some(epoch) = epoch {
+                        entity.set_branch_xmax(epoch, xid);
+                    } else {
+                        entity.set_xmax(xid);
+                    }
                     let _ = manager.update(entity);
                 }
             }
         }
-        for (collection, id, xid, _previous_xmax) in tombstones {
+        for (collection, id, xid, _previous_xmax, epoch) in tombstones {
             if let Some(manager) = store.get_collection(&collection) {
                 if let Some(mut entity) = manager.get(id) {
-                    entity.set_xmax(xid);
+                    if let Some(epoch) = epoch {
+                        entity.set_branch_xmax(epoch, xid);
+                    } else {
+                        entity.set_xmax(xid);
+                    }
                     let _ = manager.update(entity);
                 }
             }
@@ -702,6 +993,10 @@ impl RedDBRuntime {
     ) -> RedDBResult<()> {
         let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
         let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        let epoch = store
+            .get(collection, new_id)
+            .and_then(|entity| entity.branch_version().map(|version| version.origin));
         if let Some(new) = store.get(collection, new_id) {
             let fields = crate::application::ports::entity_row_fields_snapshot(&new);
             self.index_store_ref()
@@ -718,8 +1013,12 @@ impl RedDBRuntime {
             .map_err(|error| RedDBError::Internal(error.to_string()))?;
         if let Some(manager) = store.get_collection(collection) {
             if let Some(mut old) = manager.get(old_id) {
-                if old.xmax == xid {
-                    old.set_xmax(previous_xmax);
+                if epoch.map_or(old.xmax, |epoch| old.branch_xmax(epoch)) == xid {
+                    if let Some(epoch) = epoch {
+                        old.set_branch_xmax(epoch, previous_xmax);
+                    } else {
+                        old.set_xmax(previous_xmax);
+                    }
                     manager
                         .update(old.clone())
                         .map_err(|error| RedDBError::Internal(error.to_string()))?;
@@ -747,7 +1046,7 @@ impl RedDBRuntime {
         }
 
         let store = self.inner.db.store();
-        for (collection, id, _xid, _previous_xmax) in pending {
+        for (collection, id, _xid, _previous_xmax, _epoch) in pending {
             if let Some(manager) = store.get_collection(&collection) {
                 manager.remove_metadata_expiry(id);
             }
@@ -778,13 +1077,18 @@ impl RedDBRuntime {
         };
 
         let store = self.inner.db.store();
-        for (collection, id, xid, previous_xmax) in pending {
+        let _publication = store.vault_publication_lock.lock();
+        for (collection, id, xid, previous_xmax, epoch) in pending {
             let Some(manager) = store.get_collection(&collection) else {
                 continue;
             };
             if let Some(mut entity) = manager.get(id) {
-                if entity.xmax == xid {
-                    entity.set_xmax(previous_xmax);
+                if epoch.map_or(entity.xmax, |epoch| entity.branch_xmax(epoch)) == xid {
+                    if let Some(epoch) = epoch {
+                        entity.set_branch_xmax(epoch, previous_xmax);
+                    } else {
+                        entity.set_xmax(previous_xmax);
+                    }
                     let _ = manager.update(entity);
                 }
             }
@@ -896,22 +1200,27 @@ impl RedDBRuntime {
     ///
     /// Returns the number of tuples whose `xmax` was wiped back to 0.
     pub(crate) fn revive_tombstones_since(&self, conn_id: u64, stamper_xid: u64) -> usize {
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         let mut guard = self.inner.pending_tombstones.write();
         let Some(pending) = guard.get_mut(&conn_id) else {
             return 0;
         };
 
-        let store = self.inner.db.store();
         let mut revived = 0usize;
-        pending.retain(|(collection, id, xid, previous_xmax)| {
+        pending.retain(|(collection, id, xid, previous_xmax, epoch)| {
             if *xid < stamper_xid {
                 // Stamped before the savepoint — keep in queue.
                 return true;
             }
             if let Some(manager) = store.get_collection(collection) {
                 if let Some(mut entity) = manager.get(*id) {
-                    if entity.xmax == *xid {
-                        entity.set_xmax(*previous_xmax);
+                    if epoch.map_or(entity.xmax, |epoch| entity.branch_xmax(epoch)) == *xid {
+                        if let Some(epoch) = epoch {
+                            entity.set_branch_xmax(*epoch, *previous_xmax);
+                        } else {
+                            entity.set_xmax(*previous_xmax);
+                        }
                         let _ = manager.update(entity);
                         revived += 1;
                     }
@@ -958,9 +1267,14 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn own_transaction_xids(&self) -> std::collections::HashSet<u64> {
-        self.inner
+        let mut xids = self
+            .inner
             .transaction_state
-            .own_xids(current_connection_id())
+            .own_xids(current_connection_id());
+        if let Some(xid) = self.graph_insert_xid() {
+            xids.insert(xid);
+        }
+        xids
     }
 
     /// `true` when the given connection id has an open `BEGIN`. Issue

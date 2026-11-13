@@ -296,7 +296,7 @@ fn recover_paged_wal_inner(
                 let mut has_entity = false;
                 manager.try_for_each_entity(32 * 1024 * 1024, |entity| {
                     has_entity = true;
-                    high = high.max(entity.xmin).max(entity.xmax);
+                    high = high.max(entity.max_transaction_id());
                     max_entity = max_entity.max(entity.id.raw());
                     max_sequence = max_sequence.max(entity.sequence_id);
                     if let crate::storage::EntityKind::TableRow { row_id, .. } = &entity.kind {

@@ -3,8 +3,8 @@ use crate::runtime::execution_context::{CurrentSnapshotGuard, SnapshotContext};
 use crate::storage::transaction::snapshot::TxnContext;
 
 impl KvAtomicOps<'_> {
-    pub(super) fn record_vault_read(&self, collection: &str, key: Option<&str>) {
-        let snapshot = self.runtime.vault_read_snapshot();
+    pub(super) fn record_vault_read(&self, collection: &str, key: Option<&str>) -> RedDBResult<()> {
+        let snapshot = self.runtime.vault_read_snapshot()?;
         if let Some(reader) = snapshot.serializable_reader {
             snapshot.manager.record_serializable_vault_read(
                 reader,
@@ -13,6 +13,7 @@ impl KvAtomicOps<'_> {
                 key,
             );
         }
+        Ok(())
     }
 
     /// Callbacks run under the pending-write read guard and must not re-enter
@@ -59,6 +60,10 @@ impl KvAtomicOps<'_> {
         metadata: Metadata,
         base_id: Option<crate::storage::EntityId>,
     ) -> RedDBResult<VaultEntry> {
+        if let Some(epoch) = self.runtime.vcs_writer_epoch(collection)? {
+            entity.set_branch_origin(epoch);
+        }
+        entity.ensure_table_logical_id();
         let manager = self.runtime.snapshot_manager();
         let transaction_xid = self.runtime.current_xid();
         let writer_xid = transaction_xid.unwrap_or_else(|| manager.begin());
@@ -70,6 +75,7 @@ impl KvAtomicOps<'_> {
             tenant: self.tenant.clone(),
             key: key.into(),
             base_id,
+            previous_id: base_id,
             writer_xid,
             applied: false,
         };
@@ -144,12 +150,14 @@ impl PendingVaultWrite {
 }
 
 impl RedDBRuntime {
-    pub(super) fn vault_read_snapshot(&self) -> SnapshotContext {
-        super::super::execution_context::capture_current_snapshot()
-            .unwrap_or_else(|| self.vault_write_snapshot())
+    pub(super) fn vault_read_snapshot(&self) -> RedDBResult<SnapshotContext> {
+        if let Some(context) = super::super::execution_context::capture_current_snapshot() {
+            return Ok(context);
+        }
+        self.vault_write_snapshot()
     }
 
-    pub(super) fn vault_write_snapshot(&self) -> SnapshotContext {
+    pub(super) fn vault_write_snapshot(&self) -> RedDBResult<SnapshotContext> {
         let context = self
             .inner
             .transaction_state
@@ -158,13 +166,16 @@ impl RedDBRuntime {
             (context.isolation == crate::storage::transaction::IsolationLevel::Serializable)
                 .then_some(context.xid)
         });
-        SnapshotContext {
-            snapshot: self.current_snapshot(),
+        let snapshot = self.current_snapshot();
+        let branch = self.vcs_branch_read_view(&snapshot, None)?;
+        Ok(SnapshotContext {
+            branch,
+            snapshot,
             manager: self.snapshot_manager(),
             own_xids: self.own_transaction_xids(),
             requires_index_fallback: true,
             serializable_reader,
-        }
+        })
     }
 
     pub(crate) fn prepare_pending_vault_writes(
@@ -184,7 +195,7 @@ impl RedDBRuntime {
         }
         // TransactionState removes the context before prepare, so this is a
         // fresh committed view without the connection's staged overlay.
-        let _snapshot_guard = CurrentSnapshotGuard::install(self.vault_write_snapshot());
+        let _snapshot_guard = CurrentSnapshotGuard::install(self.vault_write_snapshot()?);
         let mut checked = std::collections::HashSet::new();
         let mut write_set = std::collections::HashSet::new();
         let mut vault_write_set = std::collections::HashSet::new();
@@ -248,6 +259,29 @@ impl RedDBRuntime {
 
     fn store_vault_write(&self, write: &mut PendingVaultWrite) -> RedDBResult<()> {
         let store = self.inner.db.store();
+        if let (Some(branch), Some(previous)) = (write.entity.branch_version(), write.previous_id) {
+            let mut old = store
+                .try_get(&write.collection, previous, usize::MAX)?
+                .ok_or_else(|| RedDBError::NotFound(previous.to_string()))?;
+            let epoch = branch.origin;
+            write.entity.set_logical_id(old.logical_id());
+            if let (
+                crate::storage::EntityKind::TableRow { row_id, .. },
+                crate::storage::EntityKind::TableRow {
+                    row_id: old_row_id, ..
+                },
+            ) = (&mut write.entity.kind, &old.kind)
+            {
+                *row_id = *old_row_id;
+            }
+            old.set_branch_xmax(epoch, write.entity.xmin);
+            store
+                .get_collection(&write.collection)
+                .expect("vault collection")
+                .update(old.clone())
+                .map_err(|error| RedDBError::Internal(error.to_string()))?;
+            store.persist_entities_to_pager_wal_only(&write.collection, &[old])?;
+        }
         write.applied = true;
         store
             .insert_vault_version(

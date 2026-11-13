@@ -114,8 +114,13 @@ pub(crate) fn parse_create_node_input(
         label: label.to_string(),
         node_type: payload
             .get("node_type")
-            .and_then(JsonValue::as_str)
-            .map(str::to_string),
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| RedDBError::Query("node_type must be one text value".into()))
+            })
+            .transpose()?,
         properties,
         metadata,
         embeddings,

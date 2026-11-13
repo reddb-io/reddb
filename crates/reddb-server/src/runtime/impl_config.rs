@@ -86,6 +86,29 @@ impl RedDBRuntime {
         cmd: &reddb_rql::ast::ConfigCommand,
     ) -> RedDBResult<RuntimeQueryResult> {
         use reddb_rql::ast::ConfigCommand;
+        if let ConfigCommand::Put { collection, .. }
+        | ConfigCommand::Rotate { collection, .. }
+        | ConfigCommand::Delete { collection, .. } = cmd
+        {
+            if self.vcs_is_versioned(collection)? {
+                let store = self.db().store();
+                let _publication = store.vault_publication_lock.lock();
+                let (snapshot, _retention) = self.vcs_state_write_snapshot(collection)?;
+                let _snapshot = super::execution_context::CurrentSnapshotGuard::install(snapshot);
+                return self.with_versioned_graph_insert(|| {
+                    self.execute_config_command_inner(raw_query, cmd)
+                });
+            }
+        }
+        self.execute_config_command_inner(raw_query, cmd)
+    }
+
+    fn execute_config_command_inner(
+        &self,
+        raw_query: &str,
+        cmd: &reddb_rql::ast::ConfigCommand,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        use reddb_rql::ast::ConfigCommand;
 
         match cmd {
             ConfigCommand::Put {
@@ -931,6 +954,7 @@ impl RedDBRuntime {
         self.inner
             .db
             .save_collection_contract(CollectionContract {
+                graph_contract: None,
                 name: collection.to_string(),
                 description: None,
                 description_generated: false,
@@ -1006,6 +1030,12 @@ impl RedDBRuntime {
             },
             EntityData::Row(row),
         );
+        if self.vcs_is_versioned(collection)? {
+            let previous = self
+                .latest_config_version(collection, key)?
+                .map(|version| version.id);
+            return self.insert_vcs_state_version(collection, entity, previous);
+        }
         self.inner
             .db
             .store()
@@ -1019,7 +1049,7 @@ impl RedDBRuntime {
         key: &str,
     ) -> RedDBResult<Option<ConfigVersion>> {
         let mut latest: Option<ConfigVersion> = None;
-        self.visit_config_versions(collection, Some(key), |version| {
+        self.visit_config_versions(collection, Some(key), false, |version| {
             super::keyed_spine::select_latest_version(&mut latest, version);
         })?;
         Ok(latest)
@@ -1027,7 +1057,9 @@ impl RedDBRuntime {
 
     fn config_versions(&self, collection: &str, key: &str) -> RedDBResult<Vec<ConfigVersion>> {
         let mut versions = Vec::new();
-        self.visit_config_versions(collection, Some(key), |version| versions.push(version))?;
+        self.visit_config_versions(collection, Some(key), true, |version| {
+            versions.push(version)
+        })?;
         Ok(versions)
     }
 
@@ -1037,7 +1069,7 @@ impl RedDBRuntime {
         prefix: Option<&str>,
     ) -> RedDBResult<Vec<ConfigVersion>> {
         let mut latest = std::collections::BTreeMap::new();
-        self.visit_config_versions(collection, None, |version| {
+        self.visit_config_versions(collection, None, false, |version| {
             if prefix.is_none_or(|prefix| version.key.starts_with(prefix)) {
                 super::keyed_spine::retain_latest_version(&mut latest, version);
             }
@@ -1049,6 +1081,7 @@ impl RedDBRuntime {
         &self,
         collection: &str,
         key: Option<&str>,
+        include_superseded: bool,
         mut consume: impl FnMut(ConfigVersion),
     ) -> RedDBResult<()> {
         let store = self.inner.db.store();
@@ -1058,12 +1091,34 @@ impl RedDBRuntime {
         let _publication = manager
             .has_backing()
             .then(|| store.vault_publication_lock.lock());
+        let snapshot = self
+            .vcs_is_versioned(collection)?
+            .then(|| self.native_read_snapshot())
+            .transpose()?;
         super::function_budget::try_scan(
             |visit| match key {
                 Some(key) => manager.try_for_each_key_entity(key, visit),
                 None => manager.try_for_each_entity(usize::MAX, visit),
             },
             |entity| {
+                if let Some((context, _)) = &snapshot {
+                    let mut creation;
+                    let visible = if include_superseded {
+                        creation = entity.clone();
+                        creation.set_xmax(0);
+                        let origin = creation
+                            .branch_version()
+                            .map_or(0, |version| version.origin);
+                        creation.clear_branch_version();
+                        creation.set_branch_origin(origin);
+                        &creation
+                    } else {
+                        entity
+                    };
+                    if !super::impl_core::entity_visible_with_context(Some(context), visible) {
+                        return true;
+                    }
+                }
                 let EntityData::Row(row) = &entity.data else {
                     return true;
                 };
@@ -1080,10 +1135,13 @@ impl RedDBRuntime {
     }
 
     fn prune_config_history(&self, collection: &str, key: &str) -> RedDBResult<()> {
+        if self.vcs_is_versioned(collection)? {
+            return Ok(());
+        }
         // Keep the existing retention policy and stable version ordering; the
         // decision needs identities, not every retained value's payload.
         let mut versions = Vec::new();
-        self.visit_config_versions(collection, Some(key), |version| {
+        self.visit_config_versions(collection, Some(key), true, |version| {
             versions.push((version.version, version.id));
         })?;
         if versions.len() <= CONFIG_HISTORY_LIMIT {
@@ -1330,7 +1388,7 @@ impl RedDBRuntime {
         }
     }
 
-    fn check_config_capability(
+    pub(crate) fn check_config_capability(
         &self,
         action: &str,
         collection: &str,

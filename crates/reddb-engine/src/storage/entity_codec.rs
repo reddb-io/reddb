@@ -1,4 +1,4 @@
-//! Canonical logical entity adapter for native store versions V1 through V12.
+//! Canonical logical entity adapter for native store versions V1 through V14.
 //! Physical record framing and value bytes remain owned by `reddb-file`.
 use super::entity::*;
 use crate::catalog::CollectionContract;
@@ -300,6 +300,17 @@ pub fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_ver
         write_varu64(buf, entity.xmin);
         write_varu64(buf, entity.xmax);
     }
+    if format_version >= STORE_VERSION_V14 {
+        buf.push(u8::from(entity.branch_version().is_some()));
+        if let Some(branch) = entity.branch_version() {
+            write_varu64(buf, branch.origin);
+            write_varu32(buf, branch.deletions.len() as u32);
+            for &(epoch, xid) in &branch.deletions {
+                write_varu64(buf, epoch);
+                write_varu64(buf, xid);
+            }
+        }
+    }
 }
 
 /// Decode one entity, retaining legacy optional-tail compatibility. All reads
@@ -499,6 +510,29 @@ fn read_entity_from_reader(
     if format_version >= STORE_VERSION_V9 && reader.remaining() != 0 {
         entity.set_xmin(reader.variable_u64()?);
         entity.set_xmax(reader.variable_u64()?);
+    }
+    if format_version >= STORE_VERSION_V14 {
+        match reader.byte()? {
+            0 => {}
+            1 => {
+                let origin = reader.variable_u64()?;
+                reader.reserve_elements::<EntityAux>(1)?;
+                entity.set_branch_origin(origin);
+                let count = reader.count(2)?;
+                reader.reserve_elements::<(u64, u64)>(count)?;
+                let mut previous = None;
+                for _ in 0..count {
+                    let epoch = reader.variable_u64()?;
+                    let xid = reader.variable_u64()?;
+                    if epoch == origin || xid == 0 || previous.is_some_and(|old| old >= epoch) {
+                        return Err(invalid("invalid branch deletion stamp"));
+                    }
+                    entity.set_branch_xmax(epoch, xid);
+                    previous = Some(epoch);
+                }
+            }
+            _ => return Err(invalid("invalid branch provenance flag")),
+        }
     }
     if !embeddings.is_empty() || !cross_refs.is_empty() {
         reader.reserve_elements::<EntityAux>(1)?;

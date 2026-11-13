@@ -34,6 +34,7 @@ fn visible_entities(rt: &RedDBRuntime, collection: &str) -> usize {
     // connection — `capture_current_snapshot` returns None outside
     // the execute_query scope, so we assemble it explicitly here.
     let ctx = SnapshotContext {
+        branch: None,
         snapshot: rt.current_snapshot(),
         manager: rt.snapshot_manager(),
         own_xids: rt.current_txn_own_xids(),
@@ -155,6 +156,7 @@ fn cross_model_atomic_rollback() {
         .get_collection("social")
         .map(|mgr| {
             let ctx = SnapshotContext {
+                branch: None,
                 snapshot: rt.current_snapshot(),
                 manager: rt.snapshot_manager(),
                 own_xids: rt.current_txn_own_xids(),

@@ -90,6 +90,7 @@ fn register_collection(rt: &RedDBRuntime, name: &str, model: CollectionModel) {
         .unwrap_or_else(|err| panic!("create {name}: {err}"));
     rt.db()
         .save_collection_contract(CollectionContract {
+            graph_contract: None,
             name: name.to_string(),
             description: None,
             description_generated: false,

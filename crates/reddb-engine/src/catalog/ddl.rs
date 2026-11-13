@@ -53,6 +53,7 @@ pub fn collection_contract_from_create_table(
         });
     }
     Ok(super::CollectionContract {
+        graph_contract: None,
         name: query.name.clone(),
         description: query.description.clone(),
         description_generated: false,

@@ -300,6 +300,7 @@ impl UnifiedStore {
         };
         let entity = Self::result_cache_epoch_entity(id, 1);
         self.publish_rows(super::row_publication::RowPublication {
+            replacements: Vec::new(),
             inserts: vec![(CACHE_COLLECTION.to_string(), entity, None)],
             deletes: Vec::new(),
         })?;

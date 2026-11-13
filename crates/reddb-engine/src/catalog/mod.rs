@@ -7,3 +7,6 @@ pub mod codec;
 pub mod ddl;
 pub mod enforcement;
 pub mod schema;
+
+pub mod graph;
+pub use graph::{GraphContract, GraphEdgeContract, GraphPropertyContract, GraphVertexContract};

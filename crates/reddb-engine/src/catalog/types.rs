@@ -175,5 +175,6 @@ pub struct CollectionContract {
     /// present, and decodes to `None` on sidecars written before the
     /// feature (versioned/migrated with the schema). Validated against
     /// the provider capability matrix (#1269) at DDL execution time.
+    pub graph_contract: Option<super::GraphContract>,
     pub ai_policy: Option<crate::catalog::AiPolicy>,
 }

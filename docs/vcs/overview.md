@@ -1,11 +1,26 @@
 # Git for Data — Overview
 
-RedDB ships a first-class version-control layer. Every mutation runs
-under MVCC; every commit pins an immutable snapshot of that MVCC
-state; every branch, tag, and `HEAD` is a row in a regular
-collection. Together they deliver *real* git semantics on top of a
-document/table/graph database — no external DAG, no SHA tree
-built out-of-band, no custom file format.
+See [model validation](model-validation.md) for the current test inventory and
+the remaining work across collection models.
+
+> **Current limitation:** checkout changes VCS metadata but does not isolate
+> reads or writes by branch. Non-fast-forward merge records metadata and
+> conflicts, but does not apply merged data. Conflict resolution returns an
+> error and retains the conflict until data application is implemented.
+> Merges, cherry-picks and reverts that require data application return an error.
+> Models with state outside the adopted MVCC entity history reject these
+> operations conservatively, including when their entity diff appears empty.
+> Graph entities inserted before versioning was enabled, or by older builds
+> without an MVCC creation xid, can appear in earlier `AS OF` snapshots.
+> Native entity and collection reads apply the connection's MVCC snapshot;
+> this does not provide branch isolation.
+> Do not rely on these operations for isolated
+> agent changes or reviewed publication of graph data.
+
+RedDB persists commits, branches, tags and `HEAD` in regular collections.
+Commits pin MVCC snapshots for the read and write paths that retain history.
+The operation inventory below includes metadata operations whose data semantics
+are still incomplete; it is not a claim of full Git semantics for collections.
 
 ## What you get
 
@@ -35,66 +50,44 @@ built out-of-band, no custom file format.
 | Resolve ref/hash | `red vcs resolve` | — | — |
 | Time-travel | — | — | `SELECT ... AS OF COMMIT\|BRANCH\|TAG\|TIMESTAMP\|SNAPSHOT ...` |
 
-Direct SQL time-travel (`SELECT ... AS OF COMMIT '<hash>'`) is the
-killer feature: queries run against any historical point without
-copying data or dumping snapshots.
+SQL time-travel (`SELECT ... AS OF COMMIT '<hash>'`) reads retained entity
+versions through the commit's captured snapshot. Support depends on the
+collection's write and read paths; see the model validation inventory.
 
 ## Why this design
 
-Rather than reinventing git's object tree, RedDB re-uses primitives
-the engine already has:
+RedDB uses MVCC snapshots and internal collections:
 
-- **MVCC snapshots** are already immutable, hash-ordered, and
-  content-addressed by the `xid` that produced them. We simply
-  *pin* the `xid` at commit time so `VACUUM` cannot reclaim those
-  row versions. No extra storage.
-- **Collections** hold commit metadata, refs, worksets, closure
-  rows, and conflict markers exactly like any user table — so
-  every operation is a plain INSERT/DELETE that ships through WAL,
-  CDC, and replication for free.
-- **`AS OF` clause** resolves down to the snapshot `xid` pinned by
-  a commit, then installs a `CurrentSnapshotGuard` for the scope
-  of the query. Every scan transparently honours the time-travel
-  target without duplicating the executor path.
+- **Snapshot retention** pins the earliest horizon needed by each commit,
+  including transactions excluded while still active. Retaining older entity
+  versions consumes storage; an xid is a transaction identifier, not a content hash.
+- **Metadata collections** hold commits, refs, worksets and conflicts through
+  the store's persistence paths. This alone does not make a sequence of metadata
+  writes an atomic publication of user data.
+- **`AS OF`** resolves a commit's xid and captured exclusions and installs the
+  resulting snapshot for supported query paths.
 
-Net result: git-like branching and time-travel come in at
-~1500 LoC of runtime code plus a thin application/presentation
-surface. Durability, replication, RBAC, and auth apply to the VCS
-collections without extra work.
+## Use and implementation limits
 
-## Use cases
-
-- **Auditable data edits** — every edit is a commit. `SELECT ...
-  AS OF COMMIT '<hash>'` reproduces the exact state anyone saw,
-  forever.
-- **Change review before merge** — feature branches collect
-  commits; `vcs diff main..feature` surfaces what moves; `vcs
-  merge` produces a merge commit or a conflict set.
-- **Safe schema refactors** — commit on a branch, validate with
-  `AS OF BRANCH 'feature'` queries, merge when green.
-- **Write-ahead review for AI agents** — agents mutate on their
-  own branch; humans review with `vcs log`, `vcs diff`, and merge
-  only the clean bits.
-- **Reproducible analytics** — snapshots pin the dataset that
-  produced a report. Re-run the report six months later with the
-  same `AS OF COMMIT` and get byte-for-byte identical output.
+Explicit commits can retain historical data for the adopted MVCC paths, and
+diffs expose changes between those snapshots. Writes do not automatically create
+VCS commits. Branch-isolated agent edits, reviewed merge publication and schema
+versioning remain implementation work. Historical data also does not guarantee
+identical results from volatile functions or changing query definitions.
 
 ## Guarantees
 
-- **Deterministic commit hash**: `SHA-256("reddb-commit-v1" ||
-  root_xid || sorted_parents || author || message || timestamp_ms)`
-  so two commits with the same parents + message + timestamp hash
-  identically. No custom object IDs.
+- **Deterministic commit hash**: the hash includes `root_xid`, sorted parents,
+  author, message and timestamp, with the `reddb-commit-v1` prefix. Identical
+  values for all hash inputs yield the same hash.
 - **Monotonic height**: each commit's `height = max(parents.height)
   + 1`, giving sub-linear LCA queries via height-ordered BFS.
-- **Reference-counted snapshot pin**: a commit holding xid *N*
-  survives VACUUM; deleting that commit (via branch delete with
-  no other reachable ref) releases the pin and the MVCC garbage
-  collector can reclaim the row versions.
-- **Content integrity**: commit bodies, parents, author, and
-  message are all hashed together. Modifying any field changes
-  the hash — tampering is immediately visible to anyone who saved
-  the old hash.
+- **Snapshot pins** are restored when the database reopens. Deleting a branch
+  removes its reference; it does not delete the commit records or reclaim their
+  retained history.
+- **Hash scope** covers the listed commit metadata, not the entity bodies or
+  every stored commit field. It is not a cryptographic integrity proof of the
+  historical dataset.
 
 ## Opt-in per collection
 
@@ -134,12 +127,10 @@ curl http://localhost:5000/collections/users/vcs
 
 ### Retroactive opt-in
 
-`ALTER TABLE ... SET VERSIONED = true` works on a collection
-that already has data and commits. You can flip any existing
-collection into VCS after the fact and immediately query earlier
-commits via `AS OF COMMIT '<older-hash>'` — as long as those
-commits still hold their `xid` pin, the MVCC row versions are
-still present and reachable.
+`ALTER TABLE ... SET VERSIONED = true` can enable an existing collection.
+Earlier commits are meaningful only to the extent that the collection already
+retained MVCC versions with creation and deletion xids. Enabling the flag does
+not reconstruct overwritten data or date an older unstamped insertion.
 
 ```sql
 CREATE TABLE products (...);
@@ -156,10 +147,8 @@ ALTER TABLE products SET VERSIONED = true;
 SELECT * FROM products AS OF COMMIT '<older-hash>';
 ```
 
-Caveat: once real VACUUM lands (Phase 7.5+), opting in *very*
-late may miss intermediate row versions that VACUUM reclaimed
-before the opt-in. If you know a collection will ever be
-versioned, opt in early.
+Opt in before writing data whose history must be retained. Versions already
+overwritten or reclaimed cannot be recovered by changing the flag.
 
 ### What opt-in changes
 
@@ -169,14 +158,11 @@ versioned, opt in early.
 - **`AS OF` queries** error with
   `AS OF requires a versioned collection — \`X\` has not opted in`
   when the target table hasn't been flagged.
-- **Internal `red_*` collections** are always treated as
-  append-only and always accept `AS OF` (they store VCS metadata
-  itself; their history is the history of the history).
-- **Storage**: versions of rows in non-versioned collections stay
-  reclaim-eligible by VACUUM; only versioned collections pin
-  row versions behind commit references. This is the main disk-
-  cost lever — keep ephemeral data (sessions, caches, queues)
-  out of VCS and let VACUUM prune aggressively.
+- **Internal `red_*` collections** are excluded from user opt-in and diffs.
+  Their mutable metadata is not a historical copy of the catalog.
+- **Storage**: adopted write paths preserve old physical versions. Commit
+  pins constrain reclamation through the shared snapshot manager; they are
+  not independent per-collection garbage-collection horizons.
 
 ### Default-off rationale
 
@@ -185,8 +171,8 @@ Most transactional data doesn't warrant history:
 - Sessions, tokens, and short-TTL caches churn dozens of times
   per row per day — history would multiply their storage cost
   without any audit value.
-- Queues and streams are semantically linear; commits don't map
-  to them.
+- Queue consumption is operational. Versioning payloads is useful for agent
+  branches, but delivery leases must stay local to each writer epoch.
 - Vector indices and derived aggregates can be rebuilt from
   source data on demand.
 
@@ -196,19 +182,19 @@ and reproducible.
 
 ## Storage footprint
 
-All VCS state lives in these seven `red_*` collections, created
+VCS metadata lives in these `red_*` collections, created
 on first boot:
 
 | Collection | Contents |
 |------------|----------|
-| `red_commits` | commit rows — hash, root_xid, parents[], height, author, committer, message, timestamp_ms, signature |
-| `red_refs` | branches (`refs/heads/*`), tags (`refs/tags/*`), per-connection `HEAD:<conn>` pointers |
-| `red_worksets` | per-connection working/staged state — branch, base_commit, working_xid, merge_state_id |
-| `red_closure` | commit ancestry index `(height, commit_hash, ancestor_hash)` for fast LCA |
-| `red_conflicts` | unresolved merge conflicts — base/ours/theirs JSON + conflicting paths |
-| `red_merge_state` | in-progress merge/cherry_pick/revert/rebase metadata |
-| `red_remotes` | remote repository configuration (Phase 7) |
-| `red_vcs_settings` | per-collection opt-in flag (`id = name`, `versioned = true`) |
+| `red.vcs.commits` | commit rows — hash, root_xid, parents[], height, author, committer, message, timestamp_ms, signature |
+| `red.vcs.refs` | branches (`refs/heads/*`), tags (`refs/tags/*`), per-connection `HEAD:<conn>` pointers |
+| `red.vcs.worksets` | per-connection working/staged state — branch, base_commit, working_xid, merge_state_id |
+| `red.vcs.closure` | commit ancestry index `(height, commit_hash, ancestor_hash)` for fast LCA |
+| `red.vcs.conflicts` | unresolved merge conflicts — base/ours/theirs JSON + conflicting paths |
+| `red.vcs.merge_state` | in-progress merge/cherry_pick/revert/rebase metadata |
+| `red.vcs.remotes` | remote repository configuration (Phase 7) |
+| `red.vcs.settings` | per-collection opt-in flag (`id = name`, `versioned = true`) |
 
 Config defaults live in `red.config` under content keys `vcs.*` — inheriting
 the same bare dot-notation pattern used by `ai.*`, `storage.*`, and friends.

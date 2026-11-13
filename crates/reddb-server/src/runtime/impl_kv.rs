@@ -21,6 +21,7 @@ pub(super) struct PendingVaultWrite {
     tenant: Option<String>,
     key: String,
     base_id: Option<crate::storage::EntityId>,
+    previous_id: Option<crate::storage::EntityId>,
     writer_xid: u64,
     applied: bool,
 }
@@ -210,7 +211,7 @@ impl<'a> KvAtomicOps<'a> {
         ttl_ms: Option<u64>,
         tags: &[String],
         if_not_exists: bool,
-        mut metadata: Vec<(String, MetadataValue)>,
+        metadata: Vec<(String, MetadataValue)>,
     ) -> RedDBResult<(bool, crate::storage::EntityId)> {
         // PUT, INCR and CAS serialize replacement of the same physical key.
         let vault_model = model == crate::catalog::CollectionModel::Vault;
@@ -227,13 +228,42 @@ impl<'a> KvAtomicOps<'a> {
         let rmw_lock = self.runtime.inner.rmw_locks.lock_for(collection, &lock_key);
         let _rmw_guard = rmw_lock.lock();
         let vault_store = self.runtime.inner.db.store();
-        let _vault_guard = vault_model.then(|| vault_store.vault_publication_lock.lock());
-        let _snapshot_guard = vault_model.then(|| {
-            super::execution_context::CurrentSnapshotGuard::install(
-                self.runtime.vault_write_snapshot(),
-            )
-        });
+        let versioned = self.is_versioned_collection(model, collection)?;
+        let _vault_guard =
+            (vault_model || versioned).then(|| vault_store.vault_publication_lock.lock());
+        let _snapshot_guard = if vault_model {
+            Some(super::execution_context::CurrentSnapshotGuard::install(
+                self.runtime.vault_write_snapshot()?,
+            ))
+        } else {
+            None
+        };
 
+        self.set_with_tags_and_metadata_unlocked(
+            model,
+            collection,
+            key,
+            value,
+            ttl_ms,
+            tags,
+            if_not_exists,
+            metadata,
+        )
+    }
+
+    /// Caller holds the key's RMW lock and, for versioned writes, the publication fence.
+    fn set_with_tags_and_metadata_unlocked(
+        &self,
+        model: crate::catalog::CollectionModel,
+        collection: &str,
+        key: &str,
+        value: reddb_types::Value,
+        ttl_ms: Option<u64>,
+        tags: &[String],
+        if_not_exists: bool,
+        mut metadata: Vec<(String, MetadataValue)>,
+    ) -> RedDBResult<(bool, crate::storage::EntityId)> {
+        let versioned = self.is_versioned_collection(model, collection)?;
         self.ensure_keyed_collection(model, collection)?;
 
         if model == crate::catalog::CollectionModel::Vault {
@@ -282,7 +312,6 @@ impl<'a> KvAtomicOps<'a> {
         // tombstoned (set_xmax) *after* the new version is created, so both
         // coexist physically — exactly like a table-row update. Non-versioned
         // KV publishes the replacement and TTL in one durable WAL batch.
-        let versioned = self.is_versioned_collection(model, collection)?;
         // Capture the prior *visible* version (if any) before the write so we
         // can tombstone it. On a re-PUT after a delete (`was_present` false)
         // there is no visible prior, but earlier versions still exist
@@ -338,7 +367,10 @@ impl<'a> KvAtomicOps<'a> {
                     xid
                 }
             };
-            if let Some(new_entity) = output.entity.clone() {
+            if let Some(mut new_entity) = output.entity.clone() {
+                if let Some(prior) = &prior_versioned_entity {
+                    new_entity.set_logical_id(prior.logical_id());
+                }
                 self.restamp_xmin(collection, new_entity, version_xid)?;
             }
             if let Some(prior) = prior_versioned_entity {
@@ -351,7 +383,8 @@ impl<'a> KvAtomicOps<'a> {
                 // already tombstoned by a concurrent committed writer.
                 // Autocommit (`current_xid()` is None) commits eagerly and
                 // records nothing, matching the table path.
-                let previous_xmax = prior.xmax;
+                let epoch = self.runtime.vcs_writer_epoch(collection)?;
+                let previous_xmax = epoch.map_or(prior.xmax, |epoch| prior.branch_xmax(epoch));
                 let old_id = prior.id;
                 self.tombstone_version(collection, prior, version_xid)?;
                 if self.runtime.current_xid().is_some() {
@@ -428,6 +461,9 @@ impl<'a> KvAtomicOps<'a> {
         let lock = (model != CollectionModel::Vault)
             .then(|| self.runtime.inner.rmw_locks.lock_for(collection, key));
         let _guard = lock.as_ref().map(|lock| lock.lock());
+        let history_store = self.runtime.db().store();
+        let versioned = self.is_versioned_collection(model, collection)?;
+        let _publication = versioned.then(|| history_store.vault_publication_lock.lock());
         if model == CollectionModel::Kv {
             self.runtime
                 .check_collection_privilege(reddb_rql::ast::PolicyAction::Delete, collection)?;
@@ -487,7 +523,8 @@ impl<'a> KvAtomicOps<'a> {
             // already tombstoned by a concurrent committed writer.
             // Autocommit (`current_xid()` is None) commits eagerly and
             // records nothing, matching the table path.
-            let previous_xmax = entity.xmax;
+            let epoch = self.runtime.vcs_writer_epoch(collection)?;
+            let previous_xmax = epoch.map_or(entity.xmax, |epoch| entity.branch_xmax(epoch));
             self.tombstone_version(collection, entity, xid)?;
             if self.runtime.current_xid().is_some() {
                 self.runtime.record_pending_tombstone(
@@ -496,6 +533,7 @@ impl<'a> KvAtomicOps<'a> {
                     id,
                     xid,
                     previous_xmax,
+                    epoch,
                 );
             }
             self.runtime.inner.kv_tag_index.remove(collection, key);
@@ -561,15 +599,23 @@ impl<'a> KvAtomicOps<'a> {
     fn tombstone_version(
         &self,
         collection: &str,
-        mut entity: crate::storage::UnifiedEntity,
+        entity: crate::storage::UnifiedEntity,
         xid: crate::storage::transaction::snapshot::Xid,
     ) -> RedDBResult<()> {
         let store = self.runtime.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         let Some(manager) = store.get_collection(collection) else {
             return Ok(());
         };
         let id = entity.id;
-        entity.set_xmax(xid);
+        let mut entity = manager
+            .try_get(id, usize::MAX)?
+            .ok_or_else(|| RedDBError::NotFound(id.to_string()))?;
+        if let Some(epoch) = self.runtime.vcs_writer_epoch(collection)? {
+            entity.set_branch_xmax(epoch, xid);
+        } else {
+            entity.set_xmax(xid);
+        }
         manager
             .update(entity.clone())
             .map_err(|err| RedDBError::Internal(format!("{err:?}")))?;
@@ -652,6 +698,9 @@ impl<'a> KvAtomicOps<'a> {
         }
         let rmw_lock = self.runtime.inner.rmw_locks.lock_for(collection, key);
         let _rmw_guard = rmw_lock.lock();
+        let history_store = self.runtime.db().store();
+        let versioned = self.is_versioned_collection(model, collection)?;
+        let _publication = versioned.then(|| history_store.vault_publication_lock.lock());
         self.ensure_kv_collection(collection)?;
         let existing = self.runtime.get_kv(collection, key)?;
         let current: i64 = match existing.as_ref() {
@@ -682,6 +731,21 @@ impl<'a> KvAtomicOps<'a> {
         } else {
             None
         };
+
+        if versioned {
+            self.set_with_tags_and_metadata_unlocked(
+                model,
+                collection,
+                key,
+                Value::Integer(next),
+                ttl_ms.or(carried_ttl_ms),
+                &carried_tags,
+                false,
+                Vec::new(),
+            )?;
+            self.runtime.inner.kv_stats.incr_incrs();
+            return Ok(next);
+        }
 
         let atomic = super::kv_write::atomic_available(self.runtime, collection)?;
         let previous = atomic
@@ -760,6 +824,9 @@ impl<'a> KvAtomicOps<'a> {
         }
         let rmw_lock = self.runtime.inner.rmw_locks.lock_for(collection, key);
         let _rmw_guard = rmw_lock.lock();
+        let history_store = self.runtime.db().store();
+        let versioned = self.is_versioned_collection(model, collection)?;
+        let _publication = versioned.then(|| history_store.vault_publication_lock.lock());
         self.ensure_kv_collection(collection)?;
         let existing = self.runtime.get_kv(collection, key)?;
         let current = existing.as_ref().map(|(v, _)| v.clone());
@@ -785,6 +852,21 @@ impl<'a> KvAtomicOps<'a> {
         } else {
             None
         };
+
+        if versioned {
+            self.set_with_tags_and_metadata_unlocked(
+                model,
+                collection,
+                key,
+                new_value,
+                ttl_ms.or(carried_ttl_ms),
+                &carried_tags,
+                false,
+                Vec::new(),
+            )?;
+            self.runtime.inner.kv_stats.incr_cas_success();
+            return Ok((true, current));
+        }
 
         let atomic = super::kv_write::atomic_available(self.runtime, collection)?;
         let previous = atomic
@@ -845,9 +927,10 @@ impl<'a> KvAtomicOps<'a> {
             return Ok(0);
         }
         let store = self.runtime.inner.db.store();
+        let versioned = self.is_versioned_collection(CollectionModel::Kv, collection)?;
         let entries = if let Some(manager) = store
             .get_collection(collection)
-            .filter(|manager| manager.has_backing())
+            .filter(|manager| versioned || manager.has_backing())
         {
             // The hot tag cache contains resident rows only after a bounded
             // cold boot. Explicit invalidation must also consult durable rows;
@@ -894,6 +977,12 @@ impl<'a> KvAtomicOps<'a> {
 
         let mut removed = 0usize;
         for (key, id) in entries {
+            if versioned {
+                if self.delete(CollectionModel::Kv, collection, &key)? {
+                    removed += 1;
+                }
+                continue;
+            }
             let Some(entity) = store.get(collection, id) else {
                 continue;
             };
@@ -936,9 +1025,10 @@ impl<'a> KvAtomicOps<'a> {
     /// Read authoritative tags, propagating cold storage errors to the caller.
     pub fn try_tags_for_key(&self, collection: &str, key: &str) -> RedDBResult<Vec<String>> {
         let store = self.runtime.inner.db.store();
-        if !store
-            .get_collection(collection)
-            .is_some_and(|manager| manager.has_backing())
+        if !self.is_versioned_collection(CollectionModel::Kv, collection)?
+            && !store
+                .get_collection(collection)
+                .is_some_and(|manager| manager.has_backing())
         {
             return Ok(self
                 .runtime
@@ -1119,14 +1209,14 @@ impl<'a> KvAtomicOps<'a> {
     }
 
     fn get_vault_entry(&self, collection: &str, key: &str) -> RedDBResult<Option<VaultEntry>> {
-        self.record_vault_read(collection, Some(key));
+        self.record_vault_read(collection, Some(key))?;
         let mut pending = None;
         self.visit_pending_vault_entries(collection, Some(key), |entry| pending = Some(entry));
         if let Some(entry) = pending {
             return Ok(Some(entry));
         }
         let mut latest: Option<VaultEntry> = None;
-        self.visit_vault_versions(collection, key, |entry| {
+        self.visit_vault_versions(collection, key, false, |entry| {
             super::keyed_spine::select_latest_version(&mut latest, entry);
         })?;
         Ok(latest)
@@ -1139,7 +1229,7 @@ impl<'a> KvAtomicOps<'a> {
         version: i64,
     ) -> RedDBResult<Option<VaultEntry>> {
         let mut selected = None;
-        self.visit_vault_versions(collection, key, |entry| {
+        self.visit_vault_versions(collection, key, true, |entry| {
             if entry.version == version {
                 selected = Some(entry);
             }
@@ -1149,7 +1239,7 @@ impl<'a> KvAtomicOps<'a> {
 
     fn vault_versions(&self, collection: &str, key: &str) -> RedDBResult<Vec<VaultEntry>> {
         let mut versions = Vec::new();
-        self.visit_vault_versions(collection, key, |entry| versions.push(entry))?;
+        self.visit_vault_versions(collection, key, true, |entry| versions.push(entry))?;
         Ok(versions)
     }
 
@@ -1159,19 +1249,30 @@ impl<'a> KvAtomicOps<'a> {
         &self,
         collection: &str,
         key: &str,
+        include_superseded: bool,
         mut visit: impl FnMut(VaultEntry),
     ) -> RedDBResult<()> {
-        self.record_vault_read(collection, Some(key));
+        self.record_vault_read(collection, Some(key))?;
         self.ensure_declared_model(crate::catalog::CollectionModel::Vault, collection)?;
         let store = self.runtime.inner.db.store();
         let manager = store.get_collection(collection);
-        let snapshot = self.runtime.vault_read_snapshot();
+        let snapshot = self.runtime.vault_read_snapshot()?;
+        let creation_only = include_superseded && self.runtime.vcs_is_versioned(collection)?;
         let _publication = manager
             .as_ref()
             .filter(|manager| manager.has_backing())
             .map(|_| store.vault_publication_lock.lock());
         let records = manager.as_ref().map(|manager| {
-            super::keyed_spine::records_with_metadata(manager, Some(snapshot), Some(key), |entity| {
+            super::keyed_spine::records_with_metadata(manager, (!creation_only).then(|| snapshot.clone()), Some(key), |entity| {
+                if creation_only {
+                    let mut creation = entity.clone();
+                    creation.set_xmax(0);
+                    let epoch = creation.branch_version().map_or(0, |version| version.origin);
+                    creation.set_branch_origin(epoch);
+                    if !super::execution_context::entity_visible_with_context(Some(&snapshot), &creation) {
+                        return false;
+                    }
+                }
                 entity.data.as_row().is_some_and(|row| self.vault_row_in_scope(row)
                     && matches!(row.get_field("key"), Some(Value::Text(stored)) if stored.as_ref() == key))
             })
@@ -1219,11 +1320,11 @@ impl<'a> KvAtomicOps<'a> {
         prefix: Option<&str>,
     ) -> RedDBResult<Vec<VaultEntry>> {
         // Listing protects the tenant's collection, including absent keys.
-        self.record_vault_read(collection, None);
+        self.record_vault_read(collection, None)?;
         self.ensure_declared_model(crate::catalog::CollectionModel::Vault, collection)?;
         let store = self.runtime.inner.db.store();
         let manager = store.get_collection(collection);
-        let snapshot = self.runtime.vault_read_snapshot();
+        let snapshot = self.runtime.vault_read_snapshot()?;
         let _publication = manager
             .as_ref()
             .filter(|manager| manager.has_backing())
@@ -1341,7 +1442,7 @@ impl<'a> KvAtomicOps<'a> {
         let vault_store = self.runtime.inner.db.store();
         let _vault_guard = vault_store.vault_publication_lock.lock();
         let _snapshot_guard = super::execution_context::CurrentSnapshotGuard::install(
-            self.runtime.vault_write_snapshot(),
+            self.runtime.vault_write_snapshot()?,
         );
         self.append_vault_version_unlocked(collection, key, value, op, tombstone, tags)
     }
@@ -1407,6 +1508,11 @@ impl<'a> KvAtomicOps<'a> {
     }
 
     fn purge_vault_versions(&self, collection: &str, key: &str) -> RedDBResult<usize> {
+        if self.runtime.vcs_is_versioned(collection)? {
+            return Err(RedDBError::InvalidOperation(
+                "cannot purge vault versions retained by VCS".into(),
+            ));
+        }
         self.runtime.reject_vault_transaction()?;
         let lock_key = format!("vault/{}/{}", self.tenant.as_deref().unwrap_or(""), key);
         let lock = self.runtime.inner.rmw_locks.lock_for(collection, &lock_key);
@@ -1414,7 +1520,7 @@ impl<'a> KvAtomicOps<'a> {
         let vault_store = self.runtime.inner.db.store();
         let _vault_guard = vault_store.vault_publication_lock.lock();
         let _snapshot_guard = super::execution_context::CurrentSnapshotGuard::install(
-            self.runtime.vault_write_snapshot(),
+            self.runtime.vault_write_snapshot()?,
         );
         self.ensure_declared_model(crate::catalog::CollectionModel::Vault, collection)?;
         let versions = self.vault_versions(collection, key)?;
@@ -2023,7 +2129,7 @@ impl RedDBRuntime {
         self.check_vault_capability_in_tenant(action, collection, key, current_tenant().as_deref())
     }
 
-    fn check_vault_capability_in_tenant(
+    pub(crate) fn check_vault_capability_in_tenant(
         &self,
         action: &str,
         collection: &str,
@@ -3861,6 +3967,7 @@ fn kv_list_json_result(
 fn kv_collection_contract(name: &str) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: name.to_string(),
         description: None,
         description_generated: false,

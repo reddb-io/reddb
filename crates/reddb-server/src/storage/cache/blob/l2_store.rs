@@ -134,6 +134,7 @@ impl StoreBlobCacheL2 {
         deletes.extend(control.map(|id| (COLLECTION.to_string(), id)));
         self.store
             .publish_rows(RowPublication {
+                replacements: Vec::new(),
                 inserts: vec![
                     (
                         COLLECTION.to_string(),
@@ -164,6 +165,7 @@ impl StoreBlobCacheL2 {
             .is_owned_by_current_thread());
         self.store
             .publish_rows(RowPublication {
+                replacements: Vec::new(),
                 inserts: vec![(
                     COLLECTION.to_string(),
                     cache_row(&storage_key(key), Value::Blob(encoded)),
@@ -187,6 +189,7 @@ impl StoreBlobCacheL2 {
         deletes.extend(control.map(|id| (COLLECTION.to_string(), id)));
         self.store
             .publish_rows(RowPublication {
+                replacements: Vec::new(),
                 inserts: vec![(
                     COLLECTION.to_string(),
                     cache_row(CONTROL_KEY, Value::UnsignedInteger(bytes_in_use)),
@@ -344,6 +347,7 @@ impl BlobCacheL2Backend for StoreBlobCacheL2 {
         let previous = find_value(&self.store, &key).map(|(id, _)| (COLLECTION.to_string(), id));
         self.store
             .publish_rows(RowPublication {
+                replacements: Vec::new(),
                 inserts: vec![(
                     COLLECTION.to_string(),
                     cache_row(&key, Value::UnsignedInteger(generation)),
@@ -394,7 +398,11 @@ impl BlobCacheL2Backend for StoreBlobCacheL2 {
             ));
         }
         self.store
-            .publish_rows(RowPublication { inserts, deletes })
+            .publish_rows(RowPublication {
+                replacements: Vec::new(),
+                inserts,
+                deletes,
+            })
             .map_err(store_error)?;
         if reclaimed > 0 {
             self.bytes_in_use.store(new_bytes, Ordering::Relaxed);

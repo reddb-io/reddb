@@ -263,6 +263,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
         let do_read =
             |runtime: &RedDBRuntime| -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
+                super::vcs_queue::with_operation(runtime, &[queue], true, || {
                 // WAIT is an autocommit live subscription: each retry must see
                 // commits since the previous probe. Keep identity/tenant fixed
                 // and restore the enclosing statement snapshot after the read.
@@ -297,6 +298,7 @@ impl RedDBRuntime {
                 lifecycle
                     .group_read(&txn, queue, group, consumer, count)
                     .map_err(map_qse)
+                })
             };
 
         let delivered = do_read(self)?;
@@ -567,6 +569,15 @@ impl RedDBRuntime {
         queue: &str,
         payload: Value,
     ) -> RedDBResult<EntityId> {
+        if super::delete_publication::event_writer(self).is_none() {
+            return super::vcs_queue::with_operation(self, &[queue], true, || {
+                self.enqueue_event_payload_inner(queue, payload)
+            });
+        }
+        self.enqueue_event_payload_inner(queue, payload)
+    }
+
+    fn enqueue_event_payload_inner(&self, queue: &str, payload: Value) -> RedDBResult<EntityId> {
         let _event_snapshot = super::delete_publication::event_context(self)
             .map(super::execution_context::CurrentSnapshotGuard::install);
         let store = self.inner.db.store();
@@ -684,6 +695,10 @@ impl RedDBRuntime {
         if let Some(xid) = self.current_xid().or(event_xid) {
             entity.set_xmin(xid);
         }
+        if let Some(epoch) = self.vcs_writer_epoch(queue)? {
+            entity.set_branch_origin(epoch);
+        }
+        super::vcs_queue::stamp_entity(store, queue, &mut entity)?;
         // Keep the resident message and transient WAL copies inside the same
         // engine budget as the source mutation, including outbox/DLQ writers.
         let bytes = crate::storage::unified::memory_size::entity_bytes(&entity) as u64;
@@ -914,6 +929,8 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        self.vcs_reject_destructive_ddl(&query.name)?;
         if super::impl_ddl::is_system_schema_name(&query.name) {
             return Err(RedDBError::Query("system schema is read-only".to_string()));
         }
@@ -968,6 +985,44 @@ impl RedDBRuntime {
     }
 
     pub fn execute_queue_command(
+        &self,
+        raw_query: &str,
+        cmd: &QueueCommand,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let queues = match cmd {
+            QueueCommand::Move {
+                source,
+                destination,
+                ..
+            } => vec![source.as_str(), destination.as_str()],
+            QueueCommand::Push { queue, .. }
+            | QueueCommand::Pop { queue, .. }
+            | QueueCommand::Peek { queue, .. }
+            | QueueCommand::Len { queue }
+            | QueueCommand::Purge { queue }
+            | QueueCommand::GroupCreate { queue, .. }
+            | QueueCommand::GroupRead { queue, .. }
+            | QueueCommand::Pending { queue, .. }
+            | QueueCommand::Claim { queue, .. }
+            | QueueCommand::Ack { queue, .. }
+            | QueueCommand::AckBatch { queue, .. }
+            | QueueCommand::Nack { queue, .. } => vec![queue.as_str()],
+        };
+        // READ owns a separate scope per probe, releasing its publication lock
+        // before WAIT parks so a producer can make progress.
+        if matches!(cmd, QueueCommand::GroupRead { .. }) {
+            return self.execute_queue_command_inner(raw_query, cmd);
+        }
+        let write = !matches!(
+            cmd,
+            QueueCommand::Peek { .. } | QueueCommand::Len { .. } | QueueCommand::Pending { .. }
+        );
+        super::vcs_queue::with_operation(self, &queues, write, || {
+            self.execute_queue_command_inner(raw_query, cmd)
+        })
+    }
+
+    fn execute_queue_command_inner(
         &self,
         raw_query: &str,
         cmd: &QueueCommand,
@@ -1072,6 +1127,7 @@ impl RedDBRuntime {
                 if let Some(xid) = self.current_xid() {
                     entity.set_xmin(xid);
                 }
+                super::vcs_queue::stamp_entity(store.as_ref(), queue, &mut entity)?;
                 // As for event inserts, reserve resident/WAL payload overlap
                 // before publishing either the message or its metadata.
                 let bytes = crate::storage::unified::memory_size::entity_bytes(&entity) as u64;
@@ -1092,6 +1148,7 @@ impl RedDBRuntime {
                     let id = entity.id;
                     store
                         .publish_rows(crate::storage::unified::store::RowPublication {
+                            replacements: Vec::new(),
                             inserts: vec![(queue.clone(), entity, None)],
                             deletes: Vec::new(),
                         })
@@ -1737,6 +1794,16 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &QueueSelectQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        super::vcs_queue::with_operation(self, &[&query.queue], false, || {
+            self.execute_queue_select_inner(raw_query, query)
+        })
+    }
+
+    fn execute_queue_select_inner(
+        &self,
+        raw_query: &str,
+        query: &QueueSelectQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
         ensure_queue_exists(store.as_ref(), &query.queue)?;
         let config = load_queue_config(store.as_ref(), &query.queue);
@@ -2163,7 +2230,7 @@ fn save_queue_config(
     {
         Some(rows) => {
             for (id, _) in rows {
-                let _ = store.delete(QUEUE_META_COLLECTION, id);
+                let _ = super::vcs_queue::delete_metadata(store, id);
             }
         }
         None => remove_meta_rows(store, |row| {
@@ -2423,6 +2490,29 @@ pub(super) fn load_pending_entries(
         }
     }
     pending.sort_unstable_by_key(|(id, _)| id.raw());
+    let snapshot = super::execution_context::capture_current_snapshot();
+    if snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.branch.is_some())
+    {
+        let mut visible = HashSet::new();
+        for (id, row) in &pending {
+            if let Some(message) = row_u64(row, "message_id") {
+                if store
+                    .try_get(queue, EntityId::new(message), usize::MAX)?
+                    .is_some_and(|entity| {
+                        super::execution_context::entity_visible_with_context(
+                            snapshot.as_ref(),
+                            &entity,
+                        )
+                    })
+                {
+                    visible.insert(*id);
+                }
+            }
+        }
+        pending.retain(|(id, _)| visible.contains(id));
+    }
     Ok(pending
         .into_iter()
         .filter_map(|(entity_id, row)| {
@@ -2474,7 +2564,7 @@ pub(super) fn save_queue_pending(
     )? {
         Some(rows) => {
             for (id, _) in rows {
-                let _ = store.delete(QUEUE_META_COLLECTION, id);
+                let _ = super::vcs_queue::delete_metadata(store, id);
             }
         }
         None => remove_meta_rows(store, |row| {
@@ -2775,7 +2865,7 @@ pub(super) fn insert_moved_queue_message_payload(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    let entity = UnifiedEntity::new(
+    let mut entity = UnifiedEntity::new(
         EntityId::new(0),
         EntityKind::QueueMessage {
             queue: queue.to_string(),
@@ -2790,6 +2880,7 @@ pub(super) fn insert_moved_queue_message_payload(
             acked: false,
         }),
     );
+    super::vcs_queue::stamp_entity(store, queue, &mut entity)?;
     let id = store
         .insert_auto(queue, entity)
         .map_err(|err| RedDBError::Internal(err.to_string()))?;
@@ -2808,7 +2899,7 @@ fn insert_moved_queue_message(
     message: &QueueMessageView,
 ) -> RedDBResult<EntityId> {
     let position = next_queue_position(store, queue, QueueSide::Right)?;
-    let entity = UnifiedEntity::new(
+    let mut entity = UnifiedEntity::new(
         EntityId::new(0),
         EntityKind::QueueMessage {
             queue: queue.to_string(),
@@ -2827,6 +2918,7 @@ fn insert_moved_queue_message(
             acked: false,
         }),
     );
+    super::vcs_queue::stamp_entity(store, queue, &mut entity)?;
     let id = store
         .insert_auto(queue, entity)
         .map_err(|err| RedDBError::Internal(err.to_string()))?;
@@ -3275,39 +3367,41 @@ pub(super) fn queue_message_data(
     }
 }
 
-fn insert_meta_row(store: &UnifiedStore, fields: HashMap<String, Value>) -> RedDBResult<EntityId> {
+pub(super) fn insert_meta_row(
+    store: &UnifiedStore,
+    fields: HashMap<String, Value>,
+) -> RedDBResult<EntityId> {
     let created = store.get_collection(QUEUE_META_COLLECTION).is_none();
     let _ = store.get_or_create_collection(QUEUE_META_COLLECTION);
     if created {
         super::queue_storage_index::prepare_meta_store(store)?;
     }
-    let id = store
-        .insert_auto(
-            QUEUE_META_COLLECTION,
-            UnifiedEntity::new(
-                EntityId::new(0),
-                EntityKind::TableRow {
-                    table: Arc::from(QUEUE_META_COLLECTION),
-                    row_id: 0,
-                },
-                EntityData::Row(RowData {
-                    columns: Vec::new(),
-                    named: Some(fields),
-                    schema: None,
-                }),
-            ),
-        )
-        .map_err(|err| RedDBError::Internal(err.to_string()))?;
-    Ok(id)
+    let mut entity = UnifiedEntity::new(
+        EntityId::new(0),
+        EntityKind::TableRow {
+            table: Arc::from(QUEUE_META_COLLECTION),
+            row_id: 0,
+        },
+        EntityData::Row(RowData {
+            columns: Vec::new(),
+            named: Some(fields),
+            schema: None,
+        }),
+    );
+    super::vcs_queue::stamp_entity(store, QUEUE_META_COLLECTION, &mut entity)?;
+    Ok(store.insert_auto(QUEUE_META_COLLECTION, entity)?)
 }
 
 pub(super) fn remove_meta_rows(store: &UnifiedStore, predicate: impl Fn(&RowData) -> bool + Sync) {
-    let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
-        return;
+    let rows = match super::vcs_queue::metadata_rows(store, predicate) {
+        Ok(rows) => rows,
+        Err(error) => {
+            super::vcs_queue::record_error(error);
+            return;
+        }
     };
-    let rows = manager.query_all(|entity| entity.data.as_row().is_some_and(&predicate));
-    for row in rows {
-        let _ = store.delete(QUEUE_META_COLLECTION, row.id);
+    for (id, _) in rows {
+        let _ = super::vcs_queue::delete_metadata(store, id);
     }
 }
 
@@ -3320,7 +3414,7 @@ pub(super) fn reclaim_expired_queue_dedup(
     let rows = super::queue_storage_index::dedup_rows(store, queue, None, now_ns, 64)?;
     let count = rows.len();
     for (id, _) in rows {
-        store.delete(QUEUE_META_COLLECTION, id)?;
+        super::vcs_queue::delete_metadata(store, id)?;
     }
     Ok(count)
 }
@@ -3366,7 +3460,7 @@ pub(super) fn record_queue_dedup(
 }
 
 pub(super) fn delete_meta_entity(store: &UnifiedStore, entity_id: EntityId) {
-    let _ = store.delete(QUEUE_META_COLLECTION, entity_id);
+    let _ = super::vcs_queue::delete_metadata(store, entity_id);
 }
 
 fn queue_message_lock_key(queue: &str, message_id: EntityId) -> String {
@@ -3620,6 +3714,7 @@ fn queue_collection_contract(
     }
 
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: name.to_string(),
         description: None,
         description_generated: false,
@@ -3744,6 +3839,34 @@ pub(super) fn set_message_available_at_ns(
     available_at_ns: Option<u64>,
     fallback_ttl_ms: Option<u64>,
 ) -> RedDBResult<()> {
+    if let Some(runtime) = super::vcs_queue::runtime(store) {
+        if runtime.vcs_is_versioned(queue)? {
+            let previous = super::vcs_queue::metadata_rows(store, |row| {
+                row_text(row, "kind").as_deref() == Some("queue_retry")
+                    && row_text(row, "queue").as_deref() == Some(queue)
+                    && row_u64(row, "message_id") == Some(message_id.raw())
+            })?;
+            for (id, _) in previous {
+                super::vcs_queue::delete_metadata(store, id)?;
+            }
+            insert_meta_row(
+                store,
+                HashMap::from([
+                    ("kind".into(), Value::text("queue_retry")),
+                    ("queue".into(), Value::text(queue)),
+                    (
+                        "message_id".into(),
+                        Value::UnsignedInteger(message_id.raw()),
+                    ),
+                    (
+                        "available_at_ns".into(),
+                        Value::UnsignedInteger(available_at_ns.unwrap_or(0)),
+                    ),
+                ]),
+            )?;
+            return Ok(());
+        }
+    }
     let existing_ttl_ms = store
         .get_metadata(queue, message_id)
         .and_then(|md| match md.get("_ttl_ms")? {
@@ -3787,6 +3910,25 @@ pub(super) fn read_message_available_at_ns(
     queue: &str,
     message_id: EntityId,
 ) -> Option<u64> {
+    if super::execution_context::capture_current_snapshot()
+        .is_some_and(|snapshot| snapshot.branch.is_some())
+    {
+        match super::vcs_queue::metadata_rows(store, |row| {
+            row_text(row, "kind").as_deref() == Some("queue_retry")
+                && row_text(row, "queue").as_deref() == Some(queue)
+                && row_u64(row, "message_id") == Some(message_id.raw())
+        }) {
+            Ok(rows) => {
+                if let Some((_, row)) = rows.last() {
+                    return row_u64(row, "available_at_ns");
+                }
+            }
+            Err(error) => {
+                super::vcs_queue::record_error(error);
+                return None;
+            }
+        }
+    }
     let md = store.get_metadata(queue, message_id)?;
     match md.get("_available_at_ns")? {
         MetadataValue::Timestamp(t) => Some(*t),

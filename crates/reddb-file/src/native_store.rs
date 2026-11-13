@@ -37,7 +37,9 @@ pub const STORE_VERSION_V11: u32 = 11;
 pub const STORE_VERSION_V12: u32 = 12;
 /// Persisted SQL results require an epoch recorded with the data WAL.
 pub const STORE_VERSION_V13: u32 = 13;
-pub const STORE_VERSION_CURRENT: u32 = STORE_VERSION_V13;
+/// Optional entity branch provenance and independent branch deletion stamps.
+pub const STORE_VERSION_V14: u32 = 14;
+pub const STORE_VERSION_CURRENT: u32 = STORE_VERSION_V14;
 
 pub const METADATA_MAGIC: &[u8; 4] = b"RDM2";
 pub const METADATA_HEADER_BYTES: usize = 12;
@@ -654,6 +656,7 @@ pub fn is_supported_store_version(version: u32) -> bool {
             | STORE_VERSION_V11
             | STORE_VERSION_V12
             | STORE_VERSION_V13
+            | STORE_VERSION_V14
     )
 }
 

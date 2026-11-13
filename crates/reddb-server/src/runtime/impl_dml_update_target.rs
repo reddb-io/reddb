@@ -200,6 +200,7 @@ pub(super) fn ensure_graph_insert_contract(
         .unwrap_or_default()
         .as_millis();
     db.save_collection_contract(crate::physical::CollectionContract {
+        graph_contract: None,
         name: collection.to_string(),
         description: None,
         description_generated: false,

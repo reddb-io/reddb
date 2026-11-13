@@ -167,7 +167,11 @@ impl UnifiedStore {
             }
         }
 
-        self.publish_rows(RowPublication { inserts, deletes })?;
+        self.publish_rows(RowPublication {
+            replacements: Vec::new(),
+            inserts,
+            deletes,
+        })?;
         Ok(migrated)
     }
 }
@@ -703,6 +707,7 @@ mod tests {
             .prepare_and_publish_rows(|_, _| {
                 Ok((
                     RowPublication {
+                        replacements: Vec::new(),
                         inserts: vec![
                             (
                                 "publication.must.not.exist".to_string(),

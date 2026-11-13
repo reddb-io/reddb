@@ -443,8 +443,20 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &InsertQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.with_graph_insert_for_dml(query, || self.execute_insert_inner(raw_query, query))
+    }
+
+    fn execute_insert_inner(
+        &self,
+        raw_query: &str,
+        query: &InsertQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
+        let branch_store = self.db().store();
+        let _branch_publication = (self.vcs_is_versioned(&query.table)?
+            || self.has_graph_contract(&query.table))
+        .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &query.table,
@@ -1177,8 +1189,16 @@ impl RedDBRuntime {
                             );
                             let (columns, values) = pairwise_columns_values(&node_values);
                             let label = find_column_value_string(&columns, &values, "label")?;
-                            let node_type =
-                                find_column_value_opt_string(&columns, &values, "node_type");
+                            let node_type = columns
+                                .iter()
+                                .position(|name| name.eq_ignore_ascii_case("node_type"))
+                                .map(|index| match &values[index] {
+                                    Value::Text(value) => Ok(value.to_string()),
+                                    _ => Err(RedDBError::Query(
+                                        "node_type must be one text value".into(),
+                                    )),
+                                })
+                                .transpose()?;
                             let properties = extract_remaining_properties(
                                 &columns,
                                 &values,
@@ -1343,6 +1363,8 @@ impl RedDBRuntime {
                     }
                 }
                 let batch_result = batch
+                    .with_graph_xmin(self.current_xid().or_else(|| self.graph_insert_xid()))
+                    .with_graph_branch(self.vcs_writer_epoch(&query.table)?)
                     .execute()
                     .map_err(|err| RedDBError::Internal(format!("{err:?}")))?;
                 let (ids, entity_kind) = match query.entity_type {
@@ -1350,9 +1372,11 @@ impl RedDBRuntime {
                     InsertEntityType::Edge => (batch_result.edges, "graph_edge"),
                     _ => unreachable!("prepared graph insert only handles NODE and EDGE"),
                 };
-                for id in &ids {
-                    self.stamp_xmin_if_in_txn(&query.table, *id);
-                }
+                #[cfg(test)]
+                self.index_store_ref().mutation_test_hook(
+                    &query.table,
+                    super::index_store::MutationTestPhase::StoragePublished,
+                );
                 if !graph_index_fields.is_empty() {
                     let index_rows: Vec<_> = ids
                         .iter()
@@ -1730,6 +1754,23 @@ impl RedDBRuntime {
     pub(crate) fn insert_timeseries_point(
         &self,
         collection: &str,
+        fields: Vec<(String, Value)>,
+        metadata: Vec<(String, MetadataValue)>,
+    ) -> RedDBResult<EntityId> {
+        if self.vcs_is_versioned(collection)? {
+            let store = self.db().store();
+            let _publication = store.vault_publication_lock.lock();
+            self.with_versioned_graph_insert(|| {
+                self.insert_timeseries_point_inner(collection, fields, metadata)
+            })
+        } else {
+            self.insert_timeseries_point_inner(collection, fields, metadata)
+        }
+    }
+
+    fn insert_timeseries_point_inner(
+        &self,
+        collection: &str,
         mut fields: Vec<(String, Value)>,
         mut metadata: Vec<(String, MetadataValue)>,
     ) -> RedDBResult<EntityId> {
@@ -1880,7 +1921,7 @@ impl RedDBRuntime {
         // MVCC #30: stamp xmin with the active tx xid (inside a tx)
         // or an autocommit xid (allocated and committed up-front so
         // future snapshots see the row as soon as it lands).
-        let writer_xid = match self.current_xid() {
+        let writer_xid = match self.current_xid().or_else(|| self.graph_insert_xid()) {
             Some(xid) => xid,
             None => {
                 let mgr = self.snapshot_manager();
@@ -1890,6 +1931,7 @@ impl RedDBRuntime {
             }
         };
         entity.set_xmin(writer_xid);
+        self.stamp_vcs_creation(collection, &mut entity)?;
 
         let store = self.inner.db.store();
         let id = store
@@ -1901,11 +1943,11 @@ impl RedDBRuntime {
             .map_err(RedDBError::Internal)?;
 
         if !metadata.is_empty() {
-            let _ = store.set_metadata(
+            store.set_metadata(
                 collection,
                 id,
                 Metadata::with_fields(metadata.into_iter().collect()),
-            );
+            )?;
         }
 
         let _ = self.inner.db.hypertables().route(collection, timestamp_ns);
@@ -1930,6 +1972,10 @@ impl RedDBRuntime {
         query: &UpdateQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let branch_store = self.db().store();
+        let _branch_publication = (self.vcs_is_versioned(&query.table)?
+            || self.has_graph_contract(&query.table))
+        .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &query.table,
@@ -2215,6 +2261,7 @@ impl RedDBRuntime {
                     crate::runtime::impl_core::capture_current_snapshot().unwrap_or_else(|| {
                         let manager = self.snapshot_manager();
                         crate::runtime::impl_core::SnapshotContext {
+                            branch: None,
                             snapshot: manager.fresh_read_snapshot(),
                             manager,
                             own_xids: std::collections::HashSet::new(),
@@ -2223,6 +2270,7 @@ impl RedDBRuntime {
                         }
                     });
                 ctx.snapshot = ctx.manager.fresh_read_snapshot();
+                ctx.branch = self.vcs_branch_read_view(&ctx.snapshot, None)?;
                 ctx.requires_index_fallback |= !ctx.snapshot.in_progress.is_empty();
                 Some(crate::runtime::impl_core::CurrentSnapshotGuard::install(
                     ctx,
@@ -2316,6 +2364,18 @@ impl RedDBRuntime {
                 prepared.push(applied);
             }
         }
+        self.validate_graph_changes(
+            &query.table,
+            &prepared.iter().map(|item| &item.entity).collect::<Vec<_>>(),
+            &prepared
+                .iter()
+                .map(|item| {
+                    item.replaced_entity
+                        .as_ref()
+                        .map_or(item.id, |entity| entity.id)
+                })
+                .collect::<Vec<_>>(),
+        )?;
         let affected = prepared.len() as u64;
         let mut published = 0;
         let mut _durable_publication = None;
@@ -2496,6 +2556,21 @@ impl RedDBRuntime {
             applied_chunk.push(applied);
         }
 
+        self.validate_graph_changes(
+            &query.table,
+            &applied_chunk
+                .iter()
+                .map(|item| &item.entity)
+                .collect::<Vec<_>>(),
+            &applied_chunk
+                .iter()
+                .map(|item| {
+                    item.replaced_entity
+                        .as_ref()
+                        .map_or(item.id, |entity| entity.id)
+                })
+                .collect::<Vec<_>>(),
+        )?;
         let affected = applied_chunk.len() as u64;
         let mut published = 0;
         let mut _durable_publication = None;
@@ -2862,6 +2937,10 @@ impl RedDBRuntime {
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let branch_store = self.db().store();
+        let _branch_publication = (self.vcs_is_versioned(&query.table)?
+            || self.has_graph_contract(&query.table))
+        .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &query.table,
@@ -3001,6 +3080,7 @@ impl RedDBRuntime {
         // prepared target set. A later timeout must not strand a partial
         // statement merely to stop sooner.
         let _durable_publication = super::query_budget::begin_durable_publication()?;
+        self.validate_graph_changes(&query.table, &[], &ids_to_delete)?;
         for chunk in ids_to_delete.chunks(UPDATE_APPLY_CHUNK_SIZE) {
             let deleted = self.delete_entities_batch(
                 &query.table,

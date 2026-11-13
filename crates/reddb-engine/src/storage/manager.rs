@@ -3468,6 +3468,7 @@ mod tests {
         }
         std::thread::spawn(move || {
             let snapshot = SnapshotContext {
+                branch: None,
                 snapshot: Snapshot {
                     xid: 10,
                     in_progress: HashSet::from([4]),
@@ -3730,6 +3731,7 @@ mod tests {
                 manager.force_seal().expect("seal source");
             }
             let snapshot = SnapshotContext {
+                branch: None,
                 snapshot: Snapshot {
                     xid: 10,
                     in_progress: HashSet::new(),
@@ -3855,6 +3857,7 @@ mod tests {
         manager.bulk_insert(entities).expect("versions");
         manager.force_seal().expect("seal");
         let snapshot = SnapshotContext {
+            branch: None,
             snapshot: Snapshot {
                 xid: 10,
                 in_progress: HashSet::from([4]),
@@ -3948,6 +3951,7 @@ mod tests {
             ))
             .expect("growing node");
         let snapshot = SnapshotContext {
+            branch: None,
             snapshot: Snapshot {
                 xid: 10,
                 in_progress: HashSet::new(),
@@ -4065,6 +4069,7 @@ mod tests {
         }
 
         let snapshot = SnapshotContext {
+            branch: None,
             snapshot: Snapshot {
                 xid: 10,
                 in_progress: HashSet::from([4]),
@@ -4302,6 +4307,7 @@ mod tests {
         manager.insert(hidden).expect("moderated row");
         assert_eq!(manager.stats().sealed_count, 2);
         let snapshot = SnapshotContext {
+            branch: None,
             snapshot: Snapshot {
                 xid: 10,
                 in_progress: HashSet::from([4]),

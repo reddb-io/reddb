@@ -57,6 +57,7 @@ pub use builders::{
 };
 pub use filters::{Filter, FilterAcceptor, FilterOp, FilterValue, WhereClause};
 pub use helpers::{apply_filters, cosine_similarity};
+pub(crate) use helpers::{calculate_entity_similarity, extract_searchable_text};
 pub use types::{MatchComponents, QueryResult, ScoredMatch};
 
 use super::entity::{EntityId, RefType};

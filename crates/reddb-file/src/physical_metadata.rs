@@ -191,6 +191,18 @@ pub fn encode_physical_analytical_storage_json(
     Ok(analytical_storage_json_value(config).to_string())
 }
 
+pub fn encode_physical_graph_contract_json(
+    contract: &PhysicalGraphContract,
+) -> RdbFileResult<String> {
+    serde_json::to_string(contract)
+        .map_err(|error| RdbFileError::InvalidOperation(format!("invalid graph contract: {error}")))
+}
+
+pub fn decode_physical_graph_contract_json(json: &str) -> RdbFileResult<PhysicalGraphContract> {
+    serde_json::from_str(json)
+        .map_err(|error| RdbFileError::InvalidOperation(format!("invalid graph contract: {error}")))
+}
+
 pub fn decode_physical_analytical_storage_json(
     json: &str,
 ) -> RdbFileResult<PhysicalAnalyticalStorageConfig> {
@@ -1266,6 +1278,11 @@ fn collection_contract_json_value(contract: &PhysicalCollectionContract) -> serd
             .unwrap_or(serde_json::Value::Null),
     );
     object.insert(
+        "graph_contract".into(),
+        serde_json::to_value(&contract.graph_contract)
+            .expect("graph contract consists of JSON-compatible fields"),
+    );
+    object.insert(
         "ai_policy".to_string(),
         contract
             .ai_policy
@@ -1338,6 +1355,13 @@ fn collection_contract_from_json_value(
         analytical_storage: match object.get("analytical_storage") {
             Some(serde_json::Value::Null) | None => None,
             Some(value) => Some(analytical_storage_from_json_value(value)?),
+        },
+        graph_contract: match object.get("graph_contract") {
+            Some(serde_json::Value::Null) | None => None,
+            Some(value) => Some(
+                serde_json::from_value(value.clone())
+                    .map_err(|error| invalid(format!("invalid graph contract: {error}")))?,
+            ),
         },
         ai_policy: match object.get("ai_policy") {
             Some(serde_json::Value::Null) | None => None,

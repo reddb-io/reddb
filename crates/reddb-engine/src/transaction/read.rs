@@ -18,11 +18,171 @@ use std::sync::Arc;
 /// `snapshot.xid`.
 #[derive(Clone)]
 pub struct SnapshotContext {
+    pub branch: Option<Arc<BranchReadView>>,
     pub snapshot: super::snapshot::Snapshot,
     pub manager: Arc<super::snapshot::SnapshotManager>,
     pub own_xids: std::collections::HashSet<super::snapshot::Xid>,
     pub requires_index_fallback: bool,
     pub serializable_reader: Option<super::snapshot::Xid>,
+}
+
+/// Each inherited epoch is frozen at its fork/merge snapshot. Only the current
+/// writer epoch follows the connection's live transaction snapshot.
+#[derive(Clone, Debug)]
+pub struct BranchReadView {
+    pub writer_epoch: u64,
+    pub epochs: std::collections::BTreeMap<u64, super::snapshot::Snapshot>,
+}
+
+/// Unique keys reserve pending writes in the current epoch, but ancestor
+/// epochs keep their frozen fork view. A sibling branch never reserves a key.
+pub fn entity_reserves_unique_key(
+    ctx: &SnapshotContext,
+    entity: &crate::storage::entity::UnifiedEntity,
+) -> bool {
+    let (Some(view), Some(version)) = (&ctx.branch, entity.branch_version()) else {
+        return ctx
+            .manager
+            .row_reserves_unique_key(entity.xmin, entity.xmax, &ctx.own_xids);
+    };
+    let inserted = if version.origin == view.writer_epoch {
+        ctx.manager
+            .row_reserves_unique_key(entity.xmin, 0, &ctx.own_xids)
+    } else {
+        view.epochs.get(&version.origin).is_some_and(|snapshot| {
+            !ctx.manager.is_aborted(entity.xmin) && snapshot.sees(entity.xmin, 0)
+        })
+    };
+    if !inserted {
+        return false;
+    }
+    let deleted = |epoch, xid| {
+        if xid == 0 {
+            return false;
+        }
+        if epoch == view.writer_epoch {
+            !ctx.manager.row_reserves_unique_key(0, xid, &ctx.own_xids)
+        } else {
+            view.epochs
+                .get(&epoch)
+                .is_some_and(|snapshot| !ctx.manager.is_aborted(xid) && snapshot.sees(xid, 0))
+        }
+    };
+    !deleted(version.origin, entity.xmax)
+        && !version
+            .deletions
+            .iter()
+            .any(|&(epoch, xid)| deleted(epoch, xid))
+}
+
+pub fn entity_visibility_check(
+    ctx: &SnapshotContext,
+    entity: &crate::storage::entity::UnifiedEntity,
+) -> bool {
+    let (Some(view), Some(version)) = (&ctx.branch, entity.branch_version()) else {
+        return visibility_check(ctx, entity.xmin, entity.xmax);
+    };
+    let visible_xid = |epoch, xid| {
+        view.epochs.get(&epoch).is_some_and(|snapshot| {
+            xid == 0
+                || (!ctx.manager.is_aborted(xid)
+                    && (ctx.own_xids.contains(&xid) || snapshot.sees(xid, 0)))
+        })
+    };
+    visible_xid(version.origin, entity.xmin)
+        && (entity.xmax == 0 || !visible_xid(version.origin, entity.xmax))
+        && !version
+            .deletions
+            .iter()
+            .any(|&(epoch, xid)| visible_xid(epoch, xid))
+}
+
+#[cfg(test)]
+mod branch_tests {
+    use super::*;
+    use crate::storage::entity::{EntityId, UnifiedEntity};
+    use crate::transaction::snapshot::{Snapshot, SnapshotManager};
+    use std::collections::{BTreeMap, HashSet};
+
+    fn context(epoch: u64, inherited: u64) -> SnapshotContext {
+        let mut epochs = BTreeMap::from([(
+            0,
+            Snapshot {
+                xid: inherited,
+                in_progress: HashSet::new(),
+            },
+        )]);
+        epochs.insert(
+            epoch,
+            Snapshot {
+                xid: 100,
+                in_progress: HashSet::new(),
+            },
+        );
+        SnapshotContext {
+            branch: Some(Arc::new(BranchReadView {
+                writer_epoch: epoch,
+                epochs,
+            })),
+            snapshot: Snapshot {
+                xid: 100,
+                in_progress: HashSet::new(),
+            },
+            manager: Arc::new(SnapshotManager::new()),
+            own_xids: HashSet::new(),
+            requires_index_fallback: true,
+            serializable_reader: None,
+        }
+    }
+
+    #[test]
+    fn sibling_updates_and_deletes_have_independent_visibility() {
+        let mut base = UnifiedEntity::table_row(EntityId::new(1), "items", 1, vec![]);
+        base.set_xmin(10);
+        base.set_branch_origin(0);
+        base.set_branch_xmax(0, 30);
+        base.set_branch_xmax(1, 40);
+        let main = context(0, 100);
+        let first = context(1, 20);
+        let second = context(2, 20);
+        assert!(!entity_visibility_check(&main, &base));
+        assert!(!entity_visibility_check(&first, &base));
+        assert!(entity_visibility_check(&second, &base));
+        base.set_branch_xmax(2, 50);
+        base.set_branch_xmax(1, 0);
+        assert!(
+            entity_visibility_check(&first, &base),
+            "rollback only revives its branch"
+        );
+        assert!(!entity_visibility_check(&second, &base));
+        let mut replacement = base.clone();
+        replacement.set_branch_origin(1);
+        replacement.set_xmin(40);
+        replacement.set_xmax(0);
+        assert!(entity_visibility_check(&first, &replacement));
+        assert!(!entity_visibility_check(&main, &replacement));
+        assert!(!entity_visibility_check(&second, &replacement));
+    }
+
+    #[test]
+    fn active_and_aborted_branch_deletes_remain_invisible() {
+        let mut entity = UnifiedEntity::table_row(EntityId::new(1), "items", 1, vec![]);
+        entity.set_branch_origin(0);
+        entity.set_xmin(10);
+        entity.set_branch_xmax(1, 40);
+        let mut reader = context(1, 20);
+        Arc::make_mut(reader.branch.as_mut().expect("view"))
+            .epochs
+            .get_mut(&1)
+            .expect("writer epoch")
+            .in_progress
+            .insert(40);
+        assert!(entity_visibility_check(&reader, &entity));
+        reader.own_xids.insert(40);
+        assert!(!entity_visibility_check(&reader, &entity));
+        reader.manager.rollback(40);
+        assert!(entity_visibility_check(&reader, &entity));
+    }
 }
 
 /// Record an admitted table-row read after the host has applied visibility and

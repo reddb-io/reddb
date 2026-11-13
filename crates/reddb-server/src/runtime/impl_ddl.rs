@@ -639,6 +639,8 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        self.vcs_reject_destructive_ddl(&query.name)?;
 
         if is_system_schema_name(&query.name) {
             return Err(RedDBError::Query("system schema is read-only".to_string()));
@@ -792,6 +794,8 @@ impl RedDBRuntime {
             return Err(RedDBError::Query("system schema is read-only".to_string()));
         }
         let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        self.vcs_reject_destructive_ddl(&query.name)?;
         if store.get_collection(&query.name).is_none() {
             if query.if_exists {
                 return Ok(RuntimeQueryResult::ok_message(
@@ -1879,6 +1883,8 @@ impl RedDBRuntime {
             return Err(RedDBError::Query("system schema is read-only".to_string()));
         }
         let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        self.vcs_reject_destructive_ddl(name)?;
         if store.get_collection(name).is_none() {
             if if_exists {
                 return Ok(RuntimeQueryResult::ok_message(
@@ -1966,6 +1972,9 @@ impl RedDBRuntime {
     }
 
     fn truncate_collection_entities(&self, name: &str) -> RedDBResult<u64> {
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        self.vcs_reject_destructive_ddl(name)?;
         let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection(name) else {
@@ -2001,6 +2010,8 @@ impl RedDBRuntime {
         label: &str,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        self.vcs_reject_destructive_ddl(name)?;
 
         // Emit 1 collection_dropped event before storage is wiped.
         // Queue is preserved; subscription is removed with the contract below.
@@ -2127,6 +2138,7 @@ fn default_collection_contract_for_existing_table(
 ) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: name.to_string(),
         description: None,
         description_generated: false,
@@ -2167,6 +2179,7 @@ fn keyed_collection_contract(
 ) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: name.to_string(),
         description: None,
         description_generated: false,
@@ -2203,6 +2216,7 @@ fn keyed_collection_contract(
 fn metrics_collection_contract(query: &CreateTableQuery) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: query.name.clone(),
         description: None,
         description_generated: false,
@@ -2244,6 +2258,7 @@ fn metrics_collection_contract(query: &CreateTableQuery) -> crate::physical::Col
 fn vector_collection_contract(query: &CreateVectorQuery) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: query.name.clone(),
         description: None,
         description_generated: false,
@@ -2832,6 +2847,7 @@ fn ensure_event_target_queue(runtime: &RedDBRuntime, queue: &str) -> RedDBResult
 fn event_queue_collection_contract(queue: &str) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: queue.to_string(),
         description: None,
         description_generated: false,

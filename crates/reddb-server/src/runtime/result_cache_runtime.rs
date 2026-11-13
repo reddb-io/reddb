@@ -1417,7 +1417,7 @@ mod crash_tests {
                 .unwrap();
             assert_eq!(
                 reddb_file::decode_native_store_header(&snapshot).unwrap(),
-                reddb_file::STORE_VERSION_V13
+                reddb_file::STORE_VERSION_CURRENT
             );
         }
     }

@@ -71,6 +71,32 @@ impl RedDBRuntime {
         let store = self.db().store();
         let snapshots = self.snapshot_manager();
         let own_xids = self.own_transaction_xids();
+        if self.vcs_is_versioned(&index.collection)? {
+            let (snapshot, _retention) = self.native_read_snapshot()?;
+            let mut conflict = None;
+            if let Some(manager) = store.get_collection(&index.collection) {
+                manager.try_for_each_entity(usize::MAX, |entity| {
+                    if exclude != Some(entity.id)
+                        && reddb_engine::transaction::read::entity_reserves_unique_key(
+                            &snapshot, entity,
+                        )
+                    {
+                        if let Some(row) = entity.data.as_row() {
+                            let fields: Vec<_> = row
+                                .iter_fields()
+                                .map(|(name, value)| (name.to_string(), value.clone()))
+                                .collect();
+                            if index_key(index, &fields).as_deref() == Some(key) {
+                                conflict = Some(entity.id);
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                })?;
+            }
+            return Ok(conflict);
+        }
         let pocket = index.hash_lookup_name();
         let candidates = self
             .index_store_ref()

@@ -255,39 +255,20 @@ impl RedDBRuntime {
         let read_bytes = usize::try_from(self.memory_budget().resolved_bytes / 16)
             .unwrap_or(usize::MAX)
             .clamp(1, 16 * 1024 * 1024);
-        let snapshot = crate::runtime::execution_context::capture_current_snapshot()
-            .unwrap_or_else(|| {
-                let context = self
-                    .inner
-                    .transaction_state
-                    .context(crate::runtime::execution_context::current_connection_id());
-                let serializable_reader = context.as_ref().and_then(|context| {
-                    (context.isolation == crate::storage::transaction::IsolationLevel::Serializable)
-                        .then_some(context.xid)
-                });
-                crate::runtime::execution_context::SnapshotContext {
-                    snapshot: self.current_snapshot(),
-                    manager: self.snapshot_manager(),
-                    own_xids: self.own_transaction_xids(),
-                    requires_index_fallback: true,
-                    serializable_reader,
-                }
-            });
-        let apply_rls = crate::runtime::execution_context::current_auth_identity().is_some()
-            && crate::runtime::rls_injection::rls_is_enabled(self, collection);
+        let (snapshot, _retention) = self.native_read_snapshot()?;
+        let _snapshot_guard = super::impl_core::CurrentSnapshotGuard::install(snapshot.clone());
         let (total, items) = manager.try_page_in_id_order_where_at_snapshot(
             Some(&snapshot),
             offset,
             limit,
             read_bytes,
             |entity| {
-                !apply_rls
-                    || crate::runtime::rls_injection::entity_passes_rls_action(
-                        self,
-                        collection,
-                        PolicyAction::Select,
-                        entity,
-                    )
+                crate::runtime::rls_injection::entity_passes_rls_action(
+                    self,
+                    collection,
+                    PolicyAction::Select,
+                    entity,
+                )
             },
         )?;
         let end = total.min(offset.saturating_add(limit));
@@ -306,18 +287,93 @@ impl RedDBRuntime {
         collection: &str,
         id: crate::storage::EntityId,
     ) -> RedDBResult<Option<crate::storage::UnifiedEntity>> {
-        use reddb_rql::ast::PolicyAction;
+        self.get_collection_entity_for_action(collection, id, reddb_rql::ast::PolicyAction::Select)
+    }
 
-        self.check_collection_privilege(PolicyAction::Select, collection)?;
-        let entity = self.inner.db.store().get(collection, id);
+    pub(crate) fn get_collection_entity_for_action(
+        &self,
+        collection: &str,
+        id: crate::storage::EntityId,
+        action: reddb_rql::ast::PolicyAction,
+    ) -> RedDBResult<Option<crate::storage::UnifiedEntity>> {
+        self.check_collection_privilege(action, collection)?;
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection(collection) else {
+            return Ok(None);
+        };
+        let (snapshot, _retention) = self.native_read_snapshot()?;
+        let _snapshot_guard = super::impl_core::CurrentSnapshotGuard::install(snapshot.clone());
+        let read_bytes = usize::try_from(self.memory_budget().resolved_bytes / 16)
+            .unwrap_or(usize::MAX)
+            .clamp(1, 16 * 1024 * 1024);
+        let mut entity = manager.try_get(id, read_bytes)?.filter(|candidate| {
+            candidate.logical_id() == id
+                && super::impl_core::entity_visible_with_context(Some(&snapshot), candidate)
+        });
+        // Public IDs are logical identities. A direct physical lookup can
+        // return a superseded version or miss the version visible to a reader.
+        if entity.is_none() {
+            manager.try_for_each_entity(read_bytes, |candidate| {
+                if candidate.logical_id() == id
+                    && super::impl_core::entity_visible_with_context(Some(&snapshot), candidate)
+                    && entity.as_ref().is_none_or(|selected: &UnifiedEntity| {
+                        (candidate.xmin, candidate.id) > (selected.xmin, selected.id)
+                    })
+                {
+                    entity = Some(candidate.clone());
+                }
+                true
+            })?;
+        }
+        manager.restore_owned_row_schemas(entity.iter_mut());
         Ok(entity.filter(|entity| {
             crate::runtime::rls_injection::entity_passes_rls_action(
-                self,
-                collection,
-                PolicyAction::Select,
-                entity,
+                self, collection, action, entity,
             )
         }))
+    }
+
+    pub(crate) fn native_read_snapshot(
+        &self,
+    ) -> RedDBResult<(
+        super::impl_core::SnapshotContext,
+        crate::storage::transaction::snapshot::SnapshotRetentionGuard,
+    )> {
+        let state = &self.inner.transaction_state;
+        let manager = state.snapshot_manager();
+        if let Some(context) = super::impl_core::capture_current_snapshot()
+            .filter(|context| Arc::ptr_eq(&context.manager, &manager))
+        {
+            let (_, retention) = manager.retain_snapshot(context.snapshot.clone());
+            return Ok((context, retention));
+        }
+        let connection_id = super::impl_core::current_connection_id();
+        let store = self.inner.db.store();
+        let uses_vcs = self.vcs_has_versioned_collections()?;
+        let _publication = uses_vcs.then(|| store.vault_publication_lock.lock());
+        let (snapshot, retention) = state.retained_current_snapshot(connection_id);
+        let branch = if uses_vcs {
+            self.vcs_branch_read_view(&snapshot, None)?
+        } else {
+            None
+        };
+        let context = state.context(connection_id);
+        Ok((
+            super::impl_core::SnapshotContext {
+                branch,
+                snapshot,
+                manager,
+                own_xids: self.own_transaction_xids(),
+                requires_index_fallback: true,
+                serializable_reader: context
+                    .filter(|context| {
+                        context.isolation
+                            == crate::storage::transaction::IsolationLevel::Serializable
+                    })
+                    .map(|context| context.xid),
+            },
+            retention,
+        ))
     }
 
     pub fn catalog(&self) -> CatalogModelSnapshot {

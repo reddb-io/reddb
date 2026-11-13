@@ -175,6 +175,10 @@ pub fn entity_bytes(entity: &UnifiedEntity) -> usize {
     entity.embeddings().iter().fold(
         std::mem::size_of::<UnifiedEntity>()
             .saturating_add(data)
+            .saturating_add(entity.branch_version().map_or(0, |branch| {
+                std::mem::size_of::<super::entity::BranchVersion>()
+                    .saturating_add(std::mem::size_of_val(branch.deletions.as_slice()))
+            }))
             .saturating_add(std::mem::size_of_val(entity.cross_refs())),
         |bytes, embedding| {
             bytes

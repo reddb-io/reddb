@@ -347,7 +347,35 @@ All VCS entry points surface errors through `RedDBError`:
 | `ReadOnly` | attempt to delete a protected branch |
 | `Internal` | storage failure (propagated from the unified store) |
 
-Phase-gated stubs (currently `reset --hard`, any data-apply path
-in `cherry_pick`/`revert` body merge, `conflict_resolve` apply)
-return `Internal("vcs: <feature> not yet implemented")` — callers
-can detect by prefix.
+Hard reset restores the selected commit's data view. Clean cherry-pick and
+revert apply native entity changes. Divergent merge applies nonconflicting
+changes and preserves native value types. A conflicting merge leaves live
+data unchanged until every conflict has a persisted `ours`, `theirs`,
+`base`, or `delete` choice and the pending merge is committed. Checkpoint
+and reopen preserve pending merges and choices.
+
+Data application is currently enabled for Table, Document, Graph, Vector,
+KV, Mixed, TimeSeries, Config, HLL, Sketch, Filter, Metrics, Vault and Queue.
+Queue merges version payload changes; delivery state stays local to a writer
+epoch. Merge does not copy leases or replay acknowledgements.
+See the [model validation matrix](./model-validation.md).
+
+Probabilistic collections retain native state snapshots. Concurrent changes
+to the same state require a conflict choice; merging does not implicitly add
+sketch counters twice. Versioned metrics use retained raw samples for reads
+instead of shared rollups, and raw retention cannot reclaim pinned history.
+
+Vault merge retains sealed payloads, while diff and conflict output expose only
+metadata. VCS data changes recheck collection privileges, RLS and keyed
+Config/Vault capabilities, including fast-forward and hard reset. Changing
+the history setting requires active transactions to finish first.
+
+Merge, cherry-pick, revert and hard reset validate the resulting collection
+against its current contract. Table checks, required columns, generated
+columns, unique constraints/indexes and vector dimensions are enforced.
+Generated columns are recomputed from merged inputs. Append-only contracts
+reject data merges that replace existing payloads; native Queue/TimeSeries/
+Metrics retirement remains valid. Moving HEAD selects a historical view without
+erasing immutable versions. Contracts are shared catalog
+metadata, not branch history. DROP and physical TRUNCATE reject versioned
+collections; use versioned deletes or QUEUE PURGE to retain history.

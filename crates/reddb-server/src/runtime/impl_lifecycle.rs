@@ -72,6 +72,7 @@ fn system_keyed_collection_contract(
 ) -> crate::physical::CollectionContract {
     let now = crate::utils::now_unix_millis() as u128;
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: name.to_string(),
         description: None,
         description_generated: false,
@@ -712,6 +713,7 @@ impl RedDBRuntime {
             .logical_allocated_lsn
             .store(restored_cdc_lsn, std::sync::atomic::Ordering::Release);
         runtime.rehydrate_snapshot_xid_floor()?;
+        runtime.rehydrate_vcs_snapshot_pins()?;
         assert!(runtime
             .inner
             .db

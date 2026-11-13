@@ -110,6 +110,7 @@ pub(crate) trait ReadFrame {
     /// Complete visibility context, including the reader's savepoint writes.
     fn snapshot_context(&self, runtime: &RedDBRuntime) -> SnapshotContext {
         SnapshotContext {
+            branch: None,
             snapshot: self.snapshot().clone(),
             manager: runtime.inner.transaction_state.snapshot_manager(),
             own_xids: HashSet::new(),
@@ -305,6 +306,7 @@ fn classify_lock_intent(query: &str) -> LockIntent {
 }
 
 pub(super) struct StatementExecutionFrame {
+    branch: Option<Arc<reddb_engine::transaction::read::BranchReadView>>,
     tx_local_tenant: Option<Option<String>>,
     snapshot: Snapshot,
     snapshot_retention: RefCell<Option<SnapshotRetentionGuard>>,
@@ -426,17 +428,39 @@ impl StatementExecutionFrame {
         let conn_id = current_connection_id();
         let tx_local_tenant = runtime.inner.transaction_state.local_tenant(conn_id);
         let tx_context = runtime.inner.transaction_state.context(conn_id);
-        let own_xids = own_transaction_xids(tx_context.as_ref());
+        let mut own_xids = own_transaction_xids(tx_context.as_ref());
+        let graph_insert_xid = runtime.graph_insert_xid();
+        if let Some(xid) = graph_insert_xid {
+            own_xids.insert(xid);
+        }
         let serializable_reader = tx_context
             .as_ref()
             .filter(|ctx| {
                 ctx.isolation == crate::storage::transaction::IsolationLevel::Serializable
             })
             .map(|ctx| ctx.xid);
-        let (snapshot, as_of_floor, snapshot_retention) =
-            runtime.statement_snapshot(query, identity_source)?;
-        let requires_index_fallback =
-            as_of_floor.is_some() || tx_context.is_some() || !snapshot.in_progress.is_empty();
+        let (snapshot, as_of_floor, snapshot_retention, branch) = {
+            let store = runtime.db().store();
+            let uses_vcs = runtime.vcs_has_versioned_collections()?;
+            let _publication = uses_vcs.then(|| store.vault_publication_lock.lock());
+            let (snapshot, as_of_floor, retention) =
+                runtime.statement_snapshot(query, identity_source)?;
+            let as_of = peek_top_level_as_of_with_table(query).map(|(spec, _)| spec);
+            let branch = if uses_vcs {
+                runtime.vcs_branch_read_view(&snapshot, as_of.as_ref())?
+            } else {
+                None
+            };
+            (snapshot, as_of_floor, retention, branch)
+        };
+        if as_of_floor.is_some() {
+            own_xids.clear();
+        }
+        let requires_index_fallback = as_of_floor.is_some()
+            || tx_context.is_some()
+            || graph_insert_xid.is_some()
+            || branch.is_some()
+            || !snapshot.in_progress.is_empty();
         let (cache_key, is_volatile_query) = match identity_source {
             StatementIdentity::Text(_) if uses_result_cache => (
                 result_cache_key(query),
@@ -450,7 +474,12 @@ impl StatementExecutionFrame {
             | StatementIdentity::UncachedText(_)
             | StatementIdentity::Expr(_) => (String::new(), true),
         };
-        let cache_safe = runtime.result_cache_safe(conn_id);
+        // Branch and tag references can move without changing the query text.
+        // The result cache key does not include the resolved snapshot.
+        let cache_safe = as_of_floor.is_none()
+            && branch.is_none()
+            && graph_insert_xid.is_none()
+            && runtime.result_cache_safe(conn_id);
         // Capture identity + effective scope under the same
         // thread-local view that the cache key was built from, so
         // the Interface and the cache key agree on what "this
@@ -488,6 +517,7 @@ impl StatementExecutionFrame {
         };
 
         Ok(Self {
+            branch,
             tx_local_tenant,
             snapshot,
             snapshot_retention: RefCell::new(Some(snapshot_retention)),
@@ -527,6 +557,7 @@ impl StatementExecutionFrame {
             _secret_store_guard: SecretStoreGuard::install(runtime),
             _kv_store_guard: KvStoreGuard::install(runtime.inner.auth_store.read().clone()),
             _snapshot_guard: CurrentSnapshotGuard::install(SnapshotContext {
+                branch: self.branch.clone(),
                 snapshot: self.snapshot.clone(),
                 manager: runtime.inner.transaction_state.snapshot_manager(),
                 own_xids: self.own_xids.clone(),
@@ -887,6 +918,7 @@ impl StatementExecutionFrame {
 impl ReadFrame for StatementExecutionFrame {
     fn snapshot_context(&self, runtime: &RedDBRuntime) -> SnapshotContext {
         SnapshotContext {
+            branch: self.branch.clone(),
             snapshot: self.snapshot.clone(),
             manager: runtime.inner.transaction_state.snapshot_manager(),
             own_xids: self.own_xids.clone(),
@@ -974,6 +1006,7 @@ impl ReadFrame for EffectiveScope {
         self.captured_snapshot
             .clone()
             .unwrap_or_else(|| SnapshotContext {
+                branch: None,
                 snapshot: self.snapshot.clone(),
                 manager: runtime.inner.transaction_state.snapshot_manager(),
                 own_xids: HashSet::new(),
@@ -1189,19 +1222,15 @@ impl RedDBRuntime {
                          Call vcs.set_versioned(\"{table}\", true) first."
                     )));
                 }
-                let xid = self.vcs_resolve_as_of(spec)?;
-                let (snapshot, retention) = self.snapshot_manager().retain_snapshot(Snapshot {
-                    xid,
-                    in_progress: HashSet::new(),
-                });
+                let snapshot = self.vcs_resolve_snapshot(spec)?;
+                let xid = snapshot.xid;
+                let (snapshot, retention) = self.snapshot_manager().retain_snapshot(snapshot);
                 Ok((snapshot, Some(xid), retention))
             }
             Some((spec, None)) => {
-                let xid = self.vcs_resolve_as_of(spec)?;
-                let (snapshot, retention) = self.snapshot_manager().retain_snapshot(Snapshot {
-                    xid,
-                    in_progress: HashSet::new(),
-                });
+                let snapshot = self.vcs_resolve_snapshot(spec)?;
+                let xid = snapshot.xid;
+                let (snapshot, retention) = self.snapshot_manager().retain_snapshot(snapshot);
                 Ok((snapshot, Some(xid), retention))
             }
             None => match (identity, capture_current_snapshot()) {

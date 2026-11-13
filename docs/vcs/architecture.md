@@ -43,32 +43,38 @@ the [overview](./overview.md) first if you haven't.
 
 ## Commit lifecycle
 
-```
-     begin()          commit()        pin(xid)         save_commit()
-xid ──────▶ active ──────▶ committed ──────▶ pinned ──────▶ durable
-            │                │                │                │
-            │                │                │                └─ row in red_commits
-            │                │                └─ SnapshotManager.pinned[xid]++
-            │                └─ visible to every future snapshot
-            └─ snapshot_manager tracks in-progress set
-
-                    │
-                    ▼  vcs_commit(...) returns
-```
-
 1. `snapshot_manager.begin()` — allocate a fresh monotonic `Xid`.
-2. `snapshot_manager.commit(xid)` — immediately mark committed so
-   every future snapshot can see rows stamped with this xid.
-3. `snapshot_manager.pin(xid)` — ref-count the xid so
-   `prune_aborted` skips it. Until *all* references drop (branch
-   delete, commit unreachable), the versions survive.
-4. `save_commit(...)` — write the canonical `red_commits` row with
-   `id = sha256(...)`, `root_xid = xid`, `parents`, `height`,
-   `author`, `committer`, `message`, `timestamp_ms`.
-5. `save_ref(branch, hash)` — advance the current branch ref to
-   the new commit hash (upsert semantics).
-6. `upsert_workset(conn, branch, base = hash, working_xid = xid)`
-   — update per-connection working set.
+2. Capture the snapshot, including transactions still in progress whose
+   xids precede it. Pin the oldest excluded xid, or the snapshot xid when
+   there are no exclusions, before releasing the temporary transaction.
+   This horizon prevents reclamation of versions the snapshot can see.
+3. Mark the temporary xid committed.
+4. Build the canonical `red.vcs.commits` row with
+   `id = sha256(...)`, `root_xid = xid`, the snapshot's in-progress xids,
+   `parents`, `height`, `author`, `committer`, `message`, `timestamp_ms`.
+5. Publish the commit, branch reference and connection workset in one WAL
+   batch. Merges include inserted versions and branch deletion stamps in
+   the same publication. A failed publication restores the previous rows
+   and releases the temporary snapshot pin.
+
+Each branch has a writer epoch and a frozen snapshot for every inherited
+epoch. New versions record their origin; deletions record the branch epoch
+that made them. Visibility checks both this lineage and MVCC. Fast-forward
+and hard reset install a fresh writer epoch so later writes cannot change
+the source branch or an already captured commit. Reads that cannot prove
+an index respects this view fall back to a snapshot-filtered scan.
+
+Versioned collections use native entity format V14 to persist provenance.
+The reader retains V1–V13 compatibility. Opting in upgrades the database;
+older binaries cannot read the upgraded format. Disabling history is
+rejected while versions retain shared branch provenance.
+
+On reopen, RedDB restores the pinned horizons from the stored commits.
+Commits created before snapshot exclusions were recorded contain only the
+root xid; the earlier exclusion set cannot be reconstructed. Raw
+`AS OF SNAPSHOT` likewise supplies only an xid, not a stored commit view.
+Older binaries that do not read `snapshot_in_progress` cannot reproduce the
+full visibility of newer commits.
 
 ### Commit hash
 
@@ -93,13 +99,13 @@ a different protocol can't transplant it here.
 ### Height
 
 `height = max(parents.height) + 1`, or `0` when no parents. Used
-for fast LCA queries: iterate `red_closure` in ascending height
+for fast LCA queries: iterate `red.vcs.closure` in ascending height
 and short-circuit on the first common ancestor.
 
 ## Per-collection opt-in (Phase 7)
 
 ```
-red_vcs_settings
+red.vcs.settings
   ┌─────────────────────────────────────────────────┐
   │ id = "users",     versioned = true,  ts_ms = … │
   │ id = "products",  versioned = true,  ts_ms = … │
@@ -115,7 +121,7 @@ red_vcs_settings
 ```
 
 `is_versioned(store, name)` is a cheap query on
-`red_vcs_settings` (presence of a row with `versioned = true`).
+`red.vcs.settings` (presence of a row with `versioned = true`).
 Gates three decisions:
 
 - `materialize_merge_conflicts` iterates only versioned
@@ -131,8 +137,9 @@ append-only VCS metadata and always accept `AS OF`. The
 
 ### Retroactive semantics
 
-Opting in flips the gate only. No data rewrite, no catalog
-migration, no index rebuild. A collection that already has
+Opting in stamps existing entities with the main epoch and persists the
+V14 format. It cannot recover versions already overwritten or reclaimed.
+A collection that already has
 commits pinning xids *before* the opt-in becomes queryable at
 those commits the moment the flag lands — the xids are still
 pinned, the MVCC row versions are still in storage, only the
@@ -161,9 +168,9 @@ SELECT ... AS OF COMMIT '<hash>' WHERE ...
       │     Some(AsOfSpec::Commit(<hash>))
       │
       ├─ runtime.vcs_resolve_as_of(spec) -> Xid
-      │     load red_commits row, return commit.root_xid
+      │     load red.vcs.commits row, return commit.root_xid
       │
-      ├─ Snapshot { xid, in_progress: {} }  installed via
+      ├─ stored snapshot { xid, in_progress } installed via
       │   CurrentSnapshotGuard::install(...)
       │
       └─ scans honour visibility:
@@ -175,6 +182,9 @@ SELECT ... AS OF COMMIT '<hash>' WHERE ...
 The guard restores the previous snapshot on every return path, so
 nested `SELECT` subqueries don't bleed time-travel context out of
 their declared scope.
+
+`AS OF` statements bypass the result cache because its key does not include
+the resolved snapshot and branch or tag references may move.
 
 Supported spec variants:
 
@@ -195,6 +205,7 @@ vcs_merge(input):
   lca    = vcs_lca(ours, theirs)
 
   if theirs.ancestors.contains(ours):
+    if graph may require application: return Err("graph application not implemented")
     # fast-forward — just move the branch ref
     save_ref(branch, theirs)
     return MergeOutcome { fast_forward: true, ... }
@@ -202,15 +213,39 @@ vcs_merge(input):
   if strategy == FastForwardOnly:
     return Err("not a fast-forward")
 
+  conflicts = materialize_merge_conflicts(lca, ours, theirs, merge_state_id)
+  if no conflicts and source graph may require application:
+    return Err("graph application not implemented")
+  save_merge_state(merge_state_id, kind = merge, base = lca,
+                   ours, theirs, conflicts_count = conflicts.len())
+  if conflicts are present:
+    attach merge_state_id to the current workset
+    return MergeOutcome { merge_commit: None, conflicts, merge_state_id }
+
   merge_commit = new commit with parents = [ours, theirs]
   save_commit(merge_commit)
   save_ref(branch, merge_commit)
-
-  conflicts = materialize_merge_conflicts(lca, ours, theirs, merge_state_id)
-  save_merge_state(merge_state_id, kind = merge, base = lca,
-                   ours, theirs, conflicts_count = conflicts.len())
   return MergeOutcome { merge_commit, conflicts, merge_state_id, ... }
 ```
+
+While a merge is pending on a workset, that connection's status reports its id
+and unresolved conflict count. Its HEAD-changing operations are refused, as is
+non-forced checkout. These checks do not lock the branch against other
+connections. Conflict resolution itself returns an error and leaves the marker
+intact until resolved data can be applied. Forced checkout clears the workset's
+pending pointer; it does not remove the recorded merge state or conflicts.
+For versioned graphs, fast-forward merges with differing visible graph versions
+and clean divergent merges with source-side graph changes are rejected until
+graph data application exists. Graph entities written before versioning was
+enabled or by older builds can lack an MVCC creation stamp and appear in all
+snapshots. When such entities exist, merges between different
+commits are conservatively rejected even when the graph did not change. An
+update followed by a revert may also be rejected. This guard does not provide
+branch isolation or implement graph merges.
+
+Versioned graph inserts publish their creation xid with the entity and make it
+visible to MVCC-aware readers after the captured WAL batch. Native entity and
+collection reads do not yet apply graph MVCC visibility.
 
 ### materialize_merge_conflicts
 
@@ -227,7 +262,7 @@ vcs_merge(input):
    - Run `three_way_merge(base, ours, theirs)` from
      `application::merge_json`
    - Clean merge → skip (Phase 6.2 will stage for apply)
-   - Conflicting → insert row in `red_conflicts` with
+   - Conflicting → insert row in `red.vcs.conflicts` with
      `conflicting_paths`, `base_json`, `ours_json`, `theirs_json`,
      `merge_state_id`
 
@@ -279,7 +314,7 @@ Reset modes:
 
 ## Closure index
 
-`red_closure` rows are `(height, commit_hash, ancestor_hash)`. Phase
+`red.vcs.closure` rows are `(height, commit_hash, ancestor_hash)`. Phase
 6 emits closure entries on commit; Phase 8 adds the optimised
 `vcs_lca` that iterates closures in parallel height-ascending order
 to find the first common ancestor in `O(log N)` ancestor steps.

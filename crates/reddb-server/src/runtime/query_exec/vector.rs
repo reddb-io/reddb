@@ -150,7 +150,9 @@ pub(crate) fn runtime_vector_matches(
         VectorSearchMode::Approximate => "approximate",
     }
     .to_string();
-    let turbo = (query.mode == VectorSearchMode::Approximate)
+    let branch_view = crate::runtime::impl_core::capture_current_snapshot()
+        .is_some_and(|context| context.branch.is_some());
+    let turbo = (query.mode == VectorSearchMode::Approximate && !branch_view)
         .then(|| db.turbo_state(&query.collection))
         .flatten();
     if let Some(state) = turbo {
@@ -283,7 +285,14 @@ pub(crate) fn runtime_vector_matches(
     stats.access_path = "vector_exact_scan".to_string();
     stats.mode_executed = "exact".to_string();
     if query.mode == VectorSearchMode::Approximate {
-        stats.fallback_reason = Some("no operational approximate index".to_string());
+        stats.fallback_reason = Some(
+            if branch_view {
+                "branch snapshot requires versioned candidates"
+            } else {
+                "no operational approximate index"
+            }
+            .to_string(),
+        );
     }
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let filter = effective_vector_filter(query);

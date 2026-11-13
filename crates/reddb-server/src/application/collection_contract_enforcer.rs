@@ -50,6 +50,7 @@ fn ensure_collection_model_contract(
 
     let now = implicit_contract_unix_ms();
     db.save_collection_contract(crate::physical::CollectionContract {
+        graph_contract: None,
         name: collection.to_string(),
         description: None,
         description_generated: false,
@@ -350,6 +351,27 @@ fn find_row_uniqueness_conflict(
     let Some(manager) = db.store().get_collection(collection) else {
         return Ok(None);
     };
+    if runtime.vcs_is_versioned(collection)? {
+        let (snapshot, _retention) = runtime.native_read_snapshot()?;
+        let mut rows = Vec::new();
+        manager.try_for_each_entity(usize::MAX, |entity| {
+            if reddb_engine::transaction::read::entity_reserves_unique_key(&snapshot, entity) {
+                if let Some(row) = entity.data.as_row() {
+                    rows.push(ContractRow {
+                        id: entity.id,
+                        fields: row
+                            .iter_fields()
+                            .map(|(name, value)| (name.to_string(), value.clone()))
+                            .collect(),
+                    });
+                }
+            }
+            true
+        })?;
+        return Ok(find_row_uniqueness_conflict_for_contract(
+            &contract, collection, fields, &rows, target, exclude_id,
+        )?);
+    }
     let rules = resolved_uniqueness_rules(&contract);
     let columns: Vec<Vec<String>> = rules.iter().map(|rule| rule.columns.clone()).collect();
     if let Some(target) = target {
@@ -520,6 +542,7 @@ mod tests {
             .columns
             .push(ColumnDef::new("name", DataType::Text));
         CollectionContract {
+            graph_contract: None,
             name: "people".to_string(),
             description: None,
             description_generated: false,

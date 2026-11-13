@@ -1113,7 +1113,7 @@ pub fn entity_visible_under_current_snapshot(
         let Some(ctx) = guard.as_ref() else {
             return true;
         };
-        let visible = visibility_check(ctx, entity.xmin, entity.xmax);
+        let visible = reddb_engine::transaction::read::entity_visibility_check(ctx, entity);
         if visible {
             record_serializable_read(ctx, entity);
         }

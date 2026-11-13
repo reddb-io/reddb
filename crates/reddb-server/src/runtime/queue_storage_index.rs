@@ -415,6 +415,14 @@ pub(super) fn subject_rows_store(
     group: Option<&str>,
     message_id: Option<u64>,
 ) -> RedDBResult<Option<Vec<(EntityId, RowData)>>> {
+    if super::impl_core::capture_current_snapshot()
+        .is_some_and(|snapshot| snapshot.branch.is_some())
+    {
+        return super::vcs_queue::metadata_rows(store, |row| {
+            row_matches_subject(row, kind, queue, group, message_id)
+        })
+        .map(Some);
+    }
     let _publication = store.vault_publication_lock.lock();
     let manager = match store.get_collection(META_COLLECTION) {
         Some(manager) => manager,
@@ -494,6 +502,14 @@ pub(super) fn delivery_rows_store(
     store: &UnifiedStore,
     delivery_id: &str,
 ) -> RedDBResult<Option<Vec<(EntityId, RowData)>>> {
+    if super::impl_core::capture_current_snapshot()
+        .is_some_and(|snapshot| snapshot.branch.is_some())
+    {
+        return super::vcs_queue::metadata_rows(store, |row| {
+            row_text(row, "delivery_id").as_deref() == Some(delivery_id)
+        })
+        .map(Some);
+    }
     let _publication = store.vault_publication_lock.lock();
     let manager = match store.get_collection(META_COLLECTION) {
         Some(manager) => manager,
@@ -547,6 +563,16 @@ pub(super) fn deadline_rows(
     deadline_at_or_before: u64,
 ) -> RedDBResult<Option<Vec<(EntityId, RowData)>>> {
     let store = runtime.db().store();
+    if super::impl_core::capture_current_snapshot()
+        .is_some_and(|snapshot| snapshot.branch.is_some())
+    {
+        return super::vcs_queue::metadata_rows(store.as_ref(), |row| {
+            row_text(row, "queue").as_deref() == Some(queue)
+                && row_u64(row, "lock_deadline_ns")
+                    .is_some_and(|deadline| deadline <= deadline_at_or_before)
+        })
+        .map(Some);
+    }
     let _publication = store.vault_publication_lock.lock();
     let manager = match store.get_collection(META_COLLECTION) {
         Some(manager) => manager,
@@ -622,6 +648,9 @@ pub(super) fn dedup_rows(
     let snapshot = dedup_key.and_then(|_| super::impl_core::capture_current_snapshot());
     let mut out = Vec::new();
     let mut visit = |entity: &UnifiedEntity| {
+        if !super::vcs_queue::metadata_visible(entity) {
+            return true;
+        }
         let Some((candidate_queue, candidate_key, expires)) =
             reddb_engine::storage::segment_key_lookup::SegmentKeyLookup::queue_dedup(entity)
         else {
@@ -741,9 +770,9 @@ pub(super) fn capacity_reached(
 ) -> RedDBResult<Option<bool>> {
     let snapshot = super::impl_core::capture_current_snapshot();
     if runtime.is_rls_enabled(queue)
-        || snapshot
-            .as_ref()
-            .is_some_and(|context| context.serializable_reader.is_some())
+        || snapshot.as_ref().is_some_and(|context| {
+            context.serializable_reader.is_some() || context.branch.is_some()
+        })
     {
         return Ok(None);
     }

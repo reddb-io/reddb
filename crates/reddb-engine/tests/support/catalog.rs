@@ -48,6 +48,7 @@ pub fn persisted() -> PhysicalCollectionContract {
     total.generated = Some("quantity * 5".into());
     total.check = Some("total < 100".into());
     PhysicalCollectionContract {
+        graph_contract: None,
         name: "orders".into(),
         description: None,
         description_generated: false,

@@ -342,6 +342,7 @@ fn physical_declared_column_contract_round_trips() {
 #[test]
 fn physical_collection_contract_round_trips() {
     let contract = PhysicalCollectionContract {
+        graph_contract: None,
         name: "orders".to_string(),
         description: Some("Customer orders".to_string()),
         description_generated: false,
@@ -430,6 +431,7 @@ fn physical_collection_contract_round_trips() {
 #[test]
 fn physical_collection_contract_with_ai_policy_round_trips() {
     let contract = PhysicalCollectionContract {
+        graph_contract: None,
         name: "posts".to_string(),
         description: None,
         description_generated: false,
@@ -491,6 +493,7 @@ fn physical_collection_contract_with_ai_policy_round_trips() {
 
     // A present-but-empty policy round-trips through the Null modality arms.
     let bare = PhysicalCollectionContract {
+        graph_contract: None,
         ai_policy: Some(PhysicalAiPolicy {
             embed: None,
             moderate: None,

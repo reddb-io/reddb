@@ -87,7 +87,7 @@ impl EntityKind {
 }
 
 /// The actual data content of an entity
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EntityData {
     /// Table row data
     Row(RowData),
@@ -158,7 +158,7 @@ impl EntityData {
 }
 
 /// Data for a table row
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RowData {
     /// Column values in schema order
     pub columns: Vec<Value>,
@@ -274,7 +274,7 @@ impl RowData {
 }
 
 /// Data for a graph node
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodeData {
     /// Node properties
     pub properties: HashMap<String, Value>,
@@ -316,7 +316,7 @@ impl Default for NodeData {
 }
 
 /// Data for a graph edge
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EdgeData {
     /// Edge properties
     pub properties: HashMap<String, Value>,
@@ -356,7 +356,7 @@ impl Default for EdgeData {
 }
 
 /// Data for a vector
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VectorData {
     /// Dense vector (primary embedding)
     pub dense: Vec<f32>,
@@ -403,7 +403,7 @@ impl VectorData {
 }
 
 /// Time-series data point
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TimeSeriesData {
     /// Metric name (e.g., "cpu.idle")
     pub metric: String,
@@ -420,7 +420,7 @@ pub struct TimeSeriesData {
 }
 
 /// Queue message data
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QueueMessageData {
     /// Message payload
     pub payload: Value,
@@ -437,7 +437,7 @@ pub struct QueueMessageData {
 }
 
 /// Sparse vector representation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SparseVector {
     /// Indices of non-zero elements
     pub indices: Vec<u32>,
@@ -483,7 +483,7 @@ impl SparseVector {
 }
 
 /// A slot for embedding a specific aspect of an entity
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EmbeddingSlot {
     /// Slot name (e.g., "content", "summary", "title", "code")
     pub name: String,
@@ -570,6 +570,16 @@ pub struct EntityAux {
     pub embeddings: Vec<EmbeddingSlot>,
     /// Cross-references to other entities
     pub cross_refs: Vec<CrossRef>,
+    /// VCS provenance is allocated only for opted-in entities. Epochs are
+    /// immutable branch incarnations; recreating a branch uses a new epoch.
+    pub branch: Option<BranchVersion>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BranchVersion {
+    pub origin: u64,
+    /// Deletions by other epochs must not overwrite the creator's xmax.
+    pub deletions: Vec<(u64, u64)>,
 }
 
 impl UnifiedEntity {
@@ -762,6 +772,73 @@ impl UnifiedEntity {
     #[inline]
     pub fn set_xmax(&mut self, xid: u64) {
         self.xmax = xid;
+    }
+
+    pub fn branch_version(&self) -> Option<&BranchVersion> {
+        self.aux.as_deref()?.branch.as_ref()
+    }
+
+    pub fn set_branch_origin(&mut self, epoch: u64) {
+        self.aux.get_or_insert_with(Default::default).branch = Some(BranchVersion {
+            origin: epoch,
+            deletions: Vec::new(),
+        });
+    }
+
+    pub fn clear_branch_version(&mut self) {
+        if let Some(aux) = self.aux.as_deref_mut() {
+            aux.branch = None;
+        }
+    }
+
+    pub fn branch_xmax(&self, epoch: u64) -> u64 {
+        match self.branch_version() {
+            Some(branch) if branch.origin != epoch => branch
+                .deletions
+                .binary_search_by_key(&epoch, |(owner, _)| *owner)
+                .map_or(0, |index| branch.deletions[index].1),
+            _ => self.xmax,
+        }
+    }
+
+    /// The caller holds the publication fence and starts from the current
+    /// stored entity, so another branch's deletion cannot be lost on replace.
+    pub fn set_branch_xmax(&mut self, epoch: u64, xid: u64) {
+        let Some(branch) = self.aux.as_deref_mut().and_then(|aux| aux.branch.as_mut()) else {
+            self.xmax = xid;
+            return;
+        };
+        if branch.origin == epoch {
+            self.xmax = xid;
+            return;
+        }
+        match branch
+            .deletions
+            .binary_search_by_key(&epoch, |(owner, _)| *owner)
+        {
+            Ok(index) if xid == 0 => {
+                branch.deletions.remove(index);
+            }
+            Ok(index) => branch.deletions[index].1 = xid,
+            Err(index) if xid != 0 => branch.deletions.insert(index, (epoch, xid)),
+            Err(_) => {}
+        }
+    }
+
+    pub fn retain_branch_deletions(&mut self, mut keep: impl FnMut(u64) -> bool) {
+        if let Some(branch) = self.aux.as_deref_mut().and_then(|aux| aux.branch.as_mut()) {
+            branch.deletions.retain(|(_, xid)| keep(*xid));
+        }
+    }
+
+    pub fn max_transaction_id(&self) -> u64 {
+        self.branch_version()
+            .map_or(self.xmin.max(self.xmax), |branch| {
+                branch
+                    .deletions
+                    .iter()
+                    .fold(self.xmin.max(self.xmax), |high, (_, xid)| high.max(*xid))
+            })
     }
 
     /// Stable user-visible identity. Legacy rows without an explicit

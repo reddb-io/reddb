@@ -80,13 +80,28 @@ impl PrimaryQueueStore {
     /// itself; otherwise (no-context unit-test path) we drive it here off
     /// this adapter's own runtime handle so the adapter stays correct
     /// standalone. Either way the message is retired exactly once.
-    fn retire_message_mvcc(&self, txn: &QueueTxn, queue: &str, message_id: MessageId) {
+    fn retire_message_mvcc(
+        &self,
+        txn: &QueueTxn,
+        queue: &str,
+        message_id: MessageId,
+    ) -> Result<()> {
+        let store = self.store();
+        if super::vcs_queue::runtime(store.as_ref()).is_some() {
+            return delete_message_with_state(
+                Some(&self.runtime),
+                store.as_ref(),
+                queue,
+                message_id,
+            );
+        }
         txn.record_pending_tombstone(queue, message_id);
         if !txn.has_context() {
             let store = self.store();
             let _ =
                 delete_message_with_state(Some(&self.runtime), store.as_ref(), queue, message_id);
         }
+        Ok(())
     }
 
     /// Validate the entire ACK set before retiring any message. The publication
@@ -126,7 +141,7 @@ impl PrimaryQueueStore {
             .map_err(|error| QueueStoreError::UnknownQueue(error.to_string()))??;
         if !fanout {
             for (_, row) in pending {
-                self.retire_message_mvcc(txn, &row.queue, row.message_id);
+                self.retire_message_mvcc(txn, &row.queue, row.message_id)?;
             }
         }
         Ok(())
@@ -479,17 +494,14 @@ impl PrimaryQueueStore {
         F: Fn(&RowData) -> bool + Sync,
     {
         let store = self.store();
-        let Some(manager) = store.get_collection(QUEUE_META_COLLECTION) else {
-            return Vec::new();
-        };
-        manager
-            .query_all(|entity| entity.data.as_row().is_some_and(&predicate))
-            .into_iter()
-            .filter_map(|entity| match entity.data {
-                EntityData::Row(row) => Some((entity.id, row)),
-                _ => None,
-            })
-            .collect()
+        match super::vcs_queue::metadata_rows(store.as_ref(), predicate) {
+            Ok(rows) => rows,
+            Err(error) => {
+                super::vcs_queue::record_error(&error);
+                tracing::warn!(error = %error, "queue metadata scan failed");
+                Vec::new()
+            }
+        }
     }
 
     fn subject_rows(
@@ -518,6 +530,7 @@ impl PrimaryQueueStore {
                         .unwrap_or(true)
             }),
             Err(error) => {
+                super::vcs_queue::record_error(&error);
                 tracing::warn!(error = %error, "queue meta index read failed; using resident fallback");
                 self.meta_rows(|row| {
                     row_text(row, "kind").as_deref() == Some(kind)
@@ -540,6 +553,7 @@ impl PrimaryQueueStore {
                 self.meta_rows(|row| row_text(row, "delivery_id").as_deref() == Some(delivery_id))
             }
             Err(error) => {
+                super::vcs_queue::record_error(&error);
                 tracing::warn!(error = %error, "queue delivery index read failed; using resident fallback");
                 self.meta_rows(|row| row_text(row, "delivery_id").as_deref() == Some(delivery_id))
             }
@@ -547,31 +561,9 @@ impl PrimaryQueueStore {
     }
 
     fn insert_meta_row(&self, fields: HashMap<String, Value>) -> Result<()> {
-        let store = self.store();
-        let created = store.get_collection(QUEUE_META_COLLECTION).is_none();
-        let _ = store.get_or_create_collection(QUEUE_META_COLLECTION);
-        if created {
-            super::queue_storage_index::prepare_meta(&self.runtime)
-                .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))?;
-        }
-        store
-            .insert_auto(
-                QUEUE_META_COLLECTION,
-                UnifiedEntity::new(
-                    EntityId::new(0),
-                    EntityKind::TableRow {
-                        table: Arc::from(QUEUE_META_COLLECTION),
-                        row_id: 0,
-                    },
-                    EntityData::Row(RowData {
-                        columns: Vec::new(),
-                        named: Some(fields),
-                        schema: None,
-                    }),
-                ),
-            )
-            .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))?;
-        Ok(())
+        super::impl_queue::insert_meta_row(self.store().as_ref(), fields)
+            .map(|_| ())
+            .map_err(|error| QueueStoreError::UnknownQueue(error.to_string()))
     }
 
     fn find_pending_by_delivery(&self, delivery_id: &str) -> Option<(EntityId, PendingRow)> {
@@ -579,6 +571,7 @@ impl PrimaryQueueStore {
             .into_iter()
             .find(|(_, row)| row_text(row, "kind").as_deref() == Some(KIND_PENDING_LC))
             .and_then(|(eid, row)| Some((eid, PendingRow::from_row(&row)?)))
+            .filter(|(_, row)| self.read_message(&row.queue, row.message_id).is_some())
     }
 
     fn find_pending_entry_by_key(
@@ -662,7 +655,7 @@ impl PrimaryQueueStore {
         // Drop the legacy row last — only after the lifecycle row is
         // durably in place, so a failure mid-migration never strands the
         // message in *neither* representation.
-        let _ = self.store().delete(QUEUE_META_COLLECTION, legacy_eid);
+        let _ = super::vcs_queue::delete_metadata(self.store().as_ref(), legacy_eid);
 
         self.find_pending_by_delivery(&delivery_id)
     }
@@ -701,7 +694,7 @@ impl PrimaryQueueStore {
         attempts: u32,
     ) -> Result<()> {
         for (id, _) in self.subject_rows(KIND_ATTEMPTS_LC, queue, Some(group), Some(message_id)) {
-            let _ = self.store().delete(QUEUE_META_COLLECTION, id);
+            let _ = super::vcs_queue::delete_metadata(self.store().as_ref(), id);
         }
         let mut fields = HashMap::new();
         fields.insert("kind".into(), Value::text(KIND_ATTEMPTS_LC.to_string()));
@@ -712,6 +705,9 @@ impl PrimaryQueueStore {
         self.insert_meta_row(fields)?;
 
         let store = self.store();
+        if super::vcs_queue::runtime(store.as_ref()).is_some() {
+            return Ok(());
+        }
         if let Some(manager) = store.get_collection(queue) {
             if let Some(mut entity) = manager.get(EntityId::new(message_id)) {
                 if let EntityData::QueueMessage(message) = &mut entity.data {
@@ -725,7 +721,7 @@ impl PrimaryQueueStore {
 
     fn clear_attempts(&self, queue: &str, message_id: MessageId, group: &str) {
         for (id, _) in self.subject_rows(KIND_ATTEMPTS_LC, queue, Some(group), Some(message_id)) {
-            let _ = self.store().delete(QUEUE_META_COLLECTION, id);
+            let _ = super::vcs_queue::delete_metadata(self.store().as_ref(), id);
         }
     }
 
@@ -762,6 +758,7 @@ impl PrimaryQueueStore {
             }
             Ok(None) => {}
             Err(error) => {
+                super::vcs_queue::record_error(&error);
                 tracing::warn!(error = %error, "queue position index read failed; using resident fallback");
             }
         }
@@ -806,6 +803,7 @@ impl PrimaryQueueStore {
             }
             Ok(None) => {}
             Err(error) => {
+                super::vcs_queue::record_error(&error);
                 tracing::warn!(error = %error, "queue boundary index read failed; using resident fallback");
             }
         }
@@ -813,12 +811,18 @@ impl PrimaryQueueStore {
             return Err(QueueStoreError::UnknownQueue(queue.to_string()));
         };
         let mut max = None;
-        manager.for_each_entity(|entity| {
-            if let EntityKind::QueueMessage { position, .. } = entity.kind {
-                max = Some(max.map_or(position, |previous: u64| previous.max(position)));
-            }
-            true
-        });
+        let snapshot = super::execution_context::capture_current_snapshot();
+        manager
+            .try_for_each_entity(usize::MAX, |entity| {
+                if super::execution_context::entity_visible_with_context(snapshot.as_ref(), entity)
+                {
+                    if let EntityKind::QueueMessage { position, .. } = entity.kind {
+                        max = Some(max.map_or(position, |previous: u64| previous.max(position)));
+                    }
+                }
+                true
+            })
+            .map_err(|error| QueueStoreError::UnknownQueue(error.to_string()))?;
         Ok(max.map(|p| p + 1).unwrap_or(1 << 32))
     }
 }
@@ -848,6 +852,12 @@ fn delete_message_with_state(
     queue: &str,
     message_id: MessageId,
 ) -> Result<()> {
+    if super::vcs_queue::retire(store, queue, EntityId::new(message_id))
+        .map_err(|error| QueueStoreError::UnknownQueue(error.to_string()))?
+    {
+        remove_message_state(store, queue, message_id);
+        return Ok(());
+    }
     let entity_id = EntityId::new(message_id);
     if let Some(runtime) = runtime {
         if let Some(xid) = runtime.current_xid() {
@@ -864,6 +874,7 @@ fn delete_message_with_state(
                                 entity_id,
                                 xid,
                                 previous_xmax,
+                                None,
                             );
                             super::impl_queue::forget_queue_message_lock(runtime, queue, entity_id);
                             return Ok(());
@@ -890,6 +901,7 @@ fn remove_message_state(store: &UnifiedStore, queue: &str, message_id: MessageId
         KIND_ACKED_LC,
         KIND_ATTEMPTS_LC,
         KIND_PENDING_LEGACY,
+        "queue_retry",
     ];
     let indexed = kinds
         .iter()
@@ -906,7 +918,7 @@ fn remove_message_state(store: &UnifiedStore, queue: &str, message_id: MessageId
     match indexed {
         Ok(results) if results.iter().all(Option::is_some) => {
             for (id, _) in results.into_iter().flatten().flatten() {
-                let _ = store.delete(QUEUE_META_COLLECTION, id);
+                let _ = super::vcs_queue::delete_metadata(store, id);
             }
         }
         Ok(_) | Err(_) => super::impl_queue::remove_meta_rows(store, |row| {
@@ -917,6 +929,7 @@ fn remove_message_state(store: &UnifiedStore, queue: &str, message_id: MessageId
                     | Some(KIND_ACKED_LC)
                     | Some(KIND_ATTEMPTS_LC)
                     | Some(KIND_PENDING_LEGACY)
+                    | Some("queue_retry")
             ) && super::impl_queue::row_text(row, "queue").as_deref() == Some(queue)
                 && super::impl_queue::row_u64(row, "message_id") == Some(message_id)
         }),
@@ -1042,7 +1055,7 @@ impl QueueStore for PrimaryQueueStore {
         {
             // Refresh deadline; same delivery_id.
             let store = self.store();
-            let _ = store.delete(QUEUE_META_COLLECTION, entity_id);
+            let _ = super::vcs_queue::delete_metadata(store.as_ref(), entity_id);
             let mut fields = HashMap::new();
             fields.insert("kind".into(), Value::text(KIND_PENDING_LC.to_string()));
             fields.insert("queue".into(), Value::text(queue.to_string()));
@@ -1158,7 +1171,7 @@ impl QueueStore for PrimaryQueueStore {
 
     fn release_pending(&self, _txn: &QueueTxn, delivery_id: &str) -> Result<()> {
         if let Some((entity_id, _)) = self.find_pending_by_delivery(delivery_id) {
-            let _ = self.store().delete(QUEUE_META_COLLECTION, entity_id);
+            let _ = super::vcs_queue::delete_metadata(self.store().as_ref(), entity_id);
         }
         Ok(())
     }
@@ -1175,13 +1188,13 @@ impl QueueStore for PrimaryQueueStore {
         // Clear the adapter's own bookkeeping rows eagerly (pending +
         // attempts): these are lifecycle meta-state, not the durable
         // message.
-        let _ = self.store().delete(QUEUE_META_COLLECTION, entity_id);
+        let _ = super::vcs_queue::delete_metadata(self.store().as_ref(), entity_id);
         self.clear_attempts(&row.queue, row.message_id, &row.group);
         // Retire the underlying message through the runtime MVCC path
         // (current_xid → set_xmax → record_pending_tombstone) rather than
         // an immediate hard delete, so an ack inside a statement that
         // rolls back leaves the message visible again.
-        self.retire_message_mvcc(txn, &row.queue, row.message_id);
+        self.retire_message_mvcc(txn, &row.queue, row.message_id)?;
         Ok(())
     }
 
@@ -1194,7 +1207,7 @@ impl QueueStore for PrimaryQueueStore {
         let (entity_id, row) = self
             .find_pending_by_delivery(delivery_id)
             .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
-        let _ = self.store().delete(QUEUE_META_COLLECTION, entity_id);
+        let _ = super::vcs_queue::delete_metadata(self.store().as_ref(), entity_id);
         self.clear_attempts(&row.queue, row.message_id, &row.group);
 
         let mut fields = HashMap::new();
@@ -1267,7 +1280,7 @@ impl QueueStore for PrimaryQueueStore {
                 .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))?;
         }
         let position = self.next_position(dlq_target)?;
-        let entity = UnifiedEntity::new(
+        let mut entity = UnifiedEntity::new(
             EntityId::new(0),
             EntityKind::QueueMessage {
                 queue: dlq_target.to_string(),
@@ -1282,6 +1295,8 @@ impl QueueStore for PrimaryQueueStore {
                 acked: false,
             }),
         );
+        super::vcs_queue::stamp_entity(store.as_ref(), dlq_target, &mut entity)
+            .map_err(|error| QueueStoreError::UnknownQueue(error.to_string()))?;
         let id = store
             .insert_auto(dlq_target, entity)
             .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))?;
@@ -1313,7 +1328,19 @@ impl QueueStore for PrimaryQueueStore {
         let store = self.store();
         // Queue selection can return a disk-only message after cold boot.
         // The store lookup merges the resident overlay with the paged base.
-        let entity = store.get(queue, EntityId::new(message_id))?;
+        let entity = match store.try_get(queue, EntityId::new(message_id), usize::MAX) {
+            Ok(entity) => entity?,
+            Err(error) => {
+                super::vcs_queue::record_error(error);
+                return None;
+            }
+        };
+        if !super::execution_context::entity_visible_with_context(
+            super::execution_context::capture_current_snapshot().as_ref(),
+            &entity,
+        ) {
+            return None;
+        }
         match entity.data {
             EntityData::QueueMessage(data) if !data.acked => Some(data.payload),
             _ => None,
@@ -1370,14 +1397,14 @@ impl QueueStore for PrimaryQueueStore {
         // records the per-message tombstone on `txn`, in the same shape
         // `ack_pending` uses.
         for message_id in &ids {
-            self.retire_message_mvcc(txn, queue, *message_id);
+            self.retire_message_mvcc(txn, queue, *message_id)?;
         }
         // Sweep every meta-row keyed off this queue (pending, acked,
         // attempts) — none of them are meaningful once the underlying
         // messages are gone.
         for kind in [KIND_PENDING_LC, KIND_ACKED_LC, KIND_ATTEMPTS_LC] {
             for (id, _) in self.subject_rows(kind, queue, None, None) {
-                let _ = self.store().delete(QUEUE_META_COLLECTION, id);
+                let _ = super::vcs_queue::delete_metadata(self.store().as_ref(), id);
             }
         }
 
@@ -1422,6 +1449,7 @@ impl QueueStore for PrimaryQueueStore {
             Ok(Some(rows)) => rows,
             Ok(None) => self.subject_rows(KIND_PENDING_LC, queue, None, None),
             Err(error) => {
+                super::vcs_queue::record_error(&error);
                 tracing::warn!(error = %error, "queue deadline index read failed; using resident fallback");
                 self.subject_rows(KIND_PENDING_LC, queue, None, None)
             }
@@ -1430,7 +1458,7 @@ impl QueueStore for PrimaryQueueStore {
             if row_text(&row, "kind").as_deref() == Some(KIND_PENDING_LC)
                 && row_u64(&row, "lock_deadline_ns").is_some_and(|deadline| deadline <= now_ns)
             {
-                let _ = self.store().delete(QUEUE_META_COLLECTION, id);
+                let _ = super::vcs_queue::delete_metadata(self.store().as_ref(), id);
             }
         }
         Ok(())
@@ -1469,7 +1497,7 @@ impl QueueStore for PrimaryQueueStore {
             };
 
             popped.push((message_id, payload));
-            self.retire_message_mvcc(txn, queue, message_id);
+            self.retire_message_mvcc(txn, queue, message_id)?;
         }
         Ok(popped)
     }
@@ -1477,6 +1505,14 @@ impl QueueStore for PrimaryQueueStore {
     fn delete_with_state(&self, txn: &QueueTxn, queue: &str, message_id: MessageId) -> Result<()> {
         if !self.queue_exists(queue) {
             return Err(QueueStoreError::UnknownQueue(queue.to_string()));
+        }
+        if super::vcs_queue::runtime(self.store().as_ref()).is_some() {
+            return delete_message_with_state(
+                Some(&self.runtime),
+                self.store().as_ref(),
+                queue,
+                message_id,
+            );
         }
         if txn.has_context() {
             txn.record_pending_tombstone(queue, message_id);
@@ -1556,7 +1592,8 @@ impl QueueStore for PrimaryQueueStore {
         .map_err(|err| QueueStoreError::UnknownQueue(err.to_string()))?;
         self.runtime
             .stamp_xmin_if_in_txn(super::impl_queue::QUEUE_META_COLLECTION, metadata_id);
-        if self.runtime.current_xid().is_some() {
+        if self.runtime.current_xid().is_some() || UnifiedStore::deferred_store_wal_capture_active()
+        {
             self.runtime.record_pending_queue_dedup(
                 current_connection_id(),
                 queue,

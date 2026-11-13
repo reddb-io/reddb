@@ -10,6 +10,8 @@ use std::collections::VecDeque;
 #[derive(Default)]
 pub(crate) struct RowPublication {
     pub inserts: Vec<(String, UnifiedEntity, Option<Metadata>)>,
+    /// Existing physical versions whose MVCC stamps change in this publication.
+    pub replacements: Vec<(String, UnifiedEntity, Option<Metadata>)>,
     pub deletes: Vec<(String, EntityId)>,
 }
 
@@ -81,6 +83,7 @@ impl UnifiedStore {
     fn row_publication_bytes(&self, rows: &RowPublication) -> u64 {
         rows.inserts
             .iter()
+            .chain(&rows.replacements)
             .fold(0u64, |sum, (collection, entity, metadata)| {
                 sum.saturating_add(
                     StoreWalAction::upsert_entity(
@@ -102,7 +105,7 @@ impl UnifiedStore {
     }
 
     fn validate_row_publication(rows: &RowPublication) -> Result<(), StoreError> {
-        for (collection, entity, _) in &rows.inserts {
+        for (collection, entity, _) in rows.inserts.iter().chain(&rows.replacements) {
             super::config_keys::validate_config_entity(collection, entity)?;
         }
         Ok(())
@@ -227,10 +230,9 @@ impl UnifiedStore {
         for request in &rows {
             Self::validate_row_publication(request)?;
         }
-        if rows
-            .iter()
-            .all(|rows| rows.inserts.is_empty() && rows.deletes.is_empty())
-        {
+        if rows.iter().all(|rows| {
+            rows.inserts.is_empty() && rows.replacements.is_empty() && rows.deletes.is_empty()
+        }) {
             return Ok(());
         }
         let session = self
@@ -253,19 +255,24 @@ impl UnifiedStore {
         let mut inserted = Vec::new();
         let mut deleted_ids = std::collections::HashSet::new();
         for request in &rows {
-            for (collection, id) in &request.deletes {
-                if !deleted_ids.insert((collection.as_str(), *id)) {
+            for (collection, id) in request.deletes.iter().map(|(name, id)| (name, *id)).chain(
+                request
+                    .replacements
+                    .iter()
+                    .map(|(name, entity, _)| (name, entity.id)),
+            ) {
+                if !deleted_ids.insert((collection.as_str(), id)) {
                     return Err(StoreError::Io(std::io::Error::other(
                         "overlapping row publications",
                     )));
                 }
                 let entity = self
-                    .try_get(collection, *id, usize::MAX)?
-                    .ok_or(StoreError::EntityNotFound(*id))?;
-                let metadata = self.try_get_metadata(collection, *id, usize::MAX)?;
+                    .try_get(collection, id, usize::MAX)?
+                    .ok_or(StoreError::EntityNotFound(id))?;
+                let metadata = self.try_get_metadata(collection, id, usize::MAX)?;
                 before.push((
                     collection.clone(),
-                    *id,
+                    id,
                     StoreWalAction::upsert_entity(
                         collection,
                         &entity,
@@ -278,6 +285,14 @@ impl UnifiedStore {
         let capture = StoreWalCaptureGuard::begin(session);
         let staged = (|| {
             for request in rows {
+                for (collection, entity, metadata) in request.replacements {
+                    let manager = self
+                        .get_collection(&collection)
+                        .ok_or_else(|| StoreError::CollectionNotFound(collection.clone()))?;
+                    self.resident.entity_cache.remove(entity.id.raw());
+                    manager.update_with_metadata(entity.clone(), metadata.as_ref())?;
+                    self.persist_entities_to_pager_wal_only(&collection, &[entity])?;
+                }
                 for (collection, mut entity, metadata) in request.inserts {
                     if entity.id.raw() == 0 {
                         entity.id = self.next_entity_id();
@@ -384,6 +399,7 @@ mod tests {
                 prepare: Box::new(move |_, previous| {
                     assert!(previous.is_empty());
                     Ok(RowPublication {
+                        replacements: Vec::new(),
                         inserts: vec![("keys".into(), row(2), None)],
                         deletes: vec![("keys".into(), original)],
                     })
@@ -403,6 +419,7 @@ mod tests {
                 prepare: Box::new(|_, previous| {
                     assert_eq!(previous.len(), 1, "rejected request has no plan");
                     Ok(RowPublication {
+                        replacements: Vec::new(),
                         inserts: vec![("keys".into(), row(3), None)],
                         deletes: Vec::new(),
                     })
@@ -449,6 +466,7 @@ mod tests {
                 prepare: Box::new(|_, previous| {
                     assert!(previous.is_empty());
                     Ok(RowPublication {
+                        replacements: Vec::new(),
                         inserts: vec![("keys".into(), row(7), None)],
                         deletes: Vec::new(),
                     })
@@ -483,6 +501,7 @@ mod tests {
                 .map(|(key, result)| Request {
                     prepare: Box::new(move |_, _| {
                         Ok(RowPublication {
+                            replacements: Vec::new(),
                             inserts: vec![("keys".into(), row(key), None)],
                             deletes: Vec::new(),
                         })
@@ -635,6 +654,7 @@ mod tests {
             .store(true, Ordering::Release);
         assert!(store
             .publish_rows(RowPublication {
+                replacements: Vec::new(),
                 inserts: vec![("keys".into(), row(3), None)],
                 deletes: vec![("keys".into(), first), ("keys".into(), second)],
             })

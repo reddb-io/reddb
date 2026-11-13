@@ -107,6 +107,7 @@ mod tests {
 
     fn base_contract() -> CollectionContract {
         CollectionContract {
+            graph_contract: None,
             name: "events".to_string(),
             description: None,
             description_generated: false,

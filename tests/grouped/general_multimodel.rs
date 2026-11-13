@@ -87,6 +87,18 @@ mod e2e_vcs_vector_mvcc_history;
 #[path = "vcs/e2e_vcs_opt_in.rs"]
 mod e2e_vcs_opt_in;
 
+#[path = "vcs/e2e_vcs_native_visibility.rs"]
+mod e2e_vcs_native_visibility;
+
+#[path = "vcs/e2e_vcs_branch_models.rs"]
+mod e2e_vcs_branch_models;
+
+#[path = "vcs/e2e_vcs_state_models.rs"]
+mod e2e_vcs_state_models;
+
+#[path = "vcs/e2e_vcs_merge_guards.rs"]
+mod e2e_vcs_merge_guards;
+
 #[path = "vcs/e2e_vcs_phase5.rs"]
 mod e2e_vcs_phase5;
 
@@ -110,3 +122,18 @@ mod integration_tree;
 
 #[path = "dml_updates/unit_hot_update.rs"]
 mod unit_hot_update;
+
+#[path = "vcs/e2e_vcs_queue.rs"]
+mod e2e_vcs_queue;
+
+#[path = "vcs/e2e_vcs_constraints.rs"]
+mod e2e_vcs_constraints;
+
+#[path = "vcs/e2e_vcs_native_mutations.rs"]
+mod e2e_vcs_native_mutations;
+
+#[path = "graph_analytics/e2e_graph_contract.rs"]
+mod e2e_graph_contract;
+
+#[path = "graph_analytics/e2e_hybrid_relations.rs"]
+mod e2e_hybrid_relations;

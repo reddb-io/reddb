@@ -33,8 +33,8 @@ use crate::storage::query::planner::{
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
 use crate::storage::unified::dsl::{
     apply_filters, cosine_similarity, Filter as DslFilter, FilterOp as DslFilterOp,
-    FilterValue as DslFilterValue, GraphPatternDsl, HybridQueryBuilder, MatchComponents,
-    QueryResult as DslQueryResult, ScoredMatch, TextSearchBuilder,
+    FilterValue as DslFilterValue, MatchComponents, QueryResult as DslQueryResult, ScoredMatch,
+    TextSearchBuilder,
 };
 use crate::storage::unified::store::{
     NativeCatalogSummary, NativeManifestSummary, NativePhysicalState, NativeRecoverySummary,
@@ -1286,6 +1286,7 @@ struct RuntimeInner {
                 crate::storage::unified::entity::EntityId,
                 crate::storage::transaction::snapshot::Xid,
                 crate::storage::transaction::snapshot::Xid,
+                Option<u64>,
             )>,
         >,
     >,
@@ -1506,6 +1507,7 @@ pub struct RedDBRuntime {
 }
 
 /// Storage replay can reach the owning runtime without keeping it alive.
+#[derive(Clone)]
 pub(crate) struct WeakRuntime(std::sync::Weak<RuntimeInner>);
 
 impl WeakRuntime {
@@ -1679,6 +1681,8 @@ mod function_budget;
 pub(crate) mod function_catalog;
 mod function_execution;
 mod function_validation;
+mod graph_contract;
+mod hybrid_search;
 mod impl_index_integrity;
 mod impl_scrub;
 pub use impl_index_integrity::IndexIntegrityFinding;
@@ -1770,6 +1774,7 @@ pub(crate) mod transaction_state;
 pub mod turbo_crash_inject;
 mod unique_index_admission;
 mod vcs_command;
+mod vcs_queue;
 mod vector_index;
 pub mod vector_turbo_kind;
 pub(crate) mod window_phase;

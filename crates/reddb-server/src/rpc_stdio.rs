@@ -1690,6 +1690,7 @@ mod tests {
             .unwrap_or_default()
             .as_millis();
         db.save_collection_contract(crate::physical::CollectionContract {
+            graph_contract: None,
             name: name.to_string(),
             description: None,
             description_generated: false,

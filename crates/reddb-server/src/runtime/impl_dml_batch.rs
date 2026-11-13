@@ -13,8 +13,8 @@ use crate::application::entity::AppliedEntityMutation;
 use crate::application::ports::entity_row_fields_snapshot;
 
 #[derive(Default)]
-pub(super) struct DeleteBatchResult {
-    pub(super) affected: u64,
+pub(crate) struct DeleteBatchResult {
+    pub(crate) affected: u64,
     pub(super) changes: Vec<(EntityId, u64)>,
     pub(super) pre_images: HashMap<u64, crate::json::Value>,
     // Event snapshots and rollback images share admission until both owners end.
@@ -24,7 +24,7 @@ pub(super) struct DeleteBatchResult {
 impl RedDBRuntime {
     /// Correlate CDC with actual physical identities, including skipped inputs.
     /// Transactional tombstones defer their CDC until commit.
-    pub(super) fn delete_entities_batch(
+    pub(crate) fn delete_entities_batch(
         &self,
         collection: &str,
         ids: &[EntityId],
@@ -59,6 +59,11 @@ impl RedDBRuntime {
             // committed, rather than overwriting an older snapshot's xmax.
             if active_xid.is_none() {
                 context.snapshot = context.manager.fresh_read_snapshot();
+                if let Some(view) = context.branch.as_mut() {
+                    let view = Arc::make_mut(view);
+                    view.epochs
+                        .insert(view.writer_epoch, context.snapshot.clone());
+                }
             }
             context
         });
@@ -82,7 +87,7 @@ impl RedDBRuntime {
                 };
                 entity = current;
             }
-            let versioned_graph = versioned_collection
+            let versioned_graph = (versioned_collection || self.has_graph_contract(collection))
                 && matches!(entity.data, EntityData::Node(_) | EntityData::Edge(_));
             let versioned_vector =
                 versioned_collection && matches!(entity.data, EntityData::Vector(_));
@@ -90,7 +95,7 @@ impl RedDBRuntime {
                 let visible = if matches!(entity.kind, crate::storage::EntityKind::TableRow { .. })
                 {
                     resolver.resolve_candidate(&entity).is_some()
-                } else if versioned_vector {
+                } else if versioned_vector || versioned_graph {
                     resolver.resolve_read_candidate(&entity).is_some()
                 } else {
                     entity.xmax == 0

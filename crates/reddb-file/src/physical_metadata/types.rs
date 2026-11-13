@@ -377,6 +377,7 @@ pub struct PhysicalCollectionContract {
     /// Per-collection AI policy (issue #1271). `None` on sidecars written
     /// before the feature — decode defaults to `None` for migration
     /// safety.
+    pub graph_contract: Option<PhysicalGraphContract>,
     pub ai_policy: Option<PhysicalAiPolicy>,
 }
 
@@ -392,4 +393,33 @@ pub enum PhysicalTypeModifier {
     Ident(String),
     StringLiteral(String),
     Type(Box<PhysicalSqlTypeName>),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicalGraphContract {
+    pub vertex_types: BTreeMap<String, PhysicalGraphVertexContract>,
+    #[serde(default)]
+    pub edge_types: BTreeMap<String, PhysicalGraphEdgeContract>,
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicalGraphVertexContract {
+    #[serde(default)]
+    pub properties: BTreeMap<String, PhysicalGraphPropertyContract>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicalGraphEdgeContract {
+    pub from_type: String,
+    pub to_type: String,
+    #[serde(default)]
+    pub properties: BTreeMap<String, PhysicalGraphPropertyContract>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicalGraphPropertyContract {
+    pub data_type: String,
+    #[serde(default)]
+    pub required: bool,
 }

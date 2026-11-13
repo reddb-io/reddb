@@ -737,7 +737,7 @@ impl LogicalChangeApplier {
                     let (entity, _) =
                         UnifiedStore::deserialize_entity_record(bytes, store.format_version())
                             .map_err(|err| RedDBError::Internal(err.to_string()))?;
-                    replayed_xid = replayed_xid.max(entity.xmin).max(entity.xmax);
+                    replayed_xid = replayed_xid.max(entity.max_transaction_id());
                 }
                 store
                     .refresh_collection_from_records(&record.collection, records)
@@ -871,7 +871,7 @@ impl LogicalChangeApplier {
                     .index_entity(&record.collection, &entity);
                 // Publish the visibility floor only after this record's WAL
                 // batch and metadata have become durable.
-                replayed_xid = entity.xmin.max(entity.xmax);
+                replayed_xid = entity.max_transaction_id();
             }
             ChangeOperation::Transaction => unreachable!("transaction members are validated"),
         }

@@ -16,6 +16,7 @@ use reddb_types::Value;
 
 /// Batch operations for high-performance bulk inserts
 pub struct BatchBuilder {
+    runtime: Option<crate::runtime::WeakRuntime>,
     store: Arc<UnifiedStore>,
     preprocessors: SharedPreprocessors,
     nodes: Vec<(String, UnifiedEntity, HashMap<String, MetadataValue>)>,
@@ -25,8 +26,14 @@ pub struct BatchBuilder {
 }
 
 impl BatchBuilder {
+    pub(crate) fn with_runtime(mut self, runtime: Option<crate::runtime::WeakRuntime>) -> Self {
+        self.runtime = runtime;
+        self
+    }
+
     pub(crate) fn new(store: Arc<UnifiedStore>, preprocessors: SharedPreprocessors) -> Self {
         Self {
+            runtime: None,
             store,
             preprocessors,
             nodes: Vec::new(),
@@ -185,8 +192,75 @@ impl BatchBuilder {
         self
     }
 
+    /// Stamp graph entities before their first storage and WAL publication.
+    pub(crate) fn with_graph_xmin(mut self, xmin: Option<u64>) -> Self {
+        if let Some(xmin) = xmin {
+            for (_, entity, _) in self.nodes.iter_mut().chain(self.edges.iter_mut()) {
+                entity.set_xmin(xmin);
+            }
+        }
+        self
+    }
+
+    pub(crate) fn with_graph_branch(mut self, branch: Option<u64>) -> Self {
+        if let Some(epoch) = branch {
+            for (_, entity, _) in self.nodes.iter_mut().chain(self.edges.iter_mut()) {
+                entity.set_branch_origin(epoch);
+            }
+        }
+        self
+    }
+
     /// Execute the batch
-    pub fn execute(self) -> Result<BatchResult, DevXError> {
+    pub fn execute(mut self) -> Result<BatchResult, DevXError> {
+        let runtime = self.runtime.as_ref().and_then(|runtime| runtime.upgrade());
+        let store = self.store.clone();
+        let _publication = runtime
+            .as_ref()
+            .map(|_| store.vault_publication_lock.lock());
+        if let Some(runtime) = runtime.as_ref() {
+            let mut guarded = false;
+            for (collection, entity, _) in self.nodes.iter_mut().chain(self.edges.iter_mut()) {
+                if let Some(epoch) = runtime
+                    .vcs_writer_epoch(collection)
+                    .map_err(|error| DevXError::Storage(error.to_string()))?
+                {
+                    entity.set_branch_origin(epoch);
+                    guarded = true;
+                }
+                guarded |= runtime.has_graph_contract(collection);
+            }
+            if guarded {
+                return runtime
+                    .with_versioned_graph_insert(|| {
+                        self.with_graph_xmin(
+                            runtime.current_xid().or_else(|| runtime.graph_insert_xid()),
+                        )
+                        .execute_inner()
+                        .map_err(crate::RedDBError::from)
+                    })
+                    .map_err(|error| DevXError::Storage(error.to_string()));
+            }
+        }
+        self.execute_inner()
+    }
+
+    fn execute_inner(mut self) -> Result<BatchResult, DevXError> {
+        // Admission is over the complete projected graph, before the first chunk.
+        for (_, entity, _) in self.nodes.iter_mut().chain(self.edges.iter_mut()) {
+            run_preprocessors(&self.preprocessors, entity)?;
+        }
+        if let Some(runtime) = self.runtime.as_ref().and_then(|runtime| runtime.upgrade()) {
+            let mut collections: HashMap<&str, Vec<&UnifiedEntity>> = HashMap::new();
+            for (collection, entity, _) in self.nodes.iter().chain(self.edges.iter()) {
+                collections.entry(collection).or_default().push(entity);
+            }
+            for (collection, entities) in collections {
+                runtime
+                    .validate_graph_changes(collection, &entities, &[])
+                    .map_err(|error| DevXError::Validation(error.to_string()))?;
+            }
+        }
         let mut inserted_nodes = Vec::new();
         let mut inserted_edges = Vec::new();
         let mut inserted_vectors = Vec::new();
@@ -194,10 +268,9 @@ impl BatchBuilder {
 
         // Insert nodes
         let mut nodes = self.nodes.into_iter().peekable();
-        while let Some((collection, mut first_entity, first_metadata)) = nodes.next() {
+        while let Some((collection, first_entity, first_metadata)) = nodes.next() {
             let mut entities = Vec::new();
             let mut metadata_items = Vec::new();
-            run_preprocessors(&self.preprocessors, &mut first_entity)?;
             entities.push(first_entity);
             metadata_items.push(first_metadata);
 
@@ -205,8 +278,7 @@ impl BatchBuilder {
                 if next_collection != &collection {
                     break;
                 }
-                let (_, mut entity, metadata) = nodes.next().expect("peeked node missing");
-                run_preprocessors(&self.preprocessors, &mut entity)?;
+                let (_, entity, metadata) = nodes.next().expect("peeked node missing");
                 entities.push(entity);
                 metadata_items.push(metadata);
             }
@@ -253,10 +325,9 @@ impl BatchBuilder {
 
         // Insert edges
         let mut edges = self.edges.into_iter().peekable();
-        while let Some((collection, mut first_entity, first_metadata)) = edges.next() {
+        while let Some((collection, first_entity, first_metadata)) = edges.next() {
             let mut entities = Vec::new();
             let mut metadata_items = Vec::new();
-            run_preprocessors(&self.preprocessors, &mut first_entity)?;
             entities.push(first_entity);
             metadata_items.push(first_metadata);
 
@@ -264,8 +335,7 @@ impl BatchBuilder {
                 if next_collection != &collection {
                     break;
                 }
-                let (_, mut entity, metadata) = edges.next().expect("peeked edge missing");
-                run_preprocessors(&self.preprocessors, &mut entity)?;
+                let (_, entity, metadata) = edges.next().expect("peeked edge missing");
                 entities.push(entity);
                 metadata_items.push(metadata);
             }

@@ -809,7 +809,7 @@ impl UnifiedStore {
                     if publishes_rows {
                         for manager in collections.values() {
                             manager.for_each_entity(|entity| {
-                                high = high.max(entity.xmin).max(entity.xmax);
+                                high = high.max(entity.max_transaction_id());
                                 true
                             });
                         }
@@ -1228,7 +1228,7 @@ impl UnifiedStore {
             }
         }
 
-        let format_version = STORE_VERSION_V11;
+        let format_version = self.format_version().max(STORE_VERSION_V11);
         self.set_format_version(format_version);
 
         let collections = self.resident.collections.read();
@@ -1255,11 +1255,37 @@ impl UnifiedStore {
             reddb_file::encode_native_paged_collection_root(&mut meta_data, name, *root_page);
         }
 
+        let excluded = self
+            .snapshot_manager
+            .get()
+            .map_or_else(Default::default, |manager| {
+                manager.checkpoint_excluded_state().1
+            });
+        let hidden_graph_ids = self
+            .resident
+            .snapshot_excluded_graph_ids(&Default::default(), &excluded);
         let cross_refs = self.resident.cross_refs.read();
-        let total_refs: usize = cross_refs.values().map(|v| v.len()).sum();
+        let total_refs: usize = cross_refs
+            .iter()
+            .map(|(source, refs)| {
+                if hidden_graph_ids.contains(source) {
+                    0
+                } else {
+                    refs.iter()
+                        .filter(|(target, _, _)| !hidden_graph_ids.contains(target))
+                        .count()
+                }
+            })
+            .sum();
         meta_data.extend_from_slice(&(total_refs as u32).to_le_bytes());
         for (source_id, refs) in cross_refs.iter() {
+            if hidden_graph_ids.contains(source_id) {
+                continue;
+            }
             for (target_id, ref_type, collection) in refs {
+                if hidden_graph_ids.contains(target_id) {
+                    continue;
+                }
                 reddb_file::encode_native_paged_cross_ref(
                     &mut meta_data,
                     source_id.raw(),
@@ -2309,9 +2335,8 @@ impl UnifiedStore {
                             let (entity, metadata) = decoded.map_err(|err| {
                                 page_integrity(root_page, Some(name.clone()), err.to_string())
                             })?;
-                            scanned_xid_high_water_mark = scanned_xid_high_water_mark
-                                .max(entity.xmin)
-                                .max(entity.xmax);
+                            scanned_xid_high_water_mark =
+                                scanned_xid_high_water_mark.max(entity.max_transaction_id());
                             let discard_count_seed = if let Some(seed) = count_seed.as_mut() {
                                 match seed.push(&entity) {
                                     Ok(complete) => !complete,
@@ -2757,6 +2782,14 @@ impl UnifiedStore {
             None
         };
 
+        let (visibility_revision, excluded, untracked_visibility_revision) =
+            self.snapshot_manager.get().map_or_else(
+                || (0, Default::default(), 0),
+                |manager| manager.checkpoint_projection_state(),
+            );
+        let hidden_graph_ids = self
+            .resident
+            .snapshot_excluded_graph_ids(&pending_vault_versions, &excluded);
         let collections = self.resident.collections.read();
         let mut btree_indices = self.btree_indices.write();
 
@@ -2769,11 +2802,6 @@ impl UnifiedStore {
         let previous_versions = self.checkpoint_versions.read();
         let mut checkpoint_versions = HashMap::with_capacity(collections.len());
         let pending_vault = Arc::new(pending_vault_versions.clone());
-        let (visibility_revision, excluded, untracked_visibility_revision) =
-            self.snapshot_manager.get().map_or_else(
-                || (0, Default::default(), 0),
-                |manager| manager.checkpoint_projection_state(),
-            );
         let excluded = Arc::new(excluded);
         for (name, manager) in collections.iter() {
             let mut version = CheckpointVersion {
@@ -2793,7 +2821,8 @@ impl UnifiedStore {
                     .get(name)
                     .filter(|tree| tree.has_page_proofs()),
             ) {
-                if previous.manager.ptr_eq(&version.manager)
+                if hidden_graph_ids.is_empty()
+                    && previous.manager.ptr_eq(&version.manager)
                     && previous.segments == version.segments
                     && previous.format_version == version.format_version
                     && !previous.has_unprojected_rows
@@ -2812,7 +2841,8 @@ impl UnifiedStore {
                     .get(name)
                     .filter(|tree| tree.has_page_proofs()),
             ) {
-                if previous.manager.ptr_eq(&version.manager)
+                if hidden_graph_ids.is_empty()
+                    && previous.manager.ptr_eq(&version.manager)
                     && previous.format_version == version.format_version
                 {
                     if let Some(tree) =
@@ -2833,17 +2863,19 @@ impl UnifiedStore {
                     #[cfg(test)]
                     CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(count.get() + 1));
                     let hidden = pending_vault_versions.contains(&entity.id)
-                        || (matches!(
-                            entity.data,
-                            EntityData::Row(_)
-                                | EntityData::Vector(_)
-                                | EntityData::QueueMessage(_)
-                        ) && excluded.contains(&entity.xmin));
-                    let normalize_xmax = matches!(
-                        entity.data,
-                        EntityData::Row(_) | EntityData::QueueMessage(_)
-                    ) && excluded.contains(&entity.xmax);
-                    if hidden || normalize_xmax {
+                        || excluded.contains(&entity.xmin);
+                    let normalize_xmax = excluded.contains(&entity.xmax);
+                    let normalize_branch = entity.branch_version().is_some_and(|branch| {
+                        branch
+                            .deletions
+                            .iter()
+                            .any(|(_, xid)| excluded.contains(xid))
+                    });
+                    let hide_refs = entity.cross_refs().iter().any(|reference| {
+                        hidden_graph_ids.contains(&reference.source)
+                            || hidden_graph_ids.contains(&reference.target)
+                    });
+                    if hidden || normalize_xmax || normalize_branch || hide_refs {
                         version.remember_deferred_row(entity.id);
                     }
                     if hidden {
@@ -2852,6 +2884,17 @@ impl UnifiedStore {
                     let mut normalized = std::borrow::Cow::Borrowed(entity);
                     if normalize_xmax {
                         normalized.to_mut().xmax = 0;
+                    }
+                    if normalize_branch {
+                        normalized
+                            .to_mut()
+                            .retain_branch_deletions(|xid| !excluded.contains(&xid));
+                    }
+                    if hide_refs {
+                        normalized.to_mut().cross_refs_mut().retain(|reference| {
+                            !hidden_graph_ids.contains(&reference.source)
+                                && !hidden_graph_ids.contains(&reference.target)
+                        });
                     }
                     Some(Self::serialize_entity_record(
                         &normalized,
@@ -2869,7 +2912,7 @@ impl UnifiedStore {
         // Write collection metadata to page 1
         let mut meta_data = Vec::with_capacity(4096);
 
-        let format_version = STORE_VERSION_V11;
+        let format_version = self.format_version().max(STORE_VERSION_V11);
         self.set_format_version(format_version);
 
         reddb_file::encode_native_paged_metadata_header(
@@ -2887,10 +2930,27 @@ impl UnifiedStore {
 
         // Write cross-reference metadata
         let cross_refs = self.resident.cross_refs.read();
-        let total_refs: usize = cross_refs.values().map(|v| v.len()).sum();
+        let total_refs: usize = cross_refs
+            .iter()
+            .map(|(source, refs)| {
+                if hidden_graph_ids.contains(source) {
+                    0
+                } else {
+                    refs.iter()
+                        .filter(|(target, _, _)| !hidden_graph_ids.contains(target))
+                        .count()
+                }
+            })
+            .sum();
         meta_data.extend_from_slice(&(total_refs as u32).to_le_bytes());
         for (source_id, refs) in cross_refs.iter() {
+            if hidden_graph_ids.contains(source_id) {
+                continue;
+            }
             for (target_id, ref_type, collection) in refs {
+                if hidden_graph_ids.contains(target_id) {
+                    continue;
+                }
                 reddb_file::encode_native_paged_cross_ref(
                     &mut meta_data,
                     source_id.raw(),
@@ -5162,6 +5222,117 @@ mod checkpoint_work_tests {
 
     fn row(id: u64, value: i64) -> UnifiedEntity {
         UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![Value::Integer(value)])
+    }
+
+    #[test]
+    fn paged_checkpoint_excludes_uncommitted_graph_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("graph.rdb");
+        let store = UnifiedStore::open(&path).unwrap();
+        let snapshots = Arc::new(crate::storage::transaction::snapshot::SnapshotManager::new());
+        assert!(store.snapshot_manager.set(Arc::clone(&snapshots)).is_ok());
+        store.create_collection("graph").unwrap();
+        let node = UnifiedEntity::graph_node(EntityId::new(1), "a", "person", HashMap::new());
+        let edge =
+            UnifiedEntity::graph_edge(EntityId::new(2), "knows", "1", "1", 1.0, HashMap::new());
+        store.insert("graph", node).unwrap();
+        store.insert("graph", edge).unwrap();
+        store.persist().unwrap();
+
+        let xid = snapshots.begin();
+        let manager = store.get_collection("graph").unwrap();
+        for id in [1, 2] {
+            let mut entity = manager.get(EntityId::new(id)).unwrap();
+            entity.xmax = xid;
+            manager.update(entity).unwrap();
+        }
+        let mut node = UnifiedEntity::graph_node(EntityId::new(3), "b", "person", HashMap::new());
+        let mut edge =
+            UnifiedEntity::graph_edge(EntityId::new(4), "knows", "1", "3", 1.0, HashMap::new());
+        node.xmin = xid;
+        edge.xmin = xid;
+        store.insert("graph", node).unwrap();
+        store.insert("graph", edge).unwrap();
+        store
+            .add_cross_ref(
+                "graph",
+                EntityId::new(1),
+                "graph",
+                EntityId::new(4),
+                RefType::RelatedTo,
+                1.0,
+            )
+            .unwrap();
+        store.persist().unwrap();
+        snapshots.rollback(xid);
+        store.persist().unwrap();
+        drop(manager);
+        drop(store);
+
+        let recovered = UnifiedStore::open(&path).unwrap();
+        let manager = recovered.get_collection("graph").unwrap();
+        assert_eq!(manager.get(EntityId::new(1)).unwrap().xmax, 0);
+        assert_eq!(manager.get(EntityId::new(2)).unwrap().xmax, 0);
+        assert!(manager.get(EntityId::new(3)).is_none());
+        assert!(manager.get(EntityId::new(4)).is_none());
+        assert!(!manager
+            .get(EntityId::new(1))
+            .unwrap()
+            .cross_refs()
+            .iter()
+            .any(|reference| reference.target == EntityId::new(4)));
+        assert!(!recovered
+            .get_refs_from(EntityId::new(1))
+            .iter()
+            .any(|(target, _, _)| *target == EntityId::new(4)));
+    }
+
+    #[test]
+    fn paged_checkpoint_restores_graph_references_after_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("graph.rdb");
+        let store = UnifiedStore::open(&path).unwrap();
+        let snapshots = Arc::new(crate::storage::transaction::snapshot::SnapshotManager::new());
+        assert!(store.snapshot_manager.set(Arc::clone(&snapshots)).is_ok());
+        store.create_collection("graph").unwrap();
+        store
+            .insert(
+                "graph",
+                UnifiedEntity::graph_node(EntityId::new(1), "a", "person", HashMap::new()),
+            )
+            .unwrap();
+        store.persist().unwrap();
+        let xid = snapshots.begin();
+        let mut edge =
+            UnifiedEntity::graph_edge(EntityId::new(2), "knows", "1", "1", 1.0, HashMap::new());
+        edge.xmin = xid;
+        store.insert("graph", edge).unwrap();
+        store
+            .add_cross_ref(
+                "graph",
+                EntityId::new(1),
+                "graph",
+                EntityId::new(2),
+                RefType::RelatedTo,
+                1.0,
+            )
+            .unwrap();
+        store.persist().unwrap();
+        snapshots.commit(xid);
+        store.persist().unwrap();
+        drop(store);
+
+        let recovered = UnifiedStore::open(&path).unwrap();
+        let node = recovered.get("graph", EntityId::new(1)).unwrap();
+        assert!(recovered.get("graph", EntityId::new(2)).is_some());
+        assert!(node
+            .cross_refs()
+            .iter()
+            .any(|reference| reference.target == EntityId::new(2)));
+        assert!(recovered
+            .get_refs_from(EntityId::new(1))
+            .iter()
+            .any(|(target, _, _)| *target == EntityId::new(2)));
     }
 
     #[test]

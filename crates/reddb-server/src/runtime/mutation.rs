@@ -104,6 +104,10 @@ impl<'rt> MutationEngine<'rt> {
         collection: String,
         mut rows: Vec<MutationRow>,
     ) -> RedDBResult<MutationResult> {
+        let _branch_publication = self
+            .runtime
+            .vcs_is_versioned(&collection)?
+            .then(|| self.store.vault_publication_lock.lock());
         // Public-mutation gate (PLAN.md W1). Every public path that
         // creates rows funnels through `apply`, so a single check here
         // covers SQL `INSERT`, gRPC `Insert`/`BulkInsert`, HTTP
@@ -294,11 +298,20 @@ impl<'rt> MutationEngine<'rt> {
         // time `insert_auto` runs, so concurrent readers see the same
         // row state either way (see `SnapshotManager::allocate_committed_xid`).
         // xmin=0 is no longer emitted for freshly-written rows.
+        let versioned = self.runtime.vcs_is_versioned(&collection)?;
+        let branch_publication = versioned.then(|| self.store.vault_publication_lock.lock());
         let writer_xid = match self.runtime.current_xid() {
             Some(xid) => xid,
+            None if versioned => {
+                let manager = self.runtime.snapshot_manager();
+                let xid = manager.begin();
+                manager.commit(xid);
+                xid
+            }
             None => self.runtime.snapshot_manager().allocate_committed_xid(),
         };
         entity.set_xmin(writer_xid);
+        self.runtime.stamp_vcs_creation(&collection, &mut entity)?;
 
         // Write. `insert_auto` internally runs preprocessors, context index,
         // and cross-ref indexing — no need to repeat them here.
@@ -345,6 +358,7 @@ impl<'rt> MutationEngine<'rt> {
             );
         }
 
+        drop(branch_publication);
         // Secondary indexes (not handled by insert_auto)
         if let Some((previous, fields)) = previous_fields {
             self.runtime
@@ -423,8 +437,16 @@ impl<'rt> MutationEngine<'rt> {
         // row in the batch lands with a single coherent xmin (#30
         // single-statement single-xid invariant). Pool semantics match
         // the previous `begin()/commit()` pair — see `append_one`.
+        let versioned = self.runtime.vcs_is_versioned(&collection)?;
+        let branch_publication = versioned.then(|| self.store.vault_publication_lock.lock());
         let current_xid = match self.runtime.current_xid() {
             Some(xid) => xid,
+            None if versioned => {
+                let manager = self.runtime.snapshot_manager();
+                let xid = manager.begin();
+                manager.commit(xid);
+                xid
+            }
             None => self.runtime.snapshot_manager().allocate_committed_xid(),
         };
 
@@ -468,6 +490,7 @@ impl<'rt> MutationEngine<'rt> {
                 &row.vector_links,
             );
             entity.set_xmin(current_xid);
+            self.runtime.stamp_vcs_creation(&collection, &mut entity)?;
             entities.push(entity);
         }
 
@@ -514,6 +537,7 @@ impl<'rt> MutationEngine<'rt> {
             }
         }
 
+        drop(branch_publication);
         // Secondary indexes: fused pass — one registry-lock acquisition
         // for the whole batch. When the collection has no registered
         // secondary indexes, we've already skipped the field_snapshots

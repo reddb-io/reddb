@@ -468,29 +468,15 @@ impl RedDBRuntime {
         operations: Vec<PatchEntityOperation>,
     ) -> RedDBResult<AppliedEntityMutation> {
         let id = entity.id;
-        let previous_xmax = entity.xmax;
+        let epoch = self.vcs_writer_epoch(&collection)?;
+        let previous_xmax = epoch.map_or(entity.xmax, |epoch| entity.branch_xmax(epoch));
         let operations = normalize_ttl_patch_operations(operations)?;
         // Snapshot pre-patch row fields for the secondary-index hook —
         // empty for non-row entities, which is the desired no-op.
         let pre_mutation_fields = entity_row_fields_snapshot(&entity);
 
-        // Versioned collections retain MVCC history: a PATCH/UPDATE must
-        // produce a NEW full version (the merged document/row/node) with
-        // the prior version tombstoned, mirroring the SQL UPDATE row
-        // path. Gated STRICTLY on the collection `versioned` flag —
-        // non-versioned collections keep last-writer-wins in-place
-        // mutation. Row entities (documents / table rows / KV) carry
-        // logical-id MVCC history (Phase 1/2); graph nodes & edges join
-        // in Phase 3. The post-image re-stamp (new physical id, same
-        // logical_id, fresh xmin) at the tail of this function is fully
-        // kind-agnostic, so the same machinery installs a versioned
-        // graph-node update.
-        let patch_versions = matches!(
-            entity.data,
-            crate::storage::EntityData::Row(_)
-                | crate::storage::EntityData::Node(_)
-                | crate::storage::EntityData::Edge(_)
-        ) && self.vcs_is_versioned(&collection).unwrap_or(false);
+        // Retain MVCC history for VCS and transactional graph contracts.
+        let patch_versions = epoch.is_some() || self.has_graph_contract(&collection);
         let mut replaced_entity = patch_versions.then(|| entity.clone());
 
         let db = self.db();
@@ -1144,6 +1130,7 @@ impl RedDBRuntime {
             entity.set_logical_id(logical_id);
             entity.set_xmin(xid);
             entity.set_xmax(0);
+            self.stamp_vcs_creation(&collection, &mut entity)?;
             if let Some(old) = replaced_entity.as_mut() {
                 old.set_xmax(xid);
             }
@@ -1179,7 +1166,8 @@ impl RedDBRuntime {
         row_touches_unique_columns: bool,
     ) -> RedDBResult<AppliedEntityMutation> {
         let id = entity.id;
-        let previous_xmax = entity.xmax;
+        let epoch = self.vcs_writer_epoch(&collection)?;
+        let previous_xmax = epoch.map_or(entity.xmax, |epoch| entity.branch_xmax(epoch));
         let db = self.db();
         let store = db.store();
         let Some(_) = store.get_collection(&collection) else {
@@ -1360,6 +1348,7 @@ impl RedDBRuntime {
             entity.set_logical_id(logical_id);
             entity.set_xmin(xid);
             entity.set_xmax(0);
+            self.stamp_vcs_creation(&collection, &mut entity)?;
             if let Some(old) = replaced_entity.as_mut() {
                 old.set_xmax(xid);
             }
@@ -1402,9 +1391,30 @@ impl RedDBRuntime {
             )));
         };
 
+        let epoch = self.vcs_writer_epoch(collection)?;
+        if epoch.is_some_and(|epoch| {
+            applied.iter().any(|item| {
+                item.entity
+                    .branch_version()
+                    .is_none_or(|version| version.origin != epoch)
+            })
+        }) {
+            return Err(crate::RedDBError::InvalidOperation(
+                "branch changed during update; retry the statement".into(),
+            ));
+        }
         let mut ordinary = Vec::with_capacity(applied.len());
         for item in applied {
             if let Some(old_version) = item.replaced_entity.as_ref() {
+                let old_version = if let Some(epoch) = epoch {
+                    let mut current = manager
+                        .try_get(old_version.id, usize::MAX)?
+                        .ok_or_else(|| crate::RedDBError::NotFound(old_version.id.to_string()))?;
+                    current.set_branch_xmax(epoch, item.entity.xmin);
+                    current
+                } else {
+                    old_version.clone()
+                };
                 if item.autocommit_update.is_some()
                     && crate::storage::UnifiedStore::deferred_store_wal_capture_active()
                     && !crate::runtime::mvcc_lifecycle::autocommit_update_capture_available()
@@ -1424,9 +1434,9 @@ impl RedDBRuntime {
                     },
                 ) {
                     if let Some(update) = &item.autocommit_update {
-                        let changed = manager
-                            .get_with(old_version.id, |old| old.xmax == update.xid)
-                            == Some(true);
+                        let changed = manager.get_with(old_version.id, |old| {
+                            epoch.map_or(old.xmax, |epoch| old.branch_xmax(epoch)) == update.xid
+                        }) == Some(true);
                         if changed {
                             let topology =
                                 self.index_store_ref().collection_topology_lock(collection);
@@ -1453,7 +1463,7 @@ impl RedDBRuntime {
                         collection,
                         old_version.id,
                         item.entity.id,
-                        old_version.xmax,
+                        item.entity.xmin,
                         item.replaced_entity_previous_xmax,
                     );
                 }
@@ -1681,6 +1691,14 @@ impl RedDBRuntime {
         ) {
             return Err(crate::RedDBError::NotFound("entity not found".to_string()));
         }
+        self.validate_graph_changes(
+            &applied.collection,
+            &[&applied.entity],
+            &[applied
+                .replaced_entity
+                .as_ref()
+                .map_or(applied.id, |entity| entity.id)],
+        )?;
         let _reservation = self.admit_entity_mutation(&applied)?;
         self.persist_applied_entity_mutations(std::slice::from_ref(&applied))?;
         #[cfg(test)]
@@ -1690,7 +1708,7 @@ impl RedDBRuntime {
         );
         self.flush_applied_entity_mutation(&applied, topology_guard)?;
         Ok(CreateEntityOutput {
-            id: applied.id,
+            id: applied.entity.logical_id(),
             entity: Some(public_document_entity(applied.entity)),
         })
     }
@@ -1774,6 +1792,17 @@ fn ensure_non_tree_structural_edge_label(label: &str) -> RedDBResult<()> {
 impl RedDBRuntime {
     pub(crate) fn create_node_unchecked(
         &self,
+        input: CreateNodeInput,
+    ) -> RedDBResult<CreateEntityOutput> {
+        if self.vcs_is_versioned(&input.collection)? || self.has_graph_contract(&input.collection) {
+            self.with_versioned_graph_insert(|| self.create_node_unchecked_inner(input))
+        } else {
+            self.create_node_unchecked_inner(input)
+        }
+    }
+
+    fn create_node_unchecked_inner(
+        &self,
         mut input: CreateNodeInput,
     ) -> RedDBResult<CreateEntityOutput> {
         self.check_collection_privilege(reddb_rql::ast::PolicyAction::Insert, &input.collection)?;
@@ -1834,10 +1863,10 @@ impl RedDBRuntime {
             builder = builder.link_to_weighted(link.target, link.edge_label, link.weight);
         }
 
-        let id = builder.save()?;
-        // Phase 1.1 MVCC universal: stamp xmin so concurrent snapshots
-        // don't see this node until the transaction commits.
-        self.stamp_xmin_if_in_txn(&input.collection, id);
+        let id = builder.save_with_mvcc(
+            self.current_xid().or_else(|| self.graph_insert_xid()),
+            self.vcs_writer_epoch(&input.collection)?,
+        )?;
         refresh_context_index(&db, &input.collection, id)?;
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
@@ -1852,6 +1881,17 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn create_edge_unchecked(
+        &self,
+        input: CreateEdgeInput,
+    ) -> RedDBResult<CreateEntityOutput> {
+        if self.vcs_is_versioned(&input.collection)? || self.has_graph_contract(&input.collection) {
+            self.with_versioned_graph_insert(|| self.create_edge_unchecked_inner(input))
+        } else {
+            self.create_edge_unchecked_inner(input)
+        }
+    }
+
+    fn create_edge_unchecked_inner(
         &self,
         mut input: CreateEdgeInput,
     ) -> RedDBResult<CreateEntityOutput> {
@@ -1900,10 +1940,10 @@ impl RedDBRuntime {
             builder = builder.metadata(key, value);
         }
 
-        let id = builder.save()?;
-        // Phase 1.1 MVCC universal: stamp xmin on the edge so other
-        // sessions don't follow it until COMMIT.
-        self.stamp_xmin_if_in_txn(&input.collection, id);
+        let id = builder.save_with_mvcc(
+            self.current_xid().or_else(|| self.graph_insert_xid()),
+            self.vcs_writer_epoch(&input.collection)?,
+        )?;
         refresh_context_index(&db, &input.collection, id)?;
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
@@ -2031,6 +2071,10 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
 impl RuntimeEntityPort for RedDBRuntime {
     fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let branch_store = self.db().store();
+        let _branch_publication = (self.vcs_is_versioned(&input.collection)?
+            || self.has_graph_contract(&input.collection))
+        .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &input.collection,
@@ -2076,6 +2120,10 @@ impl RuntimeEntityPort for RedDBRuntime {
         &self,
         input: CreateRowsBatchInput,
     ) -> RedDBResult<Vec<CreateEntityOutput>> {
+        let branch_store = self.db().store();
+        let _branch_publication = (self.vcs_is_versioned(&input.collection)?
+            || self.has_graph_contract(&input.collection))
+        .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &input.collection,
@@ -2341,107 +2389,119 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         self.check_collection_privilege(reddb_rql::ast::PolicyAction::Insert, &input.collection)?;
-        let mut vector_data = crate::storage::VectorData::new(input.dense.clone());
-        vector_data.content = input.content.clone();
-        let candidate = crate::storage::UnifiedEntity::new(
-            crate::storage::EntityId::new(0),
-            crate::storage::EntityKind::Vector {
-                collection: input.collection.clone(),
-            },
-            crate::storage::EntityData::Vector(vector_data),
-        );
-        ensure_insert_entity_rls(self, &input.collection, &candidate)?;
-        let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
-        contract.ensure_model(crate::catalog::CollectionModel::Vector)?;
-        contract.ensure_vector_dimension(input.dense.len())?;
-        let mut metadata = input.metadata;
-        contract.apply_default_ttl(&mut metadata);
-        let mut builder = db.vector(&input.collection).dense(input.dense);
-
-        if let Some(content) = input.content {
-            builder = builder.content(content);
-        }
-
-        for (key, value) in metadata {
-            builder = builder.metadata(key, value);
-        }
-
-        if let Some(link_row) = input.link_row {
-            builder = builder.link_to_table(link_row);
-        }
-
-        if let Some(link_node) = input.link_node {
-            builder = builder.link_to_node(link_node);
-        }
-
-        // The transaction stamp must be present on the first published version.
-        // Stamping after save exposed an xmin=0 vector to concurrent snapshots.
-        let id = builder.save_with_xmin(self.current_xid())?;
-        let dense_for_turbo = match db.store().get(&input.collection, id).map(|e| e.data) {
-            Some(crate::storage::unified::EntityData::Vector(data)) => Some(data.dense.clone()),
-            _ => None,
-        };
-        refresh_context_index(&db, &input.collection, id)?;
-        // Issue #693 — vector.turbo write path. Order matters and
-        // matches the write sequence the next slice (#673) will
-        // attach kill-points to: WAL append → in-memory index update
-        // → TurboExtent append. The legacy `vector` path is the
-        // `None` branch and is untouched.
-        if let (Some(state), Some(dense)) = (db.turbo_state(&input.collection), dense_for_turbo) {
-            // Lazy populate so an INSERT after restart sees the
-            // pre-restart vectors in the index before appending its
-            // own.
-            state.ensure_populated(&db.store(), &input.collection)?;
-            // Issue #694 — named crash boundaries for #673.
-            use crate::runtime::turbo_crash_inject::{fire, injected_io_error, InjectionPoint};
-            fire(InjectionPoint::BeforeWalFsync);
-            let wal_result = injected_io_error(InjectionPoint::BeforeWalFsync).map_or_else(
-                || {
-                    db.store()
-                        .append_vector_insert_record(&input.collection, id.raw(), &dense)
+        let versioned = self.vcs_is_versioned(&input.collection)?;
+        let create = || {
+            let mut vector_data = crate::storage::VectorData::new(input.dense.clone());
+            vector_data.content = input.content.clone();
+            let candidate = crate::storage::UnifiedEntity::new(
+                crate::storage::EntityId::new(0),
+                crate::storage::EntityKind::Vector {
+                    collection: input.collection.clone(),
                 },
-                Err,
+                crate::storage::EntityData::Vector(vector_data),
             );
-            fire(InjectionPoint::BeforeIndexCommit);
-            let mut index = state.index.lock();
-            index.insert(id, dense.clone());
-            if let Err(error) = wal_result {
-                return Err(error.into());
+            ensure_insert_entity_rls(self, &input.collection, &candidate)?;
+            let db = self.db();
+            let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
+            contract.ensure_model(crate::catalog::CollectionModel::Vector)?;
+            contract.ensure_vector_dimension(input.dense.len())?;
+            let mut metadata = input.metadata;
+            contract.apply_default_ttl(&mut metadata);
+            let mut builder = db.vector(&input.collection).dense(input.dense);
+
+            if let Some(content) = input.content {
+                builder = builder.content(content);
             }
-            // Mirror the encoded codes into the per-collection
-            // TurboExtent when one is available. The bytes are the
-            // 4-bit-packed code groups (`n_byte_groups`) plus the
-            // little-endian L2 norm — same shape `BlockedCodeStorage`
-            // appends in-memory. The extent is derived state: on an
-            // uncertain append, discard it and recover from the entity.
-            fire(InjectionPoint::BeforeExtentFsync);
-            let mut extent_guard = state.extent.lock();
-            if let Some(extent) = extent_guard.as_mut() {
-                let packed = index.encode_for_extent(&dense);
-                let extent_result = injected_io_error(InjectionPoint::BeforeExtentFsync)
-                    .map_or_else(|| extent.append(&packed), |error| Err(error.into()));
-                if let Err(error) = extent_result {
-                    *extent_guard = None;
-                    return Err(match error {
-                        crate::storage::engine::pager::PagerError::Io(error) => error.into(),
-                        error => crate::RedDBError::Internal(format!(
-                            "vector.turbo extent append failed: {error}"
-                        )),
-                    });
+
+            for (key, value) in metadata {
+                builder = builder.metadata(key, value);
+            }
+
+            if let Some(link_row) = input.link_row {
+                builder = builder.link_to_table(link_row);
+            }
+
+            if let Some(link_node) = input.link_node {
+                builder = builder.link_to_node(link_node);
+            }
+
+            // The transaction stamp must be present on the first published version.
+            // Stamping after save exposed an xmin=0 vector to concurrent snapshots.
+            let id = builder.save_with_mvcc(
+                self.current_xid().or_else(|| self.graph_insert_xid()),
+                self.vcs_writer_epoch(&input.collection)?,
+            )?;
+            let dense_for_turbo = match db.store().get(&input.collection, id).map(|e| e.data) {
+                Some(crate::storage::unified::EntityData::Vector(data)) => Some(data.dense.clone()),
+                _ => None,
+            };
+            refresh_context_index(&db, &input.collection, id)?;
+            // Issue #693 — vector.turbo write path. Order matters and
+            // matches the write sequence the next slice (#673) will
+            // attach kill-points to: WAL append → in-memory index update
+            // → TurboExtent append. The legacy `vector` path is the
+            // `None` branch and is untouched.
+            if let (Some(state), Some(dense)) = (db.turbo_state(&input.collection), dense_for_turbo)
+            {
+                // Lazy populate so an INSERT after restart sees the
+                // pre-restart vectors in the index before appending its
+                // own.
+                state.ensure_populated(&db.store(), &input.collection)?;
+                // Issue #694 — named crash boundaries for #673.
+                use crate::runtime::turbo_crash_inject::{fire, injected_io_error, InjectionPoint};
+                fire(InjectionPoint::BeforeWalFsync);
+                let wal_result = injected_io_error(InjectionPoint::BeforeWalFsync).map_or_else(
+                    || {
+                        db.store()
+                            .append_vector_insert_record(&input.collection, id.raw(), &dense)
+                    },
+                    Err,
+                );
+                fire(InjectionPoint::BeforeIndexCommit);
+                let mut index = state.index.lock();
+                index.insert(id, dense.clone());
+                if let Err(error) = wal_result {
+                    return Err(error.into());
+                }
+                // Mirror the encoded codes into the per-collection
+                // TurboExtent when one is available. The bytes are the
+                // 4-bit-packed code groups (`n_byte_groups`) plus the
+                // little-endian L2 norm — same shape `BlockedCodeStorage`
+                // appends in-memory. The extent is derived state: on an
+                // uncertain append, discard it and recover from the entity.
+                fire(InjectionPoint::BeforeExtentFsync);
+                let mut extent_guard = state.extent.lock();
+                if let Some(extent) = extent_guard.as_mut() {
+                    let packed = index.encode_for_extent(&dense);
+                    let extent_result = injected_io_error(InjectionPoint::BeforeExtentFsync)
+                        .map_or_else(|| extent.append(&packed), |error| Err(error.into()));
+                    if let Err(error) = extent_result {
+                        *extent_guard = None;
+                        return Err(match error {
+                            crate::storage::engine::pager::PagerError::Io(error) => error.into(),
+                            error => crate::RedDBError::Internal(format!(
+                                "vector.turbo extent append failed: {error}"
+                            )),
+                        });
+                    }
                 }
             }
+            self.cdc_emit(
+                crate::replication::cdc::ChangeOperation::Insert,
+                &input.collection,
+                id.raw(),
+                "vector",
+            )?;
+            Ok(CreateEntityOutput {
+                id,
+                entity: db.store().get(&input.collection, id),
+            })
+        };
+        if versioned {
+            self.with_versioned_graph_insert(create)
+        } else {
+            create()
         }
-        self.cdc_emit(
-            crate::replication::cdc::ChangeOperation::Insert,
-            &input.collection,
-            id.raw(),
-            "vector",
-        )?;
-        Ok(CreateEntityOutput {
-            id,
-            entity: db.store().get(&input.collection, id),
-        })
     }
 
     fn create_document(&self, input: CreateDocumentInput) -> RedDBResult<CreateEntityOutput> {
@@ -2513,9 +2573,19 @@ impl RuntimeEntityPort for RedDBRuntime {
             builder = builder.link_to_vector(vector);
         }
 
-        let id = builder.save()?;
-        // Phase 1.1 MVCC universal: stamp xmin on the document.
-        self.stamp_xmin_if_in_txn(&input.collection, id);
+        let create = || -> RedDBResult<crate::storage::EntityId> {
+            Ok(builder.save_with_mvcc(
+                self.current_xid().or_else(|| self.graph_insert_xid()),
+                self.vcs_writer_epoch(&input.collection)?,
+            )?)
+        };
+        let id = if self.vcs_is_versioned(&input.collection)?
+            || self.has_graph_contract(&input.collection)
+        {
+            self.with_versioned_graph_insert(create)?
+        } else {
+            create()?
+        };
         self.index_store_ref()
             .index_entity_insert(&input.collection, id, &fields)
             .map_err(crate::RedDBError::Internal)?;
@@ -2623,6 +2693,10 @@ impl RuntimeEntityPort for RedDBRuntime {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
         self.check_collection_privilege(reddb_rql::ast::PolicyAction::Update, &input.collection)?;
+        let branch_store = self.db().store();
+        let _branch_publication = (self.vcs_is_versioned(&input.collection)?
+            || self.has_graph_contract(&input.collection))
+        .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &input.collection,
@@ -2640,12 +2714,19 @@ impl RuntimeEntityPort for RedDBRuntime {
         } = input;
         let db = self.db();
         let store = db.store();
-        let Some(manager) = store.get_collection(&collection) else {
+        let Some(_) = store.get_collection(&collection) else {
             return Err(crate::RedDBError::NotFound(format!(
                 "collection not found: {collection}"
             )));
         };
-        let Some(entity) = manager.get(id) else {
+        let (snapshot, _retention) = self.native_read_snapshot()?;
+        let _snapshot = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot);
+        let Some(entity) = self.get_collection_entity_for_action(
+            &collection,
+            id,
+            reddb_rql::ast::PolicyAction::Update,
+        )?
+        else {
             return Err(crate::RedDBError::NotFound(format!(
                 "entity not found: {}",
                 id.raw()
@@ -2669,6 +2750,10 @@ impl RuntimeEntityPort for RedDBRuntime {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
         self.check_collection_privilege(reddb_rql::ast::PolicyAction::Delete, &input.collection)?;
+        let branch_store = self.db().store();
+        let _branch_publication = (self.vcs_is_versioned(&input.collection)?
+            || self.has_graph_contract(&input.collection))
+        .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &input.collection,
@@ -2682,7 +2767,14 @@ impl RuntimeEntityPort for RedDBRuntime {
         // Snapshot row fields before delete so we can mirror the removal
         // into every secondary index. The fetch is best-effort: if the
         // entity is already gone, the delete below is a no-op anyway.
-        let Some(entity) = store.get(&input.collection, input.id) else {
+        let (snapshot, _retention) = self.native_read_snapshot()?;
+        let _snapshot = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot);
+        let Some(entity) = self.get_collection_entity_for_action(
+            &input.collection,
+            input.id,
+            reddb_rql::ast::PolicyAction::Delete,
+        )?
+        else {
             return Ok(DeleteEntityOutput {
                 deleted: false,
                 id: input.id,
@@ -2696,6 +2788,32 @@ impl RuntimeEntityPort for RedDBRuntime {
         ) {
             return Ok(DeleteEntityOutput {
                 deleted: false,
+                id: input.id,
+            });
+        }
+        if self.vcs_is_versioned(&input.collection)? || self.has_graph_contract(&input.collection) {
+            if self
+                .db()
+                .collection_contract_arc(&input.collection)
+                .is_some_and(|contract| contract.append_only)
+            {
+                return Err(crate::RedDBError::InvalidOperation(
+                    "append-only collections require their native retirement operation".into(),
+                ));
+            }
+            self.validate_graph_changes(&input.collection, &[], &[entity.id])?;
+            let deleted = self.delete_entities_batch(
+                &input.collection,
+                &[entity.id],
+                topology_guard,
+                None,
+                false,
+            )?;
+            if deleted.affected > 0 {
+                self.invalidate_result_cache();
+            }
+            return Ok(DeleteEntityOutput {
+                deleted: deleted.affected > 0,
                 id: input.id,
             });
         }

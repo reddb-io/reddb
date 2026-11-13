@@ -392,6 +392,11 @@ impl RedDBRuntime {
             let Some(raw_retention_ms) = contract.metrics_raw_retention_ms else {
                 continue;
             };
+            if self.vcs_is_versioned(&contract.name)? {
+                // A raw point may still belong to a branch or pinned commit.
+                // Shared rollup retention cannot reclaim its native history.
+                continue;
+            }
             let cutoff_ns = now_ns.saturating_sub(raw_retention_ms.saturating_mul(1_000_000));
             let Some(manager) = store.get_collection(&contract.name) else {
                 continue;

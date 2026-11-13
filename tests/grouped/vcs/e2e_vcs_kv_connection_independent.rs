@@ -30,6 +30,83 @@ use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_i
 use reddb::{RedDBOptions, RedDBRuntime};
 use reddb_types::Value;
 
+#[test]
+fn alternating_committers_keep_one_branch_history() {
+    use reddb::application::{Author, CreateCommitInput};
+
+    let rt = rt();
+    let commit = |connection_id, message: &str| {
+        vcs(&rt)
+            .commit(CreateCommitInput {
+                connection_id,
+                message: message.to_string(),
+                author: Author {
+                    name: "test".to_string(),
+                    email: "test@reddb.io".to_string(),
+                },
+                committer: None,
+                amend: false,
+                allow_empty: true,
+            })
+            .expect("commit")
+    };
+    let first = commit(8001, "first");
+    let second = commit(8002, "second");
+    let third = commit(8001, "third");
+    assert_eq!(second.parents, [first.hash]);
+    assert_eq!(third.parents, [second.hash]);
+    assert_eq!(third.height, second.height + 1);
+}
+
+#[test]
+fn simultaneous_committers_do_not_lose_branch_heads() {
+    use reddb::application::{Author, CreateCommitInput, LogInput, LogRange};
+    let rt = rt();
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let commits: Vec<_> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (1..=8)
+            .map(|connection_id| {
+                let rt = Arc::clone(&rt);
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    vcs(&rt)
+                        .commit(CreateCommitInput {
+                            connection_id,
+                            message: format!("concurrent {connection_id}"),
+                            author: Author {
+                                name: "test".into(),
+                                email: "test@reddb.io".into(),
+                            },
+                            committer: None,
+                            amend: false,
+                            allow_empty: true,
+                        })
+                        .expect("concurrent commit")
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("writer"))
+            .collect()
+    });
+    let history = vcs(&rt)
+        .log(LogInput {
+            connection_id: 0,
+            range: LogRange::default(),
+        })
+        .expect("history");
+    assert_eq!(
+        history.len(),
+        commits.len(),
+        "every successful commit is reachable"
+    );
+    for commit in commits {
+        assert!(history.iter().any(|entry| entry.hash == commit.hash));
+    }
+}
+
 fn rt() -> Arc<RedDBRuntime> {
     Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime"))
 }

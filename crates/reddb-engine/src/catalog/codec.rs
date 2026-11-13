@@ -72,6 +72,10 @@ pub fn collection_contract_to_persisted(
             .analytical_storage
             .as_ref()
             .map(analytical_storage_to_persisted),
+        graph_contract: contract
+            .graph_contract
+            .as_ref()
+            .map(super::graph::to_persisted),
         ai_policy: contract.ai_policy.as_ref().map(ai_policy_to_persisted),
     }
 }
@@ -140,6 +144,11 @@ pub fn collection_contract_from_persisted(
         analytical_storage: contract
             .analytical_storage
             .map(analytical_storage_from_persisted),
+        graph_contract: contract
+            .graph_contract
+            .map(super::graph::from_persisted)
+            .transpose()
+            .map_err(|error| invalid_data(error.to_string()))?,
         ai_policy: contract.ai_policy.map(ai_policy_from_persisted),
     };
     if super::schema::has_contract_expressions(&decoded) {

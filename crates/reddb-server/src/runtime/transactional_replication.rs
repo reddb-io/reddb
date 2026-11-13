@@ -155,7 +155,7 @@ impl RedDBRuntime {
         let mut outbox_xid = retained.first().map(|(xid, _)| *xid).unwrap_or(0);
         let mut records: Vec<_> = retained.into_iter().map(|(_, record)| record).collect();
         if self.inner.db.replication.is_some() {
-            for (collection, id, xid, _) in self
+            for (collection, id, xid, _, _) in self
                 .inner
                 .pending_tombstones
                 .read()
