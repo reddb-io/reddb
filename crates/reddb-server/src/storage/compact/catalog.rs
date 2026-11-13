@@ -236,10 +236,11 @@ impl Catalog {
 
     /// Retire the obsolete physical config identity without discarding its rows.
     ///
-    /// A historical store may contain the real config tree as `red_config` and an
-    /// empty bootstrap-created `red.config` tree. In that shape the populated tree
-    /// is already the complete value/history/index source, so promote its catalog
-    /// identity atomically and retire the empty duplicate. Two populated trees are
+    /// A historical store may contain only the real config tree as `red_config`,
+    /// or it may also contain an empty bootstrap-created `red.config` tree. The
+    /// populated legacy tree is already the complete value/history/index source,
+    /// so promote its catalog identity atomically and retire an empty duplicate.
+    /// A canonical-only store is already migrated. Two populated trees are
     /// ambiguous and must be reconciled by a row-aware recovery path instead of
     /// silently choosing either side.
     pub fn migrate_legacy_system_config(&mut self) -> Result<usize> {
@@ -254,8 +255,12 @@ impl Catalog {
             .filter(|root| root.collection == "red.config")
             .count();
         ensure(
-            legacy_roots == 1 && canonical_roots == 1,
-            "canonical config migration requires exactly one red_config and one red.config root",
+            legacy_roots <= 1 && canonical_roots <= 1,
+            "canonical config migration requires unique config roots",
+        )?;
+        ensure(
+            legacy_roots + canonical_roots > 0,
+            "canonical config migration requires a config root",
         )?;
         ensure(
             self.references
@@ -268,15 +273,39 @@ impl Catalog {
             .resume
             .as_mut()
             .ok_or("canonical config migration requires a resume catalog")?;
+        ensure(
+            resume.collections.contains_key("red_config") == (legacy_roots == 1)
+                && resume.collections.contains_key("red.config") == (canonical_roots == 1),
+            "canonical config migration requires resume identities to match config roots",
+        )?;
+        if legacy_roots == 0 {
+            return Ok(0);
+        }
         let legacy = resume
             .collections
             .get("red_config")
             .ok_or("canonical config migration requires the red_config resume identity")?;
+        let legacy_records = usize::try_from(legacy.entities)?;
+
+        if canonical_roots == 0 {
+            let legacy = resume
+                .collections
+                .remove("red_config")
+                .ok_or("legacy config resume identity disappeared")?;
+            resume.collections.insert("red.config".into(), legacy);
+            let root = self
+                .roots
+                .iter_mut()
+                .find(|root| root.collection == "red_config")
+                .ok_or("legacy config root disappeared")?;
+            root.collection = "red.config".into();
+            return Ok(legacy_records);
+        }
+
         let canonical = resume
             .collections
             .get("red.config")
             .ok_or("canonical config migration requires the red.config resume identity")?;
-        let legacy_records = usize::try_from(legacy.entities)?;
 
         match (legacy.entities > 0, canonical.entities > 0) {
             (true, true) => {
@@ -494,6 +523,78 @@ mod tests {
         let resume = catalog.resume.unwrap();
         assert!(!resume.collections.contains_key("red_config"));
         assert_eq!(resume.collections["red.config"].root_page, 20);
+    }
+
+    #[test]
+    fn migration_promotes_single_legacy_config_identity() {
+        let mut catalog = duplicate_config_catalog();
+        catalog.roots.retain(|root| root.collection != "red.config");
+        catalog.header.collection_count = 2;
+        catalog
+            .resume
+            .as_mut()
+            .unwrap()
+            .collections
+            .remove("red.config");
+
+        assert_eq!(catalog.migrate_legacy_system_config().unwrap(), 1);
+        assert_eq!(catalog.header.collection_count, 2);
+        assert_eq!(
+            catalog
+                .roots
+                .iter()
+                .map(|root| (root.collection.as_str(), root.root_page))
+                .collect::<Vec<_>>(),
+            [("users", 10), ("red.config", 20)]
+        );
+        let resume = catalog.resume.unwrap();
+        assert!(!resume.collections.contains_key("red_config"));
+        assert_eq!(resume.collections["red.config"].root_page, 20);
+    }
+
+    #[test]
+    fn migration_accepts_single_canonical_config_identity() {
+        let mut catalog = duplicate_config_catalog();
+        catalog.roots.retain(|root| root.collection != "red_config");
+        catalog.header.collection_count = 2;
+        catalog
+            .resume
+            .as_mut()
+            .unwrap()
+            .collections
+            .remove("red_config");
+
+        assert_eq!(catalog.migrate_legacy_system_config().unwrap(), 0);
+        assert_eq!(catalog.header.collection_count, 2);
+        assert_eq!(
+            catalog
+                .roots
+                .iter()
+                .map(|root| (root.collection.as_str(), root.root_page))
+                .collect::<Vec<_>>(),
+            [("users", 10), ("red.config", 30)]
+        );
+        let resume = catalog.resume.unwrap();
+        assert!(!resume.collections.contains_key("red_config"));
+        assert_eq!(resume.collections["red.config"].root_page, 30);
+    }
+
+    #[test]
+    fn migration_refuses_catalog_without_any_config_identity() {
+        let mut catalog = duplicate_config_catalog();
+        catalog
+            .roots
+            .retain(|root| root.collection != "red_config" && root.collection != "red.config");
+        catalog.header.collection_count = 1;
+        let resume = catalog.resume.as_mut().unwrap();
+        resume.collections.remove("red_config");
+        resume.collections.remove("red.config");
+
+        assert!(catalog
+            .migrate_legacy_system_config()
+            .unwrap_err()
+            .to_string()
+            .contains("requires a config root"));
     }
 
     #[test]
