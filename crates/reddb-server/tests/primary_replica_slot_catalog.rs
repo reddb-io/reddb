@@ -162,6 +162,48 @@ fn scrape_metrics(runtime: &RedDBRuntime) -> String {
 }
 
 #[test]
+fn legacy_slot_registrations_survive_restart_with_a_timeline_file() {
+    let data_path = temp_data_path("legacy_slot_timeline_restart");
+    let mut history = reddb_file::TimelineHistory::new(1);
+    history
+        .fork(
+            reddb_file::TimelineId(2),
+            reddb_file::TimelineId(1),
+            0,
+            2,
+            "empty promotion",
+        )
+        .expect("empty timeline fork");
+    let plan = reddb_file::PrimaryReplicaFilePlan::new(
+        PrimaryReplication::primary_replica_root_for(&data_path),
+        reddb_file::TimelineId(2),
+    );
+    history
+        .write_to_path(plan.timeline_history_path())
+        .expect("legacy timeline file");
+    {
+        let primary = PrimaryReplication::new(Some(&data_path));
+        assert_eq!(primary.register_replica("replica-a".to_string()), 0);
+    }
+    {
+        let primary = PrimaryReplication::new(Some(&data_path));
+        assert_eq!(primary.register_replica("replica-b".to_string()), 0);
+    }
+    let catalog = reddb_file::ReplicationSlotCatalog::read_from_path(plan.slots_path())
+        .expect("cold slot catalog");
+    let ids: Vec<_> = catalog
+        .slots
+        .iter()
+        .map(|slot| slot.replica_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["replica-a", "replica-b"],
+        "restart must not lose registered consumers"
+    );
+}
+
+#[test]
 fn primary_persists_reddb_file_replication_slot_catalog() {
     let data_path = temp_data_path("primary_replica_slot_catalog");
 

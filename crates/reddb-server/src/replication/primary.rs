@@ -621,10 +621,6 @@ impl PrimaryReplication {
         let slot_path = data_path.map(Self::slot_path_for);
         let slot_catalog_path = data_path.map(Self::slot_catalog_path_for);
         let primary_replica_file_plan = data_path.map(Self::primary_replica_file_plan_for);
-        let slot_timeline = primary_replica_file_plan
-            .as_ref()
-            .map(|plan| plan.timeline)
-            .unwrap_or_else(reddb_file::TimelineId::initial);
         let mut slots = load_replication_slot_catalog(slot_catalog_path.as_deref(), now_ms);
         slots.extend(load_replication_slots(slot_path.as_deref(), now_ms));
         let logical_wal_spool = data_path
@@ -647,7 +643,9 @@ impl PrimaryReplication {
             primary_replica_file_plan,
             primary_replica_wal_lock: Mutex::new(()),
             slots: RwLock::new(slots),
-            slot_timeline,
+            // Legacy JSON cannot encode a timeline. Native catalogs are
+            // rebound to authoritative history by new_with_store instead.
+            slot_timeline: reddb_file::TimelineId::initial(),
             slot_retention_max_lag_lsn: config.slot_retention_max_lag_lsn,
             slot_idle_timeout_ms: config.slot_idle_timeout_ms,
             commit_waiter: Arc::new(crate::replication::commit_waiter::CommitWaiter::new()),
