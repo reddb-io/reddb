@@ -689,6 +689,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     query: &TableQuery,
     index_store: Option<&super::index_store::IndexStore>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    let index_store =
+        index_store.filter(|store| super::runtime_indexes_queryable(&query.table, store));
     let snapshot = crate::runtime::impl_core::capture_current_snapshot();
     let Some(mut snapshot) = snapshot else {
         return execute_runtime_canonical_table_query_inner(db, query, index_store);
