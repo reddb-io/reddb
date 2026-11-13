@@ -582,13 +582,25 @@ impl SegmentManager {
         offset: usize,
         limit: usize,
         limit_bytes: usize,
+        predicate: impl FnMut(&UnifiedEntity) -> bool,
+    ) -> Result<(usize, Vec<UnifiedEntity>), StoreError> {
+        self.try_page_in_id_order_at_snapshot(None, offset, limit, limit_bytes, predicate)
+    }
+
+    /// Filter MVCC versions before counting and paging the authorized view.
+    pub fn try_page_in_id_order_at_snapshot(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        offset: usize,
+        limit: usize,
+        limit_bytes: usize,
         mut predicate: impl FnMut(&UnifiedEntity) -> bool,
     ) -> Result<(usize, Vec<UnifiedEntity>), StoreError> {
         let mut visible = 0_usize;
         let mut retained_bytes = 0_usize;
         let mut items = Vec::new();
         let mut error = None;
-        self.try_scan_for_each(None, limit_bytes, |entity| {
+        self.try_scan_for_each(snapshot, limit_bytes, |entity| {
             if !predicate(entity) {
                 return true;
             }

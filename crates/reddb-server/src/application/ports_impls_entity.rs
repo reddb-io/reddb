@@ -2341,89 +2341,99 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         self.check_collection_privilege(reddb_rql::ast::PolicyAction::Insert, &input.collection)?;
-        let mut vector_data = crate::storage::VectorData::new(input.dense.clone());
-        vector_data.content = input.content.clone();
-        let candidate = crate::storage::UnifiedEntity::new(
-            crate::storage::EntityId::new(0),
-            crate::storage::EntityKind::Vector {
-                collection: input.collection.clone(),
-            },
-            crate::storage::EntityData::Vector(vector_data),
-        );
-        ensure_insert_entity_rls(self, &input.collection, &candidate)?;
-        let db = self.db();
-        let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
-        contract.ensure_model(crate::catalog::CollectionModel::Vector)?;
-        contract.ensure_vector_dimension(input.dense.len())?;
-        let mut metadata = input.metadata;
-        contract.apply_default_ttl(&mut metadata);
-        let mut builder = db.vector(&input.collection).dense(input.dense);
+        let versioned = self.vcs_is_versioned(&input.collection)?;
+        let create = || {
+            let mut vector_data = crate::storage::VectorData::new(input.dense.clone());
+            vector_data.content = input.content.clone();
+            let candidate = crate::storage::UnifiedEntity::new(
+                crate::storage::EntityId::new(0),
+                crate::storage::EntityKind::Vector {
+                    collection: input.collection.clone(),
+                },
+                crate::storage::EntityData::Vector(vector_data),
+            );
+            ensure_insert_entity_rls(self, &input.collection, &candidate)?;
+            let db = self.db();
+            let contract = CollectionContractWriteEnforcer::new(self, &db, &input.collection);
+            contract.ensure_model(crate::catalog::CollectionModel::Vector)?;
+            contract.ensure_vector_dimension(input.dense.len())?;
+            let mut metadata = input.metadata;
+            contract.apply_default_ttl(&mut metadata);
+            let mut builder = db.vector(&input.collection).dense(input.dense);
 
-        if let Some(content) = input.content {
-            builder = builder.content(content);
-        }
-
-        for (key, value) in metadata {
-            builder = builder.metadata(key, value);
-        }
-
-        if let Some(link_row) = input.link_row {
-            builder = builder.link_to_table(link_row);
-        }
-
-        if let Some(link_node) = input.link_node {
-            builder = builder.link_to_node(link_node);
-        }
-
-        // The transaction stamp must be present on the first published version.
-        // Stamping after save exposed an xmin=0 vector to concurrent snapshots.
-        let id = builder.save_with_xmin(self.current_xid())?;
-        let dense_for_turbo = match db.store().get(&input.collection, id).map(|e| e.data) {
-            Some(crate::storage::unified::EntityData::Vector(data)) => Some(data.dense.clone()),
-            _ => None,
-        };
-        refresh_context_index(&db, &input.collection, id)?;
-        // Issue #693 — vector.turbo write path. Order matters and
-        // matches the write sequence the next slice (#673) will
-        // attach kill-points to: WAL append → in-memory index update
-        // → TurboExtent append. The legacy `vector` path is the
-        // `None` branch and is untouched.
-        if let (Some(state), Some(dense)) = (db.turbo_state(&input.collection), dense_for_turbo) {
-            // Lazy populate so an INSERT after restart sees the
-            // pre-restart vectors in the index before appending its
-            // own.
-            state.ensure_populated(&db.store(), &input.collection)?;
-            // Issue #694 — named crash boundaries for #673.
-            use crate::runtime::turbo_crash_inject::{fire, InjectionPoint};
-            fire(InjectionPoint::BeforeWalFsync);
-            let _ = db
-                .store()
-                .append_vector_insert_record(&input.collection, id.raw(), &dense);
-            fire(InjectionPoint::BeforeIndexCommit);
-            let mut index = state.index.lock();
-            index.insert(id, dense.clone());
-            // Mirror the encoded codes into the per-collection
-            // TurboExtent when one is available. The bytes are the
-            // 4-bit-packed code groups (`n_byte_groups`) plus the
-            // little-endian L2 norm — same shape `BlockedCodeStorage`
-            // appends in-memory. Failures are non-fatal in this
-            // slice; durability of the extent is owned by #673.
-            fire(InjectionPoint::BeforeExtentFsync);
-            if let Some(extent) = state.extent.lock().as_mut() {
-                let packed = index.encode_for_extent(&dense);
-                let _ = extent.append(&packed);
+            if let Some(content) = input.content {
+                builder = builder.content(content);
             }
+
+            for (key, value) in metadata {
+                builder = builder.metadata(key, value);
+            }
+
+            if let Some(link_row) = input.link_row {
+                builder = builder.link_to_table(link_row);
+            }
+
+            if let Some(link_node) = input.link_node {
+                builder = builder.link_to_node(link_node);
+            }
+
+            // The transaction stamp must be present on the first published version.
+            // Stamping after save exposed an xmin=0 vector to concurrent snapshots.
+            let id =
+                builder.save_with_xmin(self.current_xid().or_else(|| self.graph_insert_xid()))?;
+            let dense_for_turbo = match db.store().get(&input.collection, id).map(|e| e.data) {
+                Some(crate::storage::unified::EntityData::Vector(data)) => Some(data.dense.clone()),
+                _ => None,
+            };
+            refresh_context_index(&db, &input.collection, id)?;
+            // Issue #693 — vector.turbo write path. Order matters and
+            // matches the write sequence the next slice (#673) will
+            // attach kill-points to: WAL append → in-memory index update
+            // → TurboExtent append. The legacy `vector` path is the
+            // `None` branch and is untouched.
+            if let (Some(state), Some(dense)) = (db.turbo_state(&input.collection), dense_for_turbo)
+            {
+                // Lazy populate so an INSERT after restart sees the
+                // pre-restart vectors in the index before appending its
+                // own.
+                state.ensure_populated(&db.store(), &input.collection)?;
+                // Issue #694 — named crash boundaries for #673.
+                use crate::runtime::turbo_crash_inject::{fire, InjectionPoint};
+                fire(InjectionPoint::BeforeWalFsync);
+                let _ = db
+                    .store()
+                    .append_vector_insert_record(&input.collection, id.raw(), &dense);
+                fire(InjectionPoint::BeforeIndexCommit);
+                let mut index = state.index.lock();
+                index.insert(id, dense.clone());
+                // Mirror the encoded codes into the per-collection
+                // TurboExtent when one is available. The bytes are the
+                // 4-bit-packed code groups (`n_byte_groups`) plus the
+                // little-endian L2 norm — same shape `BlockedCodeStorage`
+                // appends in-memory. Failures are non-fatal in this
+                // slice; durability of the extent is owned by #673.
+                fire(InjectionPoint::BeforeExtentFsync);
+                if let Some(extent) = state.extent.lock().as_mut() {
+                    let packed = index.encode_for_extent(&dense);
+                    let _ = extent.append(&packed);
+                }
+            }
+            self.cdc_emit(
+                crate::replication::cdc::ChangeOperation::Insert,
+                &input.collection,
+                id.raw(),
+                "vector",
+            );
+            Ok(CreateEntityOutput {
+                id,
+                entity: db.store().get(&input.collection, id),
+            })
+        };
+        if versioned {
+            self.with_versioned_graph_insert(create)
+        } else {
+            create()
         }
-        self.cdc_emit(
-            crate::replication::cdc::ChangeOperation::Insert,
-            &input.collection,
-            id.raw(),
-            "vector",
-        );
-        Ok(CreateEntityOutput {
-            id,
-            entity: db.store().get(&input.collection, id),
-        })
     }
 
     fn create_document(&self, input: CreateDocumentInput) -> RedDBResult<CreateEntityOutput> {

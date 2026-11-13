@@ -145,20 +145,11 @@ fn versioned_vector_delete_excludes_from_search() {
     );
 }
 
-/// DEFERRED — time-travel read surface for vectors. `VECTOR SEARCH` has
-/// no `AS OF` clause and `SELECT ... FROM <vector>` surfaces zero rows
-/// (vectors live in `EntityData::Vector`, not a queryable row), so a
-/// historical (tombstoned) vector version cannot be read back today.
-/// Versioned vector deletes already retain history physically (the
-/// tombstoned version stays alive with `xmax` set), so the read surface
-/// can be added later without a data-model change. Adding `AS OF` to the
-/// vector grammar + planner + a historical-version resolver is a large
-/// structural change and is intentionally out of scope for this pass;
-/// live-search correctness (deleted/superseded versions excluded) is the
-/// shipped guarantee. Un-ignore when the read surface lands.
+/// Historical payload reads must resolve the retained vector at the commit,
+/// while live search excludes it after deletion.
 #[test]
-#[ignore = "time-travel AS OF read surface for vectors is deferred; history is retained physically — see module docs and this test's doc comment"]
 fn versioned_vector_as_of_resolves_prior_version() {
+    use reddb::application::{Author, CreateCommitInput};
     let rt = rt();
     rt.execute_query("CREATE VECTOR vvec_asof DIM 2 METRIC cosine")
         .expect("CREATE VECTOR");
@@ -167,13 +158,195 @@ fn versioned_vector_as_of_resolves_prior_version() {
         .unwrap();
 
     let rid_v1 = insert_vector(&rt, "vvec_asof", "[1.0, 0.0]", "v1");
+    let before = rt
+        .vcs_commit(CreateCommitInput {
+            connection_id: 0,
+            message: "before vector deletion".to_string(),
+            author: Author {
+                name: "test".into(),
+                email: "test@reddb.io".into(),
+            },
+            committer: None,
+            amend: false,
+            allow_empty: true,
+        })
+        .expect("commit vector");
     rt.execute_query(&format!("DELETE FROM vvec_asof WHERE rid = {rid_v1}"))
         .expect("DELETE v1");
 
-    // Intended contract once the read surface lands: an AS OF read taken
-    // before the delete must still resolve "v1".
-    let hits = search_contents(&rt, "vvec_asof", "[1.0, 0.0]", 5);
-    assert_eq!(hits, vec!["v1".to_string()]);
+    let historical = rt
+        .execute_query(&format!(
+            "SELECT content FROM vvec_asof AS OF COMMIT '{}'",
+            before.hash,
+        ))
+        .expect("historical vector payload");
+    assert_eq!(historical.result.records.len(), 1);
+    assert_eq!(
+        historical.result.records[0].get("content"),
+        Some(&Value::text("v1"))
+    );
+    assert!(search_contents(&rt, "vvec_asof", "[1.0, 0.0]", 5).is_empty());
+}
+
+#[test]
+fn vector_autocommit_insert_history_survives_reopen() {
+    use reddb::application::{Author, CreateCommitInput, CreateVectorInput};
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("vector-history.rdb");
+    let before;
+    let after;
+    {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime");
+        runtime
+            .execute_query("CREATE VECTOR vvec_recovery DIM 2 METRIC cosine")
+            .expect("create");
+        runtime
+            .vcs_set_versioned("vvec_recovery", true)
+            .expect("versioned");
+        let commit = |message: &str| {
+            runtime
+                .vcs_commit(CreateCommitInput {
+                    connection_id: 0,
+                    message: message.into(),
+                    author: Author {
+                        name: "test".into(),
+                        email: "test@reddb.io".into(),
+                    },
+                    committer: None,
+                    amend: false,
+                    allow_empty: true,
+                })
+                .expect("commit")
+                .hash
+        };
+        before = commit("before inserts");
+        insert_vector(&runtime, "vvec_recovery", "[1.0, 0.0]", "sql");
+        reddb::EntityUseCases::new(&runtime)
+            .create_vector(CreateVectorInput {
+                collection: "vvec_recovery".into(),
+                dense: vec![0.0, 1.0],
+                content: Some("native".into()),
+                metadata: Vec::new(),
+                link_row: None,
+                link_node: None,
+            })
+            .expect("native vector");
+        after = commit("after inserts");
+        runtime.checkpoint().expect("checkpoint");
+    }
+    let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
+    for (hash, count) in [(&before, 0), (&after, 2)] {
+        let result = runtime
+            .execute_query(&format!(
+                "SELECT content FROM vvec_recovery AS OF COMMIT '{hash}'",
+            ))
+            .expect("historical vector read");
+        assert_eq!(result.result.records.len(), count);
+    }
+}
+
+#[test]
+fn vector_checkpoint_does_not_commit_pending_delete() {
+    check_vector_checkpoint_pending_delete(false, false);
+}
+
+#[test]
+fn vector_paged_checkpoint_does_not_commit_pending_delete() {
+    if let Some(path) = std::env::var_os("REDDB_TEST_VECTOR_CHECKPOINT_PATH") {
+        let warm = std::env::var_os("REDDB_TEST_VECTOR_CHECKPOINT_WARM").is_some();
+        let runtime = prepare_vector_pending_delete(std::path::Path::new(&path), true, warm);
+        // Exit without destructors: recovery must use the checkpoint made with
+        // an active transaction, not a shutdown checkpoint or rollback.
+        std::mem::forget(runtime);
+        std::process::exit(0);
+    }
+    check_vector_checkpoint_pending_delete(true, false);
+    check_vector_checkpoint_pending_delete(true, true);
+}
+
+fn vector_checkpoint_options(path: &std::path::Path, paged: bool) -> RedDBOptions {
+    let options = RedDBOptions::persistent(path);
+    if paged {
+        options
+            .with_storage_profile(reddb::StorageDeployPreset::Serverless.selection())
+            .expect("paged profile")
+    } else {
+        options
+    }
+}
+
+fn prepare_vector_pending_delete(
+    path: &std::path::Path,
+    paged: bool,
+    warm_checkpoint: bool,
+) -> RedDBRuntime {
+    let runtime =
+        RedDBRuntime::with_options(vector_checkpoint_options(path, paged)).expect("runtime");
+    set_current_connection_id(80004);
+    runtime
+        .execute_query("CREATE VECTOR vvec_recovery DIM 2 METRIC cosine")
+        .expect("create");
+    runtime
+        .vcs_set_versioned("vvec_recovery", true)
+        .expect("versioned");
+    let id = insert_vector(&runtime, "vvec_recovery", "[1.0, 0.0]", "keep");
+    if warm_checkpoint {
+        runtime.checkpoint().expect("publish checkpoint base");
+    }
+    runtime.execute_query("BEGIN").expect("begin");
+    runtime
+        .execute_query(&format!("DELETE FROM vvec_recovery WHERE rid = {id}"))
+        .expect("pending delete");
+    runtime.checkpoint().expect("checkpoint with active delete");
+    runtime
+}
+
+fn check_vector_checkpoint_pending_delete(paged: bool, warm_checkpoint: bool) {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("vector-live.rdb");
+    let copy = directory.path().join("vector-copy.rdb");
+    if paged {
+        // Windows prevents copying a live pager's exclusively locked file.
+        // A child process also exercises recovery after an actual abrupt exit.
+        let mut child =
+            std::process::Command::new(std::env::current_exe().expect("test executable"));
+        child.args([
+            "--exact",
+            "e2e_vcs_vector_mvcc_history::vector_paged_checkpoint_does_not_commit_pending_delete",
+            "--nocapture",
+        ]);
+        child.env("REDDB_TEST_VECTOR_CHECKPOINT_PATH", &path);
+        child.env_remove("REDDB_TEST_VECTOR_CHECKPOINT_WARM");
+        if warm_checkpoint {
+            child.env("REDDB_TEST_VECTOR_CHECKPOINT_WARM", "1");
+        }
+        assert!(child.status().expect("checkpoint child").success());
+        let recovered = RedDBRuntime::with_options(vector_checkpoint_options(&path, true))
+            .expect("recover after abrupt exit");
+        assert_eq!(
+            search_contents(&recovered, "vvec_recovery", "[1.0, 0.0]", 5),
+            ["keep"]
+        );
+        return;
+    }
+    let runtime = prepare_vector_pending_delete(&path, paged, warm_checkpoint);
+    std::fs::copy(&path, &copy).expect("copy checkpoint");
+    let wal = reddb_file::unified_wal_path(&path);
+    if wal.exists() {
+        std::fs::copy(wal, reddb_file::unified_wal_path(&copy)).expect("copy WAL");
+    }
+    let recovered =
+        RedDBRuntime::with_options(vector_checkpoint_options(&copy, paged)).expect("recover");
+    set_current_connection_id(80005);
+    let hits = search_contents(&recovered, "vvec_recovery", "[1.0, 0.0]", 5);
+    set_current_connection_id(80004);
+    runtime.execute_query("ROLLBACK").expect("rollback");
+    clear_current_connection_id();
+    assert_eq!(
+        hits,
+        ["keep".to_string()],
+        "checkpoint must preserve committed data"
+    );
 }
 
 /// (d) First-committer-wins on concurrent versioned vector delete: two

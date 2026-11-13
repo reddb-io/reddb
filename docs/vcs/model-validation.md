@@ -9,8 +9,8 @@ specific scenario, not a guarantee that the model supports every VCS operation.
 | --- | --- | --- |
 | Table | Historical table scan after an update | Inserts, deletes, branch isolation, merge application and recovery |
 | Document | Historical patch and delete; concurrent update conflict | Inserts, branch isolation, merge application and recovery |
-| Graph | Node and edge history, checkpoint recovery, conflict detection and WAL publication | Branch isolation and application of merges; native entity reads still have an ignored MVCC regression |
-| Vector | Delete visibility and concurrent delete conflict | Historical search has an ignored test; branch isolation, merge and recovery need explicit cases |
+| Graph | Node and edge history, checkpoint recovery, conflict detection and WAL publication; native read visibility | Branch isolation and application of merges |
+| Vector | Autocommit history after reopen, delete visibility, concurrent delete conflict, SELECT AS OF payloads, pending-delete recovery in embedded and paged checkpoints | Historical similarity search, branch isolation and merge application |
 | KV | Historical writes and deletes, conflicts, and commits from another connection | Branch isolation, merge application and recovery |
 | Mixed | No dedicated model-specific VCS test in this directory | Mixed-model snapshots, branch isolation, merge and recovery |
 | TimeSeries | No dedicated model-specific VCS test in this directory | Point insertion/deletion, historical reads, branch isolation, merge and recovery |
@@ -28,6 +28,21 @@ does not establish historical reads or merge support. HLL, sketch and filter
 state is stored under internal `red_config` keys, while `vcs_diff` skips
 internal collections; tests must verify how their state becomes part of VCS
 instead of treating the flag as evidence of support.
+
+`e2e_vcs_merge_guards` covers all 14 declared models. It checks that unsupported
+data application cannot advance HEAD through fast-forward merge, forced merge,
+cherry-pick or revert. Vault uses a synthetic test key and secret; metrics
+ingests a real sample through Prometheus remote write. These are not successful
+merge or history tests.
+`e2e_vcs_native_visibility` exercises pending inserts and commit visibility through
+native point reads and pagination for table, document, graph, vector and KV.
+It also combines snapshots with tenant pagination and graph/document RLS.
+Separate regressions check that alternating and simultaneous committers on one
+branch keep every successful commit reachable.
+
+Vector checkpoint recovery covers an embedded checkpoint copy and abrupt
+process exits with full and warmed paged checkpoints. An uncommitted deletion
+must not become committed when the database reopens.
 
 For every model, a complete regression suite should cover the applicable public
 read and write surfaces, values captured before and after a change, writes and

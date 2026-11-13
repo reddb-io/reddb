@@ -87,6 +87,12 @@ mod e2e_vcs_vector_mvcc_history;
 #[path = "vcs/e2e_vcs_opt_in.rs"]
 mod e2e_vcs_opt_in;
 
+#[path = "vcs/e2e_vcs_native_visibility.rs"]
+mod e2e_vcs_native_visibility;
+
+#[path = "vcs/e2e_vcs_merge_guards.rs"]
+mod e2e_vcs_merge_guards;
+
 #[path = "vcs/e2e_vcs_phase5.rs"]
 mod e2e_vcs_phase5;
 

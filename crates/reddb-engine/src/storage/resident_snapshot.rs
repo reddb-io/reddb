@@ -250,6 +250,7 @@ impl ResidentStore {
                 if matches!(
                     entity.data,
                     EntityData::Row(_)
+                        | EntityData::Vector(_)
                         | EntityData::Node(_)
                         | EntityData::Edge(_)
                         | EntityData::QueueMessage(_)

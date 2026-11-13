@@ -119,7 +119,7 @@ impl RedDBRuntime {
         })
     }
 
-    /// Publish a versioned autocommit graph insert after its WAL batch.
+    /// Publish a versioned graph or vector insert after its WAL batch.
     pub(crate) fn with_versioned_graph_insert<T>(
         &self,
         f: impl FnOnce() -> RedDBResult<T>,
@@ -134,7 +134,7 @@ impl RedDBRuntime {
                     return f();
                 }
                 return Err(RedDBError::InvalidOperation(
-                    "versioned graph insertion cannot join an unrelated WAL capture".to_string(),
+                    "versioned entity insertion cannot join an unrelated WAL capture".to_string(),
                 ));
             }
             return self.with_deferred_store_wal_if_transaction(f);
@@ -147,7 +147,7 @@ impl RedDBRuntime {
                 || GRAPH_INSERT_WRITER.with(|slot| slot.get().is_some())
             {
                 return Err(RedDBError::InvalidOperation(
-                    "versioned graph insertion cannot join an unrelated WAL capture".to_string(),
+                    "versioned entity insertion cannot join an unrelated WAL capture".to_string(),
                 ));
             }
             let writer = GraphInsertWriter::begin(self);
@@ -191,7 +191,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<T> {
         if matches!(
             query.entity_type,
-            InsertEntityType::Node | InsertEntityType::Edge
+            InsertEntityType::Node | InsertEntityType::Edge | InsertEntityType::Vector
         ) && self.vcs_is_versioned(&query.table)?
         {
             self.with_versioned_graph_insert(f)

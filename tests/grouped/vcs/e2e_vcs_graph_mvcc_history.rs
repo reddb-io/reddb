@@ -191,7 +191,6 @@ fn graph_branch_checkout_isolates_writes_from_main() {
 }
 
 #[test]
-#[ignore = "native entity and collection reads do not yet apply graph MVCC visibility"]
 fn graph_native_entity_reads_hide_pending_writes() {
     let rt = rt();
     set_current_connection_id(70028);
@@ -202,6 +201,19 @@ fn graph_native_entity_reads_hide_pending_writes() {
         .unwrap();
     rt.execute_query("BEGIN").unwrap();
     let pending = insert_node(&rt, "graph_native_visibility", "pending", 2);
+    assert!(rt
+        .get_collection_entity(
+            "graph_native_visibility",
+            reddb::storage::EntityId::new(pending),
+        )
+        .expect("own point read")
+        .is_some());
+    assert_eq!(
+        rt.scan_collection("graph_native_visibility", None, 1)
+            .expect("own scan")
+            .total,
+        1
+    );
 
     set_current_connection_id(70029);
     let entity = rt
@@ -218,8 +230,65 @@ fn graph_native_entity_reads_hide_pending_writes() {
         page.items.is_empty(),
         "collection scan exposed an uncommitted node"
     );
+    assert_eq!(page.total, 0);
+    assert!(page.next.is_none());
     set_current_connection_id(70028);
     rt.execute_query("ROLLBACK").unwrap();
+    assert!(rt
+        .get_collection_entity(
+            "graph_native_visibility",
+            reddb::storage::EntityId::new(pending),
+        )
+        .expect("read after rollback")
+        .is_none());
+    clear_current_connection_id();
+}
+
+#[test]
+fn graph_native_reads_resolve_logical_versions_and_transaction_snapshots() {
+    let rt = rt();
+    let writer = 70030;
+    let reader = 70031;
+    let collection = "graph_native_versions";
+    set_current_connection_id(writer);
+    rt.execute_query(&format!("CREATE GRAPH {collection}"))
+        .expect("create graph");
+    vcs(&rt).set_versioned(collection, true).expect("versioned");
+    let id = insert_node(&rt, collection, "alice", 1);
+    let read = || {
+        let entity = rt
+            .get_collection_entity(collection, reddb::storage::EntityId::new(id))
+            .expect("point read")
+            .expect("visible logical node");
+        let page = rt.scan_collection(collection, None, 1).expect("scan");
+        assert_eq!(page.total, 1);
+        assert!(page.next.is_none());
+        assert_eq!(page.items[0].id, entity.id);
+        let reddb::storage::EntityData::Node(node) = entity.data else {
+            panic!("expected graph node");
+        };
+        node.properties.get("score").cloned()
+    };
+    set_current_connection_id(reader);
+    rt.execute_query("BEGIN ISOLATION LEVEL REPEATABLE READ")
+        .expect("reader snapshot");
+    assert_eq!(read(), Some(Value::Integer(1)));
+    set_current_connection_id(writer);
+    update_score(&rt, collection, "alice", 2);
+    assert_eq!(read(), Some(Value::Integer(2)));
+    set_current_connection_id(reader);
+    assert_eq!(read(), Some(Value::Integer(1)));
+    rt.execute_query("COMMIT").expect("finish reader");
+    assert_eq!(read(), Some(Value::Integer(2)));
+    set_current_connection_id(writer);
+    rt.execute_query("BEGIN").expect("delete transaction");
+    rt.execute_query(&format!("DELETE FROM {collection} WHERE rid = {id}"))
+        .expect("delete current node");
+    set_current_connection_id(reader);
+    assert_eq!(read(), Some(Value::Integer(2)));
+    set_current_connection_id(writer);
+    rt.execute_query("ROLLBACK").expect("rollback delete");
+    assert_eq!(read(), Some(Value::Integer(2)));
     clear_current_connection_id();
 }
 
@@ -264,7 +333,7 @@ fn graph_fast_forward_does_not_advance_head_without_applying_changes() {
             author: author(),
         })
         .expect_err("merge must not claim success without applying graph changes");
-    assert!(err.to_string().contains("graph"), "{err}");
+    assert!(err.to_string().contains("applying data"), "{err}");
     let status = vcs(&rt)
         .status(StatusInput {
             connection_id: conn,
@@ -319,7 +388,7 @@ fn graph_clean_divergent_merge_does_not_advance_head_without_applying_changes() 
             author: author(),
         })
         .expect_err("merge must not claim success without applying graph changes");
-    assert!(err.to_string().contains("graph"), "{err}");
+    assert!(err.to_string().contains("applying data"), "{err}");
     let status = vcs(&rt)
         .status(StatusInput {
             connection_id: conn,
@@ -431,7 +500,8 @@ fn graph_autocommit_insert_is_absent_from_earlier_checkpoint() {
 fn graph_autocommit_insert_invalidates_cached_reads() {
     let rt = rt();
     set_current_connection_id(70030);
-    rt.execute_query("SET CONFIG runtime.result_cache.enabled = true").unwrap();
+    rt.execute_query("SET CONFIG runtime.result_cache.enabled = true")
+        .unwrap();
     rt.execute_query("CREATE GRAPH graph_insert_cache").unwrap();
     vcs(&rt).set_versioned("graph_insert_cache", true).unwrap();
     assert_eq!(live_score(&rt, "graph_insert_cache", "later"), None);
@@ -884,10 +954,14 @@ fn graph_diff_reports_node_update_as_one_modified_item() {
     assert_eq!((diff.added, diff.removed, diff.modified), (0, 0, 1));
     assert_eq!(diff.entries.len(), 1);
     assert_eq!(diff.entries[0].entity_id, rid.to_string());
-    assert!(matches!(
-        diff.entries[0].change,
-        DiffChange::Modified { .. }
-    ));
+    let DiffChange::Modified { before, after } = &diff.entries[0].change else {
+        panic!("expected modified node");
+    };
+    let rendered_before = reddb::json::to_string(before).expect("before JSON");
+    let rendered_after = reddb::json::to_string(after).expect("after JSON");
+    assert!(rendered_before.contains("\"score\":1"), "{rendered_before}");
+    assert!(rendered_after.contains("\"score\":2"), "{rendered_after}");
+    assert!(rendered_after.contains("\"node_type\":\"person\""));
     clear_current_connection_id();
 }
 
@@ -918,10 +992,18 @@ fn graph_diff_reports_edge_update_as_one_modified_item() {
     assert_eq!((diff.added, diff.removed, diff.modified), (0, 0, 1));
     assert_eq!(diff.entries.len(), 1);
     assert_eq!(diff.entries[0].entity_id, rid.to_string());
-    assert!(matches!(
-        diff.entries[0].change,
-        DiffChange::Modified { .. }
-    ));
+    let DiffChange::Modified { before, after } = &diff.entries[0].change else {
+        panic!("expected modified edge");
+    };
+    let rendered_before = reddb::json::to_string(before).expect("before JSON");
+    let rendered_after = reddb::json::to_string(after).expect("after JSON");
+    assert!(
+        rendered_before.contains("\"weight\":1"),
+        "{rendered_before}"
+    );
+    assert!(rendered_after.contains("\"weight\":2"), "{rendered_after}");
+    assert!(rendered_after.contains("\"from_node\""));
+    assert!(rendered_after.contains("\"to_node\""));
     clear_current_connection_id();
 }
 

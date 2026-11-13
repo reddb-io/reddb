@@ -719,11 +719,20 @@ fn load_workset_state(
         .into_iter()
         .find_map(|entity| {
             let row = entity.data.as_row()?;
-            Some((
-                row_text(row, "branch").unwrap_or_else(|| vc::DEFAULT_BRANCH_REF.to_string()),
-                row_text(row, "base_commit"),
-                row_text(row, "merge_state_id"),
-            ))
+            let branch =
+                row_text(row, "branch").unwrap_or_else(|| vc::DEFAULT_BRANCH_REF.to_string());
+            let base = row_text(row, "base_commit");
+            let pending_merge = row_text(row, "merge_state_id");
+            // Connections on a branch share its HEAD. The checkout base is
+            // authoritative only for detached/tag reads and a pending merge.
+            let head = if branch.starts_with(vc::BRANCH_REF_PREFIX) && pending_merge.is_none() {
+                load_ref(store, &branch)
+                    .map(|reference| reference.target)
+                    .or(base)
+            } else {
+                base
+            };
+            Some((branch, head, pending_merge))
         })
 }
 
@@ -781,6 +790,7 @@ impl RedDBRuntime {
     pub fn vcs_commit(&self, input: CreateCommitInput) -> RedDBResult<Commit> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        let _publication = store.vault_publication_lock.lock();
 
         ensure_no_pending_merge(store, input.connection_id)?;
 
@@ -883,6 +893,7 @@ impl RedDBRuntime {
     pub fn vcs_branch_create(&self, input: CreateBranchInput) -> RedDBResult<Ref> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        let _publication = store.vault_publication_lock.lock();
         let full_name = normalize_branch_name(&input.name);
         if load_ref(store, &full_name).is_some() {
             return Err(RedDBError::InvalidConfig(format!(
@@ -914,6 +925,7 @@ impl RedDBRuntime {
     pub fn vcs_branch_delete(&self, name: &str) -> RedDBResult<()> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        let _publication = store.vault_publication_lock.lock();
         let full = normalize_branch_name(name);
         let existing = load_ref(store, &full)
             .ok_or_else(|| RedDBError::NotFound(format!("branch `{full}` does not exist")))?;
@@ -929,6 +941,7 @@ impl RedDBRuntime {
     pub fn vcs_tag_create(&self, input: CreateTagInput) -> RedDBResult<Ref> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        let _publication = store.vault_publication_lock.lock();
         let full_name = normalize_tag_name(&input.name);
         if load_ref(store, &full_name).is_some() {
             return Err(RedDBError::InvalidConfig(format!(
@@ -949,6 +962,7 @@ impl RedDBRuntime {
     pub fn vcs_tag_delete(&self, name: &str) -> RedDBResult<()> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        let _publication = store.vault_publication_lock.lock();
         let full = normalize_tag_name(name);
         let existing = load_ref(store, &full)
             .ok_or_else(|| RedDBError::NotFound(format!("tag `{full}` does not exist")))?;
@@ -968,6 +982,7 @@ impl RedDBRuntime {
     pub fn vcs_checkout(&self, input: CheckoutInput) -> RedDBResult<Ref> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        let _publication = store.vault_publication_lock.lock();
         if !input.force {
             ensure_no_pending_merge(store, input.connection_id)?;
         }
@@ -1038,6 +1053,7 @@ impl RedDBRuntime {
     pub fn vcs_merge(&self, input: MergeInput) -> RedDBResult<MergeOutcome> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        let _publication = store.vault_publication_lock.lock();
         ensure_no_pending_merge(store, input.connection_id)?;
 
         // Resolve source commit (the one being merged in).
@@ -1088,10 +1104,9 @@ impl RedDBRuntime {
                     "cannot fast-forward a detached HEAD".to_string(),
                 ));
             }
-            if graph_merge_may_require_application(self, store, &head_hash, &from_hash)? {
+            if merge_may_require_application(self, store, &head_hash, &from_hash)? {
                 return Err(RedDBError::InvalidOperation(
-                    "cannot merge graph changes: applying graph data is not implemented"
-                        .to_string(),
+                    "cannot merge collection changes: applying data is not implemented".to_string(),
                 ));
             }
             save_ref(
@@ -1121,7 +1136,7 @@ impl RedDBRuntime {
         // Detect conflicts before advancing HEAD. Data-level application
         // and completion of a paused merge are not implemented yet.
         let lca = RedDBRuntime::vcs_lca(self, &head_hash, &from_hash)?;
-        let source_has_graph_changes = graph_merge_may_require_application(
+        let source_has_changes = merge_may_require_application(
             self,
             store,
             lca.as_deref().unwrap_or(&head_hash),
@@ -1178,7 +1193,7 @@ impl RedDBRuntime {
             Vec::new()
         };
 
-        if conflicts.is_empty() && source_has_graph_changes {
+        if conflicts.is_empty() && source_has_changes {
             let horizon = snapshot
                 .in_progress
                 .iter()
@@ -1186,7 +1201,7 @@ impl RedDBRuntime {
                 .fold(snapshot.xid, Xid::min);
             snapshot_manager.unpin(horizon);
             return Err(RedDBError::InvalidOperation(
-                "cannot merge graph changes: applying graph data is not implemented".to_string(),
+                "cannot merge collection changes: applying data is not implemented".to_string(),
             ));
         }
 
@@ -1265,6 +1280,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<MergeOutcome> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        let _publication = store.vault_publication_lock.lock();
         ensure_no_pending_merge(store, connection_id)?;
 
         // Resolve the commit being cherry-picked and its parent.
@@ -1283,6 +1299,13 @@ impl RedDBRuntime {
             ));
         }
         let parent_hash = src_commit.parents[0].clone();
+
+        if merge_may_require_application(self, store, &parent_hash, &src_hash)? {
+            return Err(RedDBError::InvalidOperation(
+                "cannot cherry-pick collection changes: applying data is not implemented"
+                    .to_string(),
+            ));
+        }
 
         // Resolve HEAD for this connection.
         let workset = load_workset(store, connection_id);
@@ -1387,6 +1410,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<Commit> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        let _publication = store.vault_publication_lock.lock();
         ensure_no_pending_merge(store, connection_id)?;
 
         let src_hash = RedDBRuntime::vcs_resolve_commitish(self, commit)?;
@@ -1398,6 +1422,12 @@ impl RedDBRuntime {
             ));
         }
         let parent_hash = src_commit.parents[0].clone();
+
+        if merge_may_require_application(self, store, &src_hash, &parent_hash)? {
+            return Err(RedDBError::InvalidOperation(
+                "cannot revert collection changes: applying data is not implemented".to_string(),
+            ));
+        }
 
         let workset = load_workset(store, connection_id);
         let (head_branch, head_hash) = match workset {
@@ -1482,6 +1512,7 @@ impl RedDBRuntime {
     pub fn vcs_reset(&self, input: ResetInput) -> RedDBResult<()> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        let _publication = store.vault_publication_lock.lock();
         ensure_no_pending_merge(store, input.connection_id)?;
         let target_hash = RedDBRuntime::vcs_resolve_commitish(self, &input.target)?;
         let target_commit = load_commit(store, &target_hash).ok_or_else(|| {
@@ -1576,8 +1607,6 @@ impl RedDBRuntime {
             let entities = manager.query_all(|_| true);
             // Compare physical versions under the stable logical identity.
             for entity in &entities {
-                let xmin = entity.xmin;
-                let xmax = entity.xmax;
                 let in_from = snapshot_sees_entity(&from_snap, &sm, entity);
                 let in_to = snapshot_sees_entity(&to_snap, &sm, entity);
                 if in_from == in_to {
@@ -1587,7 +1616,7 @@ impl RedDBRuntime {
                 let payload = if input.summary_only {
                     JsonValue::Null
                 } else {
-                    JsonValue::String(format!("entity#{} xmin={} xmax={}", entity_id, xmin, xmax))
+                    vcs_entity_body(entity)
                 };
                 let change = match (in_from, in_to) {
                     (false, true) => {
@@ -1826,6 +1855,7 @@ impl RedDBRuntime {
     pub fn vcs_set_versioned(&self, collection: &str, enabled: bool) -> RedDBResult<()> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
+        let _publication = store.vault_publication_lock.lock();
         set_versioned_flag(store, collection, enabled)
     }
 
@@ -1886,10 +1916,10 @@ impl RedDBRuntime {
     }
 }
 
-/// Until graph merge application exists, reject changes in visible graph
-/// versions. Unstamped graph inserts are visible to every snapshot, so any
+/// Until merge application exists, reject changes in visible entity
+/// versions. Unstamped inserts are visible to every snapshot, so any
 /// such entity also requires a conservative rejection for distinct commits.
-fn graph_merge_may_require_application(
+fn merge_may_require_application(
     rt: &RedDBRuntime,
     store: &UnifiedStore,
     from_hash: &str,
@@ -1901,25 +1931,38 @@ fn graph_merge_may_require_application(
     let sm = rt.inner.transaction_state.snapshot_manager();
     let from = rt.vcs_resolve_snapshot(AsOfSpec::Commit(from_hash.to_string()))?;
     let to = rt.vcs_resolve_snapshot(AsOfSpec::Commit(to_hash.to_string()))?;
-    for coll in store.list_collections() {
-        if coll.starts_with("red_") || coll.starts_with("red.") || !is_versioned(store, &coll)? {
-            continue;
-        }
-        let Some(manager) = store.get_collection(&coll) else {
-            continue;
-        };
-        for entity in manager.query_all(|entity| {
-            matches!(
-                entity.kind,
-                EntityKind::GraphNode(_) | EntityKind::GraphEdge(_)
+    for coll in versioned_collections(store)? {
+        if rt.db().collection_contract(&coll).is_some_and(|contract| {
+            !matches!(
+                contract.declared_model,
+                crate::catalog::CollectionModel::Table
+                    | crate::catalog::CollectionModel::Document
+                    | crate::catalog::CollectionModel::Graph
+                    | crate::catalog::CollectionModel::Vector
+                    | crate::catalog::CollectionModel::Kv
             )
         }) {
+            // These models own state outside the entity history (queue
+            // delivery, probabilistic blobs, configuration, etc.). An empty
+            // entity diff cannot establish that there is nothing to apply.
+            return Ok(true);
+        }
+        let Some(manager) = store.get_collection(&coll) else {
+            return Ok(true);
+        };
+        let mut changed = false;
+        manager.try_for_each_entity(usize::MAX, |entity| {
             if entity.xmin == XID_NONE
-                || snapshot_sees_entity(&from, &sm, &entity)
-                    != snapshot_sees_entity(&to, &sm, &entity)
+                || snapshot_sees_entity(&from, &sm, entity)
+                    != snapshot_sees_entity(&to, &sm, entity)
             {
-                return Ok(true);
+                changed = true;
+                return false;
             }
+            true
+        })?;
+        if changed {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -1970,16 +2013,7 @@ fn materialize_merge_conflicts(
         let mut at_theirs: HashMap<u64, JsonValue> = HashMap::new();
         for entity in manager.query_all(|_| true) {
             let eid = entity.logical_id().raw();
-            let mut body = crate::entity_render::compact_entity_json(&entity);
-            if let JsonValue::Object(ref mut fields) = body {
-                fields.insert("id".to_string(), JsonValue::Number(eid as f64));
-                if let EntityKind::GraphNode(node) = &entity.kind {
-                    fields.insert(
-                        "node_type".to_string(),
-                        JsonValue::String(node.node_type.clone()),
-                    );
-                }
-            }
+            let body = vcs_entity_body(&entity);
             if snapshot_sees_entity(&base_snap, &sm, &entity) {
                 at_base.insert(eid, body.clone());
             }
@@ -2066,6 +2100,50 @@ fn materialize_merge_conflicts(
         }
     }
     Ok(conflicts)
+}
+
+fn vcs_entity_body(entity: &UnifiedEntity) -> JsonValue {
+    let mut body = crate::entity_render::compact_entity_json(entity);
+    if let JsonValue::Object(fields) = &mut body {
+        fields.insert(
+            "id".to_string(),
+            JsonValue::Number(entity.logical_id().raw() as f64),
+        );
+        match &entity.kind {
+            EntityKind::GraphNode(node) => {
+                fields.insert("label".to_string(), JsonValue::String(node.label.clone()));
+                fields.insert(
+                    "node_type".to_string(),
+                    JsonValue::String(node.node_type.clone()),
+                );
+            }
+            EntityKind::GraphEdge(edge) => {
+                fields.insert("label".to_string(), JsonValue::String(edge.label.clone()));
+                fields.insert(
+                    "from_node".to_string(),
+                    JsonValue::String(edge.from_node.clone()),
+                );
+                fields.insert(
+                    "to_node".to_string(),
+                    JsonValue::String(edge.to_node.clone()),
+                );
+            }
+            _ => {}
+        }
+        if let EntityData::Row(row) = &entity.data {
+            if row.named.is_none() {
+                fields.insert(
+                    "row".to_string(),
+                    JsonValue::Object(
+                        row.iter_fields()
+                            .map(|(key, value)| (key.to_string(), value.to_json()))
+                            .collect(),
+                    ),
+                );
+            }
+        }
+    }
+    body
 }
 
 // Collapse Add+Remove pairs sharing the same (collection, entity_id)
