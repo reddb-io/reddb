@@ -63,27 +63,19 @@ impl RedDBRuntime {
                 ));
             }
             let started = std::time::Instant::now();
-            let snapshot = self.create_snapshot()?;
-            let mut uploaded = false;
-
-            if let (Some(backend), Some(path)) =
-                (&self.inner.db.remote_backend, self.inner.db.path())
-            {
-                let default_snapshot_prefix = self.inner.db.options().default_snapshot_prefix();
-                let default_wal_prefix = self.inner.db.options().default_wal_archive_prefix();
-                let default_head_key = self.inner.db.options().default_backup_head_key();
-                let snapshot_prefix =
-                    self.config_string("backup.snapshot_prefix", &default_snapshot_prefix);
-                let wal_prefix = self.config_string("wal.archive.prefix", &default_wal_prefix);
-                let head_key = self.config_string("backup.head_key", &default_head_key);
-                let timeline_id = self.config_string("timeline.id", "main");
-                let snapshot_key = crate::storage::wal::archive_snapshot(
-                    backend.as_ref(),
-                    path,
-                    snapshot.snapshot_id,
-                    &snapshot_prefix,
-                )
-                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            // Bind the descriptor, immutable bytes, and WAL frontier to one
+            // publication cut. The remote upload happens after releasing the
+            // fence so slow object storage does not block foreground writes.
+            let (snapshot, snapshot_payload, current_lsn) = {
+                let store = self.inner.db.store();
+                let _publication = store.vault_publication_lock.lock();
+                let snapshot = self.create_snapshot()?;
+                let payload =
+                    if self.inner.db.remote_backend.is_some() && self.inner.db.path().is_some() {
+                        Some(self.capture_serverless_snapshot()?)
+                    } else {
+                        None
+                    };
                 let current_lsn = self
                     .inner
                     .db
@@ -96,22 +88,49 @@ impl RedDBRuntime {
                             .unwrap_or_else(|| repl.wal_buffer.current_lsn())
                     })
                     .unwrap_or_else(|| self.inner.cdc.current_lsn());
+                (snapshot, payload, current_lsn)
+            };
+            let mut uploaded = false;
+
+            if let (Some(backend), Some(path)) =
+                (&self.inner.db.remote_backend, self.inner.db.path())
+            {
+                let snapshot_path = snapshot_payload
+                    .as_ref()
+                    .map(|payload| payload.path())
+                    .unwrap_or(path);
+                let default_snapshot_prefix = self.inner.db.options().default_snapshot_prefix();
+                let default_wal_prefix = self.inner.db.options().default_wal_archive_prefix();
+                let default_head_key = self.inner.db.options().default_backup_head_key();
+                let snapshot_prefix =
+                    self.config_string("backup.snapshot_prefix", &default_snapshot_prefix);
+                let wal_prefix = self.config_string("wal.archive.prefix", &default_wal_prefix);
+                let head_key = self.config_string("backup.head_key", &default_head_key);
+                let timeline_id = self.config_string("timeline.id", "main");
+                let snapshot_key = crate::storage::wal::archive_snapshot(
+                    backend.as_ref(),
+                    snapshot_path,
+                    snapshot.snapshot_id,
+                    &snapshot_prefix,
+                )
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
                 let last_archived_lsn = self.config_u64("timeline.last_archived_lsn", 0);
                 // Hash the local snapshot bytes so the manifest can carry
                 // the digest for restore-side verification (PLAN.md
                 // Phase 4). Failure to hash is non-fatal — we still
                 // publish the manifest, just without a checksum, so a
                 // future fix can backfill rather than losing the backup.
-                let snapshot_sha256 = reddb_file::SnapshotManifest::compute_snapshot_sha256(path)
-                    .map_err(|err| {
-                        tracing::warn!(
-                            target: "reddb::backup",
-                            error = %err,
-                            snapshot_id = snapshot.snapshot_id,
-                            "snapshot hash failed; manifest will lack checksum"
-                        );
-                    })
-                    .ok();
+                let snapshot_sha256 =
+                    reddb_file::SnapshotManifest::compute_snapshot_sha256(snapshot_path)
+                        .map_err(|err| {
+                            tracing::warn!(
+                                target: "reddb::backup",
+                                error = %err,
+                                snapshot_id = snapshot.snapshot_id,
+                                "snapshot hash failed; manifest will lack checksum"
+                            );
+                        })
+                        .ok();
                 let manifest = reddb_file::SnapshotManifest {
                     timeline_id: timeline_id.clone(),
                     snapshot_key: snapshot_key.clone(),
@@ -150,13 +169,14 @@ impl RedDBRuntime {
                             "logical WAL gap detected: last_archived_lsn={last_archived_lsn}, oldest_available_lsn={oldest}"
                         )));
                     }
-                    let records = if let Some(spool) = &primary.logical_wal_spool {
+                    let mut records = if let Some(spool) = &primary.logical_wal_spool {
                         spool
                             .read_since(last_archived_lsn, usize::MAX)
                             .map_err(|err| RedDBError::Internal(err.to_string()))?
                     } else {
                         primary.wal_buffer.read_since(last_archived_lsn, usize::MAX)
                     };
+                    records.retain(|(lsn, _)| *lsn <= current_lsn);
                     if let Some(meta) = crate::storage::wal::archive_change_records(
                         backend.as_ref(),
                         &wal_prefix,
