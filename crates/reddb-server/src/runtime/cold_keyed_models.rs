@@ -740,6 +740,521 @@ fn long_engine_rollout_id_survives_crash_during_checkpoint_publication() {
 }
 
 #[test]
+fn cold_open_rebuilds_incomplete_legacy_runtime_indexes_before_queries() {
+    use crate::storage::compact::scrub_paged;
+    use crate::storage::engine::{Pager, PagerConfig};
+
+    const INDEX: &str = "database_engine_rollouts_id";
+    const AFFECTED_ID: &str = "er_68bcf520c3287be18076c5cd39a1572c680005faa6b290cb43c6f3db94e33dcd";
+    const LITERAL_QUERY: &str = "SELECT id,status FROM database_engine_rollouts WHERE id = \
+        'er_68bcf520c3287be18076c5cd39a1572c680005faa6b290cb43c6f3db94e33dcd'";
+    const L2_QUERY: &str = "SELECT status,id FROM database_engine_rollouts WHERE id = \
+        'er_68bcf520c3287be18076c5cd39a1572c680005faa6b290cb43c6f3db94e33dcd'";
+
+    let directory = tempfile::tempdir().expect("legacy index fixture");
+    let path = directory.path().join("platform.rdb");
+    let options = RedDBOptions::persistent(path.clone())
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_storage_profile(
+            crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+        )
+        .expect("profile");
+    let open = || {
+        crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options.clone())
+        })
+        .expect("open runtime")
+    };
+
+    let legacy = crate::storage::unified::store::secondary_index::
+        use_legacy_runtime_secondary_index_identity();
+    let target_entity_id = {
+        let runtime = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+        for sql in [
+            "CREATE TABLE database_engine_rollouts (id TEXT, status TEXT)",
+            "CREATE UNIQUE INDEX database_engine_rollouts_id ON database_engine_rollouts (id) USING BTREE",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        for ordinal in 0..9 {
+            runtime
+                .execute_query_with_params(
+                    "INSERT INTO database_engine_rollouts (id,status) VALUES ($1,'complete')",
+                    &[Value::text(format!("er_{ordinal:064x}"))],
+                )
+                .expect("insert neighboring rollout");
+        }
+        runtime
+            .execute_query_with_params(
+                "INSERT INTO database_engine_rollouts (id,status) VALUES ($1,'running')",
+                &[Value::text(AFFECTED_ID)],
+            )
+            .expect("insert affected rollout");
+        let target = runtime
+            .db()
+            .store()
+            .get_collection("database_engine_rollouts")
+            .expect("rollout collection")
+            .query_all(|entity| {
+                crate::application::ports::entity_row_fields_snapshot(entity)
+                    .iter()
+                    .any(|(name, value)| name == "id" && value.as_text() == Some(AFFECTED_ID))
+            })
+            .into_iter()
+            .next()
+            .expect("affected rollout");
+        runtime.flush().expect("publish seed checkpoint");
+        target.id.raw()
+    };
+
+    {
+        let runtime = open();
+        let status = runtime
+            .index_statuses()
+            .into_iter()
+            .find(|status| {
+                status.collection.as_deref() == Some("database_engine_rollouts")
+                    && status.kind == "btree"
+            })
+            .expect("legacy index status before corruption");
+        assert_eq!(status.lifecycle_state, "ready");
+        assert!(status.queryable, "legacy v2 fixture must be queryable");
+        let equality = super::paged_btree_index::equality_storage_name(INDEX);
+        runtime
+            .db()
+            .store()
+            .rebuild_secondary_indices_on_next_checkpoint(
+                "database_engine_rollouts",
+                &[INDEX, equality.as_str()],
+            );
+        let _skip = crate::storage::unified::store::secondary_index::
+            checkpoint_secondary_indices_without_entity(
+                "database_engine_rollouts",
+                target_entity_id,
+            );
+        runtime
+            .checkpoint()
+            .expect("publish physically valid incomplete v2 indexes");
+        runtime
+            .graceful_shutdown(false)
+            .expect("close physically valid incomplete v2 fixture");
+    }
+
+    let physical = scrub_paged(&path).expect("physical scrub of incomplete v2 fixture");
+    assert!(
+        physical.trees.findings.is_empty(),
+        "missing postings must retain valid tree structure and checksums: {:?}",
+        physical.trees.findings
+    );
+    assert!(
+        physical.assets_verified,
+        "missing postings must leave physical assets valid"
+    );
+
+    {
+        let runtime = open();
+        let status = runtime
+            .index_statuses()
+            .into_iter()
+            .find(|status| {
+                status.collection.as_deref() == Some("database_engine_rollouts")
+                    && status.kind == "btree"
+            })
+            .expect("reopened legacy index status");
+        assert_eq!(status.lifecycle_state, "ready");
+        assert!(
+            status.queryable,
+            "incomplete v2 artifact remained falsely queryable"
+        );
+        let findings = runtime
+            .verify_persisted_indexes("database_engine_rollouts")
+            .expect("logical verification of incomplete v2 fixture");
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(findings.iter().all(|finding| {
+            finding.index == INDEX && finding.reason.contains("missing or invalid posting")
+        }));
+        let literal = runtime
+            .execute_query(LITERAL_QUERY)
+            .expect("legacy literal lookup");
+        assert_eq!(
+            literal.result.records.len(),
+            0,
+            "v2 ordered candidates remained authoritative for literal equality"
+        );
+        let parameterized = runtime
+            .execute_query_with_params(
+                "SELECT id,status FROM database_engine_rollouts WHERE id = $1",
+                &[Value::text(AFFECTED_ID)],
+            )
+            .expect("legacy parameterized lookup");
+        assert_eq!(
+            parameterized.result.records.len(),
+            0,
+            "v2 ordered candidates remained authoritative for parameterized equality"
+        );
+        let range = runtime
+            .execute_query(
+                "SELECT id,status FROM database_engine_rollouts \
+                 WHERE id >= 'er_' AND id < 'es_' ORDER BY id",
+            )
+            .expect("legacy range lookup");
+        assert_eq!(
+            range.result.records.len(),
+            9,
+            "v2 must reproduce the missing ordered posting"
+        );
+        let missed_update = runtime
+            .execute_query_with_params(
+                "UPDATE database_engine_rollouts SET status = 'missed-v2' WHERE id = $1",
+                &[Value::text(AFFECTED_ID)],
+            )
+            .expect("legacy DML lookup");
+        assert_eq!(
+            missed_update.affected_rows, 0,
+            "v2 equality candidates remained authoritative for DML"
+        );
+
+        // Refill both cache paths after DML invalidation. The v2 artifact
+        // supplies the real false miss seen by the control-plane query.
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        for query in [LITERAL_QUERY, L2_QUERY] {
+            let result = runtime.execute_query(query).expect("cache legacy miss");
+            assert!(result.result.records.is_empty(), "{query}");
+        }
+        let before_cached_read = runtime.result_cache_metrics();
+        assert!(runtime
+            .execute_query(LITERAL_QUERY)
+            .expect("cached legacy miss")
+            .result
+            .records
+            .is_empty());
+        assert_eq!(
+            runtime.result_cache_metrics().0,
+            before_cached_read.0 + 1,
+            "legacy miss must be cached before the lifecycle gate closes"
+        );
+
+        // Keep the literal in volatile L1 and evict the second query only from
+        // the process map, leaving its encoded Blob Cache entry in L2.
+        {
+            let mut cache = runtime.inner.result_blob_entries.write();
+            let literal_key = cache
+                .0
+                .iter()
+                .find_map(|(key, entry)| (entry.result.query == LITERAL_QUERY).then(|| key.clone()))
+                .expect("volatile L1 fixture entry");
+            let l2_key = cache
+                .0
+                .iter()
+                .find_map(|(key, entry)| (entry.result.query == L2_QUERY).then(|| key.clone()))
+                .expect("durable L2 fixture entry");
+            assert!(
+                !cache.4.contains(&l2_key),
+                "L2 fixture must be durably published"
+            );
+            cache.4.insert(literal_key);
+            assert!(cache.0.remove(&l2_key).is_some());
+            cache.1.retain(|key| key != &l2_key);
+            cache.4.remove(&l2_key);
+        }
+
+        // Model the exact gate-close -> invalidation window. Neither L1 nor a
+        // just-decoded L2 entry may replay the false miss; both must scan.
+        runtime
+            .index_store_ref()
+            .mark_collection_non_queryable("database_engine_rollouts");
+        let before_fallback = runtime.result_cache_metrics();
+        for query in [LITERAL_QUERY, L2_QUERY] {
+            let result = runtime.execute_query(query).expect("gated source scan");
+            assert_eq!(result.result.records.len(), 1, "{query}");
+        }
+        let after_fallback = runtime.result_cache_metrics();
+        assert_eq!(after_fallback.0, before_fallback.0);
+        assert_eq!(after_fallback.1, before_fallback.1 + 2);
+        runtime
+            .graceful_shutdown(false)
+            .expect("close incomplete v2 fixture without repair");
+    }
+    drop(legacy);
+
+    let runtime = open();
+    assert!(
+        runtime
+            .verify_persisted_indexes("database_engine_rollouts")
+            .expect("verify rebuilt indexes")
+            .is_empty(),
+        "cold open must rebuild both ordered and equality artifacts"
+    );
+    let range = runtime
+        .execute_query(
+            "SELECT id,status FROM database_engine_rollouts \
+             WHERE id >= 'er_' AND id < 'es_' ORDER BY id",
+        )
+        .expect("rebuilt range");
+    assert_eq!(range.result.records.len(), 10);
+    for result in [
+        runtime
+            .execute_query(&format!(
+                "SELECT id,status FROM database_engine_rollouts WHERE id = '{AFFECTED_ID}'"
+            ))
+            .expect("literal lookup"),
+        runtime
+            .execute_query_with_params(
+                "SELECT id,status FROM database_engine_rollouts WHERE id = $1",
+                &[Value::text(AFFECTED_ID)],
+            )
+            .expect("parameterized lookup"),
+    ] {
+        assert_eq!(result.result.records.len(), 1);
+    }
+    let updated = runtime
+        .execute_query_with_params(
+            "UPDATE database_engine_rollouts SET status = 'failed' WHERE id = $1",
+            &[Value::text(AFFECTED_ID)],
+        )
+        .expect("updated through rebuilt equality index");
+    assert_eq!(updated.affected_rows, 1);
+    runtime
+        .graceful_shutdown(false)
+        .expect("publish current indexes");
+    drop(runtime);
+
+    let pager = Pager::open(
+        &path,
+        PagerConfig {
+            read_only: true,
+            create: false,
+            ..PagerConfig::default()
+        },
+    )
+    .expect("current pager");
+    let manifest = pager.read_manifest_page().expect("current manifest");
+    let resume = reddb_file::native_resume::decode_catalog_resume(manifest.content())
+        .expect("decode current catalog")
+        .expect("current catalog");
+    let collection = &resume.collections["database_engine_rollouts"];
+    let equality = super::paged_btree_index::equality_storage_name(INDEX);
+    for name in [INDEX, equality.as_str()] {
+        assert_eq!(
+            collection.secondary_indices[name].codec_version,
+            crate::storage::unified::store::secondary_index::RUNTIME_SECONDARY_INDEX_CODEC_VERSION,
+            "{name}: current generation"
+        );
+    }
+}
+
+#[test]
+fn non_queryable_index_lifecycle_invalidates_cached_candidates_and_falls_back_to_scan() {
+    const TABLE: &str = "lifecycle_gate_rows";
+    const INDEX: &str = "lifecycle_gate_rows_id";
+    const TARGET: &str = "row-target";
+    const QUERY: &str = "SELECT id,status FROM lifecycle_gate_rows WHERE id = 'row-target'";
+
+    let directory = tempfile::tempdir().expect("lifecycle gate directory");
+    let options = RedDBOptions::persistent(directory.path().join("lifecycle-gate.rdb"))
+        .with_memory_budget(64 * 1024 * 1024)
+        .with_storage_profile(
+            crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+        )
+        .expect("lifecycle gate profile");
+    let open = || {
+        crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options.clone())
+        })
+        .expect("lifecycle gate runtime")
+    };
+    let runtime = open();
+    for sql in [
+        "CREATE TABLE lifecycle_gate_rows (id TEXT, status TEXT)",
+        "CREATE INDEX lifecycle_gate_rows_id ON lifecycle_gate_rows (id) USING BTREE",
+        "INSERT INTO lifecycle_gate_rows (id,status) VALUES ('row-other','complete')",
+        "INSERT INTO lifecycle_gate_rows (id,status) VALUES ('row-target','running')",
+        "SET CONFIG runtime.result_cache.enabled = true",
+    ] {
+        runtime.execute_query(sql).expect(sql);
+    }
+    runtime.flush().expect("publish lifecycle gate fixture");
+    runtime
+        .graceful_shutdown(false)
+        .expect("close lifecycle gate fixture");
+    drop(runtime);
+
+    let runtime = open();
+    assert!(runtime
+        .index_store_ref()
+        .list_indices(TABLE)
+        .iter()
+        .any(|index| index.name == INDEX));
+    assert!(super::query_exec::runtime_indexes_queryable(
+        TABLE,
+        runtime.index_store_ref()
+    ));
+    let first = runtime
+        .execute_query(QUERY)
+        .expect("initial indexed lookup");
+    assert_eq!(first.result.records.len(), 1);
+    let before_cached_read = runtime.result_cache_metrics();
+    let cached = runtime.execute_query(QUERY).expect("cached indexed lookup");
+    assert_eq!(cached.result.records.len(), 1);
+    let after_cached_read = runtime.result_cache_metrics();
+    assert_eq!(
+        after_cached_read.0,
+        before_cached_read.0 + 1,
+        "second result must come from the result cache"
+    );
+
+    let ddl_epoch = runtime.ddl_epoch();
+    runtime.close_runtime_index_collection_gate(TABLE);
+    assert!(
+        runtime.ddl_epoch() > ddl_epoch,
+        "plan cache was not invalidated"
+    );
+    assert!(
+        !super::query_exec::runtime_indexes_queryable(TABLE, runtime.index_store_ref()),
+        "collection candidate gate must be closed"
+    );
+    let before_fallback = runtime.result_cache_metrics();
+    let fallback = runtime.execute_query(QUERY).expect("scan fallback select");
+    assert_eq!(fallback.result.records.len(), 1);
+    let after_fallback = runtime.result_cache_metrics();
+    assert_eq!(after_fallback.0, before_fallback.0);
+    assert_eq!(after_fallback.1, before_fallback.1 + 1);
+    let parameterized = runtime
+        .execute_query_with_params(
+            "SELECT id,status FROM lifecycle_gate_rows WHERE id = $1",
+            &[Value::text(TARGET)],
+        )
+        .expect("parameterized scan fallback select");
+    assert_eq!(parameterized.result.records.len(), 1);
+    let range = runtime
+        .execute_query(
+            "SELECT id,status FROM lifecycle_gate_rows \
+             WHERE id >= 'row-target' AND id <= 'row-target'",
+        )
+        .expect("range scan fallback select");
+    assert_eq!(range.result.records.len(), 1);
+
+    let runtime = Arc::new(runtime);
+    let start = Arc::new(std::sync::Barrier::new(7));
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let mut workers = Vec::new();
+    for (name, query) in [
+        ("literal", QUERY),
+        (
+            "range",
+            "SELECT id,status FROM lifecycle_gate_rows \
+             WHERE id >= 'row-target' AND id <= 'row-target'",
+        ),
+    ] {
+        let runtime = Arc::clone(&runtime);
+        let start = Arc::clone(&start);
+        let done = done_tx.clone();
+        workers.push(std::thread::spawn(move || {
+            start.wait();
+            let result = runtime
+                .execute_query(query)
+                .map(|result| result.result.records.len())
+                .map_err(|error| error.to_string());
+            done.send((name, result)).expect("report SELECT result");
+        }));
+    }
+    {
+        let runtime = Arc::clone(&runtime);
+        let start = Arc::clone(&start);
+        let done = done_tx.clone();
+        workers.push(std::thread::spawn(move || {
+            start.wait();
+            let result = runtime
+                .execute_query_with_params(
+                    "SELECT id,status FROM lifecycle_gate_rows WHERE id = $1",
+                    &[Value::text(TARGET)],
+                )
+                .map(|result| result.result.records.len())
+                .map_err(|error| error.to_string());
+            done.send(("parameterized", result))
+                .expect("report parameterized SELECT result");
+        }));
+    }
+    {
+        let runtime = Arc::clone(&runtime);
+        let start = Arc::clone(&start);
+        let done = done_tx.clone();
+        workers.push(std::thread::spawn(move || {
+            start.wait();
+            let result = runtime
+                .execute_query_with_params(
+                    "UPDATE lifecycle_gate_rows SET status = 'failed' WHERE id = $1",
+                    &[Value::text(TARGET)],
+                )
+                .map(|result| usize::try_from(result.affected_rows).expect("affected row count"))
+                .map_err(|error| error.to_string());
+            done.send(("update", result)).expect("report UPDATE result");
+        }));
+    }
+    for name in ["stale", "building"] {
+        let runtime = Arc::clone(&runtime);
+        let start = Arc::clone(&start);
+        let done = done_tx.clone();
+        workers.push(std::thread::spawn(move || {
+            start.wait();
+            runtime.close_runtime_index_collection_gate(TABLE);
+            done.send((name, Ok(1)))
+                .expect("report lifecycle transition");
+        }));
+    }
+    drop(done_tx);
+    start.wait();
+    for _ in 0..6 {
+        let (operation, result) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("lifecycle/query race must not deadlock");
+        assert_eq!(
+            result.unwrap_or_else(|error| panic!("{operation}: {error}")),
+            1
+        );
+    }
+    for worker in workers {
+        worker.join().expect("lifecycle/query race worker");
+    }
+    assert!(
+        !super::query_exec::runtime_indexes_queryable(TABLE, runtime.index_store_ref()),
+        "racing non-queryable transitions must keep the gate closed"
+    );
+
+    let updated = runtime
+        .execute_query_with_params(
+            "SELECT id,status FROM lifecycle_gate_rows WHERE id = $1",
+            &[Value::text(TARGET)],
+        )
+        .expect("updated row remains visible through scan fallback");
+    assert_eq!(updated.result.records.len(), 1);
+    assert_eq!(
+        updated.result.records[0].get("status"),
+        Some(&Value::text("failed"))
+    );
+
+    runtime
+        .rebuild_runtime_indexes_for_table(TABLE)
+        .expect("repair runtime indexes while gate is closed");
+    runtime.refresh_runtime_index_queryability();
+    assert!(
+        super::query_exec::runtime_indexes_queryable(TABLE, runtime.index_store_ref()),
+        "ready transition must reopen the collection candidate gate"
+    );
+    let repaired = runtime
+        .execute_query(QUERY)
+        .expect("repaired indexed lookup");
+    assert_eq!(repaired.result.records.len(), 1);
+    assert_eq!(
+        repaired.result.records[0].get("status"),
+        Some(&Value::text("failed"))
+    );
+    runtime
+        .graceful_shutdown(false)
+        .expect("close lifecycle gate runtime");
+}
+
+#[test]
 fn unique_indexes_survive_process_death_during_private_rebuild() {
     const CHILD_PATH: &str = "REDDB_UNIQUE_REBUILD_CRASH_PATH";
     const CHILD_HOOK: &str = "REDDB_TEST_EXIT_DURING_UNIQUE_INDEX_REBUILD";

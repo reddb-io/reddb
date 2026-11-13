@@ -6,9 +6,9 @@
 //! The executor calls `lookup()` with a collection, column, and value —
 //! the IndexStore finds the right index and returns matching entity IDs.
 
-use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -1119,6 +1119,10 @@ pub struct IndexStore {
     pub(super) paged_btrees: RwLock<PagedBtreeProviders>,
     /// Registry of all created indices: (collection, index_name) → metadata
     registry: RwLock<HashMap<(String, String), RegisteredIndex>>,
+    /// Collections whose physical candidate artifacts are not authoritative.
+    /// Reconciled from the catalog lifecycle outside query hot paths.
+    non_queryable_collections: RwLock<HashSet<String>>,
+    lifecycle_transition: Mutex<()>,
     // Keep identities stable across DROP/recreate, including queued writers.
     // The memory sampler never takes a topology lock.
     topology: RwLock<HashMap<String, std::sync::Arc<RwLock<()>>>>,
@@ -1153,6 +1157,8 @@ impl IndexStore {
             sorted: SortedIndexManager::new(),
             paged_btrees: RwLock::new(HashMap::new()),
             registry: RwLock::new(HashMap::new()),
+            non_queryable_collections: RwLock::new(HashSet::new()),
+            lifecycle_transition: Mutex::new(()),
             topology: RwLock::new(HashMap::new()),
             indexed_mutations_active: AtomicUsize::new(0),
             indexed_mutation_generation: AtomicU64::new(0),
@@ -1176,6 +1182,27 @@ impl IndexStore {
 
     pub(crate) fn indexed_mutation_generation(&self) -> u64 {
         self.indexed_mutation_generation.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn collection_indexes_queryable(&self, collection: &str) -> bool {
+        !self.non_queryable_collections.read().contains(collection)
+    }
+
+    pub(crate) fn lifecycle_transition(&self) -> MutexGuard<'_, ()> {
+        self.lifecycle_transition.lock()
+    }
+
+    pub(crate) fn mark_collection_non_queryable(&self, collection: &str) {
+        self.non_queryable_collections
+            .write()
+            .insert(collection.to_string());
+    }
+
+    pub(crate) fn replace_non_queryable_collections(
+        &self,
+        collections: impl IntoIterator<Item = String>,
+    ) {
+        *self.non_queryable_collections.write() = collections.into_iter().collect();
     }
 
     /// The caller exclusively fences collection topology until publication.

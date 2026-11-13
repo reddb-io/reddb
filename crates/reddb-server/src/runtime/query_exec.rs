@@ -50,6 +50,13 @@ use reddb_engine::query::runtime::aggregation::aggregate_value_to_f64;
 
 pub(crate) use row_stream::{RowBufferArena, RowStream, DEFAULT_HIGH_WATER_MARK};
 
+pub(crate) fn runtime_indexes_queryable(
+    table: &str,
+    index_store: &super::index_store::IndexStore,
+) -> bool {
+    index_store.collection_indexes_queryable(table)
+}
+
 /// Public table-query entry. Produces its result through the #806
 /// bounded-memory streaming channel ([`RowStream`]) and collects the
 /// chunks internally, so the existing `/query` route consumes the new
