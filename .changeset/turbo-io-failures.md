@@ -1,5 +1,5 @@
 ---
-"reddb-io-server": patch
+"@reddb-io/cli": patch
 ---
 
 Return vector.turbo WAL and extent I/O failures instead of acknowledging them, while preserving
