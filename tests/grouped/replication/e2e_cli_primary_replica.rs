@@ -584,7 +584,7 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
     wait_for_health(&mut primary, primary_http, "leased primary");
     for query in [
         "CREATE TABLE failover_probe (id INTEGER, name TEXT)",
-        "INSERT INTO failover_probe (id, name) VALUES (1, 'before-promotion')",
+        "INSERT INTO failover_probe (id, name) VALUES (1, 'initial-snapshot')",
     ] {
         let body = format!(r#"{{"query":"{query}"}}"#);
         let (status, response) = http_request(primary_http, "POST", "/query", Some(&body));
@@ -609,7 +609,7 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         );
         let (_, replication) = http_request(replica_http, "GET", "/replication/status", None);
         if status == 200
-            && body.contains("before-promotion")
+            && body.contains("initial-snapshot")
             && replication.contains("\"state\":\"healthy\"")
         {
             break;
@@ -620,6 +620,17 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+
+    // The candidate must advance beyond the canonical outbox in its initial
+    // snapshot. Promotion must restore this later, genuinely applied WAL LSN.
+    let (status, update) = http_request(
+        primary_http,
+        "POST",
+        "/query",
+        Some(r#"{"query":"UPDATE failover_probe SET name = 'before-promotion' WHERE id = 1"}"#),
+    );
+    assert_eq!(status, 200, "post-bootstrap source update: {update}");
+    wait_for_follower_row(replica_http, 1, "before-promotion");
 
     // Keep another durable replica at the old primary's applied frontier.
     // Reconnecting it after failover must deliver the next write via WAL.
@@ -824,6 +835,11 @@ fn cli_manual_promotion_preserves_data_and_fences_the_old_primary() {
     assert!(
         !catalog.slots.is_empty(),
         "real follower must persist its slot"
+    );
+    assert_eq!(
+        catalog.slots.len(),
+        1,
+        "the promoted node must not retain its own former upstream slot: {catalog:?}"
     );
     assert!(catalog.slots.iter().all(|slot| slot.timeline.0 == 2));
     backup
