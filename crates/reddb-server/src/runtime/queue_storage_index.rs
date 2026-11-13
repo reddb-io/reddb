@@ -741,9 +741,9 @@ pub(super) fn capacity_reached(
 ) -> RedDBResult<Option<bool>> {
     let snapshot = super::impl_core::capture_current_snapshot();
     if runtime.is_rls_enabled(queue)
-        || snapshot
-            .as_ref()
-            .is_some_and(|context| context.serializable_reader.is_some())
+        || snapshot.as_ref().is_some_and(|context| {
+            context.serializable_reader.is_some() || context.branch.is_some()
+        })
     {
         return Ok(None);
     }

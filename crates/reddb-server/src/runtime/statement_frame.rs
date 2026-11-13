@@ -110,6 +110,7 @@ pub(crate) trait ReadFrame {
     /// Complete visibility context, including the reader's savepoint writes.
     fn snapshot_context(&self, runtime: &RedDBRuntime) -> SnapshotContext {
         SnapshotContext {
+            branch: None,
             snapshot: self.snapshot().clone(),
             manager: runtime.inner.transaction_state.snapshot_manager(),
             own_xids: HashSet::new(),
@@ -297,6 +298,7 @@ fn classify_lock_intent(query: &str) -> LockIntent {
 }
 
 pub(super) struct StatementExecutionFrame {
+    branch: Option<Arc<reddb_engine::transaction::read::BranchReadView>>,
     tx_local_tenant: Option<Option<String>>,
     snapshot: Snapshot,
     snapshot_retention: RefCell<Option<SnapshotRetentionGuard>>,
@@ -417,13 +419,22 @@ impl StatementExecutionFrame {
                 ctx.isolation == crate::storage::transaction::IsolationLevel::Serializable
             })
             .map(|ctx| ctx.xid);
-        let (snapshot, as_of_floor, snapshot_retention) =
-            runtime.statement_snapshot(query, identity_source)?;
+        let (snapshot, as_of_floor, snapshot_retention, branch) = {
+            let store = runtime.db().store();
+            let _publication = store.vault_publication_lock.lock();
+            let (snapshot, as_of_floor, retention) =
+                runtime.statement_snapshot(query, identity_source)?;
+            let as_of = peek_top_level_as_of_with_table(query).map(|(spec, _)| spec);
+            let branch = runtime.vcs_branch_read_view(&snapshot, as_of.as_ref())?;
+            (snapshot, as_of_floor, retention, branch)
+        };
         if as_of_floor.is_some() {
             own_xids.clear();
         }
-        let requires_index_fallback =
-            as_of_floor.is_some() || tx_context.is_some() || graph_insert_xid.is_some();
+        let requires_index_fallback = as_of_floor.is_some()
+            || tx_context.is_some()
+            || graph_insert_xid.is_some()
+            || branch.is_some();
         let (cache_key, is_volatile_query) = match identity_source {
             StatementIdentity::Text(_) => (
                 result_cache_key(query),
@@ -438,6 +449,7 @@ impl StatementExecutionFrame {
         // Branch and tag references can move without changing the query text.
         // The result cache key does not include the resolved snapshot.
         let cache_safe = as_of_floor.is_none()
+            && branch.is_none()
             && graph_insert_xid.is_none()
             && runtime.result_cache_safe(conn_id);
         // Capture identity + effective scope under the same
@@ -477,6 +489,7 @@ impl StatementExecutionFrame {
         };
 
         Ok(Self {
+            branch,
             tx_local_tenant,
             snapshot,
             snapshot_retention: RefCell::new(Some(snapshot_retention)),
@@ -514,6 +527,7 @@ impl StatementExecutionFrame {
             _secret_store_guard: SecretStoreGuard::install(runtime),
             _kv_store_guard: KvStoreGuard::install(runtime.inner.auth_store.read().clone()),
             _snapshot_guard: CurrentSnapshotGuard::install(SnapshotContext {
+                branch: self.branch.clone(),
                 snapshot: self.snapshot.clone(),
                 manager: runtime.inner.transaction_state.snapshot_manager(),
                 own_xids: self.own_xids.clone(),
@@ -871,6 +885,7 @@ impl StatementExecutionFrame {
 impl ReadFrame for StatementExecutionFrame {
     fn snapshot_context(&self, runtime: &RedDBRuntime) -> SnapshotContext {
         SnapshotContext {
+            branch: self.branch.clone(),
             snapshot: self.snapshot.clone(),
             manager: runtime.inner.transaction_state.snapshot_manager(),
             own_xids: self.own_xids.clone(),
@@ -958,6 +973,7 @@ impl ReadFrame for EffectiveScope {
         self.captured_snapshot
             .clone()
             .unwrap_or_else(|| SnapshotContext {
+                branch: None,
                 snapshot: self.snapshot.clone(),
                 manager: runtime.inner.transaction_state.snapshot_manager(),
                 own_xids: HashSet::new(),

@@ -1352,6 +1352,7 @@ impl RedDBRuntime {
                 }
                 let batch_result = batch
                     .with_graph_xmin(self.current_xid().or_else(|| self.graph_insert_xid()))
+                    .with_graph_branch(self.vcs_writer_epoch(&query.table)?)
                     .execute()
                     .map_err(|err| RedDBError::Internal(format!("{err:?}")))?;
                 let (ids, entity_kind) = match query.entity_type {
@@ -1741,6 +1742,23 @@ impl RedDBRuntime {
     pub(crate) fn insert_timeseries_point(
         &self,
         collection: &str,
+        fields: Vec<(String, Value)>,
+        metadata: Vec<(String, MetadataValue)>,
+    ) -> RedDBResult<EntityId> {
+        if self.vcs_is_versioned(collection)? {
+            let store = self.db().store();
+            let _publication = store.vault_publication_lock.lock();
+            self.with_versioned_graph_insert(|| {
+                self.insert_timeseries_point_inner(collection, fields, metadata)
+            })
+        } else {
+            self.insert_timeseries_point_inner(collection, fields, metadata)
+        }
+    }
+
+    fn insert_timeseries_point_inner(
+        &self,
+        collection: &str,
         mut fields: Vec<(String, Value)>,
         mut metadata: Vec<(String, MetadataValue)>,
     ) -> RedDBResult<EntityId> {
@@ -1891,7 +1909,7 @@ impl RedDBRuntime {
         // MVCC #30: stamp xmin with the active tx xid (inside a tx)
         // or an autocommit xid (allocated and committed up-front so
         // future snapshots see the row as soon as it lands).
-        let writer_xid = match self.current_xid() {
+        let writer_xid = match self.current_xid().or_else(|| self.graph_insert_xid()) {
             Some(xid) => xid,
             None => {
                 let mgr = self.snapshot_manager();
@@ -1901,6 +1919,7 @@ impl RedDBRuntime {
             }
         };
         entity.set_xmin(writer_xid);
+        self.stamp_vcs_creation(collection, &mut entity)?;
 
         let store = self.inner.db.store();
         let id = store
@@ -1912,11 +1931,11 @@ impl RedDBRuntime {
             .map_err(RedDBError::Internal)?;
 
         if !metadata.is_empty() {
-            let _ = store.set_metadata(
+            store.set_metadata(
                 collection,
                 id,
                 Metadata::with_fields(metadata.into_iter().collect()),
-            );
+            )?;
         }
 
         let _ = self.inner.db.hypertables().route(collection, timestamp_ns);
@@ -2226,6 +2245,7 @@ impl RedDBRuntime {
                     crate::runtime::impl_core::capture_current_snapshot().unwrap_or_else(|| {
                         let manager = self.snapshot_manager();
                         crate::runtime::impl_core::SnapshotContext {
+                            branch: None,
                             snapshot: manager.fresh_read_snapshot(),
                             manager,
                             own_xids: std::collections::HashSet::new(),
@@ -2234,6 +2254,7 @@ impl RedDBRuntime {
                         }
                     });
                 ctx.snapshot = ctx.manager.fresh_read_snapshot();
+                ctx.branch = self.vcs_branch_read_view(&ctx.snapshot, None)?;
                 ctx.requires_index_fallback |= !ctx.snapshot.in_progress.is_empty();
                 Some(crate::runtime::impl_core::CurrentSnapshotGuard::install(
                     ctx,

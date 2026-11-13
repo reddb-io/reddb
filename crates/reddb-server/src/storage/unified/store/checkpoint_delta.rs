@@ -224,18 +224,27 @@ impl UnifiedStore {
                 }
                 let raw =
                     Self::serialize_entity_record(entity, metadata.as_ref(), self.format_version());
-                let projected = if matches!(
+                let normalize_branch = entity.branch_version().is_some_and(|branch| {
+                    branch
+                        .deletions
+                        .iter()
+                        .any(|(_, xid)| current.excluded_xids.contains(xid))
+                });
+                let normalize_xmax = matches!(
                     entity.data,
                     EntityData::Row(_)
                         | EntityData::Vector(_)
                         | EntityData::Node(_)
                         | EntityData::Edge(_)
                         | EntityData::QueueMessage(_)
-                ) && current.excluded_xids.contains(&entity.xmax)
-                {
+                ) && current.excluded_xids.contains(&entity.xmax);
+                let projected = if normalize_xmax || normalize_branch {
                     defer = true;
                     let mut normalized = entity.clone();
-                    normalized.xmax = 0;
+                    if normalize_xmax {
+                        normalized.xmax = 0;
+                    }
+                    normalized.retain_branch_deletions(|xid| !current.excluded_xids.contains(&xid));
                     Some(Self::serialize_entity_record(
                         &normalized,
                         metadata.as_ref(),

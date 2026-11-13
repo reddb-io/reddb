@@ -7,7 +7,7 @@ mod prometheus;
 
 use reddb::application::{
     Author, CheckoutInput, CheckoutTarget, CreateBranchInput, CreateCommitInput, MergeInput,
-    MergeOpts, MergeStrategy, StatusInput,
+    MergeOpts, MergeStrategy, ResetInput, ResetMode, StatusInput,
 };
 use reddb::catalog::CollectionModel;
 use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
@@ -125,22 +125,92 @@ fn check_merge_guard(model: CollectionModel, create: &str, mutation: Option<&str
         assert_eq!(main.target, base.hash);
     };
     for strategy in [MergeStrategy::Auto, MergeStrategy::NoFastForward] {
-        let error = runtime
-            .vcs_merge(MergeInput {
-                connection_id: 8201,
-                from: "agent".into(),
-                opts: MergeOpts {
-                    strategy,
-                    ..MergeOpts::default()
-                },
-                author: author(),
-            })
-            .expect_err("unapplied data must not be published");
+        let result = runtime.vcs_merge(MergeInput {
+            connection_id: 8201,
+            from: "agent".into(),
+            opts: MergeOpts {
+                strategy,
+                ..MergeOpts::default()
+            },
+            author: author(),
+        });
+        if matches!(
+            model,
+            CollectionModel::Table
+                | CollectionModel::Document
+                | CollectionModel::Graph
+                | CollectionModel::Vector
+                | CollectionModel::Kv
+                | CollectionModel::Mixed
+                | CollectionModel::TimeSeries
+        ) {
+            let outcome = result.expect("fast-forward applies source data");
+            assert_eq!(outcome.fast_forward, strategy == MergeStrategy::Auto);
+            assert_eq!(
+                runtime
+                    .scan_collection("items", None, 10)
+                    .expect("merged scan")
+                    .total,
+                1
+            );
+            runtime
+                .vcs_reset(ResetInput {
+                    connection_id: 8201,
+                    target: base.hash.clone(),
+                    mode: ResetMode::Hard,
+                })
+                .expect("hard reset restores base data");
+            assert_eq!(
+                runtime
+                    .scan_collection("items", None, 10)
+                    .expect("reset scan")
+                    .total,
+                0
+            );
+            assert_head();
+            continue;
+        }
+        let error = result.expect_err("unapplied data must not be published");
         assert!(
             error.to_string().contains("applying data"),
             "{model:?}: {error}"
         );
         assert_head();
+    }
+    if matches!(
+        model,
+        CollectionModel::Table
+            | CollectionModel::Document
+            | CollectionModel::Graph
+            | CollectionModel::Vector
+            | CollectionModel::Kv
+            | CollectionModel::Mixed
+            | CollectionModel::TimeSeries
+    ) {
+        let picked = runtime
+            .vcs_cherry_pick(8201, &source.hash, author())
+            .expect("cherry-pick applies data")
+            .merge_commit
+            .expect("pick commit");
+        assert_eq!(
+            runtime
+                .scan_collection("items", None, 10)
+                .expect("picked data")
+                .total,
+            1
+        );
+        runtime
+            .vcs_revert(8201, &picked.hash, author())
+            .expect("revert applies inverse delta");
+        assert_eq!(
+            runtime
+                .scan_collection("items", None, 10)
+                .expect("reverted data")
+                .total,
+            0
+        );
+        clear_current_connection_id();
+        return;
     }
     let error = runtime
         .vcs_cherry_pick(8201, &source.hash, author())

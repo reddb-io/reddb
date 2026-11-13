@@ -159,6 +159,7 @@ impl RedDBRuntime {
                 .then_some(context.xid)
         });
         SnapshotContext {
+            branch: None,
             snapshot: self.current_snapshot(),
             manager: self.snapshot_manager(),
             own_xids: self.own_transaction_xids(),

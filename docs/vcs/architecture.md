@@ -49,13 +49,25 @@ the [overview](./overview.md) first if you haven't.
    there are no exclusions, before releasing the temporary transaction.
    This horizon prevents reclamation of versions the snapshot can see.
 3. Mark the temporary xid committed.
-4. `save_commit(...)` — write the canonical `red_commits` row with
+4. Build the canonical `red_commits` row with
    `id = sha256(...)`, `root_xid = xid`, the snapshot's in-progress xids,
    `parents`, `height`, `author`, `committer`, `message`, `timestamp_ms`.
-5. `save_ref(branch, hash)` — advance the current branch ref to
-   the new commit hash (upsert semantics).
-6. `upsert_workset(conn, branch, base = hash, working_xid = xid)`
-   — update per-connection working set.
+5. Publish the commit, branch reference and connection workset in one WAL
+   batch. Merges include inserted versions and branch deletion stamps in
+   the same publication. A failed publication restores the previous rows
+   and releases the temporary snapshot pin.
+
+Each branch has a writer epoch and a frozen snapshot for every inherited
+epoch. New versions record their origin; deletions record the branch epoch
+that made them. Visibility checks both this lineage and MVCC. Fast-forward
+and hard reset install a fresh writer epoch so later writes cannot change
+the source branch or an already captured commit. Reads that cannot prove
+an index respects this view fall back to a snapshot-filtered scan.
+
+Versioned collections use native entity format V13 to persist provenance.
+The reader retains V1–V12 compatibility. Opting in upgrades the database;
+older binaries cannot read the upgraded format. Disabling history is
+rejected while versions retain shared branch provenance.
 
 On reopen, RedDB restores the pinned horizons from the stored commits.
 Commits created before snapshot exclusions were recorded contain only the
@@ -125,8 +137,9 @@ append-only VCS metadata and always accept `AS OF`. The
 
 ### Retroactive semantics
 
-Opting in flips the gate only. No data rewrite, no catalog
-migration, no index rebuild. A collection that already has
+Opting in stamps existing entities with the main epoch and persists the
+V13 format. It cannot recover versions already overwritten or reclaimed.
+A collection that already has
 commits pinning xids *before* the opt-in becomes queryable at
 those commits the moment the flag lands — the xids are still
 pinned, the MVCC row versions are still in storage, only the

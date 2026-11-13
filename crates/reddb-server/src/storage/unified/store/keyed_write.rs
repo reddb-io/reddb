@@ -93,6 +93,7 @@ impl UnifiedStore {
             entity.id = self.next_entity_id();
             let id = entity.id;
             self.publish_rows(RowPublication {
+                replacements: Vec::new(),
                 inserts: vec![(collection.to_string(), entity, metadata)],
                 deletes: previous
                     .into_iter()

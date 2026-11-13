@@ -19,6 +19,7 @@ use reddb_types::Value;
 
 fn context(state: &TransactionState, connection: u64, serializable: bool) -> SnapshotContext {
     SnapshotContext {
+        branch: None,
         snapshot: state.current_snapshot(connection),
         manager: state.snapshot_manager(),
         own_xids: state.own_xids(connection),
@@ -260,6 +261,7 @@ fn entity_logical_version_selection() {
         1024
     );
     let fresh = SnapshotContext {
+        branch: None,
         snapshot: state.snapshot_manager().fresh_read_snapshot(),
         ..captured.clone()
     };

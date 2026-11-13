@@ -59,6 +59,11 @@ impl RedDBRuntime {
             // committed, rather than overwriting an older snapshot's xmax.
             if active_xid.is_none() {
                 context.snapshot = context.manager.fresh_read_snapshot();
+                if let Some(view) = context.branch.as_mut() {
+                    let view = Arc::make_mut(view);
+                    view.epochs
+                        .insert(view.writer_epoch, context.snapshot.clone());
+                }
             }
             context
         });
@@ -90,7 +95,7 @@ impl RedDBRuntime {
                 let visible = if matches!(entity.kind, crate::storage::EntityKind::TableRow { .. })
                 {
                     resolver.resolve_candidate(&entity).is_some()
-                } else if versioned_vector {
+                } else if versioned_vector || versioned_graph {
                     resolver.resolve_read_candidate(&entity).is_some()
                 } else {
                     entity.xmax == 0

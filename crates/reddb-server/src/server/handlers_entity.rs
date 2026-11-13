@@ -1600,6 +1600,7 @@ mod tests {
         }
         {
             let _snapshot = CurrentSnapshotGuard::install(SnapshotContext {
+                branch: None,
                 snapshot: Snapshot {
                     xid: 10,
                     in_progress: HashSet::from([4]),

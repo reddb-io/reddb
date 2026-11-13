@@ -1433,6 +1433,8 @@ impl RedDBRuntime {
 
                 let (kind, msg) = match ctl {
                     TxnControl::Begin(requested_isolation) => {
+                        let store = self.inner.db.store();
+                        let _publication = store.vault_publication_lock.lock();
                         if self.inner.transaction_state.in_transaction(conn_id) {
                             return Err(RedDBError::Query("transaction already active".into()));
                         }

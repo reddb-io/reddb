@@ -90,6 +90,9 @@ mod e2e_vcs_opt_in;
 #[path = "vcs/e2e_vcs_native_visibility.rs"]
 mod e2e_vcs_native_visibility;
 
+#[path = "vcs/e2e_vcs_branch_models.rs"]
+mod e2e_vcs_branch_models;
+
 #[path = "vcs/e2e_vcs_merge_guards.rs"]
 mod e2e_vcs_merge_guards;
 

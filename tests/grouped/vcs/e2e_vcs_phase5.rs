@@ -79,7 +79,7 @@ fn cherry_pick_creates_new_commit_on_head() {
     let pick = outcome.merge_commit.expect("picked commit present");
     assert_eq!(pick.parents, vec![c1.clone()]);
     assert!(pick.message.starts_with("cherry-pick: "));
-    assert!(outcome.merge_state_id.as_ref().unwrap().starts_with("cp:"));
+    assert!(outcome.merge_state_id.is_none());
 }
 
 #[test]
@@ -199,11 +199,7 @@ fn non_ff_merge_records_conflicts_count() {
     // count must be zero — commit-graph divergence alone is not a
     // conflict.
     assert_eq!(outcome.conflicts.len(), 0);
-    let msid = outcome.merge_state_id.unwrap();
-    // conflicts_list reads back what materialize_merge_conflicts
-    // wrote to red_conflicts; should match outcome.conflicts.
-    let listed = vcs(&rt).conflicts_list(&msid).expect("conflicts_list");
-    assert_eq!(listed.len(), 0);
+    assert!(outcome.merge_state_id.is_none());
 }
 
 #[test]

@@ -88,10 +88,15 @@ impl<'a> KvReadResolver<'a> {
         let _publication = manager
             .has_backing()
             .then(|| store.vault_publication_lock.lock());
-        let snapshot = if self.versioned {
-            super::impl_core::capture_current_snapshot()
+        let (snapshot, _retention) = if self.versioned {
+            if let Some(snapshot) = super::impl_core::capture_current_snapshot() {
+                (Some(snapshot), None)
+            } else {
+                let (snapshot, retention) = self.runtime.native_read_snapshot()?;
+                (Some(snapshot), Some(retention))
+            }
         } else {
-            None
+            (None, None)
         };
         manager
             .try_project_key_entity(

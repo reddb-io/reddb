@@ -195,6 +195,15 @@ impl BatchBuilder {
         self
     }
 
+    pub(crate) fn with_graph_branch(mut self, branch: Option<u64>) -> Self {
+        if let Some(epoch) = branch {
+            for (_, entity, _) in self.nodes.iter_mut().chain(self.edges.iter_mut()) {
+                entity.set_branch_origin(epoch);
+            }
+        }
+        self
+    }
+
     /// Execute the batch
     pub fn execute(self) -> Result<BatchResult, DevXError> {
         let mut inserted_nodes = Vec::new();

@@ -1092,6 +1092,7 @@ impl RedDBRuntime {
                     let id = entity.id;
                     store
                         .publish_rows(crate::storage::unified::store::RowPublication {
+                            replacements: Vec::new(),
                             inserts: vec![(queue.clone(), entity, None)],
                             deletes: Vec::new(),
                         })

@@ -209,7 +209,7 @@ impl BootSystemWalPlan {
                 .checked_add(1)
                 .ok_or("recovered sequence IDs are exhausted")?,
         );
-        self.xid_high = self.xid_high.max(entity.xmin).max(entity.xmax);
+        self.xid_high = self.xid_high.max(entity.max_transaction_id());
         Ok(())
     }
 

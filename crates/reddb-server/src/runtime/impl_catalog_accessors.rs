@@ -181,7 +181,7 @@ impl RedDBRuntime {
         let read_bytes = usize::try_from(self.memory_budget().resolved_bytes / 16)
             .unwrap_or(usize::MAX)
             .clamp(1, 16 * 1024 * 1024);
-        let (snapshot, _retention) = self.native_read_snapshot();
+        let (snapshot, _retention) = self.native_read_snapshot()?;
         let _snapshot_guard = super::impl_core::CurrentSnapshotGuard::install(snapshot.clone());
         let (total, items) = manager.try_page_in_id_order_at_snapshot(
             Some(&snapshot),
@@ -220,7 +220,7 @@ impl RedDBRuntime {
         let Some(manager) = store.get_collection(collection) else {
             return Ok(None);
         };
-        let (snapshot, _retention) = self.native_read_snapshot();
+        let (snapshot, _retention) = self.native_read_snapshot()?;
         let _snapshot_guard = super::impl_core::CurrentSnapshotGuard::install(snapshot.clone());
         let read_bytes = usize::try_from(self.memory_budget().resolved_bytes / 16)
             .unwrap_or(usize::MAX)
@@ -255,25 +255,29 @@ impl RedDBRuntime {
         }))
     }
 
-    fn native_read_snapshot(
+    pub(super) fn native_read_snapshot(
         &self,
-    ) -> (
+    ) -> RedDBResult<(
         super::impl_core::SnapshotContext,
         crate::storage::transaction::snapshot::SnapshotRetentionGuard,
-    ) {
+    )> {
         let state = &self.inner.transaction_state;
         let manager = state.snapshot_manager();
         if let Some(context) = super::impl_core::capture_current_snapshot()
             .filter(|context| Arc::ptr_eq(&context.manager, &manager))
         {
             let (_, retention) = manager.retain_snapshot(context.snapshot.clone());
-            return (context, retention);
+            return Ok((context, retention));
         }
         let connection_id = super::impl_core::current_connection_id();
+        let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         let (snapshot, retention) = state.retained_current_snapshot(connection_id);
+        let branch = self.vcs_branch_read_view(&snapshot, None)?;
         let context = state.context(connection_id);
-        (
+        Ok((
             super::impl_core::SnapshotContext {
+                branch,
                 snapshot,
                 manager,
                 own_xids: self.own_transaction_xids(),
@@ -286,7 +290,7 @@ impl RedDBRuntime {
                     .map(|context| context.xid),
             },
             retention,
-        )
+        ))
     }
 
     pub fn catalog(&self) -> CatalogModelSnapshot {

@@ -114,6 +114,7 @@ pub(super) fn try_resolve_update_entity_by_logical_id(
     if let Some(base) = crate::runtime::impl_core::capture_current_snapshot() {
         let snapshot = base.manager.fresh_read_snapshot();
         let ctx = crate::runtime::impl_core::SnapshotContext {
+            branch: runtime.vcs_branch_read_view(&snapshot, None)?,
             snapshot,
             manager: Arc::clone(&base.manager),
             own_xids: base.own_xids.clone(),

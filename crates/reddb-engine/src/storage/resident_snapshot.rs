@@ -245,6 +245,7 @@ impl ResidentStore {
             // V7+: serialize entity+metadata as a length-prefixed record.
             // Each record: [u32 len][serialize_entity_record bytes]
             for mut entity in entities {
+                entity.retain_branch_deletions(|xid| !excluded_xids.contains(&xid));
                 // Unfinished and rolled-back deletions cannot become committed
                 // tombstones when recovery reconstructs the xid floor.
                 if matches!(

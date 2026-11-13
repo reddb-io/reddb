@@ -347,7 +347,14 @@ All VCS entry points surface errors through `RedDBError`:
 | `ReadOnly` | attempt to delete a protected branch |
 | `Internal` | storage failure (propagated from the unified store) |
 
-Phase-gated stubs (currently `reset --hard`, any data-apply path
-in `cherry_pick`/`revert` body merge, `conflict_resolve` apply)
-return `Internal("vcs: <feature> not yet implemented")` — callers
-can detect by prefix.
+Hard reset restores the selected commit's data view. Clean cherry-pick and
+revert apply native entity changes. Divergent merge applies nonconflicting
+changes and preserves native value types. A conflicting merge leaves live
+data unchanged until every conflict has a persisted `ours`, `theirs`,
+`base`, or `delete` choice and the pending merge is committed. Checkpoint
+and reopen preserve pending merges and choices.
+
+Data application is currently enabled for Table, Document, Graph, Vector,
+KV, Mixed and TimeSeries. Other models reject application before changing
+HEAD; their opt-in flag alone does not establish complete VCS support.
+See the [model validation matrix](./model-validation.md).

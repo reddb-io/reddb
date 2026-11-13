@@ -142,6 +142,14 @@ impl NodeBuilder {
     }
 
     pub(crate) fn save_with_xmin(self, xmin: Option<u64>) -> Result<EntityId, DevXError> {
+        self.save_with_mvcc(xmin, None)
+    }
+
+    pub(crate) fn save_with_mvcc(
+        self,
+        xmin: Option<u64>,
+        branch: Option<u64>,
+    ) -> Result<EntityId, DevXError> {
         // Create the node entity
         let kind = EntityKind::GraphNode(Box::new(GraphNodeKind {
             label: self.label,
@@ -155,6 +163,9 @@ impl NodeBuilder {
         let mut entity = UnifiedEntity::new(id, kind, data);
         if let Some(xmin) = xmin {
             entity.set_xmin(xmin);
+        }
+        if let Some(epoch) = branch {
+            entity.set_branch_origin(epoch);
         }
 
         // Add embeddings
@@ -195,6 +206,9 @@ impl NodeBuilder {
             let mut edge_entity = UnifiedEntity::new(edge_id, edge_kind, edge_data);
             if let Some(xmin) = xmin {
                 edge_entity.set_xmin(xmin);
+            }
+            if let Some(epoch) = branch {
+                edge_entity.set_branch_origin(epoch);
             }
 
             // Add cross-refs for fast traversal
@@ -302,6 +316,14 @@ impl EdgeBuilder {
     }
 
     pub(crate) fn save_with_xmin(self, xmin: Option<u64>) -> Result<EntityId, DevXError> {
+        self.save_with_mvcc(xmin, None)
+    }
+
+    pub(crate) fn save_with_mvcc(
+        self,
+        xmin: Option<u64>,
+        branch: Option<u64>,
+    ) -> Result<EntityId, DevXError> {
         let from = self
             .from_node
             .ok_or_else(|| DevXError::Validation("Edge requires 'from' node".into()))?;
@@ -324,6 +346,9 @@ impl EdgeBuilder {
         let mut entity = UnifiedEntity::new(id, kind, EntityData::Edge(edge_data));
         if let Some(xmin) = xmin {
             entity.set_xmin(xmin);
+        }
+        if let Some(epoch) = branch {
+            entity.set_branch_origin(epoch);
         }
 
         // Add cross-refs for bidirectional traversal
@@ -461,6 +486,14 @@ impl VectorBuilder {
 
     /// Stamp a runtime transaction before the vector becomes visible in storage.
     pub(crate) fn save_with_xmin(self, xmin: Option<u64>) -> Result<EntityId, DevXError> {
+        self.save_with_mvcc(xmin, None)
+    }
+
+    pub(crate) fn save_with_mvcc(
+        self,
+        xmin: Option<u64>,
+        branch: Option<u64>,
+    ) -> Result<EntityId, DevXError> {
         let dense = self
             .dense
             .ok_or_else(|| DevXError::Validation("Vector requires dense data".into()))?;
@@ -500,6 +533,9 @@ impl VectorBuilder {
         run_preprocessors(&self.preprocessors, &mut entity)?;
         if let Some(xmin) = xmin {
             entity.set_xmin(xmin);
+        }
+        if let Some(epoch) = branch {
+            entity.set_branch_origin(epoch);
         }
 
         let id = self
@@ -584,6 +620,14 @@ impl RowBuilder {
 
     /// Save the row
     pub fn save(self) -> Result<EntityId, DevXError> {
+        self.save_with_mvcc(None, None)
+    }
+
+    pub(crate) fn save_with_mvcc(
+        self,
+        xmin: Option<u64>,
+        branch: Option<u64>,
+    ) -> Result<EntityId, DevXError> {
         let id = self.store.next_entity_id();
 
         // Per-table sequential row_id (1, 2, 3... per collection)
@@ -602,6 +646,12 @@ impl RowBuilder {
         row_data.named = Some(self.named);
 
         let mut entity = UnifiedEntity::new(id, kind, EntityData::Row(row_data));
+        if let Some(xmin) = xmin {
+            entity.set_xmin(xmin);
+        }
+        if let Some(branch) = branch {
+            entity.set_branch_origin(branch);
+        }
 
         // Add cross-refs
         for (target, target_collection, ref_type) in self.links {

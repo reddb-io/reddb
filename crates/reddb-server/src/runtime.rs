@@ -1278,6 +1278,7 @@ struct RuntimeInner {
                 crate::storage::unified::entity::EntityId,
                 crate::storage::transaction::snapshot::Xid,
                 crate::storage::transaction::snapshot::Xid,
+                Option<u64>,
             )>,
         >,
     >,

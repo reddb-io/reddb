@@ -160,6 +160,7 @@ pub(super) struct DeletePublication {
     row_locks: DeleteRowLocks,
     autocommit_xid: Option<u64>,
     stamp: u64,
+    branch_epoch: Option<u64>,
     published: usize,
     finished: bool,
 }
@@ -186,16 +187,27 @@ impl DeletePublication {
             row_locks,
             autocommit_xid,
             stamp: active_xid.or(autocommit_xid).expect("delete has a writer"),
+            branch_epoch: None,
             published: 0,
             finished: false,
         }
     }
 
     pub(super) fn apply(&mut self) -> RedDBResult<Vec<UnifiedEntity>> {
+        let store = self.runtime.db().store();
+        let _publication = store.vault_publication_lock.lock();
+        self.branch_epoch = self.runtime.vcs_writer_epoch(&self.collection)?;
         let mut postimages = Vec::with_capacity(self.preimages.len());
         for original in &self.preimages {
-            let mut entity = original.clone();
-            entity.set_xmax(self.stamp);
+            let mut entity = self
+                .manager
+                .try_get(original.id, usize::MAX)?
+                .ok_or_else(|| RedDBError::NotFound(original.id.to_string()))?;
+            if let Some(epoch) = self.branch_epoch {
+                entity.set_branch_xmax(epoch, self.stamp);
+            } else {
+                entity.set_xmax(self.stamp);
+            }
             self.manager
                 .update(entity.clone())
                 .map_err(|e| RedDBError::Internal(e.to_string()))?;
@@ -217,7 +229,9 @@ impl DeletePublication {
                 &self.collection,
                 original.id,
                 self.stamp,
-                original.xmax,
+                self.branch_epoch
+                    .map_or(original.xmax, |epoch| original.branch_xmax(epoch)),
+                self.branch_epoch,
             );
         }
         self.finished = true;
@@ -258,7 +272,13 @@ impl DeletePublication {
                     current.xmin,
                 ));
             }
-            for xid in [original.xmax, current.xmax] {
+            let original_xmax = self
+                .branch_epoch
+                .map_or(original.xmax, |epoch| original.branch_xmax(epoch));
+            let current_xmax = self
+                .branch_epoch
+                .map_or(current.xmax, |epoch| current.branch_xmax(epoch));
+            for xid in [original_xmax, current_xmax] {
                 if xid != 0 && xid != self.stamp && !snapshots.is_aborted(xid) {
                     return Err(RedDBRuntime::conflict_error(
                         &self.collection,
@@ -267,8 +287,12 @@ impl DeletePublication {
                     ));
                 }
             }
-            if current.xmax != self.stamp {
-                current.set_xmax(self.stamp);
+            if current_xmax != self.stamp {
+                if let Some(epoch) = self.branch_epoch {
+                    current.set_branch_xmax(epoch, self.stamp);
+                } else {
+                    current.set_xmax(self.stamp);
+                }
                 self.manager
                     .update(current)
                     .map_err(|error| RedDBError::Internal(error.to_string()))?;
@@ -315,6 +339,21 @@ impl DeletePublication {
         let _publication = store.vault_publication_lock.lock();
         let mut failure = None;
         for original in self.preimages[..self.published].iter().rev() {
+            if let Some(epoch) = self.branch_epoch {
+                match self.manager.try_get(original.id, usize::MAX) {
+                    Ok(Some(mut current)) if current.branch_xmax(epoch) == self.stamp => {
+                        current.set_branch_xmax(epoch, original.branch_xmax(epoch));
+                        if let Err(error) = self.manager.update(current) {
+                            failure.get_or_insert(RedDBError::Internal(error.to_string()));
+                        }
+                    }
+                    Err(error) => {
+                        failure.get_or_insert(RedDBError::Internal(error.to_string()));
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             if self
                 .manager
                 .get_with(original.id, |entity| entity.xmax == self.stamp)

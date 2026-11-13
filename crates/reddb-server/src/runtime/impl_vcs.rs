@@ -1,9 +1,7 @@
 //! Runtime implementation of the VCS ("Git for Data") surface.
 //!
-//! Phase 2: real persistence for commit / branch / tag / refs / log /
-//! status / checkout / lca / resolve_commitish / resolve_as_of.
-//! Merge / cherry-pick / revert / reset / diff / conflict handling
-//! remain stubbed and land in Phase 3.
+//! Branches retain immutable ancestor snapshots and independently version
+//! subsequent writes. Native merge plans publish data and history together.
 //!
 //! Every VCS entity is stored as a plain TableRow in a `red_*`
 //! collection (same pattern as `red_queue_meta` / `red_stats`).
@@ -31,13 +29,14 @@ use crate::storage::unified::UnifiedStore;
 use crate::{RedDBError, RedDBResult};
 use reddb_types::Value;
 
+#[path = "vcs_branches.rs"]
+mod branches;
+#[path = "vcs_merge_data.rs"]
+mod merge_data;
+
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
-
-fn unimplemented(method: &str) -> RedDBError {
-    RedDBError::Internal(format!("vcs: {method} not yet implemented"))
-}
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -210,7 +209,34 @@ fn load_commit(store: &UnifiedStore, hash: &str) -> Option<Commit> {
     commit_from_row(row)
 }
 
-fn capture_commit_snapshot(manager: &SnapshotManager) -> Snapshot {
+struct CommitSnapshot<'a> {
+    manager: &'a SnapshotManager,
+    snapshot: Snapshot,
+    retained: bool,
+}
+
+impl std::ops::Deref for CommitSnapshot<'_> {
+    type Target = Snapshot;
+    fn deref(&self) -> &Snapshot {
+        &self.snapshot
+    }
+}
+
+impl Drop for CommitSnapshot<'_> {
+    fn drop(&mut self) {
+        if !self.retained {
+            self.manager.unpin(
+                self.snapshot
+                    .in_progress
+                    .iter()
+                    .copied()
+                    .fold(self.snapshot.xid, Xid::min),
+            );
+        }
+    }
+}
+
+fn capture_commit_snapshot(manager: &SnapshotManager) -> CommitSnapshot<'_> {
     let xid = manager.begin();
     let mut snapshot = manager.snapshot(xid);
     snapshot.in_progress.retain(|pending| *pending < xid);
@@ -219,7 +245,11 @@ fn capture_commit_snapshot(manager: &SnapshotManager) -> Snapshot {
     let horizon = snapshot.in_progress.iter().copied().fold(xid, Xid::min);
     manager.pin(horizon);
     manager.commit(xid);
-    snapshot
+    CommitSnapshot {
+        manager,
+        snapshot,
+        retained: false,
+    }
 }
 
 fn commit_snapshot_from_row(row: &RowData) -> RedDBResult<Snapshot> {
@@ -255,23 +285,23 @@ fn commit_snapshot_from_row(row: &RowData) -> RedDBResult<Snapshot> {
 }
 
 fn snapshot_sees_entity(
-    snapshot: &Snapshot,
-    manager: &SnapshotManager,
+    context: &reddb_engine::transaction::read::SnapshotContext,
     entity: &UnifiedEntity,
 ) -> bool {
-    if entity.xmin != XID_NONE && manager.is_aborted(entity.xmin) {
-        return false;
-    }
-    let xmax = if entity.xmax != XID_NONE && manager.is_aborted(entity.xmax) {
-        XID_NONE
-    } else {
-        entity.xmax
-    };
-    snapshot.sees(entity.xmin, xmax)
+    reddb_engine::transaction::read::entity_visibility_check(context, entity)
 }
 
-fn save_commit(store: &UnifiedStore, commit: &Commit, snapshot: &Snapshot) -> RedDBResult<()> {
+fn commit_fields(
+    commit: &Commit,
+    snapshot: &Snapshot,
+    view: &reddb_engine::transaction::read::BranchReadView,
+) -> HashMap<String, Value> {
     let mut fields: HashMap<String, Value> = HashMap::new();
+    fields.insert("branch_lineage".into(), branches::encode_epochs(view));
+    fields.insert(
+        "writer_epoch".into(),
+        Value::UnsignedInteger(view.writer_epoch),
+    );
     fields.insert("id".to_string(), Value::text(commit.hash.as_str()));
     fields.insert(
         "root_xid".to_string(),
@@ -318,8 +348,7 @@ fn save_commit(store: &UnifiedStore, commit: &Commit, snapshot: &Snapshot) -> Re
     if let Some(sig) = &commit.signature {
         fields.insert("signature".to_string(), Value::text(sig.as_str()));
     }
-    insert_meta_row(store, vc::COMMITS, fields)?;
-    Ok(())
+    fields
 }
 
 // ---------------------------------------------------------------------------
@@ -737,9 +766,25 @@ fn load_workset_state(
 }
 
 fn ensure_no_pending_merge(store: &UnifiedStore, connection_id: u64) -> RedDBResult<()> {
-    if let Some((_, _, Some(merge_state_id))) = load_workset_state(store, connection_id) {
+    let branch = load_workset(store, connection_id)
+        .map(|(branch, _)| branch)
+        .unwrap_or_else(|| vc::DEFAULT_BRANCH_REF.into());
+    let mut pending = None;
+    if let Some(manager) = store.get_collection(vc::WORKSETS) {
+        manager.try_for_each_entity(usize::MAX, |entity| {
+            if let Some(row) = entity
+                .data
+                .as_row()
+                .filter(|row| row_text(row, "branch").as_deref() == Some(&branch))
+            {
+                pending = row_text(row, "merge_state_id");
+            }
+            pending.is_none()
+        })?;
+    }
+    if let Some(state) = pending {
         return Err(RedDBError::InvalidOperation(format!(
-            "cannot change HEAD while merge `{merge_state_id}` is pending"
+            "cannot change branch data or HEAD while merge `{state}` is pending"
         )));
     }
     Ok(())
@@ -792,6 +837,10 @@ impl RedDBRuntime {
         let store: &UnifiedStore = &store_arc;
         let _publication = store.vault_publication_lock.lock();
 
+        if let Some((_, _, Some(state))) = load_workset_state(store, input.connection_id) {
+            return merge_data::finish_pending(self, input, &state);
+        }
+
         ensure_no_pending_merge(store, input.connection_id)?;
 
         // Resolve current HEAD for this connection: workset -> HEAD:<conn>
@@ -803,10 +852,14 @@ impl RedDBRuntime {
             .or_else(|| resolve_ref_chain(store, &head_ref_id(input.connection_id)).and(None))
             .unwrap_or_else(|| vc::DEFAULT_BRANCH_REF.to_string());
 
-        let parent_hash = workset
-            .as_ref()
-            .and_then(|(_, base)| base.clone())
-            .or_else(|| load_ref(store, &branch_ref).map(|r| r.target));
+        if !branch_ref.starts_with(vc::BRANCH_REF_PREFIX) {
+            return Err(RedDBError::InvalidOperation(
+                "cannot commit a detached or tag checkout".into(),
+            ));
+        }
+        let parent_hash = load_ref(store, &branch_ref)
+            .map(|reference| reference.target)
+            .or_else(|| workset.as_ref().and_then(|(_, base)| base.clone()));
 
         let parents: Vec<CommitHash> = match parent_hash.clone() {
             Some(h) if !h.is_empty() => vec![h],
@@ -830,7 +883,7 @@ impl RedDBRuntime {
         // prerequisite for `AS OF BRANCH` to map to distinct
         // snapshots across divergent branches.
         let snapshot_manager = self.inner.transaction_state.snapshot_manager();
-        let snapshot = capture_commit_snapshot(&snapshot_manager);
+        let mut snapshot = capture_commit_snapshot(&snapshot_manager);
         let root_xid = snapshot.xid;
         let timestamp_ms = now_ms();
         let committer = input.committer.unwrap_or_else(|| input.author.clone());
@@ -861,32 +914,21 @@ impl RedDBRuntime {
             signature: None,
         };
 
-        save_commit(store, &commit, &snapshot)?;
-
-        // Advance (or create) the branch ref.
-        let branch_name = if branch_ref.is_empty() {
-            vc::DEFAULT_BRANCH_REF.to_string()
-        } else {
-            branch_ref
-        };
-        save_ref(
-            store,
-            &Ref {
-                name: branch_name.clone(),
-                kind: RefKind::Branch,
-                target: hash.clone(),
-                protected: false,
-            },
-        )?;
-
-        upsert_workset(
-            store,
+        if !branch_ref.starts_with(vc::BRANCH_REF_PREFIX) {
+            return Err(RedDBError::InvalidOperation(
+                "cannot commit a detached or tag checkout".into(),
+            ));
+        }
+        merge_data::publish_commit(
+            self,
             input.connection_id,
-            &branch_name,
-            Some(&hash),
-            root_xid,
+            &branch_ref,
+            &commit,
+            &snapshot,
+            None,
         )?;
 
+        snapshot.retained = true;
         Ok(commit)
     }
 
@@ -918,6 +960,8 @@ impl RedDBRuntime {
             target: target_hash,
             protected: false,
         };
+        branches::delete_view(store, &r.name)?;
+        branches::create_view(store, &r.name, &r.target)?;
         save_ref(store, &r)?;
         Ok(r)
     }
@@ -935,6 +979,7 @@ impl RedDBRuntime {
             )));
         }
         delete_ref(store, &full)?;
+        branches::delete_view(store, &full)?;
         Ok(())
     }
 
@@ -983,6 +1028,16 @@ impl RedDBRuntime {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
         let _publication = store.vault_publication_lock.lock();
+        if self
+            .inner
+            .transaction_state
+            .context(input.connection_id)
+            .is_some()
+        {
+            return Err(RedDBError::InvalidOperation(
+                "cannot checkout during an active transaction".into(),
+            ));
+        }
         if !input.force {
             ensure_no_pending_merge(store, input.connection_id)?;
         }
@@ -992,6 +1047,9 @@ impl RedDBRuntime {
                 let r = load_ref(store, &full).ok_or_else(|| {
                     RedDBError::NotFound(format!("branch `{full}` does not exist"))
                 })?;
+                if full != vc::DEFAULT_BRANCH_REF && branches::load_view(store, &full)?.is_none() {
+                    branches::create_view(store, &full, &r.target)?;
+                }
                 (full, r.target)
             }
             CheckoutTarget::Tag(name) => {
@@ -1104,26 +1162,14 @@ impl RedDBRuntime {
                     "cannot fast-forward a detached HEAD".to_string(),
                 ));
             }
-            if merge_may_require_application(self, store, &head_hash, &from_hash)? {
-                return Err(RedDBError::InvalidOperation(
-                    "cannot merge collection changes: applying data is not implemented".to_string(),
-                ));
-            }
-            save_ref(
-                store,
-                &Ref {
-                    name: head_branch.clone(),
-                    kind: RefKind::Branch,
-                    target: from_hash.clone(),
-                    protected: false,
-                },
-            )?;
-            upsert_workset(
+            branches::ensure_entity_history_supported(self)?;
+            branches::ensure_clean(self, input.connection_id, &head_hash)?;
+            branches::publish_head(
                 store,
                 input.connection_id,
                 &head_branch,
-                Some(&from_hash),
-                from_commit.root_xid,
+                &from_commit,
+                branches::commit_view(store, &from_hash)?,
             )?;
             return Ok(MergeOutcome {
                 merge_commit: Some(from_commit),
@@ -1133,15 +1179,16 @@ impl RedDBRuntime {
             });
         }
 
-        // Detect conflicts before advancing HEAD. Data-level application
-        // and completion of a paused merge are not implemented yet.
-        let lca = RedDBRuntime::vcs_lca(self, &head_hash, &from_hash)?;
-        let source_has_changes = merge_may_require_application(
-            self,
-            store,
-            lca.as_deref().unwrap_or(&head_hash),
-            &from_hash,
-        )?;
+        if !head_branch.starts_with(vc::BRANCH_REF_PREFIX) {
+            return Err(RedDBError::InvalidOperation(
+                "cannot merge into a detached or tag checkout".into(),
+            ));
+        }
+        branches::ensure_entity_history_supported(self)?;
+        branches::ensure_clean(self, input.connection_id, &head_hash)?;
+        let lca = RedDBRuntime::vcs_lca(self, &head_hash, &from_hash)?.ok_or_else(|| {
+            RedDBError::InvalidOperation("cannot merge unrelated histories".into())
+        })?;
 
         let message = input
             .opts
@@ -1157,7 +1204,7 @@ impl RedDBRuntime {
             .unwrap_or(0);
         let height = parent_height + 1;
         let snapshot_manager = self.inner.transaction_state.snapshot_manager();
-        let snapshot = capture_commit_snapshot(&snapshot_manager);
+        let mut snapshot = capture_commit_snapshot(&snapshot_manager);
         let root_xid = snapshot.xid;
 
         let hash = compute_commit_hash(root_xid, &parents, &author, &message, timestamp_ms);
@@ -1176,96 +1223,71 @@ impl RedDBRuntime {
 
         let merge_state_id = format!("ms:{}", &hash[..16]);
 
-        // Materialise conflicts: any entity whose visibility changed
-        // in BOTH sides relative to the LCA snapshot is a candidate
-        // conflict. Phase 5 records identifiers + metadata; Phase 6
-        // will stage the merged body and apply it to the user data.
-        let conflicts = if let Some(lca_hash) = &lca {
-            materialize_merge_conflicts(
+        let plan = merge_data::plan(self, &lca, &head_hash, &from_hash, &merge_state_id)?;
+        let conflicts = plan.conflicts.clone();
+        if conflicts.is_empty() {
+            let result = merge_data::publish_commit(
                 self,
-                store,
-                lca_hash,
-                &head_hash,
-                &from_hash,
-                &merge_state_id,
-            )?
-        } else {
-            Vec::new()
-        };
-
-        if conflicts.is_empty() && source_has_changes {
-            let horizon = snapshot
-                .in_progress
-                .iter()
-                .copied()
-                .fold(snapshot.xid, Xid::min);
-            snapshot_manager.unpin(horizon);
-            return Err(RedDBError::InvalidOperation(
-                "cannot merge collection changes: applying data is not implemented".to_string(),
-            ));
+                input.connection_id,
+                &head_branch,
+                &merge_commit,
+                &snapshot,
+                Some(plan),
+            );
+            result?;
+            snapshot.retained = true;
+            return Ok(MergeOutcome {
+                merge_commit: Some(merge_commit),
+                fast_forward: false,
+                conflicts,
+                merge_state_id: None,
+            });
         }
+        let mut publication = crate::storage::unified::store::RowPublication::default();
+        stage_merge_conflicts(store, &mut publication, &conflicts)?;
 
         let mut ms_fields: HashMap<String, Value> = HashMap::new();
         ms_fields.insert("id".to_string(), Value::text(merge_state_id.as_str()));
         ms_fields.insert("kind".to_string(), Value::text("merge"));
         ms_fields.insert("branch".to_string(), Value::text(head_branch.as_str()));
-        if let Some(base_hash) = &lca {
-            ms_fields.insert("base".to_string(), Value::text(base_hash.as_str()));
-        }
+        ms_fields.insert("base".to_string(), Value::text(lca.as_str()));
         ms_fields.insert("ours".to_string(), Value::text(head_hash.as_str()));
         ms_fields.insert("theirs".to_string(), Value::text(from_hash.as_str()));
         ms_fields.insert(
             "conflicts_count".to_string(),
             Value::UnsignedInteger(conflicts.len() as u64),
         );
-        insert_meta_row(store, vc::MERGE_STATE, ms_fields)?;
-
-        if !conflicts.is_empty() {
-            let head_xid = self.vcs_resolve_as_of(AsOfSpec::Commit(head_hash.clone()))?;
-            upsert_workset_with_merge(
-                store,
-                input.connection_id,
-                &head_branch,
-                Some(&head_hash),
-                head_xid,
-                Some(&merge_state_id),
-            )?;
-            let horizon = snapshot
-                .in_progress
-                .iter()
-                .copied()
-                .fold(snapshot.xid, Xid::min);
-            snapshot_manager.unpin(horizon);
-            return Ok(MergeOutcome {
-                merge_commit: None,
-                fast_forward: false,
-                conflicts,
-                merge_state_id: Some(merge_state_id),
-            });
-        }
-
-        save_commit(store, &merge_commit, &snapshot)?;
-        if !head_branch.is_empty() {
-            save_ref(
-                store,
-                &Ref {
-                    name: head_branch.clone(),
-                    kind: RefKind::Branch,
-                    target: hash.clone(),
-                    protected: false,
-                },
-            )?;
-        }
-        upsert_workset(
+        branches::stage_metadata(
             store,
-            input.connection_id,
-            &head_branch,
-            Some(&hash),
-            root_xid,
+            &mut publication,
+            vc::MERGE_STATE,
+            "id",
+            &merge_state_id,
+            ms_fields,
         )?;
 
+        let head_xid = self.vcs_resolve_as_of(AsOfSpec::Commit(head_hash.clone()))?;
+        let conn_id = input.connection_id.to_string();
+        branches::stage_metadata(
+            store,
+            &mut publication,
+            vc::WORKSETS,
+            "id",
+            &conn_id,
+            HashMap::from([
+                ("id".into(), Value::text(conn_id.as_str())),
+                ("branch".into(), Value::text(head_branch.as_str())),
+                ("base_commit".into(), Value::text(head_hash.as_str())),
+                ("working_xid".into(), Value::UnsignedInteger(head_xid)),
+                (
+                    "merge_state_id".into(),
+                    Value::text(merge_state_id.as_str()),
+                ),
+            ]),
+        )?;
+        store.publish_rows(publication)?;
         Ok(MergeOutcome {
-            merge_commit: Some(merge_commit),
+            merge_commit: None,
             fast_forward: false,
             conflicts,
             merge_state_id: Some(merge_state_id),
@@ -1300,105 +1322,19 @@ impl RedDBRuntime {
         }
         let parent_hash = src_commit.parents[0].clone();
 
-        if merge_may_require_application(self, store, &parent_hash, &src_hash)? {
-            return Err(RedDBError::InvalidOperation(
-                "cannot cherry-pick collection changes: applying data is not implemented"
-                    .to_string(),
-            ));
-        }
-
-        // Resolve HEAD for this connection.
-        let workset = load_workset(store, connection_id);
-        let (head_branch, head_hash) = match workset {
-            Some((branch, Some(head))) => (branch, head),
-            Some((branch, None)) => {
-                let head = load_ref(store, &branch)
-                    .map(|r| r.target)
-                    .unwrap_or_default();
-                (branch, head)
-            }
-            None => {
-                let head = load_ref(store, vc::DEFAULT_BRANCH_REF)
-                    .map(|r| r.target)
-                    .unwrap_or_default();
-                (vc::DEFAULT_BRANCH_REF.to_string(), head)
-            }
-        };
-        if head_hash.is_empty() {
-            return Err(RedDBError::InvalidConfig(
-                "cannot cherry-pick onto empty HEAD".to_string(),
-            ));
-        }
-
-        // Cherry-pick = 3-way merge with base = parent(src), ours = HEAD,
-        // theirs = src. The new commit records the pick so log() sees
-        // it; data application is staged in merge_state.pending so
-        // Phase 6 can apply it transactionally.
-        let message = format!("cherry-pick: {}", src_commit.message);
-        let parents = vec![head_hash.clone()];
-        let parent_height = load_commit(store, &head_hash)
-            .map(|c| c.height)
-            .unwrap_or(0);
-        let height = parent_height + 1;
-        let snapshot_manager = self.inner.transaction_state.snapshot_manager();
-        let snapshot = capture_commit_snapshot(&snapshot_manager);
-        let root_xid = snapshot.xid;
-        let timestamp_ms = now_ms();
-
-        let hash = compute_commit_hash(root_xid, &parents, &author, &message, timestamp_ms);
-        let pick_commit = Commit {
-            hash: hash.clone(),
-            root_xid,
-            parents,
-            height,
-            author: author.clone(),
-            committer: author,
-            message,
-            timestamp_ms,
-            signature: None,
-        };
-        save_commit(store, &pick_commit, &snapshot)?;
-        if !head_branch.is_empty() {
-            save_ref(
-                store,
-                &Ref {
-                    name: head_branch.clone(),
-                    kind: RefKind::Branch,
-                    target: hash.clone(),
-                    protected: false,
-                },
-            )?;
-        }
-        upsert_workset(store, connection_id, &head_branch, Some(&hash), root_xid)?;
-
-        let merge_state_id = format!("cp:{}", &hash[..16]);
-        let conflicts = materialize_merge_conflicts(
+        let picked = merge_data::apply_delta(
             self,
-            store,
+            connection_id,
             &parent_hash,
-            &head_hash,
             &src_hash,
-            &merge_state_id,
+            author,
+            format!("cherry-pick: {}", src_commit.message),
         )?;
-
-        let mut ms_fields: HashMap<String, Value> = HashMap::new();
-        ms_fields.insert("id".to_string(), Value::text(merge_state_id.as_str()));
-        ms_fields.insert("kind".to_string(), Value::text("cherry_pick"));
-        ms_fields.insert("branch".to_string(), Value::text(head_branch.as_str()));
-        ms_fields.insert("base".to_string(), Value::text(parent_hash.as_str()));
-        ms_fields.insert("ours".to_string(), Value::text(head_hash.as_str()));
-        ms_fields.insert("theirs".to_string(), Value::text(src_hash.as_str()));
-        ms_fields.insert(
-            "conflicts_count".to_string(),
-            Value::UnsignedInteger(conflicts.len() as u64),
-        );
-        insert_meta_row(store, vc::MERGE_STATE, ms_fields)?;
-
         Ok(MergeOutcome {
-            merge_commit: Some(pick_commit),
+            merge_commit: Some(picked),
             fast_forward: false,
-            conflicts,
-            merge_state_id: Some(merge_state_id),
+            conflicts: Vec::new(),
+            merge_state_id: None,
         })
     }
 
@@ -1423,90 +1359,19 @@ impl RedDBRuntime {
         }
         let parent_hash = src_commit.parents[0].clone();
 
-        if merge_may_require_application(self, store, &src_hash, &parent_hash)? {
+        if src_commit.parents.len() != 1 {
             return Err(RedDBError::InvalidOperation(
-                "cannot revert collection changes: applying data is not implemented".to_string(),
+                "cannot revert a merge commit without selecting a parent".into(),
             ));
         }
-
-        let workset = load_workset(store, connection_id);
-        let (head_branch, head_hash) = match workset {
-            Some((branch, Some(head))) => (branch, head),
-            Some((branch, None)) => {
-                let head = load_ref(store, &branch)
-                    .map(|r| r.target)
-                    .unwrap_or_default();
-                (branch, head)
-            }
-            None => {
-                let head = load_ref(store, vc::DEFAULT_BRANCH_REF)
-                    .map(|r| r.target)
-                    .unwrap_or_default();
-                (vc::DEFAULT_BRANCH_REF.to_string(), head)
-            }
-        };
-        if head_hash.is_empty() {
-            return Err(RedDBError::InvalidConfig(
-                "cannot revert onto empty HEAD".to_string(),
-            ));
-        }
-
-        // Revert = 3-way merge with base = src, ours = HEAD,
-        // theirs = parent(src). The asymmetry vs cherry-pick flips
-        // which side provides the "forward" delta so the effect is
-        // the inverse of the original commit.
-        let message = format!("Revert \"{}\"", src_commit.message);
-        let parents = vec![head_hash.clone()];
-        let parent_height = load_commit(store, &head_hash)
-            .map(|c| c.height)
-            .unwrap_or(0);
-        let height = parent_height + 1;
-        let snapshot_manager = self.inner.transaction_state.snapshot_manager();
-        let snapshot = capture_commit_snapshot(&snapshot_manager);
-        let root_xid = snapshot.xid;
-        let timestamp_ms = now_ms();
-
-        let hash = compute_commit_hash(root_xid, &parents, &author, &message, timestamp_ms);
-        let rv_commit = Commit {
-            hash: hash.clone(),
-            root_xid,
-            parents,
-            height,
-            author: author.clone(),
-            committer: author,
-            message,
-            timestamp_ms,
-            signature: None,
-        };
-        save_commit(store, &rv_commit, &snapshot)?;
-        if !head_branch.is_empty() {
-            save_ref(
-                store,
-                &Ref {
-                    name: head_branch.clone(),
-                    kind: RefKind::Branch,
-                    target: hash.clone(),
-                    protected: false,
-                },
-            )?;
-        }
-        upsert_workset(store, connection_id, &head_branch, Some(&hash), root_xid)?;
-
-        let merge_state_id = format!("rv:{}", &hash[..16]);
-        // Record merge_state for later data apply. No conflict
-        // materialisation here — revert conflicts are rare when the
-        // reverted commit touches disjoint entities.
-        let mut ms_fields: HashMap<String, Value> = HashMap::new();
-        ms_fields.insert("id".to_string(), Value::text(merge_state_id.as_str()));
-        ms_fields.insert("kind".to_string(), Value::text("revert"));
-        ms_fields.insert("branch".to_string(), Value::text(head_branch.as_str()));
-        ms_fields.insert("base".to_string(), Value::text(src_hash.as_str()));
-        ms_fields.insert("ours".to_string(), Value::text(head_hash.as_str()));
-        ms_fields.insert("theirs".to_string(), Value::text(parent_hash.as_str()));
-        ms_fields.insert("conflicts_count".to_string(), Value::UnsignedInteger(0));
-        insert_meta_row(store, vc::MERGE_STATE, ms_fields)?;
-
-        Ok(rv_commit)
+        merge_data::apply_delta(
+            self,
+            connection_id,
+            &src_hash,
+            &parent_hash,
+            author,
+            format!("Revert \"{}\"", src_commit.message),
+        )
     }
 
     pub fn vcs_reset(&self, input: ResetInput) -> RedDBResult<()> {
@@ -1551,7 +1416,26 @@ impl RedDBRuntime {
                 )?;
                 Ok(())
             }
-            ResetMode::Hard => Err(unimplemented("reset --hard (Phase 4)")),
+            ResetMode::Hard => {
+                branches::ensure_entity_history_supported(self)?;
+                if !branch.starts_with(vc::BRANCH_REF_PREFIX) {
+                    return Err(RedDBError::InvalidOperation(
+                        "hard reset requires a branch".into(),
+                    ));
+                }
+                if self.snapshot_manager().oldest_active_xid().is_some() {
+                    return Err(RedDBError::InvalidOperation(
+                        "finish active transactions before hard reset".into(),
+                    ));
+                }
+                branches::publish_head(
+                    store,
+                    input.connection_id,
+                    &branch,
+                    &target_commit,
+                    branches::commit_view(store, &target_hash)?,
+                )
+            }
         }
     }
 
@@ -1579,9 +1463,8 @@ impl RedDBRuntime {
         let store: &UnifiedStore = &store_arc;
         let from_hash = RedDBRuntime::vcs_resolve_commitish(self, &input.from)?;
         let to_hash = RedDBRuntime::vcs_resolve_commitish(self, &input.to)?;
-        let sm = self.inner.transaction_state.snapshot_manager();
-        let from_snap = self.vcs_resolve_snapshot(AsOfSpec::Commit(from_hash.clone()))?;
-        let to_snap = self.vcs_resolve_snapshot(AsOfSpec::Commit(to_hash.clone()))?;
+        let from_snap = self.vcs_commit_read_context(&from_hash)?;
+        let to_snap = self.vcs_commit_read_context(&to_hash)?;
 
         // Iterate every *user* collection (skip internal red_*).
         let mut entries: Vec<DiffEntry> = Vec::new();
@@ -1607,8 +1490,8 @@ impl RedDBRuntime {
             let entities = manager.query_all(|_| true);
             // Compare physical versions under the stable logical identity.
             for entity in &entities {
-                let in_from = snapshot_sees_entity(&from_snap, &sm, entity);
-                let in_to = snapshot_sees_entity(&to_snap, &sm, entity);
+                let in_from = snapshot_sees_entity(&from_snap, entity);
+                let in_to = snapshot_sees_entity(&to_snap, entity);
                 if in_from == in_to {
                     continue;
                 }
@@ -1730,10 +1613,10 @@ impl RedDBRuntime {
         let msid = merge_state_id.to_string();
         let out = manager
             .query_all(|entity| {
-                entity
-                    .data
-                    .as_row()
-                    .is_some_and(|row| row_text(row, "merge_state_id").as_deref() == Some(&msid))
+                entity.data.as_row().is_some_and(|row| {
+                    row_text(row, "merge_state_id").as_deref() == Some(&msid)
+                        && row.get_field("resolution").is_none()
+                })
             })
             .into_iter()
             .filter_map(|entity| {
@@ -1753,29 +1636,46 @@ impl RedDBRuntime {
         Ok(out)
     }
 
-    pub fn vcs_conflict_resolve(&self, conflict_id: &str, _resolved: JsonValue) -> RedDBResult<()> {
-        let store_arc = self.inner.db.store();
-        let store: &UnifiedStore = &store_arc;
-        let Some(manager) = store.get_collection(vc::CONFLICTS) else {
-            return Err(RedDBError::NotFound(format!(
-                "conflict `{conflict_id}` not found"
-            )));
+    pub fn vcs_conflict_resolve(&self, conflict_id: &str, resolved: JsonValue) -> RedDBResult<()> {
+        let store = self.db().store();
+        let _publication = store.vault_publication_lock.lock();
+        let row = merge_data::metadata_row(&store, vc::CONFLICTS, conflict_id)?
+            .ok_or_else(|| RedDBError::NotFound(format!("conflict `{conflict_id}` not found")))?;
+        let choice = match &resolved {
+            JsonValue::String(choice)
+                if matches!(choice.as_str(), "ours" | "theirs" | "base" | "delete") =>
+            {
+                choice
+            }
+            _ => {
+                return Err(RedDBError::InvalidOperation(
+                    "resolve with ours, theirs, base or delete; conflict retained".into(),
+                ))
+            }
         };
-        let cid = conflict_id.to_string();
-        let matches = manager.query_all(|entity| {
-            entity
-                .data
-                .as_row()
-                .is_some_and(|row| row_text(row, "id").as_deref() == Some(&cid))
-        });
-        if matches.is_empty() {
-            return Err(RedDBError::NotFound(format!(
-                "conflict `{conflict_id}` not found"
-            )));
+        let connection = crate::runtime::impl_core::current_connection_id();
+        let active_state = load_workset_state(&store, connection).and_then(|(_, _, state)| state);
+        if active_state != row_text(&row, "merge_state_id") {
+            return Err(RedDBError::InvalidOperation(
+                "conflict belongs to another pending merge".into(),
+            ));
         }
-        Err(RedDBError::InvalidOperation(
-            "vcs conflict resolution cannot apply data yet; conflict retained".to_string(),
-        ))
+        let mut fields: HashMap<_, _> = row
+            .iter_fields()
+            .map(|(name, value)| (name.into(), value.clone()))
+            .collect();
+        fields.insert("resolution".into(), Value::text(choice.as_str()));
+        let mut publication = crate::storage::unified::store::RowPublication::default();
+        branches::stage_metadata(
+            &store,
+            &mut publication,
+            vc::CONFLICTS,
+            "id",
+            conflict_id,
+            fields,
+        )?;
+        store.publish_rows(publication)?;
+        Ok(())
     }
 
     pub fn vcs_resolve_as_of(&self, spec: AsOfSpec) -> RedDBResult<Xid> {
@@ -1856,6 +1756,61 @@ impl RedDBRuntime {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
         let _publication = store.vault_publication_lock.lock();
+        if collection.starts_with("red_") || collection.starts_with("red.") {
+            return set_versioned_flag(store, collection, enabled);
+        }
+        if !enabled && list_refs_by_prefix(store, Some(vc::BRANCH_REF_PREFIX)).len() > 1 {
+            return Err(RedDBError::InvalidOperation(
+                "cannot disable history while branches share versions".into(),
+            ));
+        }
+        if enabled && store.format_version() < reddb_file::native_store::STORE_VERSION_V13 {
+            let previous_format = store.format_version();
+            store.set_format_version(reddb_file::native_store::STORE_VERSION_V13);
+            if store.pager().is_some() {
+                if let Err(error) = store.persist() {
+                    store.set_format_version(previous_format);
+                    return Err(RedDBError::Internal(error.to_string()));
+                }
+            }
+        }
+        if let Some(manager) = store.get_collection(collection) {
+            if !enabled {
+                let mut shared = false;
+                manager.try_for_each_entity(usize::MAX, |entity| {
+                    shared = entity.branch_version().is_some_and(|version| {
+                        version.origin != 0 || !version.deletions.is_empty()
+                    });
+                    !shared
+                })?;
+                if shared {
+                    return Err(RedDBError::InvalidOperation("cannot discard branch provenance; export the selected branch to an unversioned collection".into()));
+                }
+            }
+            let mut ids = Vec::new();
+            manager.try_for_each_entity(usize::MAX, |entity| {
+                if entity.branch_version().is_some() != enabled {
+                    ids.push(entity.id);
+                }
+                true
+            })?;
+            for id in ids {
+                let mut entity = manager
+                    .try_get(id, usize::MAX)?
+                    .ok_or_else(|| RedDBError::NotFound(id.to_string()))?;
+                if enabled {
+                    entity.set_branch_origin(0);
+                } else {
+                    entity.clear_branch_version();
+                }
+                manager
+                    .update(entity.clone())
+                    .map_err(|error| RedDBError::Internal(error.to_string()))?;
+                store
+                    .persist_entities_to_pager(collection, &[entity])
+                    .map_err(|error| RedDBError::Internal(error.to_string()))?;
+            }
+        }
         set_versioned_flag(store, collection, enabled)
     }
 
@@ -1916,190 +1871,66 @@ impl RedDBRuntime {
     }
 }
 
-/// Until merge application exists, reject changes in visible entity
-/// versions. Unstamped inserts are visible to every snapshot, so any
-/// such entity also requires a conservative rejection for distinct commits.
-fn merge_may_require_application(
-    rt: &RedDBRuntime,
+/// Stage a paused merge's conflicts in the same publication as its workset.
+fn stage_merge_conflicts(
     store: &UnifiedStore,
-    from_hash: &str,
-    to_hash: &str,
-) -> RedDBResult<bool> {
-    if from_hash == to_hash {
-        return Ok(false);
+    publication: &mut crate::storage::unified::store::RowPublication,
+    conflicts: &[Conflict],
+) -> RedDBResult<()> {
+    for conflict in conflicts {
+        let fields = HashMap::from([
+            ("id".into(), Value::text(conflict.id.as_str())),
+            (
+                "collection".into(),
+                Value::text(conflict.collection.as_str()),
+            ),
+            ("entity_id".into(), Value::text(conflict.entity_id.as_str())),
+            (
+                "merge_state_id".into(),
+                Value::text(conflict.merge_state_id.as_str()),
+            ),
+            (
+                "conflicting_paths".into(),
+                Value::Array(
+                    conflict
+                        .conflicting_paths
+                        .iter()
+                        .map(|path| Value::text(path.as_str()))
+                        .collect(),
+                ),
+            ),
+            (
+                "base_json".into(),
+                Value::Json(
+                    crate::json::to_vec(&conflict.base)
+                        .map_err(|e| RedDBError::Internal(e.to_string()))?,
+                ),
+            ),
+            (
+                "ours_json".into(),
+                Value::Json(
+                    crate::json::to_vec(&conflict.ours)
+                        .map_err(|e| RedDBError::Internal(e.to_string()))?,
+                ),
+            ),
+            (
+                "theirs_json".into(),
+                Value::Json(
+                    crate::json::to_vec(&conflict.theirs)
+                        .map_err(|e| RedDBError::Internal(e.to_string()))?,
+                ),
+            ),
+        ]);
+        branches::stage_metadata(
+            store,
+            publication,
+            vc::CONFLICTS,
+            "id",
+            &conflict.id,
+            fields,
+        )?;
     }
-    let sm = rt.inner.transaction_state.snapshot_manager();
-    let from = rt.vcs_resolve_snapshot(AsOfSpec::Commit(from_hash.to_string()))?;
-    let to = rt.vcs_resolve_snapshot(AsOfSpec::Commit(to_hash.to_string()))?;
-    for coll in versioned_collections(store)? {
-        if rt.db().collection_contract(&coll).is_some_and(|contract| {
-            !matches!(
-                contract.declared_model,
-                crate::catalog::CollectionModel::Table
-                    | crate::catalog::CollectionModel::Document
-                    | crate::catalog::CollectionModel::Graph
-                    | crate::catalog::CollectionModel::Vector
-                    | crate::catalog::CollectionModel::Kv
-            )
-        }) {
-            // These models own state outside the entity history (queue
-            // delivery, probabilistic blobs, configuration, etc.). An empty
-            // entity diff cannot establish that there is nothing to apply.
-            return Ok(true);
-        }
-        let Some(manager) = store.get_collection(&coll) else {
-            return Ok(true);
-        };
-        let mut changed = false;
-        manager.try_for_each_entity(usize::MAX, |entity| {
-            if entity.xmin == XID_NONE
-                || snapshot_sees_entity(&from, &sm, entity)
-                    != snapshot_sees_entity(&to, &sm, entity)
-            {
-                changed = true;
-                return false;
-            }
-            true
-        })?;
-        if changed {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// Detect entities changed on both sides of a 3-way merge and write
-/// a `red_conflicts` row for each. Returns the in-memory `Conflict`
-/// list in the same shape `vcs_conflicts_list` would later read back.
-///
-/// Phase 5: metadata-level only — identifiers + which sides moved.
-/// Phase 6 will stage the merged body (base/ours/theirs payloads +
-/// JSON 3-way merge result) so `vcs_conflict_resolve` can apply the
-/// resolved value back to the user collection.
-fn materialize_merge_conflicts(
-    rt: &RedDBRuntime,
-    store: &UnifiedStore,
-    base_hash: &str,
-    ours_hash: &str,
-    theirs_hash: &str,
-    merge_state_id: &str,
-) -> RedDBResult<Vec<Conflict>> {
-    use crate::application::merge_json::three_way_merge;
-    use crate::application::vcs::AsOfSpec;
-
-    let sm = rt.inner.transaction_state.snapshot_manager();
-    let base_snap = rt.vcs_resolve_snapshot(AsOfSpec::Commit(base_hash.to_string()))?;
-    let ours_snap = rt.vcs_resolve_snapshot(AsOfSpec::Commit(ours_hash.to_string()))?;
-    let theirs_snap = rt.vcs_resolve_snapshot(AsOfSpec::Commit(theirs_hash.to_string()))?;
-
-    // Walk every VCS-opted-in user collection, materialising
-    // per-(entity_id) visible JSON bodies at each of the three
-    // snapshots. Collections that never opted in are skipped — by
-    // definition they have no history semantics worth conflicting
-    // over.
-    let mut conflicts: Vec<Conflict> = Vec::new();
-    for coll in store.list_collections() {
-        if coll.starts_with("red_") || coll.starts_with("red.") {
-            continue;
-        }
-        if !is_versioned(store, &coll)? {
-            continue;
-        }
-        let Some(manager) = store.get_collection(&coll) else {
-            continue;
-        };
-        let mut at_base: HashMap<u64, JsonValue> = HashMap::new();
-        let mut at_ours: HashMap<u64, JsonValue> = HashMap::new();
-        let mut at_theirs: HashMap<u64, JsonValue> = HashMap::new();
-        for entity in manager.query_all(|_| true) {
-            let eid = entity.logical_id().raw();
-            let body = vcs_entity_body(&entity);
-            if snapshot_sees_entity(&base_snap, &sm, &entity) {
-                at_base.insert(eid, body.clone());
-            }
-            if snapshot_sees_entity(&ours_snap, &sm, &entity) {
-                at_ours.insert(eid, body.clone());
-            }
-            if snapshot_sees_entity(&theirs_snap, &sm, &entity) {
-                at_theirs.insert(eid, body);
-            }
-        }
-
-        let mut all_ids: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
-        all_ids.extend(at_base.keys().copied());
-        all_ids.extend(at_ours.keys().copied());
-        all_ids.extend(at_theirs.keys().copied());
-
-        for eid in all_ids {
-            let b = at_base.get(&eid).cloned().unwrap_or(JsonValue::Null);
-            let o = at_ours.get(&eid).cloned().unwrap_or(JsonValue::Null);
-            let t = at_theirs.get(&eid).cloned().unwrap_or(JsonValue::Null);
-            let ours_changed = b != o;
-            let theirs_changed = b != t;
-            if !(ours_changed && theirs_changed) {
-                continue;
-            }
-            if o == t {
-                continue;
-            }
-            let merge = three_way_merge(&b, &o, &t);
-            if merge.is_clean() {
-                // Both sides touched different paths — no conflict
-                // to record; Phase 6.2 will stage the merged body
-                // into the workset for automatic apply.
-                continue;
-            }
-            let conflict_id = format!("{}:{}/{}", merge_state_id, coll, eid);
-            let paths: Vec<String> = merge
-                .conflicts
-                .iter()
-                .map(|c| {
-                    if c.path.is_empty() {
-                        "*".to_string()
-                    } else {
-                        c.path.clone()
-                    }
-                })
-                .collect();
-
-            let mut fields: HashMap<String, Value> = HashMap::new();
-            fields.insert("id".to_string(), Value::text(conflict_id.as_str()));
-            fields.insert("collection".to_string(), Value::text(coll.as_str()));
-            fields.insert(
-                "entity_id".to_string(),
-                Value::text(eid.to_string().as_str()),
-            );
-            fields.insert("merge_state_id".to_string(), Value::text(merge_state_id));
-            fields.insert(
-                "conflicting_paths".to_string(),
-                Value::Array(paths.iter().map(|p| Value::text(p.as_str())).collect()),
-            );
-            // Persist the three bodies as Value::Json blobs so
-            // vcs_conflicts_list can hydrate them back into the
-            // Conflict struct for presentation.
-            if let Ok(bytes) = crate::json::to_vec(&b) {
-                fields.insert("base_json".to_string(), Value::Json(bytes));
-            }
-            if let Ok(bytes) = crate::json::to_vec(&o) {
-                fields.insert("ours_json".to_string(), Value::Json(bytes));
-            }
-            if let Ok(bytes) = crate::json::to_vec(&t) {
-                fields.insert("theirs_json".to_string(), Value::Json(bytes));
-            }
-            insert_meta_row(store, vc::CONFLICTS, fields)?;
-            conflicts.push(Conflict {
-                id: conflict_id,
-                collection: coll.clone(),
-                entity_id: eid.to_string(),
-                base: b,
-                ours: o,
-                theirs: t,
-                conflicting_paths: paths,
-                merge_state_id: merge_state_id.to_string(),
-            });
-        }
-    }
-    Ok(conflicts)
+    Ok(())
 }
 
 fn vcs_entity_body(entity: &UnifiedEntity) -> JsonValue {

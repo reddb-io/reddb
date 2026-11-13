@@ -118,7 +118,7 @@ fn rql_checkout_switches_head_ref() {
 }
 
 #[test]
-fn rql_reset_soft_moves_head_and_hard_is_unimplemented() {
+fn rql_reset_soft_and_hard_move_head() {
     let rt = rt();
     set_current_connection_id(3);
     let c1 = commit(&rt, 3, "c1");
@@ -128,14 +128,9 @@ fn rql_reset_soft_moves_head_and_hard_is_unimplemented() {
         .expect("reset soft via rql");
     assert_eq!(head_field(&rt, "head_commit"), c1);
 
-    // HARD mode parses + routes, but the port rejects it (Phase 4).
-    let err = rt
-        .execute_query(&format!("RESET HARD TO {c1}"))
-        .expect_err("reset --hard not implemented");
-    assert!(
-        format!("{err}").contains("reset --hard"),
-        "expected reset --hard error, got `{err}`"
-    );
+    rt.execute_query(&format!("RESET HARD TO {c1}"))
+        .expect("reset hard via rql");
+    assert_eq!(head_field(&rt, "head_commit"), c1);
     clear_current_connection_id();
 }
 

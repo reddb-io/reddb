@@ -363,6 +363,7 @@ mod tests {
         }
 
         let explicit = SnapshotContext {
+            branch: None,
             snapshot: Snapshot {
                 xid: 10,
                 in_progress: HashSet::from([4]),
@@ -375,6 +376,7 @@ mod tests {
         // A decoy statement frame that would hide almost everything if the
         // scan ever consulted ambient state instead of its argument.
         let decoy = SnapshotContext {
+            branch: None,
             snapshot: Snapshot {
                 xid: 1,
                 in_progress: HashSet::new(),

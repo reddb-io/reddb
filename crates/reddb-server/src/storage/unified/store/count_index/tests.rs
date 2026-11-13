@@ -701,6 +701,7 @@ fn interrupted_count_batch_preserves_rows_and_can_rebuild() {
 
 fn context(manager: &Arc<SnapshotManager>) -> SnapshotContext {
     SnapshotContext {
+        branch: None,
         snapshot: manager.fresh_read_snapshot(),
         manager: Arc::clone(manager),
         own_xids: Default::default(),

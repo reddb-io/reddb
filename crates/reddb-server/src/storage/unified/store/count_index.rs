@@ -602,7 +602,9 @@ impl UnifiedStore {
         collection: &str,
         snapshot: Option<&SnapshotContext>,
     ) -> Result<Option<u64>, StoreError> {
-        if snapshot.is_some_and(|context| context.serializable_reader.is_some()) {
+        if snapshot.is_some_and(|context| {
+            context.serializable_reader.is_some() || context.branch.is_some()
+        }) {
             return Ok(None);
         }
         let collection = Self::canonical_collection(collection);

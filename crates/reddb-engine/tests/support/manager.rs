@@ -46,6 +46,7 @@ fn row(id: u64, key: &str, xmin: u64, xmax: u64) -> UnifiedEntity {
 
 fn context(state: &TransactionState, connection: u64, serializable: bool) -> SnapshotContext {
     SnapshotContext {
+        branch: None,
         snapshot: state.current_snapshot(connection),
         manager: state.snapshot_manager(),
         own_xids: state.own_xids(connection),

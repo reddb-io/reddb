@@ -864,6 +864,7 @@ fn delete_message_with_state(
                                 entity_id,
                                 xid,
                                 previous_xmax,
+                                None,
                             );
                             super::impl_queue::forget_queue_message_lock(runtime, queue, entity_id);
                             return Ok(());

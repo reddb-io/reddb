@@ -603,7 +603,7 @@ impl UnifiedStore {
                     if publishes_rows {
                         for manager in collections.values() {
                             manager.for_each_entity(|entity| {
-                                high = high.max(entity.xmin).max(entity.xmax);
+                                high = high.max(entity.max_transaction_id());
                                 true
                             });
                         }
@@ -974,7 +974,7 @@ impl UnifiedStore {
             }
         }
 
-        let format_version = STORE_VERSION_V11;
+        let format_version = self.format_version().max(STORE_VERSION_V11);
         self.set_format_version(format_version);
 
         let collections = self.resident.collections.read();
@@ -2020,9 +2020,8 @@ impl UnifiedStore {
                             let (entity, metadata) = decoded.map_err(|err| {
                                 page_integrity(root_page, Some(name.clone()), err.to_string())
                             })?;
-                            scanned_xid_high_water_mark = scanned_xid_high_water_mark
-                                .max(entity.xmin)
-                                .max(entity.xmax);
+                            scanned_xid_high_water_mark =
+                                scanned_xid_high_water_mark.max(entity.max_transaction_id());
                             let discard_count_seed = if let Some(seed) = count_seed.as_mut() {
                                 match seed.push(&entity) {
                                     Ok(complete) => !complete,
@@ -2537,11 +2536,17 @@ impl UnifiedStore {
                             | EntityData::Edge(_)
                             | EntityData::QueueMessage(_)
                     ) && excluded.contains(&entity.xmax);
+                    let normalize_branch = entity.branch_version().is_some_and(|branch| {
+                        branch
+                            .deletions
+                            .iter()
+                            .any(|(_, xid)| excluded.contains(xid))
+                    });
                     let hide_refs = entity.cross_refs().iter().any(|reference| {
                         hidden_graph_ids.contains(&reference.source)
                             || hidden_graph_ids.contains(&reference.target)
                     });
-                    if hidden || normalize_xmax || hide_refs {
+                    if hidden || normalize_xmax || normalize_branch || hide_refs {
                         version.remember_deferred_row(entity.id);
                     }
                     if hidden {
@@ -2550,6 +2555,11 @@ impl UnifiedStore {
                     let mut normalized = std::borrow::Cow::Borrowed(entity);
                     if normalize_xmax {
                         normalized.to_mut().xmax = 0;
+                    }
+                    if normalize_branch {
+                        normalized
+                            .to_mut()
+                            .retain_branch_deletions(|xid| !excluded.contains(&xid));
                     }
                     if hide_refs {
                         normalized.to_mut().cross_refs_mut().retain(|reference| {
@@ -2573,7 +2583,7 @@ impl UnifiedStore {
         // Write collection metadata to page 1
         let mut meta_data = Vec::with_capacity(4096);
 
-        let format_version = STORE_VERSION_V11;
+        let format_version = self.format_version().max(STORE_VERSION_V11);
         self.set_format_version(format_version);
 
         reddb_file::encode_native_paged_metadata_header(

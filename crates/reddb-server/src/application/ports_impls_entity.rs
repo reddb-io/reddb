@@ -468,7 +468,8 @@ impl RedDBRuntime {
         operations: Vec<PatchEntityOperation>,
     ) -> RedDBResult<AppliedEntityMutation> {
         let id = entity.id;
-        let previous_xmax = entity.xmax;
+        let epoch = self.vcs_writer_epoch(&collection)?;
+        let previous_xmax = epoch.map_or(entity.xmax, |epoch| entity.branch_xmax(epoch));
         let operations = normalize_ttl_patch_operations(operations)?;
         // Snapshot pre-patch row fields for the secondary-index hook —
         // empty for non-row entities, which is the desired no-op.
@@ -485,12 +486,7 @@ impl RedDBRuntime {
         // logical_id, fresh xmin) at the tail of this function is fully
         // kind-agnostic, so the same machinery installs a versioned
         // graph-node update.
-        let patch_versions = matches!(
-            entity.data,
-            crate::storage::EntityData::Row(_)
-                | crate::storage::EntityData::Node(_)
-                | crate::storage::EntityData::Edge(_)
-        ) && self.vcs_is_versioned(&collection).unwrap_or(false);
+        let patch_versions = epoch.is_some();
         let versioned_update_xid = if patch_versions {
             match self.current_xid() {
                 Some(xid) => Some(xid),
@@ -1153,6 +1149,7 @@ impl RedDBRuntime {
             entity.set_logical_id(logical_id);
             entity.set_xmin(xid);
             entity.set_xmax(0);
+            self.stamp_vcs_creation(&collection, &mut entity)?;
             if let Some(old) = replaced_entity.as_mut() {
                 old.set_xmax(xid);
             }
@@ -1187,7 +1184,8 @@ impl RedDBRuntime {
         row_touches_unique_columns: bool,
     ) -> RedDBResult<AppliedEntityMutation> {
         let id = entity.id;
-        let previous_xmax = entity.xmax;
+        let epoch = self.vcs_writer_epoch(&collection)?;
+        let previous_xmax = epoch.map_or(entity.xmax, |epoch| entity.branch_xmax(epoch));
         let db = self.db();
         let store = db.store();
         let Some(_) = store.get_collection(&collection) else {
@@ -1375,6 +1373,7 @@ impl RedDBRuntime {
             entity.set_logical_id(logical_id);
             entity.set_xmin(xid);
             entity.set_xmax(0);
+            self.stamp_vcs_creation(&collection, &mut entity)?;
             if let Some(old) = replaced_entity.as_mut() {
                 old.set_xmax(xid);
             }
@@ -1416,9 +1415,30 @@ impl RedDBRuntime {
             )));
         };
 
+        let epoch = self.vcs_writer_epoch(collection)?;
+        if epoch.is_some_and(|epoch| {
+            applied.iter().any(|item| {
+                item.entity
+                    .branch_version()
+                    .is_none_or(|version| version.origin != epoch)
+            })
+        }) {
+            return Err(crate::RedDBError::InvalidOperation(
+                "branch changed during update; retry the statement".into(),
+            ));
+        }
         let mut ordinary = Vec::with_capacity(applied.len());
         for item in applied {
             if let Some(old_version) = item.replaced_entity.as_ref() {
+                let old_version = if let Some(epoch) = epoch {
+                    let mut current = manager
+                        .try_get(old_version.id, usize::MAX)?
+                        .ok_or_else(|| crate::RedDBError::NotFound(old_version.id.to_string()))?;
+                    current.set_branch_xmax(epoch, item.entity.xmin);
+                    current
+                } else {
+                    old_version.clone()
+                };
                 store
                     .install_versioned_table_row_update(
                         collection,
@@ -1437,7 +1457,7 @@ impl RedDBRuntime {
                         collection,
                         old_version.id,
                         item.entity.id,
-                        old_version.xmax,
+                        item.entity.xmin,
                         item.replaced_entity_previous_xmax,
                     );
                 }
@@ -1829,7 +1849,10 @@ impl RedDBRuntime {
             builder = builder.link_to_weighted(link.target, link.edge_label, link.weight);
         }
 
-        let id = builder.save_with_xmin(self.current_xid().or_else(|| self.graph_insert_xid()))?;
+        let id = builder.save_with_mvcc(
+            self.current_xid().or_else(|| self.graph_insert_xid()),
+            self.vcs_writer_epoch(&input.collection)?,
+        )?;
         refresh_context_index(&db, &input.collection, id)?;
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
@@ -1903,7 +1926,10 @@ impl RedDBRuntime {
             builder = builder.metadata(key, value);
         }
 
-        let id = builder.save_with_xmin(self.current_xid().or_else(|| self.graph_insert_xid()))?;
+        let id = builder.save_with_mvcc(
+            self.current_xid().or_else(|| self.graph_insert_xid()),
+            self.vcs_writer_epoch(&input.collection)?,
+        )?;
         refresh_context_index(&db, &input.collection, id)?;
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
@@ -2379,8 +2405,10 @@ impl RuntimeEntityPort for RedDBRuntime {
 
             // The transaction stamp must be present on the first published version.
             // Stamping after save exposed an xmin=0 vector to concurrent snapshots.
-            let id =
-                builder.save_with_xmin(self.current_xid().or_else(|| self.graph_insert_xid()))?;
+            let id = builder.save_with_mvcc(
+                self.current_xid().or_else(|| self.graph_insert_xid()),
+                self.vcs_writer_epoch(&input.collection)?,
+            )?;
             let dense_for_turbo = match db.store().get(&input.collection, id).map(|e| e.data) {
                 Some(crate::storage::unified::EntityData::Vector(data)) => Some(data.dense.clone()),
                 _ => None,
@@ -2505,9 +2533,17 @@ impl RuntimeEntityPort for RedDBRuntime {
             builder = builder.link_to_vector(vector);
         }
 
-        let id = builder.save()?;
-        // Phase 1.1 MVCC universal: stamp xmin on the document.
-        self.stamp_xmin_if_in_txn(&input.collection, id);
+        let create = || -> RedDBResult<crate::storage::EntityId> {
+            Ok(builder.save_with_mvcc(
+                self.current_xid().or_else(|| self.graph_insert_xid()),
+                self.vcs_writer_epoch(&input.collection)?,
+            )?)
+        };
+        let id = if self.vcs_is_versioned(&input.collection)? {
+            self.with_versioned_graph_insert(create)?
+        } else {
+            create()?
+        };
         self.index_store_ref()
             .index_entity_insert(&input.collection, id, &fields)
             .map_err(crate::RedDBError::Internal)?;

@@ -5,6 +5,7 @@ use reddb_file::native_value::{read_native_value, write_native_value, NativeRead
 use reddb_types::Value;
 
 pub const CASES: &[(&str, fn())] = &[
+    ("entity_codec_branch_provenance_v13", branch_provenance),
     ("entity_codec_native_v1_v12_goldens", native_goldens),
     ("entity_codec_value_tags_and_truncation", value_tags),
     ("entity_codec_invalid_lengths_and_depth", invalid_values),
@@ -13,6 +14,28 @@ pub const CASES: &[(&str, fn())] = &[
         entity_boundaries,
     ),
 ];
+
+fn branch_provenance() {
+    for mut entity in corpus::entities() {
+        entity.set_branch_origin(7);
+        entity.set_branch_xmax(9, 30);
+        entity.set_branch_xmax(8, 29);
+        let mut encoded = Vec::new();
+        write_entity_binary(&mut encoded, &entity, 13);
+        let mut position = 0;
+        let decoded = read_entity_binary(&encoded, &mut position, 13).expect("branch version");
+        assert_eq!(position, encoded.len());
+        assert_eq!(decoded.branch_version(), entity.branch_version());
+        assert_eq!(decoded.xmin, entity.xmin);
+        assert_eq!(decoded.xmax, entity.xmax);
+        assert_eq!(decoded.branch_xmax(8), 29);
+        assert_eq!(decoded.branch_xmax(9), 30);
+        // Every byte in the new required tail participates in decoding.
+        for end in encoded.len() - 6..encoded.len() {
+            assert!(read_entity_binary(&encoded[..end], &mut 0, 13).is_err());
+        }
+    }
+}
 
 fn native_goldens() {
     let inputs = corpus::entities();

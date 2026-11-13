@@ -958,6 +958,7 @@ fn cold_key_projection_keeps_snapshot_history_and_masks_replaced_base_rows() {
     let manager = SegmentManager::new("keys");
     manager.install_backing(Arc::new(PagedCollection::new(tree)), 0, 11, 128 * 1024, 5);
     let snapshot = SnapshotContext {
+        branch: None,
         snapshot: Snapshot {
             xid: 10,
             in_progress: HashSet::new(),
@@ -1156,6 +1157,7 @@ fn indexed_cold_keys_bound_reads_preserve_versions_and_verify_candidates() {
         "an indexed probe must not walk unrelated collection pages"
     );
     let snapshot = SnapshotContext {
+        branch: None,
         snapshot: Snapshot {
             xid: 10,
             in_progress: HashSet::new(),
@@ -1272,6 +1274,7 @@ fn owned_key_history_freezes_metadata_and_masks_renamed_or_deleted_base_rows() {
         .collect();
     assert_eq!(visible, vec![7, 10]);
     let snapshot = reddb_engine::transaction::read::SnapshotContext {
+        branch: None,
         snapshot: reddb_engine::transaction::snapshot::Snapshot {
             xid: 5,
             in_progress: Default::default(),

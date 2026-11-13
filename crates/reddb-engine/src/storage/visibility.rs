@@ -1,7 +1,7 @@
 //! Visibility of persisted entities under an explicit statement snapshot.
 //! Host authorization, tenant and provider policy remain outside this module.
 use super::entity::{EntityData, UnifiedEntity};
-use crate::transaction::read::{record_serializable_read, visibility_check, SnapshotContext};
+use crate::transaction::read::{record_serializable_read, SnapshotContext};
 use reddb_types::Value;
 
 /// Reserved row field that carries a row's moderation visibility state.
@@ -60,7 +60,7 @@ pub fn entity_visible_with_context(ctx: Option<&SnapshotContext>, entity: &Unifi
     }
     match ctx {
         Some(ctx) => {
-            let visible = visibility_check(ctx, entity.xmin, entity.xmax);
+            let visible = crate::transaction::read::entity_visibility_check(ctx, entity);
             if visible {
                 record_serializable_read(ctx, entity);
             }

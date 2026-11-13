@@ -7,13 +7,13 @@ specific scenario, not a guarantee that the model supports every VCS operation.
 
 | Collection model | Existing focused VCS evidence | Important gaps to cover |
 | --- | --- | --- |
-| Table | Historical table scan after an update | Inserts, deletes, branch isolation, merge application and recovery |
-| Document | Historical patch and delete; concurrent update conflict | Inserts, branch isolation, merge application and recovery |
-| Graph | Node and edge history, checkpoint recovery, conflict detection and WAL publication; native read visibility | Branch isolation and application of merges |
-| Vector | Autocommit history after reopen, delete visibility, concurrent delete conflict, SELECT AS OF payloads, pending-delete recovery in embedded and paged checkpoints | Historical similarity search, branch isolation and merge application |
-| KV | Historical writes and deletes, conflicts, and commits from another connection | Branch isolation, merge application and recovery |
-| Mixed | No dedicated model-specific VCS test in this directory | Mixed-model snapshots, branch isolation, merge and recovery |
-| TimeSeries | No dedicated model-specific VCS test in this directory | Point insertion/deletion, historical reads, branch isolation, merge and recovery |
+| Table | Independent branch updates, typed divergent merge, insert/delete, hard reset, cherry-pick/revert, indexed AS OF and recovery | Broader constraint and authorization combinations |
+| Document | Historical patch/delete, independent branches, fast-forward/forced merge and recovery | Conflicts involving independent creations of the same application key |
+| Graph | Node/edge history, independent branches, actual merge, persisted conflict resolution, recovery and failed publication | Contract enforcement during merge |
+| Vector | Autocommit, independent branches, merge, native reads, exact fallback for approximate search, embedded/paged recovery | Additional historical similarity workloads |
+| KV | History, independent branch updates, INCR/CAS, tag invalidation, merge and recovery | Concurrent creation of the same key in different branches |
+| Mixed | Row/node/vector snapshots, independent additions/deletion, divergent merge and embedded/paged recovery | More combinations of native mutation surfaces |
+| TimeSeries | Native points, append-only rejection, independent branch additions, merge and embedded/paged recovery | Retention, chunk and rollup operations |
 | Queue | No dedicated model-specific VCS test in this directory | Message state, branch isolation, merge and recovery without unintended delivery side effects |
 | Metrics | No dedicated model-specific VCS test in this directory | Samples and derived state, historical reads, branch isolation, merge and recovery |
 | HLL | No dedicated model-specific VCS test in this directory | State changes, historical reads, branch isolation, diff, merge and recovery |
@@ -29,9 +29,10 @@ state is stored under internal `red_config` keys, while `vcs_diff` skips
 internal collections; tests must verify how their state becomes part of VCS
 instead of treating the flag as evidence of support.
 
-`e2e_vcs_merge_guards` covers all 14 declared models. It checks that unsupported
-data application cannot advance HEAD through fast-forward merge, forced merge,
-cherry-pick or revert. Vault uses a synthetic test key and secret; metrics
+`e2e_vcs_merge_guards` covers all 14 declared models. Supported models apply
+fast-forward and forced merges, hard reset, cherry-pick and revert. For the
+remaining models it checks that unsupported data application cannot advance
+HEAD. Vault uses a synthetic test key and secret; metrics
 ingests a real sample through Prometheus remote write. These are not successful
 merge or history tests.
 `e2e_vcs_native_visibility` exercises pending inserts and commit visibility through
