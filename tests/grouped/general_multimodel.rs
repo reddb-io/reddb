@@ -125,3 +125,6 @@ mod unit_hot_update;
 
 #[path = "vcs/e2e_vcs_queue.rs"]
 mod e2e_vcs_queue;
+
+#[path = "vcs/e2e_vcs_constraints.rs"]
+mod e2e_vcs_constraints;

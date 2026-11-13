@@ -13,12 +13,21 @@ struct Image {
 
 impl PartialEq for Image {
     fn eq(&self, other: &Self) -> bool {
-        self.entity.kind == other.entity.kind
+        semantic_kind(&self.entity.kind) == semantic_kind(&other.entity.kind)
             && self.entity.data == other.entity.data
             && self.entity.embeddings() == other.entity.embeddings()
             && self.entity.cross_refs() == other.entity.cross_refs()
             && self.metadata == other.metadata
     }
+}
+
+// A row's physical row_id is not user data and differs across versions.
+fn semantic_kind(kind: &EntityKind) -> EntityKind {
+    let mut kind = kind.clone();
+    if let EntityKind::TableRow { row_id, .. } = &mut kind {
+        *row_id = 0;
+    }
+    kind
 }
 
 fn choose<T: Clone + PartialEq>(base: &T, ours: &T, theirs: &T, path: &str) -> Result<T, String> {
@@ -126,14 +135,28 @@ fn merge_values(
     Ok(merged)
 }
 
-fn merge_image(base: &Image, ours: &Image, theirs: &Image) -> Result<Image, String> {
+fn merge_image(
+    base: &Image,
+    ours: &Image,
+    theirs: &Image,
+    derived: &HashSet<String>,
+) -> Result<Image, String> {
     let mut merged = ours.clone();
     merged.entity.kind = choose(
-        &base.entity.kind,
-        &ours.entity.kind,
-        &theirs.entity.kind,
+        &semantic_kind(&base.entity.kind),
+        &semantic_kind(&ours.entity.kind),
+        &semantic_kind(&theirs.entity.kind),
         "/kind",
     )?;
+    if let (
+        EntityKind::TableRow { row_id, .. },
+        EntityKind::TableRow {
+            row_id: previous, ..
+        },
+    ) = (&mut merged.entity.kind, &ours.entity.kind)
+    {
+        *row_id = *previous;
+    }
     merged.metadata = merge_map(
         &base.metadata,
         &ours.metadata,
@@ -180,13 +203,13 @@ fn merge_image(base: &Image, ours: &Image, theirs: &Image) -> Result<Image, Stri
             if b.named.is_some() && o.named.is_some() && t.named.is_some() =>
         {
             let mut value = o.clone();
-            value.named = Some(merge_values(
-                b.named.as_ref().unwrap(),
-                o.named.as_ref().unwrap(),
-                t.named.as_ref().unwrap(),
-                "/row",
-                0,
-            )?);
+            let fields = |row: &RowData| {
+                row.iter_fields()
+                    .filter(|(name, _)| !derived.contains(*name))
+                    .map(|(name, value)| (name.to_string(), value.clone()))
+                    .collect()
+            };
+            value.named = Some(merge_values(&fields(b), &fields(o), &fields(t), "/row", 0)?);
             EntityData::Row(value)
         }
         (EntityData::Vector(b), EntityData::Vector(o), EntityData::Vector(t)) => {
@@ -424,6 +447,16 @@ fn plan_contexts(
             }
         }
         let [base, ours, theirs] = images;
+        let contract = runtime.db().collection_contract(&collection);
+        let derived: HashSet<_> = contract
+            .as_ref()
+            .into_iter()
+            .flat_map(|contract| &contract.declared_columns)
+            .filter(|column| column.generated.is_some())
+            .map(|column| column.name.clone())
+            .collect();
+        let changes_start = plan.changes.len();
+        let conflicts_start = plan.conflicts.len();
         let ids: BTreeSet<_> = base
             .keys()
             .chain(ours.keys())
@@ -435,7 +468,7 @@ fn plan_contexts(
             let o = ours.get(&id).cloned();
             let t = theirs.get(&id).cloned();
             let merged = choose(&b, &o, &t, "*").or_else(|path| match (&b, &o, &t) {
-                (Some(b), Some(o), Some(t)) => merge_image(b, o, t).map(Some),
+                (Some(b), Some(o), Some(t)) => merge_image(b, o, t, &derived).map(Some),
                 _ => Err(path),
             });
             let conflict_id = format!("{state}:{collection}/{id}");
@@ -525,8 +558,119 @@ fn plan_contexts(
                 }
             }
         }
+        if authorize_changes && plan.conflicts.len() == conflicts_start {
+            validate_collection_result(
+                runtime,
+                &collection,
+                &ours,
+                &mut plan.changes[changes_start..],
+                state == "head-change",
+            )?;
+        }
     }
     Ok(plan)
+}
+
+fn validate_collection_result(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    ours: &HashMap<u64, Image>,
+    changes: &mut [Change],
+    moving_head: bool,
+) -> RedDBResult<()> {
+    use reddb_engine::catalog::enforcement::CollectionContractEnforcer;
+    let Some(mut contract) = runtime.db().collection_contract(collection) else {
+        return Ok(());
+    };
+    let native_retirement = matches!(
+        contract.declared_model,
+        crate::catalog::CollectionModel::Queue
+            | crate::catalog::CollectionModel::Metrics
+            | crate::catalog::CollectionModel::TimeSeries
+    );
+    if contract.append_only
+        && !moving_head
+        && changes
+            .iter()
+            .any(|change| change.before.is_some() && (change.after.is_some() || !native_retirement))
+    {
+        return Err(RedDBError::InvalidOperation(format!(
+            "collection '{collection}' is append-only"
+        )));
+    }
+    // Restore authored timestamps; schema admission must not manufacture a new
+    // update time merely because an existing version is merged or checked out.
+    contract.timestamps_enabled = false;
+    let enforcer = CollectionContractEnforcer::new(&contract);
+    for change in changes.iter_mut() {
+        let Some(after) = &mut change.after else {
+            continue;
+        };
+        if let EntityData::Vector(vector) = &after.entity.data {
+            enforcer.ensure_vector_dimension(vector.dense.len())?;
+        }
+        if let EntityData::Row(row) = &mut after.entity.data {
+            let fields = row
+                .iter_fields()
+                .map(|(name, value)| (name.to_string(), value.clone()))
+                .collect();
+            let normalized: HashMap<_, _> = enforcer
+                .normalize_update_at(fields, 0)?
+                .into_iter()
+                .collect();
+            if moving_head && row.named.as_ref() != Some(&normalized) {
+                return Err(RedDBError::InvalidOperation(format!(
+                    "historical rows in '{collection}' require migration under the current contract; use a data merge"
+                )));
+            }
+            row.named = Some(normalized);
+            row.schema = None;
+            row.columns.clear();
+        }
+        // Recomputed derived values must also pass the caller's row policy.
+        ensure_vcs_entity_access(
+            runtime,
+            collection,
+            &after.entity,
+            if change.before.is_some() {
+                reddb_rql::ast::PolicyAction::Update
+            } else {
+                reddb_rql::ast::PolicyAction::Insert
+            },
+        )?;
+    }
+    let removed: HashSet<_> = changes
+        .iter()
+        .filter_map(|change| change.before.as_ref())
+        .map(|image| image.entity.id)
+        .collect();
+    let final_images = ours
+        .values()
+        .filter(|image| !removed.contains(&image.entity.id))
+        .chain(changes.iter().filter_map(|change| change.after.as_ref()));
+    let rows: Vec<Vec<(String, Value)>> = final_images
+        .filter_map(|image| image.entity.data.as_row())
+        .map(|row| {
+            row.iter_fields()
+                .map(|(name, value)| (name.to_string(), value.clone()))
+                .collect()
+        })
+        .collect();
+    enforcer.enforce_batch_uniqueness(&rows)?;
+    for index in runtime.index_store_ref().unique_indexes(collection) {
+        let mut keys = HashSet::new();
+        for row in &rows {
+            if let Some(key) = super::super::index_store::unique_index_key(&index.columns, row) {
+                if !keys.insert(key) {
+                    return Err(RedDBError::Query(format!(
+                        "duplicate key violates unique index '{}' on collection '{collection}'",
+                        index.name
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn publish_commit(

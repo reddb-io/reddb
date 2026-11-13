@@ -202,6 +202,18 @@ fn check_merge_guard(model: CollectionModel, create: &str, mutation: Option<&str
         .vcs_revert(8201, &picked.hash, author())
         .expect("revert applies inverse delta");
     assert_eq!(read_state(), 0);
+    assert!(runtime
+        .execute_query("DROP COLLECTION items")
+        .expect_err("history must survive DDL")
+        .to_string()
+        .contains("versioned"));
+    if model != CollectionModel::Queue {
+        assert!(runtime
+            .execute_query("TRUNCATE COLLECTION items")
+            .expect_err("history must survive truncate")
+            .to_string()
+            .contains("versioned"));
+    }
     clear_current_connection_id();
 }
 

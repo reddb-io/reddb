@@ -754,6 +754,15 @@ fn ensure_no_pending_merge(store: &UnifiedStore, connection_id: u64) -> RedDBRes
 // ---------------------------------------------------------------------------
 
 impl RedDBRuntime {
+    pub(crate) fn vcs_reject_destructive_ddl(&self, collection: &str) -> RedDBResult<()> {
+        if self.vcs_is_versioned(collection)? {
+            return Err(RedDBError::InvalidOperation(format!(
+                "cannot physically drop or truncate versioned collection '{collection}'; use versioned deletes or QUEUE PURGE"
+            )));
+        }
+        Ok(())
+    }
+
     pub(super) fn rehydrate_vcs_snapshot_pins(&self) -> RedDBResult<()> {
         let store = self.inner.db.store();
         let Some(commits) = store.get_collection(vc::COMMITS) else {

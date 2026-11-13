@@ -369,3 +369,13 @@ Vault merge retains sealed payloads, while diff and conflict output expose only
 metadata. VCS data changes recheck collection privileges, RLS and keyed
 Config/Vault capabilities, including fast-forward and hard reset. Changing
 the history setting requires active transactions to finish first.
+
+Merge, cherry-pick, revert and hard reset validate the resulting collection
+against its current contract. Table checks, required columns, generated
+columns, unique constraints/indexes and vector dimensions are enforced.
+Generated columns are recomputed from merged inputs. Append-only contracts
+reject data merges that replace existing payloads; native Queue/TimeSeries/
+Metrics retirement remains valid. Moving HEAD selects a historical view without
+erasing immutable versions. Contracts are shared catalog
+metadata, not branch history. DROP and physical TRUNCATE reject versioned
+collections; use versioned deletes or QUEUE PURGE to retain history.

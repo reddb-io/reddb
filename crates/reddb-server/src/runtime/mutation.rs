@@ -104,6 +104,8 @@ impl<'rt> MutationEngine<'rt> {
         collection: String,
         mut rows: Vec<MutationRow>,
     ) -> RedDBResult<MutationResult> {
+        let _branch_publication = self.runtime.vcs_is_versioned(&collection)?
+            .then(|| self.store.vault_publication_lock.lock());
         // Public-mutation gate (PLAN.md W1). Every public path that
         // creates rows funnels through `apply`, so a single check here
         // covers SQL `INSERT`, gRPC `Insert`/`BulkInsert`, HTTP

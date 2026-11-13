@@ -453,6 +453,9 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
+        let branch_store = self.db().store();
+        let _branch_publication = self.vcs_is_versioned(&query.table)?
+            .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &query.table,
@@ -1960,6 +1963,9 @@ impl RedDBRuntime {
         query: &UpdateQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let branch_store = self.db().store();
+        let _branch_publication = self.vcs_is_versioned(&query.table)?
+            .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &query.table,
@@ -2894,6 +2900,9 @@ impl RedDBRuntime {
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let branch_store = self.db().store();
+        let _branch_publication = self.vcs_is_versioned(&query.table)?
+            .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &query.table,

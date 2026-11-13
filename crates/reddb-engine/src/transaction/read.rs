@@ -34,6 +34,47 @@ pub struct BranchReadView {
     pub epochs: std::collections::BTreeMap<u64, super::snapshot::Snapshot>,
 }
 
+/// Unique keys reserve pending writes in the current epoch, but ancestor
+/// epochs keep their frozen fork view. A sibling branch never reserves a key.
+pub fn entity_reserves_unique_key(
+    ctx: &SnapshotContext,
+    entity: &crate::storage::entity::UnifiedEntity,
+) -> bool {
+    let (Some(view), Some(version)) = (&ctx.branch, entity.branch_version()) else {
+        return ctx
+            .manager
+            .row_reserves_unique_key(entity.xmin, entity.xmax, &ctx.own_xids);
+    };
+    let inserted = if version.origin == view.writer_epoch {
+        ctx.manager
+            .row_reserves_unique_key(entity.xmin, 0, &ctx.own_xids)
+    } else {
+        view.epochs.get(&version.origin).is_some_and(|snapshot| {
+            !ctx.manager.is_aborted(entity.xmin) && snapshot.sees(entity.xmin, 0)
+        })
+    };
+    if !inserted {
+        return false;
+    }
+    let deleted = |epoch, xid| {
+        if xid == 0 {
+            return false;
+        }
+        if epoch == view.writer_epoch {
+            !ctx.manager.row_reserves_unique_key(0, xid, &ctx.own_xids)
+        } else {
+            view.epochs
+                .get(&epoch)
+                .is_some_and(|snapshot| !ctx.manager.is_aborted(xid) && snapshot.sees(xid, 0))
+        }
+    };
+    !deleted(version.origin, entity.xmax)
+        && !version
+            .deletions
+            .iter()
+            .any(|&(epoch, xid)| deleted(epoch, xid))
+}
+
 pub fn entity_visibility_check(
     ctx: &SnapshotContext,
     entity: &crate::storage::entity::UnifiedEntity,
