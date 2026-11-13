@@ -708,7 +708,7 @@ pub(super) fn publish_commit(
         commit_fields(commit, snapshot, &view),
     )?;
     branches::stage_head(&store, &mut publication, connection, branch, commit, None)?;
-    if let Some((_, _, Some(state))) = load_workset_state(&store, connection) {
+    if let Some((_, _, Some(state))) = load_workset_state(&store, connection)? {
         for collection in [vc::CONFLICTS, vc::MERGE_STATE] {
             if let Some(manager) = store.get_collection(collection) {
                 manager.try_for_each_entity(usize::MAX, |entity| {
@@ -775,7 +775,7 @@ pub(super) fn finish_pending(
         field("ours")?,
         field("theirs")?,
     );
-    if load_ref(&store, &branch)
+    if load_ref(&store, &branch)?
         .map(|reference| reference.target)
         .as_deref()
         != Some(&ours)
@@ -794,6 +794,12 @@ pub(super) fn finish_pending(
     let snapshot_manager = runtime.snapshot_manager();
     let mut snapshot = capture_commit_snapshot(&snapshot_manager);
     let parents = vec![ours, theirs];
+    let mut parent_height = 0;
+    for parent in &parents {
+        let commit = load_commit(&store, parent)?
+            .ok_or_else(|| RedDBError::Internal("vcs: missing merge parent".into()))?;
+        parent_height = parent_height.max(commit.height);
+    }
     let timestamp_ms = now_ms();
     let commit = Commit {
         hash: compute_commit_hash(
@@ -804,12 +810,7 @@ pub(super) fn finish_pending(
             timestamp_ms,
         ),
         root_xid: snapshot.xid,
-        height: parents
-            .iter()
-            .filter_map(|hash| load_commit(&store, hash).map(|commit| commit.height))
-            .max()
-            .unwrap_or(0)
-            + 1,
+        height: parent_height + 1,
         parents,
         committer: input.committer.unwrap_or_else(|| input.author.clone()),
         author: input.author,
@@ -841,13 +842,13 @@ pub(super) fn apply_delta(
     branches::ensure_entity_history_supported(runtime)?;
     let store = runtime.db().store();
     let (branch, workset_head) =
-        load_workset(&store, connection).unwrap_or_else(|| (vc::DEFAULT_BRANCH_REF.into(), None));
+        load_workset(&store, connection)?.unwrap_or_else(|| (vc::DEFAULT_BRANCH_REF.into(), None));
     if !branch.starts_with(vc::BRANCH_REF_PREFIX) {
         return Err(RedDBError::InvalidOperation(
             "cannot apply history to a detached or tag checkout".into(),
         ));
     }
-    let head = load_ref(&store, &branch)
+    let head = load_ref(&store, &branch)?
         .map(|reference| reference.target)
         .or(workset_head)
         .filter(|hash| !hash.is_empty())
@@ -868,7 +869,7 @@ pub(super) fn apply_delta(
     let commit = Commit {
         hash: compute_commit_hash(snapshot.xid, &parents, &author, &message, timestamp_ms),
         root_xid: snapshot.xid,
-        height: load_commit(&store, &head).expect("resolved head").height + 1,
+        height: load_commit(&store, &head)?.expect("resolved head").height + 1,
         parents,
         author: author.clone(),
         committer: author,

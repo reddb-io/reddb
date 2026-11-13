@@ -33,6 +33,9 @@ use reddb_types::Value;
 mod branches;
 #[path = "vcs_merge_data.rs"]
 mod merge_data;
+#[cfg(test)]
+#[path = "vcs_metadata_tests.rs"]
+mod metadata_tests;
 
 impl RedDBRuntime {
     pub(crate) fn vcs_live_graph_validation_contexts(
@@ -60,12 +63,20 @@ impl RedDBRuntime {
         names
             .into_iter()
             .map(|name| {
-                let mut branch = branches::load_view(&store, &name)?.unwrap_or_else(|| {
-                    reddb_engine::transaction::read::BranchReadView {
-                        writer_epoch: 0,
-                        epochs: Default::default(),
+                let mut branch = match branches::load_view(&store, &name)? {
+                    Some(branch) => branch,
+                    None if name == vc::DEFAULT_BRANCH_REF => {
+                        reddb_engine::transaction::read::BranchReadView {
+                            writer_epoch: 0,
+                            epochs: Default::default(),
+                        }
                     }
-                });
+                    None => {
+                        return Err(RedDBError::InvalidOperation(format!(
+                            "checkout legacy branch '{name}' before enabling a graph contract"
+                        )))
+                    }
+                };
                 branch
                     .epochs
                     .insert(branch.writer_epoch, context.snapshot.clone());
@@ -136,31 +147,6 @@ fn row_string_list(row: &RowData, field: &str) -> Vec<String> {
     }
 }
 
-fn insert_meta_row(
-    store: &UnifiedStore,
-    collection: &str,
-    fields: HashMap<String, Value>,
-) -> RedDBResult<EntityId> {
-    let _ = store.get_or_create_collection(collection);
-    store
-        .insert_auto(
-            collection,
-            UnifiedEntity::new(
-                EntityId::new(0),
-                EntityKind::TableRow {
-                    table: Arc::from(collection),
-                    row_id: 0,
-                },
-                EntityData::Row(RowData {
-                    columns: Vec::new(),
-                    named: Some(fields),
-                    schema: None,
-                }),
-            ),
-        )
-        .map_err(|e| RedDBError::Internal(e.to_string()))
-}
-
 fn compute_commit_hash(
     root_xid: Xid,
     parents: &[CommitHash],
@@ -213,17 +199,33 @@ fn head_ref_id(connection_id: u64) -> String {
 // Commit load / save
 // ---------------------------------------------------------------------------
 
-fn load_commit_entity(store: &UnifiedStore, hash: &str) -> Option<UnifiedEntity> {
-    let manager = store.get_collection(vc::COMMITS)?;
-    manager
-        .query_all(|entity| {
-            entity
-                .data
-                .as_row()
-                .is_some_and(|row| row_text(row, "id").as_deref() == Some(hash))
-        })
-        .into_iter()
-        .next()
+fn load_metadata_entity(
+    store: &UnifiedStore,
+    collection: &str,
+    key: &str,
+) -> RedDBResult<Option<UnifiedEntity>> {
+    let mut result = None;
+    if let Some(manager) = store.get_collection(collection) {
+        super::function_budget::try_scan(
+            |visit| manager.try_for_each_entity(usize::MAX, visit),
+            |entity| {
+                if entity
+                    .data
+                    .as_row()
+                    .is_some_and(|row| row_text(row, "id").as_deref() == Some(key))
+                {
+                    result = Some(entity.clone());
+                    return false;
+                }
+                true
+            },
+        )?;
+    }
+    Ok(result)
+}
+
+fn load_commit_entity(store: &UnifiedStore, hash: &str) -> RedDBResult<Option<UnifiedEntity>> {
+    load_metadata_entity(store, vc::COMMITS, hash)
 }
 
 fn commit_from_row(row: &RowData) -> Option<Commit> {
@@ -246,10 +248,16 @@ fn commit_from_row(row: &RowData) -> Option<Commit> {
     })
 }
 
-fn load_commit(store: &UnifiedStore, hash: &str) -> Option<Commit> {
-    let entity = load_commit_entity(store, hash)?;
-    let row = entity.data.as_row()?;
-    commit_from_row(row)
+fn load_commit(store: &UnifiedStore, hash: &str) -> RedDBResult<Option<Commit>> {
+    load_commit_entity(store, hash)?
+        .map(|entity| {
+            entity
+                .data
+                .as_row()
+                .and_then(commit_from_row)
+                .ok_or_else(|| RedDBError::Internal(format!("vcs: invalid commit '{hash}'")))
+        })
+        .transpose()
 }
 
 struct CommitSnapshot<'a> {
@@ -398,19 +406,20 @@ fn commit_fields(
 // Ref load / save / delete
 // ---------------------------------------------------------------------------
 
-fn ref_kind_from_str(s: &str) -> RefKind {
+fn ref_kind_from_str(s: &str) -> Option<RefKind> {
     match s {
-        "tag" => RefKind::Tag,
-        "head" => RefKind::Head,
-        _ => RefKind::Branch,
+        "branch" => Some(RefKind::Branch),
+        "tag" => Some(RefKind::Tag),
+        "head" => Some(RefKind::Head),
+        _ => None,
     }
 }
 
 fn ref_from_row(row: &RowData) -> Option<Ref> {
     Some(Ref {
         name: row_text(row, "id")?,
-        kind: ref_kind_from_str(&row_text(row, "type").unwrap_or_default()),
-        target: row_text(row, "target").unwrap_or_default(),
+        kind: ref_kind_from_str(&row_text(row, "type")?)?,
+        target: row_text(row, "target")?,
         protected: row
             .get_field("protected")
             .and_then(|v| match v {
@@ -421,52 +430,64 @@ fn ref_from_row(row: &RowData) -> Option<Ref> {
     })
 }
 
-fn load_ref_entity(store: &UnifiedStore, name: &str) -> Option<(EntityId, UnifiedEntity)> {
-    let manager = store.get_collection(vc::REFS)?;
-    manager
-        .query_all(|entity| {
+fn load_ref_entity(
+    store: &UnifiedStore,
+    name: &str,
+) -> RedDBResult<Option<(EntityId, UnifiedEntity)>> {
+    Ok(load_metadata_entity(store, vc::REFS, name)?.map(|entity| (entity.id, entity)))
+}
+
+fn load_ref(store: &UnifiedStore, name: &str) -> RedDBResult<Option<Ref>> {
+    load_ref_entity(store, name)?
+        .map(|(_, entity)| {
             entity
                 .data
                 .as_row()
-                .is_some_and(|row| row_text(row, "id").as_deref() == Some(name))
+                .and_then(ref_from_row)
+                .ok_or_else(|| RedDBError::Internal(format!("vcs: invalid reference '{name}'")))
         })
-        .into_iter()
-        .next()
-        .map(|entity| (entity.id, entity))
+        .transpose()
 }
 
-fn load_ref(store: &UnifiedStore, name: &str) -> Option<Ref> {
-    let (_, entity) = load_ref_entity(store, name)?;
-    ref_from_row(entity.data.as_row()?)
-}
-
-fn save_ref(store: &UnifiedStore, r: &Ref) -> RedDBResult<()> {
-    // Delete-then-insert gives us upsert semantics over the TableRow
-    // primary-key `_id` used by every red_* collection.
-    if let Some((id, _)) = load_ref_entity(store, &r.name) {
-        let _ = store.delete(vc::REFS, id);
-    }
-    let mut fields: HashMap<String, Value> = HashMap::new();
-    fields.insert("id".to_string(), Value::text(r.name.as_str()));
-    let kind_str = match r.kind {
+fn stage_ref(
+    store: &UnifiedStore,
+    publication: &mut crate::storage::unified::store::RowPublication,
+    reference: &Ref,
+) -> RedDBResult<()> {
+    let kind = match reference.kind {
         RefKind::Branch => "branch",
         RefKind::Tag => "tag",
         RefKind::Head => "head",
     };
-    fields.insert("type".to_string(), Value::text(kind_str));
-    fields.insert("target".to_string(), Value::text(r.target.as_str()));
-    fields.insert("protected".to_string(), Value::Boolean(r.protected));
-    insert_meta_row(store, vc::REFS, fields)?;
+    branches::stage_metadata(
+        store,
+        publication,
+        vc::REFS,
+        "id",
+        &reference.name,
+        HashMap::from([
+            ("id".into(), Value::text(reference.name.as_str())),
+            ("type".into(), Value::text(kind)),
+            ("target".into(), Value::text(reference.target.as_str())),
+            ("protected".into(), Value::Boolean(reference.protected)),
+        ]),
+    )
+}
+
+fn save_ref(store: &UnifiedStore, reference: &Ref) -> RedDBResult<()> {
+    let mut publication = crate::storage::unified::store::RowPublication::default();
+    stage_ref(store, &mut publication, reference)?;
+    store.publish_rows(publication)?;
     Ok(())
 }
 
 fn delete_ref(store: &UnifiedStore, name: &str) -> RedDBResult<bool> {
-    let Some((id, _)) = load_ref_entity(store, name) else {
+    let Some((id, _)) = load_ref_entity(store, name)? else {
         return Ok(false);
     };
-    store
-        .delete(vc::REFS, id)
-        .map_err(|e| RedDBError::Internal(e.to_string()))?;
+    let mut publication = crate::storage::unified::store::RowPublication::default();
+    publication.deletes.push((vc::REFS.into(), id));
+    store.publish_rows(publication)?;
     Ok(true)
 }
 
@@ -532,31 +553,37 @@ fn versioned_collections(store: &UnifiedStore) -> RedDBResult<Vec<String>> {
     Ok(collections)
 }
 
-fn list_refs_by_prefix(store: &UnifiedStore, prefix: Option<&str>) -> Vec<Ref> {
-    let Some(manager) = store.get_collection(vc::REFS) else {
-        return Vec::new();
-    };
-    let prefix_owned = prefix.map(|s| s.to_string());
-    manager
-        .query_all(|entity| {
-            entity.data.as_row().is_some_and(|row| {
-                let id = row_text(row, "id").unwrap_or_default();
-                match &prefix_owned {
-                    Some(p) => id.starts_with(p),
-                    None => true,
+fn list_refs_by_prefix(store: &UnifiedStore, prefix: Option<&str>) -> RedDBResult<Vec<Ref>> {
+    let mut refs = Vec::new();
+    if let Some(manager) = store.get_collection(vc::REFS) {
+        super::function_budget::try_scan_result(
+            |visit| manager.try_for_each_entity(usize::MAX, visit),
+            |entity| {
+                let row = entity
+                    .data
+                    .as_row()
+                    .ok_or_else(|| RedDBError::Internal("vcs: invalid reference row".into()))?;
+                let reference = ref_from_row(row)
+                    .ok_or_else(|| RedDBError::Internal("vcs: invalid reference".into()))?;
+                if prefix.is_none_or(|prefix| reference.name.starts_with(prefix)) {
+                    refs.push(reference);
                 }
-            })
-        })
-        .into_iter()
-        .filter_map(|entity| ref_from_row(entity.data.as_row()?))
-        .collect()
+                Ok(true)
+            },
+        )?;
+    }
+    Ok(refs)
 }
 
 // ---------------------------------------------------------------------------
 // Ancestry helpers
 // ---------------------------------------------------------------------------
 
-fn ancestor_set(store: &UnifiedStore, start: &str, max_steps: usize) -> HashSet<CommitHash> {
+fn ancestor_set(
+    store: &UnifiedStore,
+    start: &str,
+    max_steps: usize,
+) -> RedDBResult<HashSet<CommitHash>> {
     let mut visited: HashSet<CommitHash> = HashSet::new();
     let mut stack: Vec<CommitHash> = vec![start.to_string()];
     let mut steps = 0usize;
@@ -564,7 +591,9 @@ fn ancestor_set(store: &UnifiedStore, start: &str, max_steps: usize) -> HashSet<
         if !visited.insert(hash.clone()) {
             continue;
         }
-        if let Some(c) = load_commit(store, &hash) {
+        {
+            let c = load_commit(store, &hash)?
+                .ok_or_else(|| RedDBError::Internal(format!("vcs: missing ancestor '{hash}'")))?;
             for p in c.parents {
                 if !visited.contains(&p) {
                     stack.push(p);
@@ -572,20 +601,23 @@ fn ancestor_set(store: &UnifiedStore, start: &str, max_steps: usize) -> HashSet<
             }
         }
         steps += 1;
-        if steps >= max_steps {
-            break;
+        if steps >= max_steps && !stack.is_empty() {
+            return Err(RedDBError::InvalidOperation(
+                "vcs: ancestry exceeds traversal budget".into(),
+            ));
         }
     }
-    visited
+    Ok(visited)
 }
 
-fn topo_walk(store: &UnifiedStore, start: &str, range: &LogRange) -> Vec<Commit> {
+fn topo_walk(store: &UnifiedStore, start: &str, range: &LogRange) -> RedDBResult<Vec<Commit>> {
     let limit = range.limit.unwrap_or(usize::MAX);
     let skip = range.skip.unwrap_or(0);
     let exclude = range
         .from
         .as_ref()
         .map(|h| ancestor_set(store, h, 100_000))
+        .transpose()?
         .unwrap_or_default();
 
     let mut visited: HashSet<CommitHash> = HashSet::new();
@@ -599,9 +631,8 @@ fn topo_walk(store: &UnifiedStore, start: &str, range: &LogRange) -> Vec<Commit>
         if exclude.contains(&hash) {
             continue;
         }
-        let Some(commit) = load_commit(store, &hash) else {
-            continue;
-        };
+        let commit = load_commit(store, &hash)?
+            .ok_or_else(|| RedDBError::Internal(format!("vcs: missing ancestor '{hash}'")))?;
         if range.no_merges && commit.parents.len() > 1 {
             for p in &commit.parents {
                 if !visited.contains(p) {
@@ -630,145 +661,111 @@ fn topo_walk(store: &UnifiedStore, start: &str, range: &LogRange) -> Vec<Commit>
             .cmp(&a.height)
             .then(b.timestamp_ms.cmp(&a.timestamp_ms))
     });
-    out
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
 // Commitish resolution
 // ---------------------------------------------------------------------------
 
-fn resolve_ref_chain(store: &UnifiedStore, name: &str) -> Option<CommitHash> {
-    // Follow up to 4 levels of ref indirection.
+fn resolve_ref_chain(store: &UnifiedStore, name: &str) -> RedDBResult<Option<CommitHash>> {
     let mut current = name.to_string();
     for _ in 0..4 {
-        let r = load_ref(store, &current)?;
-        match r.kind {
-            RefKind::Branch | RefKind::Tag => return Some(r.target),
-            RefKind::Head => {
-                current = r.target;
-                continue;
-            }
+        let Some(reference) = load_ref(store, &current)? else {
+            return Ok(None);
+        };
+        match reference.kind {
+            RefKind::Branch | RefKind::Tag => return Ok(Some(reference.target)),
+            RefKind::Head => current = reference.target,
         }
     }
-    None
+    Err(RedDBError::InvalidOperation(
+        "vcs: reference chain exceeds four levels".into(),
+    ))
 }
 
-fn resolve_short_commit(store: &UnifiedStore, prefix: &str) -> Option<CommitHash> {
+fn resolve_short_commit(store: &UnifiedStore, prefix: &str) -> RedDBResult<Option<CommitHash>> {
     if prefix.len() < 4 {
-        return None;
+        return Ok(None);
     }
-    let manager = store.get_collection(vc::COMMITS)?;
-    let matches: Vec<String> = manager
-        .query_all(|entity| {
-            entity.data.as_row().is_some_and(|row| {
-                row_text(row, "id")
-                    .map(|id| id.starts_with(prefix))
-                    .unwrap_or(false)
-            })
-        })
-        .into_iter()
-        .filter_map(|entity| row_text(entity.data.as_row()?, "id"))
-        .collect();
-    if matches.len() == 1 {
-        matches.into_iter().next()
-    } else {
-        None
+    let mut found = None;
+    let mut ambiguous = false;
+    if let Some(manager) = store.get_collection(vc::COMMITS) {
+        super::function_budget::try_scan(
+            |visit| manager.try_for_each_entity(usize::MAX, visit),
+            |entity| {
+                if let Some(hash) = entity.data.as_row().and_then(|row| row_text(row, "id")) {
+                    if hash.starts_with(prefix) {
+                        ambiguous = found.is_some();
+                        found = Some(hash);
+                    }
+                }
+                !ambiguous
+            },
+        )?;
     }
+    Ok(if ambiguous { None } else { found })
 }
 
 // ---------------------------------------------------------------------------
 // Workset helpers (lightweight — full WIP tracking lands in Phase 3)
 // ---------------------------------------------------------------------------
 
-fn upsert_workset(
+fn stage_workset(
     store: &UnifiedStore,
+    publication: &mut crate::storage::unified::store::RowPublication,
     connection_id: u64,
     branch: &str,
     base_commit: Option<&str>,
     working_xid: Xid,
 ) -> RedDBResult<()> {
-    upsert_workset_with_merge(store, connection_id, branch, base_commit, working_xid, None)
-}
-
-fn upsert_workset_with_merge(
-    store: &UnifiedStore,
-    connection_id: u64,
-    branch: &str,
-    base_commit: Option<&str>,
-    working_xid: Xid,
-    merge_state_id: Option<&str>,
-) -> RedDBResult<()> {
-    let conn_id = connection_id.to_string();
-    // Delete old workset for this connection
-    if let Some(manager) = store.get_collection(vc::WORKSETS) {
-        let rows = manager.query_all(|entity| {
-            entity
-                .data
-                .as_row()
-                .is_some_and(|row| row_text(row, "id").as_deref() == Some(&conn_id))
-        });
-        for row in rows {
-            store
-                .delete(vc::WORKSETS, row.id)
-                .map_err(|error| RedDBError::Internal(error.to_string()))?;
-        }
-    }
-    let mut fields: HashMap<String, Value> = HashMap::new();
-    fields.insert("id".to_string(), Value::text(conn_id.as_str()));
-    fields.insert("branch".to_string(), Value::text(branch));
+    let connection = connection_id.to_string();
+    let mut fields = HashMap::from([
+        ("id".into(), Value::text(connection.as_str())),
+        ("branch".into(), Value::text(branch)),
+        ("working_xid".into(), Value::UnsignedInteger(working_xid)),
+    ]);
     if let Some(base) = base_commit {
-        fields.insert("base_commit".to_string(), Value::text(base));
+        fields.insert("base_commit".into(), Value::text(base));
     }
-    if let Some(id) = merge_state_id {
-        fields.insert("merge_state_id".to_string(), Value::text(id));
-    }
-    fields.insert(
-        "working_xid".to_string(),
-        Value::UnsignedInteger(working_xid),
-    );
-    insert_meta_row(store, vc::WORKSETS, fields)?;
-    Ok(())
+    branches::stage_metadata(store, publication, vc::WORKSETS, "id", &connection, fields)
 }
 
-fn load_workset(store: &UnifiedStore, connection_id: u64) -> Option<(RefName, Option<CommitHash>)> {
-    load_workset_state(store, connection_id).map(|(branch, base, _)| (branch, base))
+fn load_workset(
+    store: &UnifiedStore,
+    connection_id: u64,
+) -> RedDBResult<Option<(RefName, Option<CommitHash>)>> {
+    Ok(load_workset_state(store, connection_id)?.map(|(branch, base, _)| (branch, base)))
 }
 
 fn load_workset_state(
     store: &UnifiedStore,
     connection_id: u64,
-) -> Option<(RefName, Option<CommitHash>, Option<String>)> {
-    let manager = store.get_collection(vc::WORKSETS)?;
-    let conn_id = connection_id.to_string();
-    manager
-        .query_all(|entity| {
-            entity
-                .data
-                .as_row()
-                .is_some_and(|row| row_text(row, "id").as_deref() == Some(&conn_id))
-        })
-        .into_iter()
-        .find_map(|entity| {
-            let row = entity.data.as_row()?;
-            let branch =
-                row_text(row, "branch").unwrap_or_else(|| vc::DEFAULT_BRANCH_REF.to_string());
-            let base = row_text(row, "base_commit");
-            let pending_merge = row_text(row, "merge_state_id");
-            // Connections on a branch share its HEAD. The checkout base is
-            // authoritative only for detached/tag reads and a pending merge.
-            let head = if branch.starts_with(vc::BRANCH_REF_PREFIX) && pending_merge.is_none() {
-                load_ref(store, &branch)
-                    .map(|reference| reference.target)
-                    .or(base)
-            } else {
-                base
-            };
-            Some((branch, head, pending_merge))
-        })
+) -> RedDBResult<Option<(RefName, Option<CommitHash>, Option<String>)>> {
+    let Some(entity) = load_metadata_entity(store, vc::WORKSETS, &connection_id.to_string())?
+    else {
+        return Ok(None);
+    };
+    let row = entity
+        .data
+        .as_row()
+        .ok_or_else(|| RedDBError::Internal("vcs: invalid workset".into()))?;
+    let branch = row_text(row, "branch")
+        .ok_or_else(|| RedDBError::Internal("vcs: workset has no branch".into()))?;
+    let base = row_text(row, "base_commit");
+    let pending_merge = row_text(row, "merge_state_id");
+    let head = if branch.starts_with(vc::BRANCH_REF_PREFIX) && pending_merge.is_none() {
+        load_ref(store, &branch)?
+            .map(|reference| reference.target)
+            .or(base)
+    } else {
+        base
+    };
+    Ok(Some((branch, head, pending_merge)))
 }
 
 fn ensure_no_pending_merge(store: &UnifiedStore, connection_id: u64) -> RedDBResult<()> {
-    let branch = load_workset(store, connection_id)
+    let branch = load_workset(store, connection_id)?
         .map(|(branch, _)| branch)
         .unwrap_or_else(|| vc::DEFAULT_BRANCH_REF.into());
     let mut pending = None;
@@ -848,7 +845,7 @@ impl RedDBRuntime {
         let store: &UnifiedStore = &store_arc;
         let _publication = store.vault_publication_lock.lock();
 
-        if let Some((_, _, Some(state))) = load_workset_state(store, input.connection_id) {
+        if let Some((_, _, Some(state))) = load_workset_state(store, input.connection_id)? {
             return merge_data::finish_pending(self, input, &state);
         }
 
@@ -856,11 +853,10 @@ impl RedDBRuntime {
 
         // Resolve current HEAD for this connection: workset -> HEAD:<conn>
         // -> default branch.
-        let workset = load_workset(store, input.connection_id);
+        let workset = load_workset(store, input.connection_id)?;
         let branch_ref = workset
             .as_ref()
             .map(|(b, _)| b.clone())
-            .or_else(|| resolve_ref_chain(store, &head_ref_id(input.connection_id)).and(None))
             .unwrap_or_else(|| vc::DEFAULT_BRANCH_REF.to_string());
 
         if !branch_ref.starts_with(vc::BRANCH_REF_PREFIX) {
@@ -868,7 +864,7 @@ impl RedDBRuntime {
                 "cannot commit a detached or tag checkout".into(),
             ));
         }
-        let parent_hash = load_ref(store, &branch_ref)
+        let parent_hash = load_ref(store, &branch_ref)?
             .map(|reference| reference.target)
             .or_else(|| workset.as_ref().and_then(|(_, base)| base.clone()));
 
@@ -877,11 +873,12 @@ impl RedDBRuntime {
             _ => Vec::new(),
         };
 
-        let parent_height = parents
-            .iter()
-            .filter_map(|p| load_commit(store, p).map(|c| c.height))
-            .max()
-            .unwrap_or(0);
+        let mut parent_height = 0;
+        for parent in &parents {
+            let commit = load_commit(store, parent)?
+                .ok_or_else(|| RedDBError::Internal("vcs: missing parent commit".into()))?;
+            parent_height = parent_height.max(commit.height);
+        }
         let height = if parents.is_empty() {
             0
         } else {
@@ -907,7 +904,7 @@ impl RedDBRuntime {
             timestamp_ms,
         );
 
-        if load_commit(store, &hash).is_some() {
+        if load_commit(store, &hash)?.is_some() {
             return Err(RedDBError::InvalidConfig(format!(
                 "commit {hash} already exists (duplicate timestamp+content)"
             )));
@@ -948,7 +945,7 @@ impl RedDBRuntime {
         let store: &UnifiedStore = &store_arc;
         let _publication = store.vault_publication_lock.lock();
         let full_name = normalize_branch_name(&input.name);
-        if load_ref(store, &full_name).is_some() {
+        if load_ref(store, &full_name)?.is_some() {
             return Err(RedDBError::InvalidConfig(format!(
                 "branch `{full_name}` already exists"
             )));
@@ -957,11 +954,11 @@ impl RedDBRuntime {
             Some(spec) => RedDBRuntime::vcs_resolve_commitish(self, spec)?,
             None => {
                 // Fall back to the connection's current HEAD branch, then default.
-                let workset = load_workset(store, input.connection_id);
+                let workset = load_workset(store, input.connection_id)?;
 
                 workset
                     .and_then(|(_, base)| base)
-                    .or_else(|| load_ref(store, vc::DEFAULT_BRANCH_REF).map(|r| r.target))
+                    .or(load_ref(store, vc::DEFAULT_BRANCH_REF)?.map(|r| r.target))
                     .unwrap_or_default()
             }
         };
@@ -971,9 +968,10 @@ impl RedDBRuntime {
             target: target_hash,
             protected: false,
         };
-        branches::delete_view(store, &r.name)?;
-        branches::create_view(store, &r.name, &r.target)?;
-        save_ref(store, &r)?;
+        let mut publication = crate::storage::unified::store::RowPublication::default();
+        branches::stage_new_view(store, &mut publication, &r.name, &r.target)?;
+        stage_ref(store, &mut publication, &r)?;
+        store.publish_rows(publication)?;
         Ok(r)
     }
 
@@ -982,15 +980,24 @@ impl RedDBRuntime {
         let store: &UnifiedStore = &store_arc;
         let _publication = store.vault_publication_lock.lock();
         let full = normalize_branch_name(name);
-        let existing = load_ref(store, &full)
+        let existing = load_ref(store, &full)?
             .ok_or_else(|| RedDBError::NotFound(format!("branch `{full}` does not exist")))?;
         if existing.protected {
             return Err(RedDBError::ReadOnly(format!(
                 "branch `{full}` is protected"
             )));
         }
-        delete_ref(store, &full)?;
-        branches::delete_view(store, &full)?;
+        if full == vc::DEFAULT_BRANCH_REF {
+            return Err(RedDBError::InvalidOperation(
+                "cannot delete the default branch".into(),
+            ));
+        }
+        let mut publication = crate::storage::unified::store::RowPublication::default();
+        if let Some((id, _)) = load_ref_entity(store, &full)? {
+            publication.deletes.push((vc::REFS.into(), id));
+        }
+        branches::stage_delete_view(store, &mut publication, &full)?;
+        store.publish_rows(publication)?;
         Ok(())
     }
 
@@ -999,7 +1006,7 @@ impl RedDBRuntime {
         let store: &UnifiedStore = &store_arc;
         let _publication = store.vault_publication_lock.lock();
         let full_name = normalize_tag_name(&input.name);
-        if load_ref(store, &full_name).is_some() {
+        if load_ref(store, &full_name)?.is_some() {
             return Err(RedDBError::InvalidConfig(format!(
                 "tag `{full_name}` already exists"
             )));
@@ -1020,7 +1027,7 @@ impl RedDBRuntime {
         let store: &UnifiedStore = &store_arc;
         let _publication = store.vault_publication_lock.lock();
         let full = normalize_tag_name(name);
-        let existing = load_ref(store, &full)
+        let existing = load_ref(store, &full)?
             .ok_or_else(|| RedDBError::NotFound(format!("tag `{full}` does not exist")))?;
         if existing.protected {
             return Err(RedDBError::ReadOnly(format!("tag `{full}` is protected")));
@@ -1032,7 +1039,7 @@ impl RedDBRuntime {
     pub fn vcs_list_refs(&self, prefix: Option<&str>) -> RedDBResult<Vec<Ref>> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
-        Ok(list_refs_by_prefix(store, prefix))
+        Ok(list_refs_by_prefix(store, prefix)?)
     }
 
     pub fn vcs_checkout(&self, input: CheckoutInput) -> RedDBResult<Ref> {
@@ -1052,20 +1059,21 @@ impl RedDBRuntime {
         if !input.force {
             ensure_no_pending_merge(store, input.connection_id)?;
         }
+        let mut publication = crate::storage::unified::store::RowPublication::default();
         let (branch_ref, target_hash) = match &input.target {
             CheckoutTarget::Branch(name) => {
                 let full = normalize_branch_name(name);
-                let r = load_ref(store, &full).ok_or_else(|| {
+                let r = load_ref(store, &full)?.ok_or_else(|| {
                     RedDBError::NotFound(format!("branch `{full}` does not exist"))
                 })?;
                 if full != vc::DEFAULT_BRANCH_REF && branches::load_view(store, &full)?.is_none() {
-                    branches::create_view(store, &full, &r.target)?;
+                    branches::stage_new_view(store, &mut publication, &full, &r.target)?;
                 }
                 (full, r.target)
             }
             CheckoutTarget::Tag(name) => {
                 let full = normalize_tag_name(name);
-                let r = load_ref(store, &full)
+                let r = load_ref(store, &full)?
                     .ok_or_else(|| RedDBError::NotFound(format!("tag `{full}` does not exist")))?;
                 (full, r.target)
             }
@@ -1077,8 +1085,9 @@ impl RedDBRuntime {
             }
         };
 
-        upsert_workset(
+        stage_workset(
             store,
+            &mut publication,
             input.connection_id,
             &branch_ref,
             Some(&target_hash),
@@ -1089,8 +1098,9 @@ impl RedDBRuntime {
         )?;
 
         // Update per-connection HEAD pointer for status/introspection.
-        save_ref(
+        stage_ref(
             store,
+            &mut publication,
             &Ref {
                 name: head_ref_id(input.connection_id),
                 kind: RefKind::Head,
@@ -1103,6 +1113,7 @@ impl RedDBRuntime {
             },
         )?;
 
+        store.publish_rows(publication)?;
         Ok(Ref {
             name: if branch_ref.is_empty() {
                 format!("detached:{target_hash}")
@@ -1127,22 +1138,22 @@ impl RedDBRuntime {
 
         // Resolve source commit (the one being merged in).
         let from_hash = RedDBRuntime::vcs_resolve_commitish(self, &input.from)?;
-        let from_commit = load_commit(store, &from_hash).ok_or_else(|| {
+        let from_commit = load_commit(store, &from_hash)?.ok_or_else(|| {
             RedDBError::NotFound(format!("source commit `{from_hash}` not found"))
         })?;
 
         // Resolve current HEAD for the connection.
-        let workset = load_workset(store, input.connection_id);
+        let workset = load_workset(store, input.connection_id)?;
         let (head_branch, head_hash) = match workset {
             Some((branch, Some(head))) => (branch, head),
             Some((branch, None)) => {
-                let head = load_ref(store, &branch)
+                let head = load_ref(store, &branch)?
                     .map(|r| r.target)
                     .unwrap_or_default();
                 (branch, head)
             }
             None => {
-                let head = load_ref(store, vc::DEFAULT_BRANCH_REF)
+                let head = load_ref(store, vc::DEFAULT_BRANCH_REF)?
                     .map(|r| r.target)
                     .unwrap_or_default();
                 (vc::DEFAULT_BRANCH_REF.to_string(), head)
@@ -1155,7 +1166,7 @@ impl RedDBRuntime {
         }
 
         // Fast-forward check: is HEAD an ancestor of `from`?
-        let from_ancestors = ancestor_set(store, &from_hash, 100_000);
+        let from_ancestors = ancestor_set(store, &from_hash, 100_000)?;
         let can_fast_forward = from_ancestors.contains(&head_hash);
 
         match input.opts.strategy {
@@ -1209,11 +1220,12 @@ impl RedDBRuntime {
         let author = input.author.clone();
         let timestamp_ms = now_ms();
         let parents = vec![head_hash.clone(), from_hash.clone()];
-        let parent_height = parents
-            .iter()
-            .filter_map(|p| load_commit(store, p).map(|c| c.height))
-            .max()
-            .unwrap_or(0);
+        let mut parent_height = 0;
+        for parent in &parents {
+            let commit = load_commit(store, parent)?
+                .ok_or_else(|| RedDBError::Internal("vcs: missing parent commit".into()))?;
+            parent_height = parent_height.max(commit.height);
+        }
         let height = parent_height + 1;
         let snapshot_manager = self.inner.transaction_state.snapshot_manager();
         let mut snapshot = capture_commit_snapshot(&snapshot_manager);
@@ -1319,7 +1331,7 @@ impl RedDBRuntime {
 
         // Resolve the commit being cherry-picked and its parent.
         let src_hash = RedDBRuntime::vcs_resolve_commitish(self, commit)?;
-        let src_commit = load_commit(store, &src_hash).ok_or_else(|| {
+        let src_commit = load_commit(store, &src_hash)?.ok_or_else(|| {
             RedDBError::NotFound(format!("cherry-pick source `{src_hash}` not found"))
         })?;
         if src_commit.parents.is_empty() {
@@ -1362,7 +1374,7 @@ impl RedDBRuntime {
         ensure_no_pending_merge(store, connection_id)?;
 
         let src_hash = RedDBRuntime::vcs_resolve_commitish(self, commit)?;
-        let src_commit = load_commit(store, &src_hash)
+        let src_commit = load_commit(store, &src_hash)?
             .ok_or_else(|| RedDBError::NotFound(format!("revert source `{src_hash}` not found")))?;
         if src_commit.parents.is_empty() {
             return Err(RedDBError::InvalidConfig(
@@ -1392,52 +1404,44 @@ impl RedDBRuntime {
         let _publication = store.vault_publication_lock.lock();
         ensure_no_pending_merge(store, input.connection_id)?;
         let target_hash = RedDBRuntime::vcs_resolve_commitish(self, &input.target)?;
-        let target_commit = load_commit(store, &target_hash).ok_or_else(|| {
+        let target_commit = load_commit(store, &target_hash)?.ok_or_else(|| {
             RedDBError::NotFound(format!("target commit `{target_hash}` not found"))
         })?;
 
         // Find the current branch for this connection.
-        let workset = load_workset(store, input.connection_id);
+        let workset = load_workset(store, input.connection_id)?;
         let branch = workset
             .as_ref()
             .map(|(b, _)| b.clone())
             .unwrap_or_else(|| vc::DEFAULT_BRANCH_REF.to_string());
 
+        if !branch.starts_with(vc::BRANCH_REF_PREFIX) {
+            return Err(RedDBError::InvalidOperation(
+                "reset requires a branch".into(),
+            ));
+        }
+        if self.snapshot_manager().oldest_active_xid().is_some() {
+            return Err(RedDBError::InvalidOperation(
+                "finish active transactions before reset".into(),
+            ));
+        }
         // Soft and Mixed retain working data; Hard installs the target view.
         match input.mode {
             ResetMode::Soft | ResetMode::Mixed => {
-                if !branch.is_empty() {
-                    save_ref(
-                        store,
-                        &Ref {
-                            name: branch.clone(),
-                            kind: RefKind::Branch,
-                            target: target_hash.clone(),
-                            protected: false,
-                        },
-                    )?;
-                }
-                upsert_workset(
+                let mut publication = crate::storage::unified::store::RowPublication::default();
+                branches::stage_head(
                     store,
+                    &mut publication,
                     input.connection_id,
                     &branch,
-                    Some(&target_hash),
-                    target_commit.root_xid,
+                    &target_commit,
+                    None,
                 )?;
+                store.publish_rows(publication)?;
                 Ok(())
             }
             ResetMode::Hard => {
                 branches::ensure_entity_history_supported(self)?;
-                if !branch.starts_with(vc::BRANCH_REF_PREFIX) {
-                    return Err(RedDBError::InvalidOperation(
-                        "hard reset requires a branch".into(),
-                    ));
-                }
-                if self.snapshot_manager().oldest_active_xid().is_some() {
-                    return Err(RedDBError::InvalidOperation(
-                        "finish active transactions before hard reset".into(),
-                    ));
-                }
                 merge_data::validate_head_change(self, input.connection_id, &target_hash)?;
                 branches::publish_head(
                     store,
@@ -1456,17 +1460,17 @@ impl RedDBRuntime {
         let start = match &input.range.to {
             Some(spec) => RedDBRuntime::vcs_resolve_commitish(self, spec)?,
             None => {
-                let workset = load_workset(store, input.connection_id);
+                let workset = load_workset(store, input.connection_id)?;
                 workset
                     .and_then(|(_, base)| base)
-                    .or_else(|| load_ref(store, vc::DEFAULT_BRANCH_REF).map(|r| r.target))
+                    .or(load_ref(store, vc::DEFAULT_BRANCH_REF)?.map(|r| r.target))
                     .unwrap_or_default()
             }
         };
         if start.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(topo_walk(store, &start, &input.range))
+        Ok(topo_walk(store, &start, &input.range)?)
     }
 
     pub fn vcs_diff(&self, input: DiffInput) -> RedDBResult<Diff> {
@@ -1561,14 +1565,14 @@ impl RedDBRuntime {
     pub fn vcs_status(&self, input: StatusInput) -> RedDBResult<Status> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
-        let workset = load_workset_state(store, input.connection_id);
+        let workset = load_workset_state(store, input.connection_id)?;
         let (head_ref, head_commit, merge_state_id) = match workset {
             Some((branch, base, merge_state_id)) => {
-                let base = base.or_else(|| load_ref(store, &branch).map(|r| r.target));
+                let base = base.or(load_ref(store, &branch)?.map(|r| r.target));
                 (Some(branch), base, merge_state_id)
             }
             None => {
-                let base = load_ref(store, vc::DEFAULT_BRANCH_REF).map(|r| r.target);
+                let base = load_ref(store, vc::DEFAULT_BRANCH_REF)?.map(|r| r.target);
                 (Some(vc::DEFAULT_BRANCH_REF.to_string()), base, None)
             }
         };
@@ -1594,7 +1598,7 @@ impl RedDBRuntime {
         let store: &UnifiedStore = &store_arc;
         let a_hash = RedDBRuntime::vcs_resolve_commitish(self, a)?;
         let b_hash = RedDBRuntime::vcs_resolve_commitish(self, b)?;
-        let a_ancestors = ancestor_set(store, &a_hash, 100_000);
+        let a_ancestors = ancestor_set(store, &a_hash, 100_000)?;
 
         // BFS from b, return first hit in a_ancestors with the greatest
         // height (closest common ancestor to b).
@@ -1606,7 +1610,7 @@ impl RedDBRuntime {
                 continue;
             }
             if a_ancestors.contains(&hash) {
-                let height = load_commit(store, &hash).map(|c| c.height).unwrap_or(0);
+                let height = load_commit(store, &hash)?.map(|c| c.height).unwrap_or(0);
                 match &best {
                     Some((h, _)) if *h >= height => {}
                     _ => best = Some((height, hash.clone())),
@@ -1615,7 +1619,10 @@ impl RedDBRuntime {
                 // further from root are already captured.
                 continue;
             }
-            if let Some(commit) = load_commit(store, &hash) {
+            {
+                let commit = load_commit(store, &hash)?.ok_or_else(|| {
+                    RedDBError::Internal(format!("vcs: missing ancestor '{hash}'"))
+                })?;
                 for p in commit.parents {
                     if !visited.contains(&p) {
                         stack.push(p);
@@ -1650,7 +1657,7 @@ impl RedDBRuntime {
             }
         };
         let connection = crate::runtime::impl_core::current_connection_id();
-        let active_state = load_workset_state(&store, connection).and_then(|(_, _, state)| state);
+        let active_state = load_workset_state(&store, connection)?.and_then(|(_, _, state)| state);
         if active_state != row_text(&row, "merge_state_id") {
             return Err(RedDBError::InvalidOperation(
                 "conflict belongs to another pending merge".into(),
@@ -1687,7 +1694,7 @@ impl RedDBRuntime {
                 in_progress: HashSet::new(),
             }),
             AsOfSpec::Commit(h) => {
-                let entity = load_commit_entity(store, &h)
+                let entity = load_commit_entity(store, &h)?
                     .ok_or_else(|| RedDBError::NotFound(format!("commit `{h}` not found")))?;
                 let row = entity.data.as_row().ok_or_else(|| {
                     RedDBError::Internal("vcs: invalid commit record".to_string())
@@ -1696,10 +1703,10 @@ impl RedDBRuntime {
             }
             AsOfSpec::Branch(name) => {
                 let full = normalize_branch_name(&name);
-                let r = load_ref(store, &full).ok_or_else(|| {
+                let r = load_ref(store, &full)?.ok_or_else(|| {
                     RedDBError::NotFound(format!("branch `{full}` does not exist"))
                 })?;
-                let entity = load_commit_entity(store, &r.target).ok_or_else(|| {
+                let entity = load_commit_entity(store, &r.target)?.ok_or_else(|| {
                     RedDBError::NotFound(format!("branch `{full}` points to missing commit"))
                 })?;
                 let row = entity.data.as_row().ok_or_else(|| {
@@ -1709,9 +1716,9 @@ impl RedDBRuntime {
             }
             AsOfSpec::Tag(name) => {
                 let full = normalize_tag_name(&name);
-                let r = load_ref(store, &full)
+                let r = load_ref(store, &full)?
                     .ok_or_else(|| RedDBError::NotFound(format!("tag `{full}` does not exist")))?;
-                let entity = load_commit_entity(store, &r.target).ok_or_else(|| {
+                let entity = load_commit_entity(store, &r.target)?.ok_or_else(|| {
                     RedDBError::NotFound(format!("tag `{full}` points to missing commit"))
                 })?;
                 let row = entity.data.as_row().ok_or_else(|| {
@@ -1725,7 +1732,11 @@ impl RedDBRuntime {
                     .ok_or_else(|| RedDBError::NotFound("no commits exist yet".to_string()))?;
                 // Find the commit with the greatest timestamp_ms <= ts.
                 let mut best: Option<(i64, UnifiedEntity)> = None;
-                let entities = manager.query_all(|_| true);
+                let mut entities = Vec::new();
+                manager.try_for_each_entity(usize::MAX, |entity| {
+                    entities.push(entity.clone());
+                    true
+                })?;
                 for entity in entities {
                     if let Some(row) = entity.data.as_row() {
                         let t = row_i64(row, "timestamp_ms").unwrap_or(0);
@@ -1782,7 +1793,7 @@ impl RedDBRuntime {
                 "export probabilistic state before discarding its version history".into(),
             ));
         }
-        if !enabled && list_refs_by_prefix(store, Some(vc::BRANCH_REF_PREFIX)).len() > 1 {
+        if !enabled && list_refs_by_prefix(store, Some(vc::BRANCH_REF_PREFIX))?.len() > 1 {
             return Err(RedDBError::InvalidOperation(
                 "cannot disable history while branches share versions".into(),
             ));
@@ -1889,30 +1900,30 @@ impl RedDBRuntime {
         // 1. Exact commit hash.
         if spec.len() == 64
             && spec.chars().all(|c| c.is_ascii_hexdigit())
-            && load_commit(store, spec).is_some()
+            && load_commit(store, spec)?.is_some()
         {
             return Ok(spec.to_string());
         }
 
         // 2. Full ref name (refs/heads/..., refs/tags/...).
         if spec.starts_with("refs/") {
-            if let Some(hash) = resolve_ref_chain(store, spec) {
+            if let Some(hash) = resolve_ref_chain(store, spec)? {
                 return Ok(hash);
             }
         }
 
         // 3. Short branch / tag name.
         let normalized_branch = normalize_branch_name(spec);
-        if let Some(hash) = resolve_ref_chain(store, &normalized_branch) {
+        if let Some(hash) = resolve_ref_chain(store, &normalized_branch)? {
             return Ok(hash);
         }
         let normalized_tag = normalize_tag_name(spec);
-        if let Some(hash) = resolve_ref_chain(store, &normalized_tag) {
+        if let Some(hash) = resolve_ref_chain(store, &normalized_tag)? {
             return Ok(hash);
         }
 
         // 4. Short commit hash prefix (≥ 4 chars, unique match).
-        if let Some(hash) = resolve_short_commit(store, spec) {
+        if let Some(hash) = resolve_short_commit(store, spec)? {
             return Ok(hash);
         }
 

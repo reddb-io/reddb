@@ -495,7 +495,7 @@ fn decode_epochs(value: &Value) -> RedDBResult<BTreeMap<u64, Snapshot>> {
 }
 
 pub(super) fn commit_view(store: &UnifiedStore, hash: &str) -> RedDBResult<BranchReadView> {
-    let entity = load_commit_entity(store, hash)
+    let entity = load_commit_entity(store, hash)?
         .ok_or_else(|| RedDBError::NotFound(format!("commit `{hash}` not found")))?;
     let row = entity
         .data
@@ -545,7 +545,12 @@ pub(super) fn load_view(store: &UnifiedStore, branch: &str) -> RedDBResult<Optio
     Ok(result)
 }
 
-pub(super) fn create_view(store: &UnifiedStore, branch: &str, from: &str) -> RedDBResult<()> {
+pub(super) fn stage_new_view(
+    store: &UnifiedStore,
+    publication: &mut crate::storage::unified::store::RowPublication,
+    branch: &str,
+    from: &str,
+) -> RedDBResult<()> {
     let mut view = if from.is_empty() {
         BranchReadView {
             writer_epoch: 0,
@@ -563,11 +568,15 @@ pub(super) fn create_view(store: &UnifiedStore, branch: &str, from: &str) -> Red
         ),
         ("ancestors".into(), encode_epochs(&view)),
     ]);
-    insert_meta_row(store, VIEWS, fields)?;
+    stage_metadata(store, publication, VIEWS, "branch", branch, fields)?;
     Ok(())
 }
 
-pub(super) fn delete_view(store: &UnifiedStore, branch: &str) -> RedDBResult<()> {
+pub(super) fn stage_delete_view(
+    store: &UnifiedStore,
+    publication: &mut crate::storage::unified::store::RowPublication,
+    branch: &str,
+) -> RedDBResult<()> {
     if let Some(manager) = store.get_collection(VIEWS) {
         let mut ids = Vec::new();
         manager.try_for_each_entity(usize::MAX, |entity| {
@@ -580,9 +589,9 @@ pub(super) fn delete_view(store: &UnifiedStore, branch: &str) -> RedDBResult<()>
             }
             true
         })?;
-        store
-            .delete_batch(VIEWS, &ids)
-            .map_err(|error| RedDBError::Internal(error.to_string()))?;
+        publication
+            .deletes
+            .extend(ids.into_iter().map(|id| (VIEWS.into(), id)));
     }
     Ok(())
 }
@@ -684,7 +693,7 @@ pub(super) fn stage_head(
             (
                 "protected".into(),
                 Value::Boolean(
-                    load_ref(store, branch).is_some_and(|reference| reference.protected),
+                    load_ref(store, branch)?.is_some_and(|reference| reference.protected),
                 ),
             ),
         ]),
@@ -780,7 +789,7 @@ pub(super) fn live_view(
 ) -> RedDBResult<BranchReadView> {
     let store = runtime.db().store();
     let (branch, head) =
-        load_workset(&store, connection).unwrap_or_else(|| (vc::DEFAULT_BRANCH_REF.into(), None));
+        load_workset(&store, connection)?.unwrap_or_else(|| (vc::DEFAULT_BRANCH_REF.into(), None));
     if !branch.starts_with(vc::BRANCH_REF_PREFIX) {
         return commit_view(&store, head.as_deref().unwrap_or(""));
     }
@@ -829,10 +838,10 @@ impl RedDBRuntime {
         let commit = match as_of {
             Some(AsOfSpec::Commit(hash)) => Some(self.vcs_resolve_commitish(hash)?),
             Some(AsOfSpec::Branch(branch)) => {
-                load_ref(&store, &normalize_branch_name(branch)).map(|reference| reference.target)
+                load_ref(&store, &normalize_branch_name(branch))?.map(|reference| reference.target)
             }
             Some(AsOfSpec::Tag(tag)) => {
-                load_ref(&store, &normalize_tag_name(tag)).map(|reference| reference.target)
+                load_ref(&store, &normalize_tag_name(tag))?.map(|reference| reference.target)
             }
             Some(AsOfSpec::TimestampMs(_)) => {
                 let mut found = None;
@@ -876,7 +885,7 @@ impl RedDBRuntime {
         }
         let connection = super::super::execution_context::current_connection_id();
         ensure_no_pending_merge(&store, connection)?;
-        let (branch, _) = load_workset(&store, connection)
+        let (branch, _) = load_workset(&store, connection)?
             .unwrap_or_else(|| (vc::DEFAULT_BRANCH_REF.into(), None));
         if !branch.starts_with(vc::BRANCH_REF_PREFIX) {
             return Err(RedDBError::ReadOnly(
