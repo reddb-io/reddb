@@ -1,5 +1,7 @@
 # Changelog
 
+## 1.36.0
+
 ## 1.35.0
 
 ### Minor Changes
