@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.36.5
+
+### Patch Changes
+
+- [#2842](https://github.com/reddb-io/reddb/pull/2842) [`eb3217b`](https://github.com/reddb-io/reddb/commit/eb3217b505a8c2ca4d5bf69e75f72273ede03078) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Rebuild persisted HASH and BTREE runtime indexes on cold open with a new generation identity. Fall back to source scans while physical index artifacts are not queryable, including when a stale miss exists in the result cache.
+
 ## 1.36.4
 
 ### Patch Changes
