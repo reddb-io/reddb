@@ -648,7 +648,19 @@ fn validate_collection_result(
         .values()
         .filter(|image| !removed.contains(&image.entity.id))
         .chain(changes.iter().filter_map(|change| change.after.as_ref()));
+    let final_images: Vec<_> = final_images.collect();
+    if let Some(graph) = &contract.graph_contract {
+        runtime.validate_graph_entities(
+            collection,
+            graph,
+            &final_images
+                .iter()
+                .map(|image| &image.entity)
+                .collect::<Vec<_>>(),
+        )?;
+    }
     let rows: Vec<Vec<(String, Value)>> = final_images
+        .into_iter()
         .filter_map(|image| image.entity.data.as_row())
         .map(|row| {
             row.iter_fields()

@@ -224,6 +224,7 @@ impl RedDB {
             collection,
             label,
         )
+        .with_runtime(self.runtime.get().cloned())
     }
 
     /// Start building a graph edge
@@ -244,6 +245,7 @@ impl RedDB {
             collection,
             label,
         )
+        .with_runtime(self.runtime.get().cloned())
     }
 
     /// Start building a vector entry

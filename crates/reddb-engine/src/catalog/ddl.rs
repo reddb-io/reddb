@@ -49,6 +49,7 @@ pub fn collection_contract_from_create_table(
         });
     }
     Ok(super::CollectionContract {
+        graph_contract: None,
         name: query.name.clone(),
         declared_model: super::CollectionModel::Table,
         schema_mode: super::SchemaMode::SemiStructured,

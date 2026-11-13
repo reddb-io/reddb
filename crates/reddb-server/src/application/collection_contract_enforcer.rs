@@ -50,6 +50,7 @@ fn ensure_collection_model_contract(
 
     let now = implicit_contract_unix_ms();
     db.save_collection_contract(crate::physical::CollectionContract {
+        graph_contract: None,
         name: collection.to_string(),
         declared_model: requested_model,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
@@ -539,6 +540,7 @@ mod tests {
             .columns
             .push(ColumnDef::new("name", DataType::Text));
         CollectionContract {
+            graph_contract: None,
             name: "people".to_string(),
             declared_model: CollectionModel::Table,
             schema_mode,

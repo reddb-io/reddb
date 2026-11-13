@@ -928,7 +928,7 @@ fn graph_checkpoint_does_not_recover_references_to_uncommitted_native_edge() {
         .unwrap()
         .id;
     let source = reddb::storage::EntityId::new(first);
-    assert!(rt
+    assert!(!rt
         .db()
         .store()
         .get("graph_pending_refs", source)
@@ -936,6 +936,14 @@ fn graph_checkpoint_does_not_recover_references_to_uncommitted_native_edge() {
         .cross_refs()
         .iter()
         .any(|reference| reference.target == edge));
+    assert_eq!(
+        rt.execute_query("GRAPH NEIGHBORHOOD 'first' DEPTH 1")
+            .unwrap()
+            .result
+            .records
+            .len(),
+        2
+    );
     rt.checkpoint().unwrap();
     std::fs::copy(&path, &copy).unwrap();
     let wal = reddb_file::unified_wal_path(&path);
@@ -955,6 +963,15 @@ fn graph_checkpoint_does_not_recover_references_to_uncommitted_native_edge() {
         .get_refs_from(source)
         .iter()
         .any(|(target, _, _)| *target == edge));
+    assert_eq!(
+        recovered
+            .execute_query("GRAPH NEIGHBORHOOD 'first' DEPTH 1")
+            .unwrap()
+            .result
+            .records
+            .len(),
+        1
+    );
     rt.execute_query("ROLLBACK").unwrap();
     clear_current_connection_id();
 }
@@ -992,16 +1009,25 @@ fn graph_native_autocommit_edge_recovers_from_wal_before_checkpoint() {
     let store = recovered.db().store();
     let source = reddb::storage::EntityId::new(first);
     assert!(store.get("graph_wal_edge", edge).is_some());
-    assert!(store
+    assert!(!store
         .get("graph_wal_edge", source)
         .unwrap()
         .cross_refs()
         .iter()
         .any(|reference| reference.target == edge));
     assert!(store
-        .get_refs_from(source)
+        .get_refs_from(edge)
         .iter()
-        .any(|(target, _, _)| *target == edge));
+        .any(|(target, _, _)| *target == source));
+    assert_eq!(
+        recovered
+            .execute_query("GRAPH NEIGHBORHOOD 'first' DEPTH 1")
+            .unwrap()
+            .result
+            .records
+            .len(),
+        2
+    );
     clear_current_connection_id();
 }
 

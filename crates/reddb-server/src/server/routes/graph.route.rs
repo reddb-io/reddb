@@ -34,6 +34,20 @@ macro_rules! graph_aliases {
 
 const GRAPH_ROUTES: &[RouteEntry] = &[
     RouteEntry::with_aliases(
+        "graph.contract.get",
+        RouteMethod::Get,
+        "/collections/:name/graph/contract",
+        graph_aliases!(RouteMethod::Get, "/v1/collections/:name/graph/contract"),
+        graph_contract_get,
+    ),
+    RouteEntry::with_aliases(
+        "graph.contract.put",
+        RouteMethod::Put,
+        "/collections/:name/graph/contract",
+        graph_aliases!(RouteMethod::Put, "/v1/collections/:name/graph/contract"),
+        graph_contract_put,
+    ),
+    RouteEntry::with_aliases(
         "graph.neighborhood",
         RouteMethod::Post,
         "/graph/neighborhood",
@@ -218,6 +232,52 @@ const GRAPH_ROUTES: &[RouteEntry] = &[
 
 pub(crate) fn register(registry: &mut RouteRegistry) {
     registry.routes(GRAPH_USER, GRAPH_ROUTES);
+}
+
+fn graph_contract_get(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    let collection = req.matched.params.get("name")?;
+    if let Some(deny) = server.check_collection_http_policy(req.headers, "select", collection) {
+        return Some(deny);
+    }
+    let result = server
+        .runtime
+        .graph_contract(collection)
+        .and_then(|contract| match contract {
+            Some(contract) => crate::json::from_str::<JsonValue>(&contract.to_json()?)
+                .map_err(|error| crate::RedDBError::Internal(error.to_string())),
+            None => Ok(JsonValue::Null),
+        });
+    Some(match result {
+        Ok(value) => json_response(200, value),
+        Err(error) => {
+            let (status, message) = crate::server::transport::map_runtime_error(&error);
+            json_error(status, message)
+        }
+    })
+}
+
+fn graph_contract_put(server: &RedDBServer, req: &RouteRequest<'_>) -> Option<HttpResponse> {
+    let collection = req.matched.params.get("name")?;
+    if let Some(deny) = server.check_collection_http_policy(req.headers, "alter", collection) {
+        return Some(deny);
+    }
+    let result = (|| -> crate::RedDBResult<()> {
+        let json = std::str::from_utf8(req.body)
+            .map_err(|error| crate::RedDBError::Query(error.to_string()))?;
+        let contract = if json.trim() == "null" {
+            None
+        } else {
+            Some(crate::catalog::GraphContract::from_json(json)?)
+        };
+        server.runtime.set_graph_contract(collection, contract)
+    })();
+    Some(match result {
+        Ok(()) => json_response(200, crate::json::json!({"ok": true})),
+        Err(error) => {
+            let (status, message) = crate::server::transport::map_runtime_error(&error);
+            json_error(status, message)
+        }
+    })
 }
 
 // Handlers. Each route above binds one of these by fn pointer, so a

@@ -213,9 +213,16 @@ impl RedDBRuntime {
         collection: &str,
         id: crate::storage::EntityId,
     ) -> RedDBResult<Option<crate::storage::UnifiedEntity>> {
-        use reddb_rql::ast::PolicyAction;
+        self.get_collection_entity_for_action(collection, id, reddb_rql::ast::PolicyAction::Select)
+    }
 
-        self.check_collection_privilege(PolicyAction::Select, collection)?;
+    pub(crate) fn get_collection_entity_for_action(
+        &self,
+        collection: &str,
+        id: crate::storage::EntityId,
+        action: reddb_rql::ast::PolicyAction,
+    ) -> RedDBResult<Option<crate::storage::UnifiedEntity>> {
+        self.check_collection_privilege(action, collection)?;
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection(collection) else {
             return Ok(None);
@@ -247,10 +254,7 @@ impl RedDBRuntime {
         manager.restore_owned_row_schemas(entity.iter_mut());
         Ok(entity.filter(|entity| {
             crate::runtime::rls_injection::entity_passes_rls_action(
-                self,
-                collection,
-                PolicyAction::Select,
-                entity,
+                self, collection, action, entity,
             )
         }))
     }

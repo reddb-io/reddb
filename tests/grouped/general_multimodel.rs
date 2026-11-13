@@ -128,3 +128,12 @@ mod e2e_vcs_queue;
 
 #[path = "vcs/e2e_vcs_constraints.rs"]
 mod e2e_vcs_constraints;
+
+#[path = "vcs/e2e_vcs_native_mutations.rs"]
+mod e2e_vcs_native_mutations;
+
+#[path = "graph_analytics/e2e_graph_contract.rs"]
+mod e2e_graph_contract;
+
+#[path = "graph_analytics/e2e_hybrid_relations.rs"]
+mod e2e_hybrid_relations;

@@ -1196,6 +1196,7 @@ fn hypertable_collection_contract(
         .map(|ht| ht.time_column.as_str())
         .unwrap_or("timestamp");
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: query.name.clone(),
         // Table model — rows go through the normal INSERT path,
         // which now calls HypertableRegistry::route after each row
@@ -1239,6 +1240,7 @@ fn timeseries_collection_contract(
 ) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: query.name.clone(),
         declared_model: crate::catalog::CollectionModel::TimeSeries,
         schema_mode: crate::catalog::SchemaMode::SemiStructured,

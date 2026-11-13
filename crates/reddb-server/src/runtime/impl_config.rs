@@ -932,6 +932,7 @@ impl RedDBRuntime {
         self.inner
             .db
             .save_collection_contract(CollectionContract {
+                graph_contract: None,
                 name: collection.to_string(),
                 declared_model: CollectionModel::Config,
                 schema_mode: SchemaMode::Dynamic,

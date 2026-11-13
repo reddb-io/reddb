@@ -91,6 +91,36 @@ curl -X POST http://127.0.0.1:5000/hybrid/search \
   }'
 ```
 
+### Following relationships in hybrid search
+
+For a Graph collection, `graph.edge_labels` enables one-hop expansion
+from matching vertices. For example, find people connected to a topic matching
+the query, even when their own properties do not contain the query text:
+
+```json
+{
+  "collections": ["knowledge"],
+  "query": "database",
+  "graph": {"edge_labels": ["ABOUT"], "node_type": "Person"},
+  "weights": {"vector": 0.5, "graph": 0.3, "filter": 0.2},
+  "k": 10,
+  "limit": 10
+}
+```
+
+Send this body to `POST /hybrid/search`. Seeds are the top `k` graph vertices by
+the greater of text relevance and vector similarity. Requested edge labels are
+followed in both directions within each collection. `node_type` and `label`
+constrain the returned vertices; anchors may have other types. Cycles and
+parallel edges do not multiply the relationship contribution.
+
+The score combines vector similarity, text relevance (the `filter` weight), and
+the strongest adjacent seed's relevance (the `graph` weight). Results include
+the seed-edge-target path and hop distance. Filters, `min_score`, and `limit`
+apply to the combined results. Every endpoint and edge must be visible in the
+same transaction/branch snapshot and pass collection authorization and RLS.
+The exact scan and its adjacency buffers use query memory admission.
+
 ## 6. Text-Only Search
 
 When you don't have an embedding model available:

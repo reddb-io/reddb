@@ -475,18 +475,10 @@ impl RedDBRuntime {
         // empty for non-row entities, which is the desired no-op.
         let pre_mutation_fields = entity_row_fields_snapshot(&entity);
 
-        // Versioned collections retain MVCC history: a PATCH/UPDATE must
-        // produce a NEW full version (the merged document/row/node) with
-        // the prior version tombstoned, mirroring the SQL UPDATE row
-        // path. Gated STRICTLY on the collection `versioned` flag —
-        // non-versioned collections keep last-writer-wins in-place
-        // mutation. Row entities (documents / table rows / KV) carry
-        // logical-id MVCC history (Phase 1/2); graph nodes & edges join
-        // in Phase 3. The post-image re-stamp (new physical id, same
-        // logical_id, fresh xmin) at the tail of this function is fully
-        // kind-agnostic, so the same machinery installs a versioned
-        // graph-node update.
-        let patch_versions = epoch.is_some();
+        // VCS and graph contracts retain prior versions. Besides preserving
+        // history, this lets contract validation distinguish concurrent edits
+        // and restore the prior graph when a transaction rolls back.
+        let patch_versions = epoch.is_some() || self.has_graph_contract(&collection);
         let versioned_update_xid = if patch_versions {
             match self.current_xid() {
                 Some(xid) => Some(xid),
@@ -1685,6 +1677,14 @@ impl RedDBRuntime {
         ) {
             return Err(crate::RedDBError::NotFound("entity not found".to_string()));
         }
+        self.validate_graph_changes(
+            &applied.collection,
+            &[&applied.entity],
+            &[applied
+                .replaced_entity
+                .as_ref()
+                .map_or(applied.id, |entity| entity.id)],
+        )?;
         let _reservation = self.admit_entity_mutation(&applied)?;
         self.persist_applied_entity_mutations(std::slice::from_ref(&applied))?;
         #[cfg(test)]
@@ -1694,7 +1694,7 @@ impl RedDBRuntime {
         );
         self.flush_applied_entity_mutation(&applied, topology_guard)?;
         Ok(CreateEntityOutput {
-            id: applied.id,
+            id: applied.entity.logical_id(),
             entity: Some(public_document_entity(applied.entity)),
         })
     }
@@ -1780,7 +1780,7 @@ impl RedDBRuntime {
         &self,
         input: CreateNodeInput,
     ) -> RedDBResult<CreateEntityOutput> {
-        if self.vcs_is_versioned(&input.collection)? {
+        if self.vcs_is_versioned(&input.collection)? || self.has_graph_contract(&input.collection) {
             self.with_versioned_graph_insert(|| self.create_node_unchecked_inner(input))
         } else {
             self.create_node_unchecked_inner(input)
@@ -1870,7 +1870,7 @@ impl RedDBRuntime {
         &self,
         input: CreateEdgeInput,
     ) -> RedDBResult<CreateEntityOutput> {
-        if self.vcs_is_versioned(&input.collection)? {
+        if self.vcs_is_versioned(&input.collection)? || self.has_graph_contract(&input.collection) {
             self.with_versioned_graph_insert(|| self.create_edge_unchecked_inner(input))
         } else {
             self.create_edge_unchecked_inner(input)
@@ -2058,8 +2058,9 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let branch_store = self.db().store();
-        let _branch_publication = self.vcs_is_versioned(&input.collection)?
-            .then(|| branch_store.vault_publication_lock.lock());
+        let _branch_publication = (self.vcs_is_versioned(&input.collection)?
+            || self.has_graph_contract(&input.collection))
+        .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &input.collection,
@@ -2106,8 +2107,9 @@ impl RuntimeEntityPort for RedDBRuntime {
         input: CreateRowsBatchInput,
     ) -> RedDBResult<Vec<CreateEntityOutput>> {
         let branch_store = self.db().store();
-        let _branch_publication = self.vcs_is_versioned(&input.collection)?
-            .then(|| branch_store.vault_publication_lock.lock());
+        let _branch_publication = (self.vcs_is_versioned(&input.collection)?
+            || self.has_graph_contract(&input.collection))
+        .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &input.collection,
@@ -2545,7 +2547,9 @@ impl RuntimeEntityPort for RedDBRuntime {
                 self.vcs_writer_epoch(&input.collection)?,
             )?)
         };
-        let id = if self.vcs_is_versioned(&input.collection)? {
+        let id = if self.vcs_is_versioned(&input.collection)?
+            || self.has_graph_contract(&input.collection)
+        {
             self.with_versioned_graph_insert(create)?
         } else {
             create()?
@@ -2658,8 +2662,9 @@ impl RuntimeEntityPort for RedDBRuntime {
         let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
         self.check_collection_privilege(reddb_rql::ast::PolicyAction::Update, &input.collection)?;
         let branch_store = self.db().store();
-        let _branch_publication = self.vcs_is_versioned(&input.collection)?
-            .then(|| branch_store.vault_publication_lock.lock());
+        let _branch_publication = (self.vcs_is_versioned(&input.collection)?
+            || self.has_graph_contract(&input.collection))
+        .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &input.collection,
@@ -2677,12 +2682,19 @@ impl RuntimeEntityPort for RedDBRuntime {
         } = input;
         let db = self.db();
         let store = db.store();
-        let Some(manager) = store.get_collection(&collection) else {
+        let Some(_) = store.get_collection(&collection) else {
             return Err(crate::RedDBError::NotFound(format!(
                 "collection not found: {collection}"
             )));
         };
-        let Some(entity) = manager.get(id) else {
+        let (snapshot, _retention) = self.native_read_snapshot()?;
+        let _snapshot = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot);
+        let Some(entity) = self.get_collection_entity_for_action(
+            &collection,
+            id,
+            reddb_rql::ast::PolicyAction::Update,
+        )?
+        else {
             return Err(crate::RedDBError::NotFound(format!(
                 "entity not found: {}",
                 id.raw()
@@ -2707,8 +2719,9 @@ impl RuntimeEntityPort for RedDBRuntime {
         let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
         self.check_collection_privilege(reddb_rql::ast::PolicyAction::Delete, &input.collection)?;
         let branch_store = self.db().store();
-        let _branch_publication = self.vcs_is_versioned(&input.collection)?
-            .then(|| branch_store.vault_publication_lock.lock());
+        let _branch_publication = (self.vcs_is_versioned(&input.collection)?
+            || self.has_graph_contract(&input.collection))
+        .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &input.collection,
@@ -2722,7 +2735,14 @@ impl RuntimeEntityPort for RedDBRuntime {
         // Snapshot row fields before delete so we can mirror the removal
         // into every secondary index. The fetch is best-effort: if the
         // entity is already gone, the delete below is a no-op anyway.
-        let Some(entity) = store.get(&input.collection, input.id) else {
+        let (snapshot, _retention) = self.native_read_snapshot()?;
+        let _snapshot = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot);
+        let Some(entity) = self.get_collection_entity_for_action(
+            &input.collection,
+            input.id,
+            reddb_rql::ast::PolicyAction::Delete,
+        )?
+        else {
             return Ok(DeleteEntityOutput {
                 deleted: false,
                 id: input.id,
@@ -2736,6 +2756,32 @@ impl RuntimeEntityPort for RedDBRuntime {
         ) {
             return Ok(DeleteEntityOutput {
                 deleted: false,
+                id: input.id,
+            });
+        }
+        if self.vcs_is_versioned(&input.collection)? || self.has_graph_contract(&input.collection) {
+            if self
+                .db()
+                .collection_contract_arc(&input.collection)
+                .is_some_and(|contract| contract.append_only)
+            {
+                return Err(crate::RedDBError::InvalidOperation(
+                    "append-only collections require their native retirement operation".into(),
+                ));
+            }
+            self.validate_graph_changes(&input.collection, &[], &[entity.id])?;
+            let deleted = self.delete_entities_batch(
+                &input.collection,
+                &[entity.id],
+                topology_guard,
+                None,
+                false,
+            )?;
+            if deleted.affected > 0 {
+                self.invalidate_result_cache();
+            }
+            return Ok(DeleteEntityOutput {
+                deleted: deleted.affected > 0,
                 id: input.id,
             });
         }

@@ -13,7 +13,10 @@ use crate::storage::unified::UnifiedStore;
 use crate::storage::{EntityKind, SegmentManager, UnifiedEntity};
 use reddb_types::Value;
 
-pub use reddb_engine::catalog::{AnalyticalStorageConfig, SchemaMode};
+pub use reddb_engine::catalog::{
+    AnalyticalStorageConfig, GraphContract, GraphEdgeContract, GraphPropertyContract,
+    GraphVertexContract, SchemaMode,
+};
 
 // Catalog AST-leaf descriptors re-homed to the neutral keystone crate (ADR
 // 0053, RQL Phase 2 S4b) so the canonical SQL AST

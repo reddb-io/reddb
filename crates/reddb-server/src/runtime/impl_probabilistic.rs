@@ -33,6 +33,7 @@ fn probabilistic_collection_contract(
 ) -> crate::physical::CollectionContract {
     let now = crate::utils::now_unix_millis() as u128;
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: name.to_string(),
         declared_model: model,
         schema_mode: crate::catalog::SchemaMode::Dynamic,

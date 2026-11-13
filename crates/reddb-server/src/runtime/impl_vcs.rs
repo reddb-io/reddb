@@ -34,6 +34,49 @@ mod branches;
 #[path = "vcs_merge_data.rs"]
 mod merge_data;
 
+impl RedDBRuntime {
+    pub(crate) fn vcs_live_graph_validation_contexts(
+        &self,
+        collection: &str,
+    ) -> RedDBResult<Vec<reddb_engine::transaction::read::SnapshotContext>> {
+        let (mut context, _retention) = self.native_read_snapshot()?;
+        context.snapshot = self.snapshot_manager().fresh_read_snapshot();
+        context.own_xids.clear();
+        if !self.vcs_is_versioned(collection)? {
+            return Ok(vec![context]);
+        }
+        let store = self.db().store();
+        let mut names = BTreeSet::from([vc::DEFAULT_BRANCH_REF.to_string()]);
+        if let Some(manager) = store.get_collection(vc::REFS) {
+            manager.try_for_each_entity(usize::MAX, |entity| {
+                if let Some(name) = entity.data.as_row().and_then(|row| row_text(row, "id")) {
+                    if name.starts_with(vc::BRANCH_REF_PREFIX) {
+                        names.insert(name);
+                    }
+                }
+                true
+            })?;
+        }
+        names
+            .into_iter()
+            .map(|name| {
+                let mut branch = branches::load_view(&store, &name)?.unwrap_or_else(|| {
+                    reddb_engine::transaction::read::BranchReadView {
+                        writer_epoch: 0,
+                        epochs: Default::default(),
+                    }
+                });
+                branch
+                    .epochs
+                    .insert(branch.writer_epoch, context.snapshot.clone());
+                let mut snapshot = context.clone();
+                snapshot.branch = Some(Arc::new(branch));
+                Ok(snapshot)
+            })
+            .collect()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
@@ -1761,7 +1804,13 @@ impl RedDBRuntime {
                 publication.inserts.push((collection.into(), entity, None));
             }
         }
-        if self.db().collection_contract(collection).is_some_and(|contract| contract.declared_model == crate::catalog::CollectionModel::Queue) {
+        if self
+            .db()
+            .collection_contract(collection)
+            .is_some_and(|contract| {
+                contract.declared_model == crate::catalog::CollectionModel::Queue
+            })
+        {
             super::vcs_queue::stage_metadata_scope(store, &mut publication, collection, enabled)?;
         }
         if let Some(manager) = store.get_collection(collection) {

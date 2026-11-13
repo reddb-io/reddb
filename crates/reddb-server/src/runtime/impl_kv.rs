@@ -3969,6 +3969,7 @@ fn kv_list_json_result(
 fn kv_collection_contract(name: &str) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: name.to_string(),
         declared_model: crate::catalog::CollectionModel::Kv,
         schema_mode: crate::catalog::SchemaMode::Dynamic,

@@ -454,8 +454,9 @@ impl RedDBRuntime {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
         let branch_store = self.db().store();
-        let _branch_publication = self.vcs_is_versioned(&query.table)?
-            .then(|| branch_store.vault_publication_lock.lock());
+        let _branch_publication = (self.vcs_is_versioned(&query.table)?
+            || self.has_graph_contract(&query.table))
+        .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &query.table,
@@ -1188,8 +1189,16 @@ impl RedDBRuntime {
                             );
                             let (columns, values) = pairwise_columns_values(&node_values);
                             let label = find_column_value_string(&columns, &values, "label")?;
-                            let node_type =
-                                find_column_value_opt_string(&columns, &values, "node_type");
+                            let node_type = columns
+                                .iter()
+                                .position(|name| name.eq_ignore_ascii_case("node_type"))
+                                .map(|index| match &values[index] {
+                                    Value::Text(value) => Ok(value.to_string()),
+                                    _ => Err(RedDBError::Query(
+                                        "node_type must be one text value".into(),
+                                    )),
+                                })
+                                .transpose()?;
                             let properties = extract_remaining_properties(
                                 &columns,
                                 &values,
@@ -1964,8 +1973,9 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let branch_store = self.db().store();
-        let _branch_publication = self.vcs_is_versioned(&query.table)?
-            .then(|| branch_store.vault_publication_lock.lock());
+        let _branch_publication = (self.vcs_is_versioned(&query.table)?
+            || self.has_graph_contract(&query.table))
+        .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &query.table,
@@ -2354,6 +2364,18 @@ impl RedDBRuntime {
                 prepared.push(applied);
             }
         }
+        self.validate_graph_changes(
+            &query.table,
+            &prepared.iter().map(|item| &item.entity).collect::<Vec<_>>(),
+            &prepared
+                .iter()
+                .map(|item| {
+                    item.replaced_entity
+                        .as_ref()
+                        .map_or(item.id, |entity| entity.id)
+                })
+                .collect::<Vec<_>>(),
+        )?;
         let affected = prepared.len() as u64;
         let mut published = 0;
         let mut _durable_publication = None;
@@ -2534,6 +2556,21 @@ impl RedDBRuntime {
             applied_chunk.push(applied);
         }
 
+        self.validate_graph_changes(
+            &query.table,
+            &applied_chunk
+                .iter()
+                .map(|item| &item.entity)
+                .collect::<Vec<_>>(),
+            &applied_chunk
+                .iter()
+                .map(|item| {
+                    item.replaced_entity
+                        .as_ref()
+                        .map_or(item.id, |entity| entity.id)
+                })
+                .collect::<Vec<_>>(),
+        )?;
         let affected = applied_chunk.len() as u64;
         let mut published = 0;
         let mut _durable_publication = None;
@@ -2901,8 +2938,9 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let branch_store = self.db().store();
-        let _branch_publication = self.vcs_is_versioned(&query.table)?
-            .then(|| branch_store.vault_publication_lock.lock());
+        let _branch_publication = (self.vcs_is_versioned(&query.table)?
+            || self.has_graph_contract(&query.table))
+        .then(|| branch_store.vault_publication_lock.lock());
         let constraint_lock = crate::application::collection_contract_enforcer::row_constraint_lock(
             self,
             &query.table,
@@ -3042,6 +3080,7 @@ impl RedDBRuntime {
         // prepared target set. A later timeout must not strand a partial
         // statement merely to stop sooner.
         let _durable_publication = super::query_budget::begin_durable_publication()?;
+        self.validate_graph_changes(&query.table, &[], &ids_to_delete)?;
         for chunk in ids_to_delete.chunks(UPDATE_APPLY_CHUNK_SIZE) {
             let deleted = self.delete_entities_batch(
                 &query.table,

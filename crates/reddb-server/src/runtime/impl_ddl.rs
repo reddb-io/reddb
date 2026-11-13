@@ -2077,6 +2077,7 @@ fn default_collection_contract_for_existing_table(
 ) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: name.to_string(),
         declared_model: crate::catalog::CollectionModel::Table,
         schema_mode: crate::catalog::SchemaMode::SemiStructured,
@@ -2115,6 +2116,7 @@ fn keyed_collection_contract(
 ) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: name.to_string(),
         declared_model: model,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
@@ -2149,6 +2151,7 @@ fn keyed_collection_contract(
 fn metrics_collection_contract(query: &CreateTableQuery) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: query.name.clone(),
         declared_model: crate::catalog::CollectionModel::Metrics,
         schema_mode: crate::catalog::SchemaMode::SemiStructured,
@@ -2188,6 +2191,7 @@ fn metrics_collection_contract(query: &CreateTableQuery) -> crate::physical::Col
 fn vector_collection_contract(query: &CreateVectorQuery) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: query.name.clone(),
         declared_model: crate::catalog::CollectionModel::Vector,
         schema_mode: crate::catalog::SchemaMode::Dynamic,
@@ -2756,6 +2760,7 @@ fn ensure_event_target_queue(runtime: &RedDBRuntime, queue: &str) -> RedDBResult
 fn event_queue_collection_contract(queue: &str) -> crate::physical::CollectionContract {
     let now = current_unix_ms();
     crate::physical::CollectionContract {
+        graph_contract: None,
         name: queue.to_string(),
         declared_model: crate::catalog::CollectionModel::Queue,
         schema_mode: crate::catalog::SchemaMode::Dynamic,

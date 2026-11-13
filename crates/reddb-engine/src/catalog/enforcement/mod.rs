@@ -885,7 +885,7 @@ fn coerce_contract_literal(
     }
 }
 
-fn value_matches_declared_type(value: &Value, target: DataType) -> bool {
+pub(crate) fn value_matches_declared_type(value: &Value, target: DataType) -> bool {
     matches!(
         (value, target),
         (Value::Null, _)

@@ -322,8 +322,12 @@ impl RedDB {
                 == crate::storage::StoragePackaging::SingleFile
             && !self.paged_mode
         {
+            let mut contracts = self.collection_contracts();
+            contracts.retain(|existing| existing.name != contract.name);
+            contracts.push(contract.clone());
+            let bytes = crate::physical::serialize_collection_contracts(&contracts);
+            self.store.persist_aux_metadata(bytes)?;
             self.collection_contract_cache.insert(contract.clone());
-            self.sync_single_file_contract_blob()?;
             return Ok(contract);
         }
 

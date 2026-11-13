@@ -9,7 +9,7 @@ A node represents an entity in the graph:
 | Field | Required | Description |
 |:------|:---------|:------------|
 | `label` | Yes | Unique identifier within the collection (e.g., `"alice"`, `"web-01"`) |
-| `node_type` | No | Classification (e.g., `"person"`, `"host"`, `"service"`) |
+| `node_type` | No | One concrete type (e.g., `"person"`, `"host"`, `"service"`); defaults to the label |
 | `properties` | No | Arbitrary key-value properties |
 | `metadata` | No | Operational metadata |
 
@@ -50,6 +50,57 @@ curl -X POST http://127.0.0.1:5000/collections/social/edges \
     "properties": {"since": "2024-01-01"}
   }'
 ```
+
+## Optional graph contract
+
+A Graph collection can opt into a contract defining vertex types, edge types,
+required properties and endpoint types. Each vertex has one `node_type` string;
+multiple simultaneous types and type inheritance are not supported. Without a
+contract, existing schemaless behavior remains available.
+
+Install or replace a contract with `PUT /v1/collections/social/graph/contract`:
+
+```json
+{
+  "vertex_types": {
+    "Person": {
+      "properties": {"age": {"data_type": "INT", "required": true}}
+    },
+    "Company": {"properties": {}}
+  },
+  "edge_types": {
+    "WORKS_AT": {
+      "from_type": "Person",
+      "to_type": "Company",
+      "properties": {}
+    }
+  }
+}
+```
+
+`GET` on the same path returns the contract, or `null`. Sending JSON `null` with
+`PUT` disables it. These operations also have `/collections/...` aliases. Native
+Rust callers use `RedDBRuntime::graph_contract` and `set_graph_contract` with the
+types exported from `reddb::catalog`.
+
+Property types use RedDB's declared type names. Required properties reject
+missing values and `NULL`; declared values must already have the required type.
+Undeclared properties remain allowed. Vertex types and edge labels must be
+declared. Both edge endpoints must exist in the same collection and match the
+declared types. Cross-collection projections remain available on graphs without
+this contract.
+
+Enabling a contract validates existing data on every live VCS branch. Contract
+changes require active transactions to finish and apply to the collection across
+branches. Inserts, updates, deletes, transaction commits, merges and changes of
+VCS HEAD validate the resulting graph. Delete referencing edges before deleting
+a vertex, or delete both in one statement. Historical reads retain their original
+data; selecting an invalid historical state as the new HEAD is rejected.
+
+Validation scans the projected graph and uses query memory admission. It is an
+opt-in integrity check with a cost proportional to the graph size. The contract
+persists with the collection; enabling it upgrades storage to V13, which older
+readers must reject.
 
 ## Graph Storage
 

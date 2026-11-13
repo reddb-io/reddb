@@ -18,6 +18,7 @@ pub const EXACT_ID: u64 = 9_007_199_254_740_993;
 
 pub fn contract(name: &str) -> reddb_engine::catalog::CollectionContract {
     reddb_engine::catalog::codec::collection_contract_from_persisted(PhysicalCollectionContract {
+        graph_contract: None,
         name: name.into(),
         declared_model: "table".into(),
         schema_mode: "strict".into(),

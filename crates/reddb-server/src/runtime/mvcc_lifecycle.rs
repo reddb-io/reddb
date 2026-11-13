@@ -271,7 +271,7 @@ impl RedDBRuntime {
                 | InsertEntityType::Edge
                 | InsertEntityType::Vector
                 | InsertEntityType::Document
-        ) && self.vcs_is_versioned(&query.table)?
+        ) && (self.vcs_is_versioned(&query.table)? || self.has_graph_contract(&query.table))
         {
             self.with_versioned_graph_insert(f)
         } else {

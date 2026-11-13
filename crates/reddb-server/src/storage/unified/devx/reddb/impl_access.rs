@@ -1431,6 +1431,7 @@ impl RedDB {
     /// Start a batch operation for bulk inserts
     pub fn batch(&self) -> BatchBuilder {
         BatchBuilder::new(self.store.clone(), self.preprocessors.clone())
+            .with_runtime(self.runtime.get().cloned())
     }
 
     // ========================================================================

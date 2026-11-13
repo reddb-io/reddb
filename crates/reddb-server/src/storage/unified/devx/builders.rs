@@ -21,6 +21,7 @@ use reddb_types::Value;
 
 /// Fluent builder for graph nodes
 pub struct NodeBuilder {
+    runtime: Option<crate::runtime::WeakRuntime>,
     store: Arc<UnifiedStore>,
     preprocessors: SharedPreprocessors,
     collection: String,
@@ -34,6 +35,11 @@ pub struct NodeBuilder {
 }
 
 impl NodeBuilder {
+    pub(crate) fn with_runtime(mut self, runtime: Option<crate::runtime::WeakRuntime>) -> Self {
+        self.runtime = runtime;
+        self
+    }
+
     pub(crate) fn new(
         store: Arc<UnifiedStore>,
         preprocessors: SharedPreprocessors,
@@ -42,6 +48,7 @@ impl NodeBuilder {
     ) -> Self {
         let label_str = label.into();
         Self {
+            runtime: None,
             store,
             preprocessors,
             collection: collection.into(),
@@ -150,6 +157,35 @@ impl NodeBuilder {
         xmin: Option<u64>,
         branch: Option<u64>,
     ) -> Result<EntityId, DevXError> {
+        let runtime = self.runtime.as_ref().and_then(|runtime| runtime.upgrade());
+        let store = self.store.clone();
+        let _publication = runtime
+            .as_ref()
+            .map(|_| store.vault_publication_lock.lock());
+        if let Some(runtime) = runtime.as_ref() {
+            if runtime
+                .vcs_is_versioned(&self.collection)
+                .map_err(|error| DevXError::Storage(error.to_string()))?
+                || runtime.has_graph_contract(&self.collection)
+            {
+                let branch = runtime
+                    .vcs_writer_epoch(&self.collection)
+                    .map_err(|error| DevXError::Storage(error.to_string()))?;
+                return runtime
+                    .with_versioned_graph_insert(|| {
+                        self.save_inner(
+                            runtime.current_xid().or_else(|| runtime.graph_insert_xid()),
+                            branch,
+                        )
+                        .map_err(crate::RedDBError::from)
+                    })
+                    .map_err(|error| DevXError::Storage(error.to_string()));
+            }
+        }
+        self.save_inner(xmin, branch)
+    }
+
+    fn save_inner(self, xmin: Option<u64>, branch: Option<u64>) -> Result<EntityId, DevXError> {
         // Create the node entity
         let kind = EntityKind::GraphNode(Box::new(GraphNodeKind {
             label: self.label,
@@ -177,21 +213,7 @@ impl NodeBuilder {
         }
         run_preprocessors(&self.preprocessors, &mut entity)?;
 
-        // Insert the entity
-        let id = self
-            .store
-            .insert_auto(&self.collection, entity)
-            .map_err(|e| DevXError::Storage(format!("{:?}", e)))?;
-
-        // Store metadata
-        if !self.metadata.is_empty() {
-            let _ = self.store.set_metadata(
-                &self.collection,
-                id,
-                Metadata::with_fields(self.metadata.clone()),
-            );
-        }
-
+        let mut edges = Vec::with_capacity(self.links.len());
         // Create edges for links
         for (target, edge_label, weight) in self.links {
             let edge_kind = EntityKind::GraphEdge(Box::new(GraphEdgeKind {
@@ -220,17 +242,33 @@ impl NodeBuilder {
             ));
 
             run_preprocessors(&self.preprocessors, &mut edge_entity)?;
-            let _ = self.store.insert_auto(&self.collection, edge_entity);
-
-            // Add cross-ref from source node to edge
-            let _ = self.store.add_cross_ref(
-                &self.collection,
+            entity.add_cross_ref(CrossRef::new(
                 id,
-                &self.collection,
                 edge_id,
+                self.collection.clone(),
                 RefType::RelatedTo,
-                1.0,
-            );
+            ));
+            edges.push(edge_entity);
+        }
+        if let Some(runtime) = self.runtime.as_ref().and_then(|runtime| runtime.upgrade()) {
+            let mut added: Vec<_> = edges.iter().collect();
+            added.push(&entity);
+            runtime
+                .validate_graph_changes(&self.collection, &added, &[])
+                .map_err(|error| DevXError::Validation(error.to_string()))?;
+        }
+        self.store
+            .insert_auto(&self.collection, entity)
+            .map_err(|error| DevXError::Storage(error.to_string()))?;
+        for edge in edges {
+            self.store
+                .insert_auto(&self.collection, edge)
+                .map_err(|error| DevXError::Storage(error.to_string()))?;
+        }
+        if !self.metadata.is_empty() {
+            self.store
+                .set_metadata(&self.collection, id, Metadata::with_fields(self.metadata))
+                .map_err(|error| DevXError::Storage(error.to_string()))?;
         }
 
         Ok(id)
@@ -243,6 +281,7 @@ impl NodeBuilder {
 
 /// Fluent builder for graph edges
 pub struct EdgeBuilder {
+    runtime: Option<crate::runtime::WeakRuntime>,
     store: Arc<UnifiedStore>,
     preprocessors: SharedPreprocessors,
     collection: String,
@@ -255,6 +294,11 @@ pub struct EdgeBuilder {
 }
 
 impl EdgeBuilder {
+    pub(crate) fn with_runtime(mut self, runtime: Option<crate::runtime::WeakRuntime>) -> Self {
+        self.runtime = runtime;
+        self
+    }
+
     pub(crate) fn new(
         store: Arc<UnifiedStore>,
         preprocessors: SharedPreprocessors,
@@ -262,6 +306,7 @@ impl EdgeBuilder {
         label: impl Into<String>,
     ) -> Self {
         Self {
+            runtime: None,
             store,
             preprocessors,
             collection: collection.into(),
@@ -324,6 +369,35 @@ impl EdgeBuilder {
         xmin: Option<u64>,
         branch: Option<u64>,
     ) -> Result<EntityId, DevXError> {
+        let runtime = self.runtime.as_ref().and_then(|runtime| runtime.upgrade());
+        let store = self.store.clone();
+        let _publication = runtime
+            .as_ref()
+            .map(|_| store.vault_publication_lock.lock());
+        if let Some(runtime) = runtime.as_ref() {
+            if runtime
+                .vcs_is_versioned(&self.collection)
+                .map_err(|error| DevXError::Storage(error.to_string()))?
+                || runtime.has_graph_contract(&self.collection)
+            {
+                let branch = runtime
+                    .vcs_writer_epoch(&self.collection)
+                    .map_err(|error| DevXError::Storage(error.to_string()))?;
+                return runtime
+                    .with_versioned_graph_insert(|| {
+                        self.save_inner(
+                            runtime.current_xid().or_else(|| runtime.graph_insert_xid()),
+                            branch,
+                        )
+                        .map_err(crate::RedDBError::from)
+                    })
+                    .map_err(|error| DevXError::Storage(error.to_string()));
+            }
+        }
+        self.save_inner(xmin, branch)
+    }
+
+    fn save_inner(self, xmin: Option<u64>, branch: Option<u64>) -> Result<EntityId, DevXError> {
         let from = self
             .from_node
             .ok_or_else(|| DevXError::Validation("Edge requires 'from' node".into()))?;
@@ -366,6 +440,11 @@ impl EdgeBuilder {
         ));
         run_preprocessors(&self.preprocessors, &mut entity)?;
 
+        if let Some(runtime) = self.runtime.as_ref().and_then(|runtime| runtime.upgrade()) {
+            runtime
+                .validate_graph_changes(&self.collection, &[&entity], &[])
+                .map_err(|error| DevXError::Validation(error.to_string()))?;
+        }
         let id = self
             .store
             .insert_auto(&self.collection, entity)
@@ -380,24 +459,26 @@ impl EdgeBuilder {
             );
         }
 
-        // Update source and target nodes with cross-refs
-        let _ = self.store.add_cross_ref(
-            &self.collection,
-            from,
-            &self.collection,
-            id,
-            RefType::RelatedTo,
-            1.0,
-        );
-        let _ = self.store.add_cross_ref(
-            &self.collection,
-            to,
-            &self.collection,
-            id,
-            RefType::RelatedTo,
-            1.0,
-        );
-
+        // Historical node versions must remain immutable. Edges carry both endpoints.
+        if branch.is_none() && xmin.is_none() {
+            // Update source and target nodes with cross-refs
+            let _ = self.store.add_cross_ref(
+                &self.collection,
+                from,
+                &self.collection,
+                id,
+                RefType::RelatedTo,
+                1.0,
+            );
+            let _ = self.store.add_cross_ref(
+                &self.collection,
+                to,
+                &self.collection,
+                id,
+                RefType::RelatedTo,
+                1.0,
+            );
+        }
         Ok(id)
     }
 }

@@ -1452,8 +1452,19 @@ impl RedDBRuntime {
                             .get(&conn_id)
                             .is_some_and(|writes| !writes.is_empty());
                         let store = self.inner.db.store();
-                        let _vault_guard =
-                            has_vault_writes.then(|| store.vault_publication_lock.lock());
+                        let has_graph_contracts = self
+                            .db()
+                            .collection_contracts()
+                            .iter()
+                            .any(|contract| contract.graph_contract.is_some());
+                        let _vault_guard = (has_vault_writes || has_graph_contracts)
+                            .then(|| store.vault_publication_lock.lock());
+                        if has_graph_contracts && self.current_xid().is_some() {
+                            if let Err(error) = self.validate_graph_contracts_at_commit() {
+                                self.rollback_connection(conn_id)?;
+                                return Err(error);
+                            }
+                        }
                         let context = self.inner.transaction_state.commit(conn_id, |ctx| {
                             let mut own_xids = std::collections::HashSet::new();
                             own_xids.insert(ctx.xid);

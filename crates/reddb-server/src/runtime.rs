@@ -33,8 +33,8 @@ use crate::storage::query::planner::{
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
 use crate::storage::unified::dsl::{
     apply_filters, cosine_similarity, Filter as DslFilter, FilterOp as DslFilterOp,
-    FilterValue as DslFilterValue, GraphPatternDsl, HybridQueryBuilder, MatchComponents,
-    QueryResult as DslQueryResult, ScoredMatch, TextSearchBuilder,
+    FilterValue as DslFilterValue, MatchComponents, QueryResult as DslQueryResult, ScoredMatch,
+    TextSearchBuilder,
 };
 use crate::storage::unified::store::{
     NativeCatalogSummary, NativeManifestSummary, NativePhysicalState, NativeRecoverySummary,
@@ -1492,6 +1492,7 @@ pub struct RedDBRuntime {
 }
 
 /// Storage replay can reach the owning runtime without keeping it alive.
+#[derive(Clone)]
 pub(crate) struct WeakRuntime(std::sync::Weak<RuntimeInner>);
 
 impl WeakRuntime {
@@ -1663,6 +1664,8 @@ mod function_budget;
 pub(crate) mod function_catalog;
 mod function_execution;
 mod function_validation;
+mod graph_contract;
+mod hybrid_search;
 mod impl_scrub;
 mod impl_search;
 mod impl_serverless;

@@ -46,6 +46,7 @@ pub fn persisted() -> PhysicalCollectionContract {
     total.generated = Some("quantity * 5".into());
     total.check = Some("total < 100".into());
     PhysicalCollectionContract {
+        graph_contract: None,
         name: "orders".into(),
         declared_model: "table".into(),
         schema_mode: "strict".into(),
