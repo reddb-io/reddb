@@ -668,6 +668,148 @@ fn committed_mvcc_index_reads_survive_crash_during_checkpoint_publication() {
 }
 
 #[test]
+fn unique_indexes_survive_process_death_during_private_rebuild() {
+    const CHILD_PATH: &str = "REDDB_UNIQUE_REBUILD_CRASH_PATH";
+    const CHILD_HOOK: &str = "REDDB_TEST_EXIT_DURING_UNIQUE_INDEX_REBUILD";
+    const CRASH_EXIT: i32 = 215;
+    let options = |path: std::path::PathBuf| {
+        RedDBOptions::persistent(path).with_memory_budget(128 * 1024 * 1024)
+    };
+    let open = |path| RedDBRuntime::with_options(options(path)).expect("open runtime");
+
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        let runtime = open(path.into());
+        runtime
+            .background_tasks
+            .as_ref()
+            .expect("background tasks")
+            .shutdown();
+        assert_eq!(
+            runtime
+                .index_store_ref()
+                .list_indices("unique_rebuild_rows")
+                .len(),
+            2,
+            "fixture must rebuild two indexes"
+        );
+        std::env::set_var(CHILD_HOOK, "unique_rebuild_rows");
+        runtime
+            .rebuild_runtime_indexes_for_table("unique_rebuild_rows")
+            .expect("rebuild reaches crash hook");
+        panic!("unique rebuild crash hook was not reached");
+    }
+
+    let directory = tempfile::tempdir().expect("unique rebuild crash fixture");
+    let path = directory.path().join("unique-rebuild.rdb");
+    {
+        let runtime = open(path.clone());
+        for sql in [
+            "CREATE TABLE unique_rebuild_rows (id INTEGER, email TEXT, payload TEXT)",
+            "CREATE UNIQUE INDEX unique_rebuild_id ON unique_rebuild_rows (id) USING HASH",
+            "CREATE UNIQUE INDEX unique_rebuild_email ON unique_rebuild_rows (email) USING BTREE",
+            "INSERT INTO unique_rebuild_rows (id,email,payload) VALUES (1,'alpha','one'),(2,'beta','two'),(3,'gamma','three')",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        runtime.checkpoint().expect("baseline checkpoint");
+    }
+
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "runtime::cold_keyed_models::unique_indexes_survive_process_death_during_private_rebuild",
+            "--nocapture",
+        ])
+        .env(CHILD_PATH, &path)
+        .output()
+        .expect("run rebuild crash child");
+    assert_eq!(
+        output.status.code(),
+        Some(CRASH_EXIT),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    for (phase, rows_before, new_id, new_email) in [
+        ("recovery", 3, 4, "delta"),
+        ("second reopen", 4, 5, "epsilon"),
+    ] {
+        let runtime = open(path.clone());
+        for (sql, payload) in [
+            (
+                "SELECT payload FROM unique_rebuild_rows WHERE id = 2",
+                "two",
+            ),
+            (
+                "SELECT payload FROM unique_rebuild_rows WHERE email = 'gamma'",
+                "three",
+            ),
+        ] {
+            let result = runtime.execute_query(sql).expect(sql);
+            assert_eq!(result.result.records.len(), 1, "{phase}: {sql}");
+            assert_eq!(
+                result.result.records[0].get("payload"),
+                Some(&Value::text(payload)),
+                "{phase}: {sql}"
+            );
+        }
+        if phase == "second reopen" {
+            let result = runtime
+                .execute_query("SELECT payload FROM unique_rebuild_rows WHERE email = 'delta'")
+                .expect("read post-recovery insert through UNIQUE index");
+            assert_eq!(result.result.records.len(), 1);
+            assert_eq!(
+                result.result.records[0].get("payload"),
+                Some(&Value::text("after-recovery"))
+            );
+        }
+        let duplicate_id = format!(
+            "INSERT INTO unique_rebuild_rows (id,email,payload) VALUES (2,'{new_email}-id-probe','duplicate-id')"
+        );
+        let duplicate_email = format!(
+            "INSERT INTO unique_rebuild_rows (id,email,payload) VALUES ({},'beta','duplicate-email')",
+            new_id + 100
+        );
+        for duplicate in [duplicate_id, duplicate_email] {
+            let error = runtime
+                .execute_query(&duplicate)
+                .err()
+                .expect("UNIQUE must reject duplicate after crash");
+            assert!(
+                error.to_string().to_lowercase().contains("unique"),
+                "{phase}: {error}"
+            );
+        }
+        let count = runtime
+            .execute_query("SELECT COUNT(*) AS n FROM unique_rebuild_rows")
+            .expect("count authoritative rows");
+        assert_eq!(
+            count.result.records[0].get("n"),
+            Some(&Value::Integer(rows_before)),
+            "{phase}"
+        );
+        runtime
+            .execute_query(&format!(
+                "INSERT INTO unique_rebuild_rows (id,email,payload) VALUES ({new_id},'{new_email}','after-recovery')"
+            ))
+            .expect("non-conflicting write after rebuild crash");
+        let count = runtime
+            .execute_query("SELECT COUNT(*) AS n FROM unique_rebuild_rows")
+            .expect("count accepted row");
+        assert_eq!(
+            count.result.records[0].get("n"),
+            Some(&Value::Integer(rows_before + 1)),
+            "{phase}"
+        );
+        runtime
+            .rebuild_runtime_indexes_for_table("unique_rebuild_rows")
+            .expect("rebuild remains retryable");
+        runtime.checkpoint().expect("checkpoint recovered indexes");
+    }
+}
+
+#[test]
 fn disk_full_wal_recovers_committed_rows_and_indexes_before_accepting_retry() {
     use crate::api::DurabilityMode;
     const CHILD_PATH: &str = "REDDB_DISK_FULL_PATH";
