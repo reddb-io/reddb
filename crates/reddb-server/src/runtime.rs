@@ -1747,6 +1747,7 @@ pub(crate) mod transaction_state;
 pub mod turbo_crash_inject;
 mod unique_index_admission;
 mod vcs_command;
+mod vcs_queue;
 mod vector_index;
 pub mod vector_turbo_kind;
 pub(crate) mod window_phase;

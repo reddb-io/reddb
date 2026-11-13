@@ -171,8 +171,8 @@ Most transactional data doesn't warrant history:
 - Sessions, tokens, and short-TTL caches churn dozens of times
   per row per day — history would multiply their storage cost
   without any audit value.
-- Queues and streams are semantically linear; commits don't map
-  to them.
+- Queue consumption is operational. Versioning payloads is useful for agent
+  branches, but delivery leases must stay local to each writer epoch.
 - Vector indices and derived aggregates can be rebuilt from
   source data on demand.
 

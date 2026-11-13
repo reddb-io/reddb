@@ -355,9 +355,9 @@ data unchanged until every conflict has a persisted `ours`, `theirs`,
 and reopen preserve pending merges and choices.
 
 Data application is currently enabled for Table, Document, Graph, Vector,
-KV, Mixed, TimeSeries, Config, HLL, Sketch, Filter, Metrics and Vault. Queue
-rejects application before changing HEAD; its opt-in flag alone
-does not establish complete VCS support.
+KV, Mixed, TimeSeries, Config, HLL, Sketch, Filter, Metrics, Vault and Queue.
+Queue merges version payload changes; delivery state stays local to a writer
+epoch. Merge does not copy leases or replay acknowledgements.
 See the [model validation matrix](./model-validation.md).
 
 Probabilistic collections retain native state snapshots. Concurrent changes

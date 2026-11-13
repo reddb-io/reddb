@@ -1752,6 +1752,9 @@ impl RedDBRuntime {
                 publication.inserts.push((collection.into(), entity, None));
             }
         }
+        if self.db().collection_contract(collection).is_some_and(|contract| contract.declared_model == crate::catalog::CollectionModel::Queue) {
+            super::vcs_queue::stage_metadata_scope(store, &mut publication, collection, enabled)?;
+        }
         if let Some(manager) = store.get_collection(collection) {
             if !enabled {
                 let mut shared = false;

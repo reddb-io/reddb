@@ -114,6 +114,13 @@ mod tests {
                 "FILTER CHECK items 'base'",
                 "exists",
             ),
+            (
+                "CREATE QUEUE items",
+                "QUEUE PUSH items 'base'",
+                "QUEUE POP items",
+                "QUEUE LEN items",
+                "len",
+            ),
         ] {
             let directory = tempfile::tempdir().expect("directory");
             let path = directory.path().join("state.rdb");
@@ -146,6 +153,92 @@ mod tests {
                 Some(&before)
             );
         }
+    }
+
+    #[test]
+    fn failed_queue_reservation_and_ack_recover_the_prior_delivery() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("queue.rdb");
+        let options = || crate::RedDBOptions::persistent(&path);
+        let message_id;
+        {
+            let runtime = RedDBRuntime::with_options(options()).expect("runtime");
+            runtime
+                .execute_query("CREATE QUEUE items LOCK_DEADLINE_MS 600000")
+                .expect("queue");
+            runtime
+                .execute_query("QUEUE GROUP CREATE items workers")
+                .expect("group");
+            runtime.vcs_set_versioned("items", true).expect("versioned");
+            runtime
+                .execute_query("QUEUE PUSH items 'base'")
+                .expect("message");
+            let fail_next = || {
+                runtime
+                    .db()
+                    .store()
+                    .test_fail_deferred_wal_append
+                    .store(true, std::sync::atomic::Ordering::Release)
+            };
+            fail_next();
+            assert!(runtime
+                .execute_query("QUEUE READ items GROUP workers CONSUMER c COUNT 1")
+                .is_err());
+            assert!(runtime
+                .execute_query("QUEUE PENDING items GROUP workers")
+                .expect("failed reservation")
+                .result
+                .records
+                .is_empty());
+            let delivery = runtime
+                .execute_query("QUEUE READ items GROUP workers CONSUMER c COUNT 1")
+                .expect("retry reservation");
+            let Some(Value::Text(id)) = delivery.result.records[0].get("message_id") else {
+                panic!("message handle")
+            };
+            message_id = id.to_string();
+            fail_next();
+            assert!(runtime
+                .execute_query(&format!("QUEUE ACK items GROUP workers '{message_id}'"))
+                .is_err());
+            assert_eq!(
+                runtime
+                    .scan_collection("items", None, 10)
+                    .expect("retained payload")
+                    .total,
+                1
+            );
+            assert_eq!(
+                runtime
+                    .execute_query("QUEUE PENDING items GROUP workers")
+                    .expect("retained reservation")
+                    .result
+                    .records
+                    .len(),
+                1
+            );
+            runtime.checkpoint().expect("checkpoint");
+        }
+        let runtime = RedDBRuntime::with_options(options()).expect("reopen");
+        assert_eq!(
+            runtime
+                .execute_query("QUEUE PENDING items GROUP workers")
+                .expect("recovered reservation")
+                .result
+                .records
+                .len(),
+            1
+        );
+        runtime
+            .execute_query(&format!("QUEUE ACK items GROUP workers '{message_id}'"))
+            .expect("retry ACK");
+        assert_eq!(
+            runtime
+                .scan_collection("items", None, 10)
+                .expect("retired payload")
+                .total,
+            0
+        );
     }
 
     #[test]
@@ -668,6 +761,7 @@ pub(super) fn ensure_entity_history_supported(runtime: &RedDBRuntime) -> RedDBRe
                         | crate::catalog::CollectionModel::Filter
                         | crate::catalog::CollectionModel::Metrics
                         | crate::catalog::CollectionModel::Vault
+                        | crate::catalog::CollectionModel::Queue
                 )
             })
         {

@@ -1,5 +1,5 @@
-//! Apply supported models' native state and reject incomplete adapters without
-//! advancing HEAD. Dedicated model tests cover divergent branches and recovery.
+//! Apply native state for every collection model. Dedicated model tests cover
+//! divergent branches, model-specific behavior and recovery.
 
 #[path = "../../support/prometheus.rs"]
 #[allow(dead_code)]
@@ -179,82 +179,29 @@ fn check_merge_guard(model: CollectionModel, create: &str, mutation: Option<&str
             },
             author: author(),
         });
-        if matches!(
-            model,
-            CollectionModel::Table
-                | CollectionModel::Document
-                | CollectionModel::Graph
-                | CollectionModel::Vector
-                | CollectionModel::Kv
-                | CollectionModel::Mixed
-                | CollectionModel::TimeSeries
-                | CollectionModel::Config
-                | CollectionModel::Hll
-                | CollectionModel::Sketch
-                | CollectionModel::Filter
-                | CollectionModel::Metrics
-                | CollectionModel::Vault
-        ) {
-            let outcome = result.expect("fast-forward applies source data");
-            assert_eq!(outcome.fast_forward, strategy == MergeStrategy::Auto);
-            assert_eq!(read_state(), source_value);
-            runtime
-                .vcs_reset(ResetInput {
-                    connection_id: 8201,
-                    target: base.hash.clone(),
-                    mode: ResetMode::Hard,
-                })
-                .expect("hard reset restores base data");
-            assert_eq!(read_state(), 0);
-            assert_head();
-            continue;
-        }
-        let error = result.expect_err("unapplied data must not be published");
-        assert!(
-            error.to_string().contains("applying data"),
-            "{model:?}: {error}"
-        );
-        assert_head();
-    }
-    if matches!(
-        model,
-        CollectionModel::Table
-            | CollectionModel::Document
-            | CollectionModel::Graph
-            | CollectionModel::Vector
-            | CollectionModel::Kv
-            | CollectionModel::Mixed
-            | CollectionModel::TimeSeries
-            | CollectionModel::Config
-            | CollectionModel::Hll
-            | CollectionModel::Sketch
-            | CollectionModel::Filter
-            | CollectionModel::Metrics
-            | CollectionModel::Vault
-    ) {
-        let picked = runtime
-            .vcs_cherry_pick(8201, &source.hash, author())
-            .expect("cherry-pick applies data")
-            .merge_commit
-            .expect("pick commit");
+        let outcome = result.expect("fast-forward applies source data");
+        assert_eq!(outcome.fast_forward, strategy == MergeStrategy::Auto);
         assert_eq!(read_state(), source_value);
         runtime
-            .vcs_revert(8201, &picked.hash, author())
-            .expect("revert applies inverse delta");
+            .vcs_reset(ResetInput {
+                connection_id: 8201,
+                target: base.hash.clone(),
+                mode: ResetMode::Hard,
+            })
+            .expect("hard reset restores base data");
         assert_eq!(read_state(), 0);
-        clear_current_connection_id();
-        return;
+        assert_head();
     }
-    let error = runtime
+    let picked = runtime
         .vcs_cherry_pick(8201, &source.hash, author())
-        .expect_err("cherry-pick must apply data before publishing");
-    assert!(error.to_string().contains("applying data"));
-    assert_head();
-    let error = runtime
-        .vcs_revert(8201, &source.hash, author())
-        .expect_err("revert must apply data before publishing");
-    assert!(error.to_string().contains("applying data"));
-    assert_head();
+        .expect("cherry-pick applies data")
+        .merge_commit
+        .expect("pick commit");
+    assert_eq!(read_state(), source_value);
+    runtime
+        .vcs_revert(8201, &picked.hash, author())
+        .expect("revert applies inverse delta");
+    assert_eq!(read_state(), 0);
     clear_current_connection_id();
 }
 

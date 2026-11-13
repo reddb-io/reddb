@@ -122,3 +122,6 @@ mod integration_tree;
 
 #[path = "dml_updates/unit_hot_update.rs"]
 mod unit_hot_update;
+
+#[path = "vcs/e2e_vcs_queue.rs"]
+mod e2e_vcs_queue;
