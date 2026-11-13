@@ -1,8 +1,78 @@
-use std::sync::Arc;
+use std::io::Read;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 
-use reddb_server::storage::backend::LocalBackend;
+use reddb_server::storage::backend::{BackendError, LocalBackend, RemoteBackend};
 use reddb_server::storage::wal::PointInTimeRecovery;
 use reddb_server::{RedDBOptions, RedDBRuntime};
+
+struct SplitSnapshotBackend {
+    started: Mutex<Option<mpsc::Sender<()>>>,
+    resume: Mutex<mpsc::Receiver<()>>,
+    split_once: AtomicBool,
+}
+
+impl RemoteBackend for SplitSnapshotBackend {
+    fn name(&self) -> &str {
+        "split-snapshot"
+    }
+
+    fn download(&self, remote_key: &str, local_path: &Path) -> Result<bool, BackendError> {
+        LocalBackend.download(remote_key, local_path)
+    }
+
+    fn upload(&self, local_path: &Path, remote_key: &str) -> Result<(), BackendError> {
+        if reddb_file::is_archived_snapshot_key(remote_key)
+            && !self.split_once.swap(true, Ordering::AcqRel)
+        {
+            let mut source = std::fs::File::open(local_path)
+                .map_err(|error| BackendError::Transport(error.to_string()))?;
+            let length = source
+                .metadata()
+                .map_err(|error| BackendError::Transport(error.to_string()))?
+                .len();
+            let destination = Path::new(remote_key);
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| BackendError::Transport(error.to_string()))?;
+            }
+            let mut output = std::fs::File::create(destination)
+                .map_err(|error| BackendError::Transport(error.to_string()))?;
+            std::io::copy(&mut Read::by_ref(&mut source).take(length / 2), &mut output)
+                .map_err(|error| BackendError::Transport(error.to_string()))?;
+            if let Some(started) = self.started.lock().expect("started lock").take() {
+                started
+                    .send(())
+                    .map_err(|error| BackendError::Transport(error.to_string()))?;
+            }
+            self.resume
+                .lock()
+                .expect("resume lock")
+                .recv()
+                .map_err(|error| BackendError::Transport(error.to_string()))?;
+            std::io::copy(&mut source, &mut output)
+                .map_err(|error| BackendError::Transport(error.to_string()))?;
+            output
+                .sync_all()
+                .map_err(|error| BackendError::Transport(error.to_string()))?;
+            return Ok(());
+        }
+        LocalBackend.upload(local_path, remote_key)
+    }
+
+    fn exists(&self, remote_key: &str) -> Result<bool, BackendError> {
+        LocalBackend.exists(remote_key)
+    }
+
+    fn delete(&self, remote_key: &str) -> Result<(), BackendError> {
+        LocalBackend.delete(remote_key)
+    }
+
+    fn list(&self, prefix: &str) -> Result<Vec<String>, BackendError> {
+        LocalBackend.list(prefix)
+    }
+}
 
 #[test]
 fn populated_single_file_backup_restores_into_an_independent_store() {
@@ -60,6 +130,105 @@ fn populated_single_file_backup_restores_into_an_independent_store() {
         rows(&expected),
         "all populated single-file rows must survive backup/restore"
     );
+}
+
+#[test]
+fn concurrent_update_ddl_and_vacuum_leave_a_restorable_backup_cut() {
+    let directory = tempfile::tempdir().expect("private concurrent backup directory");
+    let source = directory.path().join("source").join("data.rdb");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let remote = directory.path().join("remote");
+    let snapshots = format!("{}/", remote.join("snapshots").display());
+    let wal = format!("{}/", remote.join("wal").display());
+    let (started_tx, started_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let backend: Arc<dyn RemoteBackend> = Arc::new(SplitSnapshotBackend {
+        started: Mutex::new(Some(started_tx)),
+        resume: Mutex::new(resume_rx),
+        split_once: AtomicBool::new(false),
+    });
+    let options = RedDBOptions::persistent(&source)
+        .with_remote_backend(backend.clone(), remote.join("head.rdb").to_string_lossy())
+        .with_metadata("red.config.backup.snapshot_prefix", &snapshots)
+        .with_metadata("red.config.wal.archive.prefix", &wal)
+        .with_metadata(
+            "red.config.backup.head_key",
+            remote.join("HEAD.json").to_string_lossy(),
+        );
+    let runtime = RedDBRuntime::with_options(options).expect("source runtime");
+    runtime
+        .execute_query("SET CONFIG runtime.mvcc.autovacuum.enabled = false")
+        .expect("deterministic vacuum");
+    runtime
+        .execute_query("CREATE TABLE backup_cut (id INT, generation INT, payload TEXT)")
+        .expect("table");
+    runtime
+        .execute_query("CREATE UNIQUE INDEX backup_cut_id ON backup_cut (id) USING HASH")
+        .expect("hash index");
+    runtime
+        .execute_query("CREATE INDEX backup_cut_generation ON backup_cut (generation) USING BTREE")
+        .expect("btree index");
+    for id in 0..128 {
+        runtime
+            .execute_query(&format!(
+                "INSERT INTO backup_cut (id,generation,payload) VALUES ({id},1,'baseline-{id}')"
+            ))
+            .expect("baseline row");
+    }
+
+    std::thread::scope(|scope| {
+        let backup = scope.spawn(|| runtime.trigger_backup());
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("snapshot upload reached its midpoint");
+        let update = runtime.execute_query("UPDATE backup_cut SET generation = 2");
+        let ddl = runtime.execute_query("ALTER TABLE backup_cut ADD COLUMN during_backup TEXT");
+        let vacuum = runtime.execute_query("VACUUM backup_cut");
+        let checkpoint = runtime.checkpoint();
+        resume_tx.send(()).expect("finish snapshot upload");
+        update.expect("concurrent update");
+        ddl.expect("concurrent DDL");
+        vacuum.expect("concurrent vacuum");
+        checkpoint.expect("publish concurrent generation");
+        let result = backup
+            .join()
+            .expect("backup thread")
+            .expect("backup result");
+        assert!(result.uploaded);
+    });
+
+    let destination = directory.path().join("restore").join("data.rdb");
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    PointInTimeRecovery::new(backend, &snapshots, &wal)
+        .restore_to(0, &destination)
+        .expect("concurrent backup must remain restorable");
+    let restored = RedDBRuntime::with_options(RedDBOptions::persistent(&destination))
+        .expect("restored runtime");
+    let rows = restored
+        .execute_query("SELECT id, generation FROM backup_cut ORDER BY id")
+        .expect("restored rows");
+    assert_eq!(rows.result.records.len(), 128);
+    assert!(rows
+        .result
+        .records
+        .iter()
+        .all(|row| { row.get("generation") == Some(&reddb_types::Value::Integer(1)) }));
+    let hash = restored
+        .execute_query("SELECT id FROM backup_cut WHERE id = 64")
+        .expect("cold restored HASH lookup");
+    assert_eq!(hash.result.records.len(), 1);
+    let btree = restored
+        .execute_query("SELECT id FROM backup_cut WHERE generation = 1 ORDER BY id")
+        .expect("cold restored BTREE lookup");
+    assert_eq!(btree.result.records.len(), 128);
+    let described = restored
+        .execute_query("DESCRIBE backup_cut")
+        .expect("restored schema");
+    assert!(described
+        .result
+        .records
+        .iter()
+        .all(|row| row.get("name") != Some(&reddb_types::Value::text("during_backup"))));
 }
 
 #[test]
