@@ -27,12 +27,14 @@ impl RedDBRuntime {
             .get_collection(collection)
             .ok_or_else(|| RedDBError::NotFound(collection.into()))?;
         if !store.is_paged()
+            || store.config().resident_memory_bytes_max.is_none()
             || indexes.iter().any(|index| {
                 !matches!(index.method, IndexMethodKind::Hash | IndexMethodKind::BTree)
             })
         {
             return Err(RedDBError::InvalidOperation(
-                "persisted index verification requires paged HASH/BTREE indexes".into(),
+                "persisted index verification requires disk-resident paged HASH/BTREE indexes"
+                    .into(),
             ));
         }
         let (_scratch, limit_bytes) = self.reserve_index_scan(&manager)?;
@@ -55,5 +57,35 @@ impl RedDBRuntime {
             }
         }
         Ok(findings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resident_serverless_indexes_reject_physical_projection_verification() {
+        let directory = tempfile::tempdir().expect("serverless index fixture");
+        let options = crate::api::RedDBOptions::persistent(directory.path().join("index.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::Serverless.selection(),
+            )
+            .expect("serverless profile");
+        let runtime = RedDBRuntime::with_options(options).expect("serverless runtime");
+        runtime
+            .execute_query("CREATE TABLE records (id INTEGER)")
+            .expect("create table");
+        runtime
+            .execute_query("CREATE INDEX records_id ON records (id) USING HASH")
+            .expect("create index");
+
+        let error = runtime
+            .verify_persisted_indexes("records")
+            .expect_err("resident index has no physical projection to verify");
+        assert!(error.to_string().contains(
+            "persisted index verification requires disk-resident paged HASH/BTREE indexes"
+        ));
     }
 }
