@@ -29,23 +29,22 @@ fn graph_autocommit_snapshot_excludes_insert_before_wal_publication() {
         .unwrap();
     let (published_send, published_receive) = mpsc::channel();
     let (release_send, release_receive) = mpsc::channel();
-    let release_receive = Mutex::new(release_receive);
-    *runtime.index_store_ref().mutation_hook.lock() = Some(Arc::new(move |collection, phase| {
-        if collection == "graph_publication" && phase == MutationTestPhase::StoragePublished {
-            published_send.send(()).unwrap();
-            release_receive
-                .lock()
-                .unwrap()
-                .recv_timeout(TIMEOUT)
-                .unwrap();
-        }
-    }));
     std::thread::scope(|scope| {
-        let writer = scope.spawn(|| {
+        let writer_runtime = &runtime;
+        let writer = scope.spawn(move || {
+            let runtime = writer_runtime;
             set_current_connection_id(89002);
-            let result = runtime.execute_query(
-                "INSERT INTO graph_publication NODE (label, node_type, score) VALUES ('later', 'person', 2)",
-            );
+            let result = runtime.with_versioned_graph_insert(|| {
+                let result = runtime.execute_query(
+                    "INSERT INTO graph_publication NODE (label, node_type, score) VALUES ('later', 'person', 2)",
+                )?;
+                // The statement released its branch fence, but the owning WAL
+                // scope has not published the insert or committed its xid.
+                assert!(runtime.snapshot_manager().is_active(runtime.graph_insert_xid().unwrap()));
+                published_send.send(()).unwrap();
+                release_receive.recv_timeout(TIMEOUT).unwrap();
+                Ok(result)
+            });
             clear_current_connection_id();
             result
         });
@@ -82,7 +81,6 @@ fn graph_autocommit_snapshot_excludes_insert_before_wal_publication() {
             1
         );
     });
-    *runtime.index_store_ref().mutation_hook.lock() = None;
     clear_current_connection_id();
 }
 

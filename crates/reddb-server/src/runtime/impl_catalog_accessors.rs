@@ -349,9 +349,14 @@ impl RedDBRuntime {
         }
         let connection_id = super::impl_core::current_connection_id();
         let store = self.inner.db.store();
-        let _publication = store.vault_publication_lock.lock();
+        let uses_vcs = self.vcs_has_versioned_collections()?;
+        let _publication = uses_vcs.then(|| store.vault_publication_lock.lock());
         let (snapshot, retention) = state.retained_current_snapshot(connection_id);
-        let branch = self.vcs_branch_read_view(&snapshot, None)?;
+        let branch = if uses_vcs {
+            self.vcs_branch_read_view(&snapshot, None)?
+        } else {
+            None
+        };
         let context = state.context(connection_id);
         Ok((
             super::impl_core::SnapshotContext {

@@ -441,11 +441,16 @@ impl StatementExecutionFrame {
             .map(|ctx| ctx.xid);
         let (snapshot, as_of_floor, snapshot_retention, branch) = {
             let store = runtime.db().store();
-            let _publication = store.vault_publication_lock.lock();
+            let uses_vcs = runtime.vcs_has_versioned_collections()?;
+            let _publication = uses_vcs.then(|| store.vault_publication_lock.lock());
             let (snapshot, as_of_floor, retention) =
                 runtime.statement_snapshot(query, identity_source)?;
             let as_of = peek_top_level_as_of_with_table(query).map(|(spec, _)| spec);
-            let branch = runtime.vcs_branch_read_view(&snapshot, as_of.as_ref())?;
+            let branch = if uses_vcs {
+                runtime.vcs_branch_read_view(&snapshot, as_of.as_ref())?
+            } else {
+                None
+            };
             (snapshot, as_of_floor, retention, branch)
         };
         if as_of_floor.is_some() {

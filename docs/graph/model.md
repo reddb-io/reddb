@@ -100,7 +100,7 @@ rejected. Soft/mixed reset only moves commit references and retains working data
 
 Validation scans the projected graph and uses query memory admission. It is an
 opt-in integrity check with a cost proportional to the graph size. The contract
-persists with the collection; enabling it upgrades storage to V13, which older
+persists with the collection; enabling it upgrades storage to V14, which older
 readers must reject.
 
 ## Graph Storage

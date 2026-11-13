@@ -794,6 +794,10 @@ fn ensure_no_pending_merge(store: &UnifiedStore, connection_id: u64) -> RedDBRes
 // ---------------------------------------------------------------------------
 
 impl RedDBRuntime {
+    pub(crate) fn vcs_has_versioned_collections(&self) -> RedDBResult<bool> {
+        Ok(!versioned_collections(&self.db().store())?.is_empty())
+    }
+
     pub(crate) fn vcs_reject_destructive_ddl(&self, collection: &str) -> RedDBResult<()> {
         if self.vcs_is_versioned(collection)? {
             return Err(RedDBError::InvalidOperation(format!(
