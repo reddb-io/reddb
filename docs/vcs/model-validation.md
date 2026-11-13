@@ -71,3 +71,10 @@ labels, one-hop paths, score fusion, RLS, branch isolation and transaction views
 Metadata publication tests inject WAL failures into branch creation/deletion,
 checkout, tags, soft/mixed reset and merges. Missing ancestry or malformed
 references fail the operation instead of producing partial history.
+
+The native time-series read bridge bypasses shared column blocks for versioned
+collections and resolves the authorized branch snapshot from canonical entities.
+This also applies to blocks sealed before history was enabled. Versioned
+collections skip columnar sealing; low-level columnar scans return no block.
+Regression coverage checks independent branch points, merge, transactional
+rollback, and embedded/paged reopen with a pre-existing compressed chunk.

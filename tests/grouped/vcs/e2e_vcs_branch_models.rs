@@ -611,3 +611,145 @@ fn vcs_typed_divergent_merge_delete_and_recovery() {
         clear_current_connection_id();
     }
 }
+
+#[test]
+fn timeseries_read_bridge_ignores_shared_chunks_after_branching() {
+    use reddb::application::{MergeInput, MergeOpts};
+    for paged in [false, true] {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("chunk-branches.rdb");
+        let options = || {
+            let options =
+                RedDBOptions::persistent(&path).with_columnar_projection_size_floor_rows(1);
+            if paged {
+                options
+                    .with_storage_profile(reddb::StorageDeployPreset::Serverless.selection())
+                    .expect("paged profile")
+            } else {
+                options
+            }
+        };
+        let author = || Author {
+            name: "test".into(),
+            email: "test@reddb.io".into(),
+        };
+        let connection = 9018;
+        let checkout = |runtime: &RedDBRuntime, branch: &str| {
+            set_current_connection_id(connection);
+            runtime
+                .vcs_checkout(CheckoutInput {
+                    connection_id: connection,
+                    target: CheckoutTarget::Branch(branch.into()),
+                    force: false,
+                })
+                .expect("checkout");
+        };
+        let commit = |runtime: &RedDBRuntime| {
+            runtime
+                .vcs_commit(CreateCommitInput {
+                    connection_id: connection,
+                    message: "points".into(),
+                    author: author(),
+                    committer: None,
+                    amend: false,
+                    allow_empty: true,
+                })
+                .expect("commit")
+        };
+        let points = |runtime: &RedDBRuntime| {
+            runtime
+                .read_bridge_points("cpu", 0, u64::MAX)
+                .expect("snapshot points")
+        };
+        {
+            let runtime = RedDBRuntime::with_options(options()).expect("runtime");
+            set_current_connection_id(connection);
+            runtime
+                .execute_query("CREATE TIMESERIES cpu")
+                .expect("create");
+            runtime
+                .execute_query(
+                    "INSERT INTO cpu (metric, value, timestamp) VALUES ('load', 10.0, 1)",
+                )
+                .expect("seed");
+            assert_eq!(
+                runtime
+                    .seal_hypertable_chunks("cpu")
+                    .expect("seal before opt-in"),
+                1
+            );
+            assert_eq!(
+                runtime
+                    .columnar_chunk_points("cpu", 0, 0, u64::MAX)
+                    .expect("legacy column block"),
+                [(1, 10.0)]
+            );
+            runtime.vcs_set_versioned("cpu", true).expect("versioned");
+            commit(&runtime);
+            runtime
+                .vcs_branch_create(CreateBranchInput {
+                    connection_id: connection,
+                    name: "agent".into(),
+                    from: None,
+                })
+                .expect("branch");
+            checkout(&runtime, "agent");
+            runtime
+                .execute_query(
+                    "INSERT INTO cpu (metric, value, timestamp) VALUES ('load', 30.0, 2)",
+                )
+                .expect("agent point");
+            commit(&runtime);
+            assert_eq!(points(&runtime), [(1, 10.0), (2, 30.0)]);
+            assert_eq!(
+                runtime
+                    .seal_hypertable_chunks("cpu")
+                    .expect("versioned seal"),
+                0
+            );
+            assert!(runtime
+                .columnar_chunk_points("cpu", 0, 0, u64::MAX)
+                .is_none());
+            assert!(runtime
+                .columnar_chunk_range_scan("cpu", 0, 0, u64::MAX)
+                .is_none());
+            assert!(runtime
+                .columnar_chunk_value_eq_scan("cpu", 0, 10.0)
+                .is_none());
+            checkout(&runtime, "main");
+            assert_eq!(points(&runtime), [(1, 10.0)]);
+            runtime
+                .execute_query(
+                    "INSERT INTO cpu (metric, value, timestamp) VALUES ('load', 20.0, 3)",
+                )
+                .expect("main point");
+            commit(&runtime);
+            assert_eq!(points(&runtime), [(1, 10.0), (3, 20.0)]);
+            runtime
+                .vcs_merge(MergeInput {
+                    connection_id: connection,
+                    from: "agent".into(),
+                    author: author(),
+                    opts: MergeOpts::default(),
+                })
+                .expect("merge points");
+            assert_eq!(points(&runtime), [(1, 10.0), (2, 30.0), (3, 20.0)]);
+            runtime.execute_query("BEGIN").expect("begin");
+            runtime
+                .execute_query(
+                    "INSERT INTO cpu (metric, value, timestamp) VALUES ('load', 40.0, 4)",
+                )
+                .expect("pending point");
+            assert_eq!(points(&runtime).len(), 4);
+            runtime.execute_query("ROLLBACK").expect("rollback");
+            assert_eq!(points(&runtime).len(), 3);
+            runtime.checkpoint().expect("checkpoint");
+        }
+        let runtime = RedDBRuntime::with_options(options()).expect("reopen");
+        checkout(&runtime, "main");
+        assert_eq!(points(&runtime), [(1, 10.0), (2, 30.0), (3, 20.0)]);
+        checkout(&runtime, "agent");
+        assert_eq!(points(&runtime), [(1, 10.0), (2, 30.0)]);
+        clear_current_connection_id();
+    }
+}

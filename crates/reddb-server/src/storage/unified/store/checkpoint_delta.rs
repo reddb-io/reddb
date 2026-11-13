@@ -210,14 +210,7 @@ impl UnifiedStore {
             let mut defer = false;
             let row = manager.get_with(id, |entity| {
                 if current.pending_vault.contains(&id)
-                    || (matches!(
-                        entity.data,
-                        EntityData::Row(_)
-                            | EntityData::Vector(_)
-                            | EntityData::Node(_)
-                            | EntityData::Edge(_)
-                            | EntityData::QueueMessage(_)
-                    ) && current.excluded_xids.contains(&entity.xmin))
+                    || current.excluded_xids.contains(&entity.xmin)
                 {
                     defer = true;
                     return None;
@@ -230,14 +223,7 @@ impl UnifiedStore {
                         .iter()
                         .any(|(_, xid)| current.excluded_xids.contains(xid))
                 });
-                let normalize_xmax = matches!(
-                    entity.data,
-                    EntityData::Row(_)
-                        | EntityData::Vector(_)
-                        | EntityData::Node(_)
-                        | EntityData::Edge(_)
-                        | EntityData::QueueMessage(_)
-                ) && current.excluded_xids.contains(&entity.xmax);
+                let normalize_xmax = current.excluded_xids.contains(&entity.xmax);
                 let projected = if normalize_xmax || normalize_branch {
                     defer = true;
                     let mut normalized = entity.clone();

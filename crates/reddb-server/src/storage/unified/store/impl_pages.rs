@@ -2863,22 +2863,8 @@ impl UnifiedStore {
                     #[cfg(test)]
                     CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(count.get() + 1));
                     let hidden = pending_vault_versions.contains(&entity.id)
-                        || (matches!(
-                            entity.data,
-                            EntityData::Row(_)
-                                | EntityData::Vector(_)
-                                | EntityData::Node(_)
-                                | EntityData::Edge(_)
-                                | EntityData::QueueMessage(_)
-                        ) && excluded.contains(&entity.xmin));
-                    let normalize_xmax = matches!(
-                        entity.data,
-                        EntityData::Row(_)
-                            | EntityData::Vector(_)
-                            | EntityData::Node(_)
-                            | EntityData::Edge(_)
-                            | EntityData::QueueMessage(_)
-                    ) && excluded.contains(&entity.xmax);
+                        || excluded.contains(&entity.xmin);
+                    let normalize_xmax = excluded.contains(&entity.xmax);
                     let normalize_branch = entity.branch_version().is_some_and(|branch| {
                         branch
                             .deletions

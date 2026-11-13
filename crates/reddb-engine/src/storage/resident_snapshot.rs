@@ -231,14 +231,7 @@ impl ResidentStore {
                 if pending_versions.contains(&entity.id) {
                     return false;
                 }
-                !matches!(
-                    entity.data,
-                    EntityData::Row(_)
-                        | EntityData::Vector(_)
-                        | EntityData::Node(_)
-                        | EntityData::Edge(_)
-                        | EntityData::QueueMessage(_)
-                ) || !excluded_xids.contains(&entity.xmin)
+                !excluded_xids.contains(&entity.xmin)
             });
             reddb_file::encode_native_dump_collection_header(&mut buf, name, entities.len() as u32);
 
@@ -248,15 +241,7 @@ impl ResidentStore {
                 entity.retain_branch_deletions(|xid| !excluded_xids.contains(&xid));
                 // Unfinished and rolled-back deletions cannot become committed
                 // tombstones when recovery reconstructs the xid floor.
-                if matches!(
-                    entity.data,
-                    EntityData::Row(_)
-                        | EntityData::Vector(_)
-                        | EntityData::Node(_)
-                        | EntityData::Edge(_)
-                        | EntityData::QueueMessage(_)
-                ) && excluded_xids.contains(&entity.xmax)
-                {
+                if excluded_xids.contains(&entity.xmax) {
                     entity.xmax = 0;
                 }
                 if entity.cross_refs().iter().any(|reference| {
