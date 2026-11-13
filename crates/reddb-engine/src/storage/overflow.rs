@@ -23,6 +23,7 @@
 use super::page::{Page, PageType, CONTENT_SIZE, HEADER_SIZE, PAGE_SIZE};
 use super::page_store::PageStore;
 use super::pager::PagerError;
+use std::collections::HashSet;
 
 /// Bytes consumed by the per-page chain header (next + payload_len).
 pub const OVERFLOW_PAGE_HEADER: usize = 8;
@@ -45,6 +46,8 @@ pub enum OverflowError {
     LengthMismatch { expected: u64, actual: u64 },
     /// Caller asked to free a non-overflow page as a chain head.
     InvalidHead { page_id: u32 },
+    /// A page points back to an already visited member of the same chain.
+    CycleDetected { page_id: u32 },
 }
 
 impl std::fmt::Display for OverflowError {
@@ -68,6 +71,9 @@ impl std::fmt::Display for OverflowError {
             ),
             Self::InvalidHead { page_id } => {
                 write!(f, "free called with non-overflow head page {}", page_id)
+            }
+            Self::CycleDetected { page_id } => {
+                write!(f, "cyclic overflow chain repeats page {}", page_id)
             }
         }
     }
@@ -175,8 +181,12 @@ impl<'p, P: PageStore> OverflowChain<'p, P> {
         let mut out = Vec::with_capacity(expected);
         let mut current = head_page_id;
         let mut collected: u64 = 0;
+        let mut visited = HashSet::new();
 
         while current != 0 {
+            if !visited.insert(current) {
+                return Err(OverflowError::CycleDetected { page_id: current });
+            }
             let page = self.pager.read_page(current).map_err(OverflowError::from)?;
             let (next, len) = read_chain_header(&page)?;
             let len_usize = len as usize;
@@ -209,7 +219,11 @@ impl<'p, P: PageStore> OverflowChain<'p, P> {
     pub fn free(&self, head_page_id: u32) -> Result<(), OverflowError> {
         let mut current = head_page_id;
         let mut first = true;
+        let mut visited = HashSet::new();
         while current != 0 {
+            if !visited.insert(current) {
+                return Err(OverflowError::CycleDetected { page_id: current });
+            }
             let page = self.pager.read_page(current).map_err(OverflowError::from)?;
             if page.page_type().map_err(PagerError::from)? != PageType::Overflow {
                 return Err(if first {
