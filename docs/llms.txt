@@ -44,7 +44,7 @@ RedDB is a multi-model store (documents, key-value, queues, graph, vault, config
 
 This reference is generated from the `reddb-io-types` function, operator, and cast catalogs. Do not edit by hand — regenerate from the engine.
 
-## Value types (33)
+## Value types (34)
 
 Every concrete value type the engine's type-system authorities reference, grouped by coercion category:
 
@@ -90,7 +90,7 @@ Every concrete value type the engine's type-system authorities reference, groupe
 
 ### Feature types
 
-`FEATURE_VECTOR`, `BIT_SIGNATURE`
+`FEATURE_VECTOR`, `BIT_SIGNATURE`, `LANDMARK_SET`
 
 ### Biometric types
 
