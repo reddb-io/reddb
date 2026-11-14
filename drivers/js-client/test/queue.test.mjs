@@ -245,7 +245,7 @@ test('queue consumer waits, handles, ACKs, and stops gracefully', async () => {
     waitMs: 1000,
     async handleMessage(message) {
       handled.push(message.payload)
-      void worker.stop()
+      worker.requestStop()
     },
   })
 

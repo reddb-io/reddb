@@ -1284,6 +1284,12 @@ impl ScopedQueueClient {
         handler_timeout_ms: u64,
     ) -> PyResult<QueueConsumer> {
         let _ = self.read_sql(consumer, wait_ms, group, Some(1))?;
+        if wait_ms == 0 {
+            return Err(err(
+                "INVALID_ARGUMENT",
+                "queue consumer wait_ms must be greater than zero",
+            ));
+        }
         validate_queue_delay(retry_delay)?;
         if concurrency != 1 {
             return Err(err(

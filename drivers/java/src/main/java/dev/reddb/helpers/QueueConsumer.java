@@ -86,14 +86,15 @@ public final class QueueConsumer implements AutoCloseable {
         if (options.group != null && !options.group.isEmpty()) {
             Sql.assertIdentifier(options.group, "group name");
         }
-        if (options.wait == null || options.wait.isNegative()) {
-            throw new HelperException.InvalidArgument("queue consumer wait must be non-negative");
+        if (options.wait == null || options.wait.isZero() || options.wait.isNegative()) {
+            throw new HelperException.InvalidArgument("queue consumer wait must be positive");
         }
         if (options.concurrency < 1 || options.concurrency > 128) {
             throw new HelperException.InvalidArgument(
                 "queue consumer concurrency must be between 1 and 128");
         }
-        if (options.receiveBackoffInitial == null || options.receiveBackoffInitial.isNegative()
+        if (options.receiveBackoffInitial == null || options.receiveBackoffInitial.isZero()
+            || options.receiveBackoffInitial.isNegative()
             || options.receiveBackoffMax == null
             || options.receiveBackoffMax.compareTo(options.receiveBackoffInitial) < 0
             || options.receiveBackoffMultiplier < 1) {

@@ -474,14 +474,14 @@ public class QueueConsumer internal constructor(
     init {
         Sql.assertIdentifier(options.consumer, "consumer name")
         options.group?.takeIf { it.isNotEmpty() }?.let { Sql.assertIdentifier(it, "group name") }
-        if (options.wait.isNegative()) {
-            throw HelperException.InvalidArgument("queue consumer wait must be non-negative")
+        if (options.wait <= kotlin.time.Duration.ZERO) {
+            throw HelperException.InvalidArgument("queue consumer wait must be positive")
         }
         if (options.concurrency !in 1..128) {
             throw HelperException.InvalidArgument(
                 "queue consumer concurrency must be between 1 and 128")
         }
-        if (options.receiveBackoffInitial.isNegative() ||
+        if (options.receiveBackoffInitial <= kotlin.time.Duration.ZERO ||
             options.receiveBackoffMax < options.receiveBackoffInitial ||
             options.receiveBackoffMultiplier < 1.0
         ) {

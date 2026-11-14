@@ -685,12 +685,12 @@ public sealed class QueueConsumer : IAsyncDisposable
         Sql.AssertIdentifier(options.Consumer, "consumer name");
         if (!string.IsNullOrEmpty(options.Group))
             Sql.AssertIdentifier(options.Group!, "group name");
-        if (options.Wait < TimeSpan.Zero)
-            throw new HelperException.InvalidArgument("queue consumer wait must be non-negative");
+        if (options.Wait <= TimeSpan.Zero)
+            throw new HelperException.InvalidArgument("queue consumer wait must be positive");
         if (options.Concurrency is < 1 or > 128)
             throw new HelperException.InvalidArgument(
                 "queue consumer concurrency must be between 1 and 128");
-        if (options.ReceiveBackoff.Initial < TimeSpan.Zero ||
+        if (options.ReceiveBackoff.Initial <= TimeSpan.Zero ||
             options.ReceiveBackoff.Max < options.ReceiveBackoff.Initial ||
             options.ReceiveBackoff.Multiplier < 1)
             throw new HelperException.InvalidArgument("invalid queue receive backoff");
@@ -712,10 +712,15 @@ public sealed class QueueConsumer : IAsyncDisposable
 
     public async Task StopAsync()
     {
+        RequestStop();
+        if (_run is not null) await _run.ConfigureAwait(false);
+    }
+
+    public void RequestStop()
+    {
         _stopping = true;
         _state = "stopping";
         Resume();
-        if (_run is not null) await _run.ConfigureAwait(false);
     }
 
     public void Pause()

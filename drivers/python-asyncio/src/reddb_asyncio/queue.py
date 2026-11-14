@@ -167,8 +167,8 @@ class QueueConsumer:
         self.queue = queue
         self.consumer_name = sql_identifier(consumer)
         self.group = sql_identifier(group) if group is not None else None
-        if not isinstance(wait_ms, int) or isinstance(wait_ms, bool) or wait_ms < 0:
-            raise TypeError("queue consumer wait_ms must be a non-negative integer")
+        if not isinstance(wait_ms, int) or isinstance(wait_ms, bool) or wait_ms <= 0:
+            raise TypeError("queue consumer wait_ms must be a positive integer")
         _retry_delay(retry_delay)
         self.wait_ms = wait_ms
         self.retry_delay = retry_delay
@@ -183,9 +183,10 @@ class QueueConsumer:
                 "queue consumer concurrency must be an integer between 1 and 128"
             )
         self.concurrency = concurrency
-        self._backoff_initial = _non_negative_int(
+        self._backoff_initial = _optional_positive_int(
             receive_backoff_initial_ms, "receive_backoff_initial_ms"
         )
+        assert self._backoff_initial is not None
         self._backoff_max = _non_negative_int(
             receive_backoff_max_ms, "receive_backoff_max_ms"
         )

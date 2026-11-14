@@ -939,7 +939,7 @@ func (q *ScopedQueueClient) Consumer(options QueueConsumerOptions) (*QueueConsum
 			Multiplier: 2, Jitter: true,
 		}
 	}
-	if backoff.Initial < 0 || backoff.Max < backoff.Initial || backoff.Multiplier < 1 {
+	if backoff.Initial <= 0 || backoff.Max < backoff.Initial || backoff.Multiplier < 1 {
 		return nil, NewError(CodeInvalidArgument, "invalid queue receive backoff")
 	}
 	options.ReceiveBackoff = backoff

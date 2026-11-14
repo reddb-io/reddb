@@ -59,6 +59,10 @@ before NACKing. This means a handler that ignores cancellation can delay
 shutdown, but RedDB never deliberately overlaps it with a redelivery.
 
 Graceful stop finishes the active handler and its ACK/NACK before returning.
+When stopping from inside the handler, use the driver's non-waiting request
+method (`requestStop()` in JavaScript and Dart, `RequestStop()` in .NET,
+`Stop()` in Go) and await the worker only after the handler returns; awaiting
+graceful completion from the handler would wait on itself.
 An idle worker can take up to its configured wait duration to observe the stop
 request. Drivers whose transport wires request cancellation can interrupt the
 outstanding request; otherwise even `abort` is bounded by the configured wait.

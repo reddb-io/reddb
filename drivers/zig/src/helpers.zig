@@ -727,7 +727,7 @@ pub const ScopedQueueClient = struct {
     pub fn consume(self: ScopedQueueClient, options: ConsumerOptions) !void {
         try assertIdentifier(options.consumer, "consumer name");
         if (options.group) |group| try assertIdentifier(group, "group name");
-        if (options.wait_ms < 0) return HelperError.InvalidArgument;
+        if (options.wait_ms <= 0) return HelperError.InvalidArgument;
         if (options.retry_delay) |delay| if (!validQueueDelay(delay)) return HelperError.InvalidArgument;
         const read_options = QueueClient.ReadWaitOptions{ .group = options.group, .count = 1 };
         while (!options.stop.load(.acquire)) {

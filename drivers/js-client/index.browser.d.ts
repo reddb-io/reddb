@@ -325,6 +325,8 @@ export class QueueConsumer<T = unknown> {
   readonly status: QueueConsumerStatus
   start(): this
   stop(): Promise<void>
+  /** Request graceful stop without awaiting completion; safe inside the handler. */
+  requestStop(): this
   pause(): this
   resume(): this
   finished(): Promise<void>

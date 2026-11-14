@@ -122,8 +122,8 @@ export class QueueConsumer {
     this.consumerName = requiredQueueName(options.consumer, 'consumer')
     this.group = options.group == null ? null : requiredQueueName(options.group, 'group')
     this.waitMs = options.waitMs ?? 30_000
-    if (!Number.isInteger(this.waitMs) || this.waitMs < 0) {
-      throw new TypeError('queue consumer waitMs must be a non-negative integer')
+    if (!Number.isInteger(this.waitMs) || this.waitMs <= 0) {
+      throw new TypeError('queue consumer waitMs must be a positive integer')
     }
     this.handleMessage = options.handleMessage
     this.onError = options.onError ?? null
@@ -181,12 +181,18 @@ export class QueueConsumer {
     if (this.state === 'idle' || this.state === 'stopped' || this.state === 'failed') {
       return this.finished()
     }
+    this.requestStop()
+    return this.finished()
+  }
+
+  requestStop() {
+    if (this.state === 'idle' || this.state === 'stopped' || this.state === 'failed') return this
     this.stopRequested = true
     this.paused = false
     this.state = 'stopping'
     this.#wake(this.pauseWaiters)
     this.#wake(this.sleepWaiters)
-    return this.finished()
+    return this
   }
   pause() {
     if (this.state !== 'running') return this
@@ -370,8 +376,8 @@ function receiveBackoffOptions(value) {
     multiplier: options.multiplier ?? 2,
     jitter: options.jitter ?? true,
   }
-  if (!Number.isInteger(result.initialMs) || result.initialMs < 0) {
-    throw new TypeError('queue consumer receiveBackoff.initialMs must be a non-negative integer')
+  if (!Number.isInteger(result.initialMs) || result.initialMs <= 0) {
+    throw new TypeError('queue consumer receiveBackoff.initialMs must be a positive integer')
   }
   if (!Number.isInteger(result.maxMs) || result.maxMs < result.initialMs) {
     throw new TypeError('queue consumer receiveBackoff.maxMs must be an integer >= initialMs')
