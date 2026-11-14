@@ -320,6 +320,7 @@ impl RedDBRuntime {
                 columns,
                 method: super::index_store::IndexMethodKind::Hash,
                 unique: false,
+                similarity_contract: None,
             });
         self.invalidate_plan_cache();
     }

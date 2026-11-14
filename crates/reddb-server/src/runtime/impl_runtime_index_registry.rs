@@ -87,6 +87,7 @@ fn index_descriptor(entity: &crate::storage::UnifiedEntity) -> Option<IndexDescr
         return Some((key, None));
     }
     let method = index_method_kind_from_str(&raw_method, resolution)?;
+    let similarity_contract = persisted_similarity_contract(named, method);
     Some((
         key,
         Some(super::index_store::RegisteredIndex {
@@ -95,8 +96,42 @@ fn index_descriptor(entity: &crate::storage::UnifiedEntity) -> Option<IndexDescr
             columns,
             method,
             unique: named_bool(named, "unique").unwrap_or(false),
+            similarity_contract,
         }),
     ))
+}
+
+fn persisted_similarity_contract(
+    named: &std::collections::HashMap<String, reddb_types::Value>,
+    method: super::index_store::IndexMethodKind,
+) -> Option<super::index_store::similarity::SimilarityContract> {
+    use super::index_store::similarity::SimilarityContract;
+
+    let version = u32::try_from(named_i64(named, "similarity_version")?).ok()?;
+    match method {
+        super::index_store::IndexMethodKind::Hnsw => {
+            let space_id: [u8; 16] = named_blob(named, "similarity_space_id")?.try_into().ok()?;
+            let dimensions = usize::try_from(named_i64(named, "similarity_width")?).ok()?;
+            Some(SimilarityContract::Feature {
+                space_id,
+                dimensions,
+                version,
+            })
+        }
+        super::index_store::IndexMethodKind::Hamming => {
+            let space_id: [u8; 16] = named_blob(named, "similarity_space_id")?.try_into().ok()?;
+            let bytes = usize::try_from(named_i64(named, "similarity_width")?).ok()?;
+            Some(SimilarityContract::Bits {
+                space_id,
+                bytes,
+                version,
+            })
+        }
+        super::index_store::IndexMethodKind::Minutiae => {
+            Some(SimilarityContract::Minutiae { version })
+        }
+        _ => None,
+    }
 }
 
 fn named_text(
@@ -129,6 +164,16 @@ fn named_i64(
     }
 }
 
+fn named_blob<'a>(
+    named: &'a std::collections::HashMap<String, reddb_types::Value>,
+    key: &str,
+) -> Option<&'a [u8]> {
+    match named.get(key) {
+        Some(reddb_types::Value::Blob(value)) => Some(value),
+        _ => None,
+    }
+}
+
 fn index_method_kind_as_str(method: super::index_store::IndexMethodKind) -> &'static str {
     match method {
         super::index_store::IndexMethodKind::Hash => "hash",
@@ -137,6 +182,9 @@ fn index_method_kind_as_str(method: super::index_store::IndexMethodKind) -> &'st
         // The H3 resolution rides in a sibling `resolution` column of the
         // persisted descriptor; the method tag itself is just "h3".
         super::index_store::IndexMethodKind::H3 { .. } => "h3",
+        super::index_store::IndexMethodKind::Hnsw => "hnsw",
+        super::index_store::IndexMethodKind::Hamming => "hamming",
+        super::index_store::IndexMethodKind::Minutiae => "minutiae",
     }
 }
 
@@ -158,6 +206,9 @@ fn index_method_kind_from_str(
         "bitmap" => Some(super::index_store::IndexMethodKind::Bitmap),
         "btree" => Some(super::index_store::IndexMethodKind::BTree),
         "h3" => Some(super::index_store::IndexMethodKind::H3 { resolution }),
+        "hnsw" => Some(super::index_store::IndexMethodKind::Hnsw),
+        "hamming" => Some(super::index_store::IndexMethodKind::Hamming),
+        "minutiae" => Some(super::index_store::IndexMethodKind::Minutiae),
         _ => None,
     }
 }
@@ -185,6 +236,54 @@ impl RedDBRuntime {
     ) -> RedDBResult<()> {
         let store = self.inner.db.store();
         let _ = store.get_or_create_collection(RUNTIME_INDEX_REGISTRY_COLLECTION);
+        let mut named = std::collections::HashMap::from([
+            (
+                "collection".to_string(),
+                reddb_types::Value::text(index.collection.clone()),
+            ),
+            (
+                "name".to_string(),
+                reddb_types::Value::text(index.name.clone()),
+            ),
+            (
+                "columns".to_string(),
+                reddb_types::Value::text(index.columns.join("\u{1f}")),
+            ),
+            (
+                "method".to_string(),
+                reddb_types::Value::text(index_method_kind_as_str(index.method)),
+            ),
+            (
+                "resolution".to_string(),
+                reddb_types::Value::Integer(i64::from(index_method_kind_resolution(index.method))),
+            ),
+            (
+                "unique".to_string(),
+                reddb_types::Value::Boolean(index.unique),
+            ),
+            ("dropped".to_string(), reddb_types::Value::Boolean(false)),
+        ]);
+        if let Some(contract) = index.similarity_contract {
+            named.insert(
+                "similarity_version".to_string(),
+                reddb_types::Value::Integer(i64::from(contract.version())),
+            );
+            if let Some(space_id) = contract.space_id() {
+                named.insert(
+                    "similarity_space_id".to_string(),
+                    reddb_types::Value::Blob(space_id.to_vec()),
+                );
+            }
+            if let Some(width) = contract.width() {
+                let width = i64::try_from(width).map_err(|_| {
+                    RedDBError::Internal("typed similarity index width exceeds i64".to_string())
+                })?;
+                named.insert(
+                    "similarity_width".to_string(),
+                    reddb_types::Value::Integer(width),
+                );
+            }
+        }
         let entity = crate::storage::UnifiedEntity::new(
             crate::storage::EntityId::new(0),
             crate::storage::EntityKind::TableRow {
@@ -193,39 +292,7 @@ impl RedDBRuntime {
             },
             crate::storage::EntityData::Row(crate::storage::RowData {
                 columns: Vec::new(),
-                named: Some(
-                    [
-                        (
-                            "collection".to_string(),
-                            reddb_types::Value::text(index.collection.clone()),
-                        ),
-                        (
-                            "name".to_string(),
-                            reddb_types::Value::text(index.name.clone()),
-                        ),
-                        (
-                            "columns".to_string(),
-                            reddb_types::Value::text(index.columns.join("\u{1f}")),
-                        ),
-                        (
-                            "method".to_string(),
-                            reddb_types::Value::text(index_method_kind_as_str(index.method)),
-                        ),
-                        (
-                            "resolution".to_string(),
-                            reddb_types::Value::Integer(i64::from(index_method_kind_resolution(
-                                index.method,
-                            ))),
-                        ),
-                        (
-                            "unique".to_string(),
-                            reddb_types::Value::Boolean(index.unique),
-                        ),
-                        ("dropped".to_string(), reddb_types::Value::Boolean(false)),
-                    ]
-                    .into_iter()
-                    .collect(),
-                ),
+                named: Some(named),
                 schema: None,
             }),
         );
@@ -430,6 +497,15 @@ impl RedDBRuntime {
         #[cfg(test)]
         let mut rebuilt_unique_indexes = 0usize;
         for index in registered {
+            if index.has_stale_similarity_contract() {
+                tracing::warn!(
+                    collection = %collection,
+                    index = %index.name,
+                    "typed similarity index contract is stale; exact search fallback remains active until the index is recreated"
+                );
+                prepared.register(index);
+                continue;
+            }
             if index.method == super::index_store::IndexMethodKind::BTree
                 && !index.columns.is_empty()
                 && self
@@ -470,6 +546,11 @@ impl RedDBRuntime {
                     &[],
                 )
                 .map_err(RedDBError::Internal)?;
+            if let Some(contract) = index.similarity_contract {
+                prepared
+                    .install_similarity_contract(collection, &index.name, contract)
+                    .map_err(RedDBError::Internal)?;
+            }
             #[cfg(test)]
             let crash_after_build = index.unique
                 && std::env::var("REDDB_TEST_EXIT_DURING_UNIQUE_INDEX_REBUILD")

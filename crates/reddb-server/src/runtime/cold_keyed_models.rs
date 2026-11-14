@@ -1042,16 +1042,19 @@ fn disk_full_checkpoint_recovers_pages_catalog_and_indexes() {
         ] {
             runtime.execute_query(sql).expect(sql);
         }
-        let offset = match std::env::var(CHILD_TARGET).expect("target").as_str() {
-            "catalog" => Some(crate::storage::engine::PAGE_SIZE as u64),
-            "page" => None,
-            target => panic!("unknown checkpoint target {target}"),
-        };
-        let prefix_bytes = std::env::var(CHILD_PREFIX)
+        let target = std::env::var(CHILD_TARGET).expect("target");
+        let prefix_bytes: usize = std::env::var(CHILD_PREFIX)
             .expect("prefix")
             .parse()
             .expect("prefix bytes");
-        crate::storage::engine::pager::test_fail_next_pager_write(offset, prefix_bytes);
+        match target.as_str() {
+            "catalog" => std::env::set_var(
+                "REDDB_TEST_CATALOG_HOME_IO_PREFIX",
+                prefix_bytes.to_string(),
+            ),
+            "page" => crate::storage::engine::pager::test_fail_next_pager_write(None, prefix_bytes),
+            target => panic!("unknown checkpoint target {target}"),
+        }
         let error = runtime
             .checkpoint()
             .expect_err("disk full must fail checkpoint");
@@ -3444,6 +3447,11 @@ fn cold_dml_delete_late_point_failure_preserves_preimages_and_writer_horizon() {
 fn cold_dml_deferred_delete_abort_preserves_indexes_and_releases_admission() {
     for index in [None, Some("HASH"), Some("BTREE")] {
         let (directory, runtime) = cold_dml_fixture(index);
+        runtime
+            .background_tasks
+            .as_ref()
+            .expect("background tasks")
+            .shutdown();
         runtime
             .db()
             .store()

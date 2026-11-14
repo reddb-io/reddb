@@ -20,6 +20,7 @@ pub fn runtime_info() -> Result<JsValue, JsValue> {
             "sqlWrites": true,
             "transactions": true,
             "queryParameters": true,
+            "biometricParameters": true,
             "databaseBackups": true,
             "databaseInspection": true,
             "localVault": true,
@@ -203,8 +204,14 @@ fn coded_error(code: &str, message: impl std::fmt::Display) -> JsValue {
 fn query_parameter(value: JsValue) -> Result<reddb_types::Value, JsValue> {
     use reddb_types::Value;
     let invalid = || {
-        coded_error("INVALID_ARGUMENT", "Parameters require null, boolean, string, finite numbers with safe integers, or i64/u64 bigints")
+        coded_error(
+            "INVALID_ARGUMENT",
+            "Parameters require a supported scalar or typed RedDB value envelope",
+        )
     };
+    if let Some(value) = typed_query_parameter(&value)? {
+        return Ok(value);
+    }
     if value.is_null() {
         return Ok(Value::Null);
     }
@@ -245,6 +252,168 @@ fn query_parameter(value: JsValue) -> Result<reddb_types::Value, JsValue> {
             .map_err(|_| invalid());
     }
     Err(invalid())
+}
+
+fn typed_query_parameter(value: &JsValue) -> Result<Option<reddb_types::Value>, JsValue> {
+    use reddb_types::{BiometricFormat, BiometricModality, BiometricSample, Value};
+
+    if !value.is_object() || Array::is_array(value) {
+        return Ok(None);
+    }
+    if let Some(envelope) = object_property(value, "$biometric")? {
+        let modality = string_property(&envelope, "modality")?;
+        let format_name = string_property(&envelope, "format")?;
+        let data = decode_hex(&string_property(&envelope, "data")?)?;
+        let format = BiometricFormat::from_standard_name(&format_name)
+            .ok_or_else(|| coded_error("INVALID_ARGUMENT", "Unknown biometric format"))?;
+        let expected = match modality.to_ascii_lowercase().as_str() {
+            "fingerprint" => BiometricModality::Fingerprint,
+            "face" => BiometricModality::Face,
+            "iris" => BiometricModality::Iris,
+            _ => {
+                return Err(coded_error(
+                    "INVALID_ARGUMENT",
+                    "Unknown biometric modality",
+                ))
+            }
+        };
+        if format.modality() != expected {
+            return Err(coded_error(
+                "INVALID_ARGUMENT",
+                "Biometric format does not match modality",
+            ));
+        }
+        let sample = BiometricSample::with_format(format, data)
+            .map_err(|error| coded_error("INVALID_ARGUMENT", error))?;
+        return Ok(Some(match expected {
+            BiometricModality::Fingerprint => Value::Fingerprint(sample),
+            BiometricModality::Face => Value::Face(sample),
+            BiometricModality::Iris => Value::Iris(sample),
+        }));
+    }
+    if let Some(envelope) = object_property(value, "$feature_vector")? {
+        let space_id = decode_space_id(&string_property(&envelope, "space_id")?)?;
+        let raw_values = js_sys::Reflect::get(&envelope, &JsValue::from_str("values"))?;
+        if !Array::is_array(&raw_values) {
+            return Err(coded_error(
+                "INVALID_ARGUMENT",
+                "Feature vector values must be an array",
+            ));
+        }
+        let values = Array::from(&raw_values)
+            .iter()
+            .map(|value| {
+                let number = value
+                    .as_f64()
+                    .filter(|number| number.is_finite())
+                    .ok_or_else(|| {
+                        coded_error(
+                            "INVALID_ARGUMENT",
+                            "Feature coordinates must be finite numbers",
+                        )
+                    })?;
+                #[allow(clippy::cast_possible_truncation)]
+                let coordinate = number as f32;
+                Ok(coordinate)
+            })
+            .collect::<Result<Vec<_>, JsValue>>()?;
+        let feature = reddb_types::FeatureVector::new(space_id, values)
+            .map_err(|error| coded_error("INVALID_ARGUMENT", error))?;
+        return Ok(Some(Value::FeatureVector(feature)));
+    }
+    if let Some(envelope) = object_property(value, "$bit_signature")? {
+        let space_id = decode_space_id(&string_property(&envelope, "space_id")?)?;
+        let bits = decode_hex(&string_property(&envelope, "bits")?)?;
+        let mask = optional_property(&envelope, "mask")?
+            .map(|value| {
+                value
+                    .as_string()
+                    .ok_or_else(|| {
+                        coded_error(
+                            "INVALID_ARGUMENT",
+                            "Bit signature mask must be hexadecimal text",
+                        )
+                    })
+                    .and_then(|value| decode_hex(&value))
+            })
+            .transpose()?;
+        let signature = reddb_types::BitSignature::new(space_id, bits, mask)
+            .map_err(|error| coded_error("INVALID_ARGUMENT", error))?;
+        return Ok(Some(Value::BitSignature(signature)));
+    }
+    Ok(None)
+}
+
+fn object_property(object: &JsValue, name: &str) -> Result<Option<JsValue>, JsValue> {
+    let Some(value) = optional_property(object, name)? else {
+        return Ok(None);
+    };
+    if !value.is_object() || value.is_null() {
+        return Err(coded_error(
+            "INVALID_ARGUMENT",
+            format!("Typed parameter '{name}' must contain an object"),
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn optional_property(object: &JsValue, name: &str) -> Result<Option<JsValue>, JsValue> {
+    let key = JsValue::from_str(name);
+    if !js_sys::Reflect::has(object, &key)? {
+        return Ok(None);
+    }
+    js_sys::Reflect::get(object, &key).map(Some)
+}
+
+fn string_property(object: &JsValue, name: &str) -> Result<String, JsValue> {
+    js_sys::Reflect::get(object, &JsValue::from_str(name))?
+        .as_string()
+        .ok_or_else(|| {
+            coded_error(
+                "INVALID_ARGUMENT",
+                format!("Typed parameter field '{name}' must be text"),
+            )
+        })
+}
+
+fn decode_space_id(value: &str) -> Result<[u8; 16], JsValue> {
+    decode_hex(value)?
+        .try_into()
+        .map_err(|_| coded_error("INVALID_ARGUMENT", "Feature space_id must contain 16 bytes"))
+}
+
+fn decode_hex(value: &str) -> Result<Vec<u8>, JsValue> {
+    if !value.len().is_multiple_of(2) {
+        return Err(coded_error(
+            "INVALID_ARGUMENT",
+            "Hexadecimal text must contain an even number of digits",
+        ));
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let digit = |byte| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            };
+            let high = digit(pair[0]).ok_or_else(|| {
+                coded_error(
+                    "INVALID_ARGUMENT",
+                    "Typed parameter contains invalid hexadecimal text",
+                )
+            })?;
+            let low = digit(pair[1]).ok_or_else(|| {
+                coded_error(
+                    "INVALID_ARGUMENT",
+                    "Typed parameter contains invalid hexadecimal text",
+                )
+            })?;
+            Ok((high << 4) | low)
+        })
+        .collect()
 }
 
 #[wasm_bindgen]

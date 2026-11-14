@@ -28,9 +28,22 @@ public:
         std::array<std::byte, 16> bytes;
         std::string canonical;
     };
+    struct Fingerprint { uint16_t format; std::vector<std::byte> data; };
+    struct Face { uint16_t format; std::vector<std::byte> data; };
+    struct Iris { uint16_t format; std::vector<std::byte> data; };
+    struct FeatureVector {
+        std::array<std::byte, 16> space_id;
+        std::vector<float> values;
+    };
+    struct BitSignature {
+        std::array<std::byte, 16> space_id;
+        std::vector<std::byte> bits;
+        std::vector<std::byte> mask;
+    };
 
     using Storage = std::variant<Null, bool, int64_t, double, std::string,
-                                 Bytes, Vector, Json, Timestamp, Uuid>;
+                                 Bytes, Vector, Json, Timestamp, Uuid,
+                                 Fingerprint, Face, Iris, FeatureVector, BitSignature>;
 
     Value() : storage_(Null{}) {}
     Value(std::nullopt_t) : storage_(Null{}) {}
@@ -55,6 +68,14 @@ public:
     static Value timestamp_seconds(int64_t epoch_seconds);
     static Value timestamp(std::chrono::system_clock::time_point value);
     static Value uuid(std::string_view value);
+    static Value fingerprint(uint16_t format, std::span<const std::byte> data);
+    static Value face(uint16_t format, std::span<const std::byte> data);
+    static Value iris(uint16_t format, std::span<const std::byte> data);
+    static Value feature_vector(std::array<std::byte, 16> space_id,
+                                std::span<const float> values);
+    static Value bit_signature(std::array<std::byte, 16> space_id,
+                               std::span<const std::byte> bits,
+                               std::span<const std::byte> mask = {});
 
     const Storage& storage() const noexcept { return storage_; }
 

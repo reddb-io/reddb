@@ -164,6 +164,9 @@ fn runtime_index_descriptors(runtime: &crate::runtime::RedDBRuntime) -> JsonValu
                 IndexMethodKind::Bitmap => ("bitmap", 0),
                 IndexMethodKind::BTree => ("btree", 0),
                 IndexMethodKind::H3 { resolution } => ("h3", resolution),
+                IndexMethodKind::Hnsw => ("hnsw", 0),
+                IndexMethodKind::Hamming => ("hamming", 0),
+                IndexMethodKind::Minutiae => ("minutiae", 0),
             };
             indices.push(crate::json::json!({
                 "collection": index.collection,

@@ -22,6 +22,37 @@ final class ValueCodecTest extends TestCase
         $this->assertSame(0x07, ValueCodec::TAG_JSON);
         $this->assertSame(0x08, ValueCodec::TAG_TIMESTAMP);
         $this->assertSame(0x09, ValueCodec::TAG_UUID);
+        $this->assertSame(0x0a, ValueCodec::TAG_FINGERPRINT);
+        $this->assertSame(0x0b, ValueCodec::TAG_FACE);
+        $this->assertSame(0x0c, ValueCodec::TAG_IRIS);
+        $this->assertSame(0x0d, ValueCodec::TAG_FEATURE_VECTOR);
+        $this->assertSame(0x0e, ValueCodec::TAG_BIT_SIGNATURE);
+    }
+
+    public function test_encode_biometric_feature_and_bit_envelopes(): void
+    {
+        $space = '00112233445566778899aabbccddeeff';
+        $feature = ValueCodec::encodeValue([
+            '$feature_vector' => ['space_id' => $space, 'values' => [1.0, -2.0]],
+        ]);
+        $this->assertSame(ValueCodec::TAG_FEATURE_VECTOR, ord($feature[0]));
+        $this->assertSame(2, unpack('V', substr($feature, 17, 4))[1]);
+
+        $bits = ValueCodec::encodeValue([
+            '$bit_signature' => ['space_id' => $space, 'bits' => 'aa55', 'mask' => 'ff0f'],
+        ]);
+        $this->assertSame(ValueCodec::TAG_BIT_SIGNATURE, ord($bits[0]));
+        $this->assertSame(hex2bin('aa55ff0f'), substr($bits, 21));
+
+        $face = ValueCodec::encodeValue([
+            '$biometric' => [
+                'modality' => 'face',
+                'format' => 'ISO/IEC 19794-5',
+                'data' => '46414300',
+            ],
+        ]);
+        $this->assertSame(ValueCodec::TAG_FACE, ord($face[0]));
+        $this->assertSame(0x0202, unpack('v', substr($face, 1, 2))[1]);
     }
 
     public function test_encode_scalar_values(): void

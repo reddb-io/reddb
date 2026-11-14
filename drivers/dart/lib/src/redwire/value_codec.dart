@@ -20,9 +20,42 @@ class ValueCodec {
   static const int tagJson = 0x07;
   static const int tagTimestamp = 0x08;
   static const int tagUuid = 0x09;
+  static const int tagFingerprint = 0x0a;
+  static const int tagFace = 0x0b;
+  static const int tagIris = 0x0c;
+  static const int tagFeatureVector = 0x0d;
+  static const int tagBitSignature = 0x0e;
 
   static const int maxParamCount = 65536;
   static const int maxValuePayloadLen = MAX_FRAME_SIZE;
+  static const int maxFeatureVectorDimensions = 65536;
+  static const int maxBitSignatureBytes = 1 << 20;
+
+  static const Map<String, int> _biometricFormats = {
+    'ISO/IEC 39794-2': 0x0101,
+    'ISO/IEC 39794-4': 0x0102,
+    'ISO/IEC 19794-2': 0x0103,
+    'ISO/IEC 19794-4': 0x0104,
+    'ANSI INCITS 378': 0x0105,
+    'ANSI INCITS 381': 0x0106,
+    'ANSI/NIST-ITL Type-4': 0x0107,
+    'ANSI/NIST-ITL Type-9': 0x0108,
+    'CBEFF fingerprint': 0x0109,
+    'ISO/IEC 39794-5': 0x0201,
+    'ISO/IEC 19794-5': 0x0202,
+    'ANSI/NIST-ITL Type-10': 0x0203,
+    'CBEFF face': 0x0204,
+    'ISO/IEC 39794-6': 0x0301,
+    'ISO/IEC 19794-6': 0x0302,
+    'ANSI/NIST-ITL Type-17': 0x0303,
+    'CBEFF iris': 0x0304,
+  };
+
+  static bool requiresBiometricCapability(Object? value) =>
+      value is Map &&
+      (value.containsKey(r'$biometric') ||
+          value.containsKey(r'$feature_vector') ||
+          value.containsKey(r'$bit_signature'));
 
   static Uint8List encodeQueryWithParams(String sql, List<Object?> params) {
     if (params.length > maxParamCount) {
@@ -72,7 +105,10 @@ class ValueCodec {
       return _encodeF64(value);
     }
     if (value is String) {
-      return _encodeLenPrefixed(tagText, Uint8List.fromList(utf8.encode(value)));
+      return _encodeLenPrefixed(
+        tagText,
+        Uint8List.fromList(utf8.encode(value)),
+      );
     }
     if (value is Uint8List) {
       return _encodeLenPrefixed(tagBytes, value);
@@ -87,6 +123,17 @@ class ValueCodec {
       final seconds = value.toUtc().millisecondsSinceEpoch ~/ 1000;
       return _encodeI64(seconds, tagTimestamp);
     }
+    if (value is Map && value.length == 1) {
+      if (value.containsKey(r'$biometric')) {
+        return _encodeBiometric(value[r'$biometric']);
+      }
+      if (value.containsKey(r'$feature_vector')) {
+        return _encodeFeatureVector(value[r'$feature_vector']);
+      }
+      if (value.containsKey(r'$bit_signature')) {
+        return _encodeBitSignature(value[r'$bit_signature']);
+      }
+    }
     if (value is Map || value is List) {
       final jsonBytes = utf8.encode(_canonicalJson(value));
       return _encodeLenPrefixed(tagJson, Uint8List.fromList(jsonBytes));
@@ -95,9 +142,7 @@ class ValueCodec {
   }
 
   static List<Object?> toHttpParams(List<Object?> params) {
-    return [
-      for (var i = 0; i < params.length; i++) _toHttpParam(params[i], i),
-    ];
+    return [for (var i = 0; i < params.length; i++) _toHttpParam(params[i], i)];
   }
 
   static Uint8List _encodeWrapped(Value value) {
@@ -241,6 +286,110 @@ class ValueCodec {
     data.setUint32(1, values.length, Endian.little);
     for (var i = 0; i < values.length; i++) {
       data.setFloat32(5 + i * 4, values[i], Endian.little);
+    }
+    return out;
+  }
+
+  static Uint8List _encodeBiometric(Object? raw) {
+    if (raw is! Map) {
+      throw ArgumentError(r'$biometric must be an object');
+    }
+    final modality = raw['modality'];
+    final formatName = raw['format'];
+    final data = _decodeHex(raw['data'], 'biometric data');
+    final format = _biometricFormats[formatName];
+    final expected = const {'fingerprint': 1, 'face': 2, 'iris': 3}[modality];
+    if (format == null || expected == null || format >> 8 != expected) {
+      throw ArgumentError('invalid biometric modality or format');
+    }
+    if (data.isEmpty || data.length > maxValuePayloadLen) {
+      throw ArgumentError('invalid biometric payload length');
+    }
+    final tag = const {
+      'fingerprint': tagFingerprint,
+      'face': tagFace,
+      'iris': tagIris,
+    }[modality]!;
+    final out = Uint8List(1 + 2 + 4 + data.length);
+    final bytes = ByteData.sublistView(out);
+    out[0] = tag;
+    bytes.setUint16(1, format, Endian.little);
+    bytes.setUint32(3, data.length, Endian.little);
+    out.setRange(7, out.length, data);
+    return out;
+  }
+
+  static Uint8List _encodeFeatureVector(Object? raw) {
+    if (raw is! Map || raw['values'] is! List) {
+      throw ArgumentError(r'$feature_vector must contain values');
+    }
+    final values = raw['values'] as List;
+    if (values.isEmpty || values.length > maxFeatureVectorDimensions) {
+      throw ArgumentError('invalid feature vector dimension');
+    }
+    final space = _parseSpaceId(raw['space_id']);
+    final out = Uint8List(1 + 16 + 4 + values.length * 4);
+    final bytes = ByteData.sublistView(out);
+    out[0] = tagFeatureVector;
+    out.setRange(1, 17, space);
+    bytes.setUint32(17, values.length, Endian.little);
+    var norm = 0.0;
+    for (var i = 0; i < values.length; i++) {
+      final value = values[i];
+      if (value is! num || !value.isFinite) {
+        throw ArgumentError('feature vector coordinates must be finite');
+      }
+      final coordinate = value.toDouble();
+      norm += coordinate * coordinate;
+      bytes.setFloat32(21 + i * 4, coordinate, Endian.little);
+    }
+    if (norm == 0) {
+      throw ArgumentError('feature vector norm must be non-zero');
+    }
+    return out;
+  }
+
+  static Uint8List _encodeBitSignature(Object? raw) {
+    if (raw is! Map) {
+      throw ArgumentError(r'$bit_signature must be an object');
+    }
+    final space = _parseSpaceId(raw['space_id']);
+    final bits = _decodeHex(raw['bits'], 'bit signature bits');
+    final mask = raw.containsKey('mask')
+        ? _decodeHex(raw['mask'], 'bit signature mask')
+        : Uint8List.fromList(List.filled(bits.length, 0xff));
+    if (bits.isEmpty ||
+        bits.length > maxBitSignatureBytes ||
+        mask.length != bits.length ||
+        !mask.any((byte) => byte != 0)) {
+      throw ArgumentError('invalid bit signature length or mask');
+    }
+    final out = Uint8List(1 + 16 + 4 + bits.length * 2);
+    final bytes = ByteData.sublistView(out);
+    out[0] = tagBitSignature;
+    out.setRange(1, 17, space);
+    bytes.setUint32(17, bits.length, Endian.little);
+    out.setRange(21, 21 + bits.length, bits);
+    out.setRange(21 + bits.length, out.length, mask);
+    return out;
+  }
+
+  static Uint8List _parseSpaceId(Object? value) {
+    if (value is! String) {
+      throw ArgumentError('space_id must be hexadecimal text');
+    }
+    return _parseUuid(value);
+  }
+
+  static Uint8List _decodeHex(Object? value, String field) {
+    if (value is! String ||
+        value.length.isOdd ||
+        !RegExp(r'^[0-9a-fA-F]*$').hasMatch(value)) {
+      throw ArgumentError('$field must be even-length hexadecimal text');
+    }
+    final out = Uint8List(value.length ~/ 2);
+    for (var i = 0; i < out.length; i++) {
+      out[i] = int.parse(value.substring(i * 2, i * 2 + 2), radix: 16);
     }
     return out;
   }

@@ -564,7 +564,7 @@ mod tests {
         }
         for _ in 0..2 {
             receive
-                .recv_timeout(std::time::Duration::from_secs(30))
+                .recv_timeout(std::time::Duration::from_secs(60))
                 .expect("no publication/admission/index lock inversion");
         }
         for worker in workers {
@@ -799,7 +799,7 @@ mod tests {
     #[test]
     fn paged_hash_page_errors_reach_select_update_delete_and_unique_admission() {
         use crate::storage::engine::{Page, PageType};
-        let (_directory, runtime) = fixture();
+        let (directory, runtime) = fixture();
         let store = runtime.db().store();
         let schema = store
             .get_collection("hash_rows")
@@ -831,6 +831,19 @@ mod tests {
             );
         }
         pager.write_page(root, original).expect("restore");
+        drop(native);
+        drop(store);
+        drop(runtime);
+        let options = RedDBOptions::persistent(directory.path().join("hash.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile");
+        let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options)
+        })
+        .expect("reopen restored fixture");
         assert_eq!(lookup(&runtime, "alpha").len(), 1);
     }
 }

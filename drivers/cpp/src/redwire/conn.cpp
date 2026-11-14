@@ -19,6 +19,7 @@
 #include <poll.h>
 
 #include <cerrno>
+#include <algorithm>
 #include <cstring>
 #include <sstream>
 #include <stdexcept>
@@ -680,6 +681,11 @@ std::string RedWireConn::query(std::string_view sql, std::span<const reddb::Valu
     if ((server_features_ & FEATURE_PARAMS) != FEATURE_PARAMS) {
         throw RedDBError(ErrorCode::ParamsUnsupported,
                          "server did not advertise FEATURE_PARAMS; upgrade the server to use parameterized queries");
+    }
+    if ((server_features_ & FEATURE_BIOMETRIC_PARAMS) != FEATURE_BIOMETRIC_PARAMS &&
+        std::any_of(params.begin(), params.end(), requires_biometric_capability)) {
+        throw RedDBError(ErrorCode::ParamsUnsupported,
+                         "server did not advertise FEATURE_BIOMETRIC_PARAMS");
     }
     std::lock_guard<std::mutex> g(io_);
     Frame req;

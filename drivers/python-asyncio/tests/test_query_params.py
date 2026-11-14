@@ -34,6 +34,45 @@ def test_redwire_query_with_params_kind_is_pinned() -> None:
     assert Kind.QueryWithParams == 0x28
 
 
+def test_redwire_encodes_biometric_feature_parameters() -> None:
+    space_id = "00112233445566778899aabbccddeeff"
+    sql = "SELECT $1, $2"
+    payload = encode_query_with_params(
+        sql,
+        [
+            {"$feature_vector": {"space_id": space_id, "values": [1, -2]}},
+            {
+                "$bit_signature": {
+                    "space_id": space_id,
+                    "bits": "aa55",
+                    "mask": "ff0f",
+                }
+            },
+        ],
+    )
+    pos = 4 + len(sql.encode()) + 4
+    assert payload[pos] == ValueTag.FeatureVector
+    pos += 1 + 16 + 4 + 8
+    assert payload[pos] == ValueTag.BitSignature
+    assert payload[-4:] == bytes.fromhex("aa55ff0f")
+
+
+def test_redwire_rejects_biometric_modality_mismatch() -> None:
+    with pytest.raises(RedDBError, match="invalid biometric modality or format"):
+        encode_query_with_params(
+            "SELECT $1",
+            [
+                {
+                    "$biometric": {
+                        "modality": "face",
+                        "format": "ISO/IEC 19794-2",
+                        "data": "464d5200",
+                    }
+                }
+            ],
+        )
+
+
 async def test_http_query_sends_params_array() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/query"

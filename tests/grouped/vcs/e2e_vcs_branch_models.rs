@@ -254,6 +254,137 @@ fn timeseries_and_mixed_branch_merges_preserve_history_after_recovery() {
     }
 }
 
+#[test]
+fn biometric_and_feature_values_survive_branch_merge_and_recovery() {
+    use reddb::application::{MergeInput, MergeOpts};
+    use reddb_types::{BiometricFormat, BiometricSample, BitSignature, FeatureVector};
+
+    fn iso_fmr() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"FMR\0 20\0");
+        bytes.extend_from_slice(&36_u32.to_be_bytes());
+        bytes.extend_from_slice(&0_u16.to_be_bytes());
+        bytes.extend_from_slice(&500_u16.to_be_bytes());
+        bytes.extend_from_slice(&500_u16.to_be_bytes());
+        bytes.extend_from_slice(&197_u16.to_be_bytes());
+        bytes.extend_from_slice(&197_u16.to_be_bytes());
+        bytes.extend_from_slice(&[1, 0]);
+        bytes.extend_from_slice(&[1, 0, 100, 1]);
+        bytes.extend_from_slice(&[0x40, 1, 0, 2, 3, 90]);
+        bytes.extend_from_slice(&[0, 0]);
+        bytes
+    }
+
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("biometric-branches.rdb");
+    let connection_id = 9_104;
+    let author = || Author {
+        name: "test".into(),
+        email: "test@reddb.io".into(),
+    };
+    let commit = |runtime: &RedDBRuntime, message: &str| {
+        runtime
+            .vcs_commit(CreateCommitInput {
+                connection_id,
+                message: message.into(),
+                author: author(),
+                committer: None,
+                amend: false,
+                allow_empty: false,
+            })
+            .expect("commit")
+    };
+    let checkout = |runtime: &RedDBRuntime, branch: &str| {
+        runtime
+            .vcs_checkout(CheckoutInput {
+                connection_id,
+                target: CheckoutTarget::Branch(branch.into()),
+                force: false,
+            })
+            .expect("checkout")
+    };
+    let space = [0x42; 16];
+    let fingerprint =
+        BiometricSample::with_format(BiometricFormat::FingerprintIso19794_2, iso_fmr())
+            .expect("standard fingerprint");
+    let row = |id: i64, x: f32, bits: u8| {
+        vec![
+            Value::Integer(id),
+            Value::Fingerprint(fingerprint.clone()),
+            Value::FeatureVector(FeatureVector::new(space, vec![x, 1.0]).expect("feature vector")),
+            Value::BitSignature(BitSignature::new(space, vec![bits], None).expect("bit signature")),
+        ]
+    };
+
+    set_current_connection_id(connection_id);
+    {
+        let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime");
+        runtime
+            .execute_query(
+                "CREATE TABLE identities (id INTEGER, print FINGERPRINT, face FEATURE_VECTOR, iris BIT_SIGNATURE)",
+            )
+            .expect("table");
+        runtime
+            .vcs_set_versioned("identities", true)
+            .expect("versioned");
+        runtime
+            .execute_query_with_params(
+                "INSERT INTO identities (id,print,face,iris) VALUES ($1,$2,$3,$4)",
+                &row(1, 1.0, 0b1010),
+            )
+            .expect("base row");
+        commit(&runtime, "base");
+        runtime
+            .vcs_branch_create(CreateBranchInput {
+                connection_id,
+                name: "biometric-source".into(),
+                from: None,
+            })
+            .expect("branch");
+
+        checkout(&runtime, "biometric-source");
+        runtime
+            .execute_query_with_params(
+                "INSERT INTO identities (id,print,face,iris) VALUES ($1,$2,$3,$4)",
+                &row(2, 2.0, 0b1110),
+            )
+            .expect("source row");
+        commit(&runtime, "source");
+
+        checkout(&runtime, "main");
+        runtime
+            .execute_query_with_params(
+                "INSERT INTO identities (id,print,face,iris) VALUES ($1,$2,$3,$4)",
+                &row(3, 3.0, 0b0010),
+            )
+            .expect("main row");
+        commit(&runtime, "main");
+        runtime
+            .vcs_merge(MergeInput {
+                connection_id,
+                from: "biometric-source".into(),
+                opts: MergeOpts::default(),
+                author: author(),
+            })
+            .expect("merge");
+        runtime.checkpoint().expect("checkpoint");
+    }
+
+    let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
+    checkout(&runtime, "main");
+    let result = runtime
+        .execute_query("SELECT id,print,face,iris FROM identities ORDER BY id")
+        .expect("merged values");
+    assert_eq!(result.result.records.len(), 3);
+    for (index, record) in result.result.records.iter().enumerate() {
+        assert_eq!(record.get("id"), Some(&Value::Integer(index as i64 + 1)));
+        assert!(matches!(record.get("print"), Some(Value::Fingerprint(_))));
+        assert!(matches!(record.get("face"), Some(Value::FeatureVector(_))));
+        assert!(matches!(record.get("iris"), Some(Value::BitSignature(_))));
+    }
+    clear_current_connection_id();
+}
+
 fn check_branch_history(
     create: &str,
     insert: &str,

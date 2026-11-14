@@ -915,6 +915,12 @@ pub enum IndexMethod {
     H3 {
         resolution: u8,
     },
+    /// HNSW candidate generation over `FEATURE_VECTOR` values.
+    Hnsw,
+    /// Banded postings over `BIT_SIGNATURE` values with exact reranking.
+    Hamming,
+    /// Local-descriptor postings over fingerprint minutiae with exact reranking.
+    Minutiae,
 }
 
 impl fmt::Display for IndexMethod {
@@ -925,6 +931,9 @@ impl fmt::Display for IndexMethod {
             Self::Bitmap => write!(f, "BITMAP"),
             Self::Spatial => write!(f, "SPATIAL"),
             Self::H3 { .. } => write!(f, "H3"),
+            Self::Hnsw => write!(f, "HNSW"),
+            Self::Hamming => write!(f, "HAMMING"),
+            Self::Minutiae => write!(f, "MINUTIAE"),
         }
     }
 }
@@ -2872,6 +2881,18 @@ pub enum SearchCommand {
         /// clears this back to `None`.
         text_param: Option<usize>,
     },
+    /// SEARCH FEATURE|BITS|FINGERPRINT $N IN table COLUMN column
+    /// [LIMIT n] MIN_SCORE score [EXACT]
+    TypedSimilarity {
+        kind: TypedSearchKind,
+        value: Option<Value>,
+        value_param: Option<usize>,
+        collection: String,
+        column: String,
+        limit: usize,
+        min_score: f64,
+        exact: bool,
+    },
     /// SEARCH TEXT 'query' [COLLECTION col] [LIMIT n] [FUZZY]
     Text {
         query: String,
@@ -2986,6 +3007,13 @@ pub enum SearchCommand {
         /// and clears this back to `None`.
         k_param: Option<usize>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedSearchKind {
+    Feature,
+    Bits,
+    Fingerprint,
 }
 
 // ============================================================================

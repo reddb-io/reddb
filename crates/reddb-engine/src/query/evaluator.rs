@@ -149,6 +149,8 @@ pub enum EvalError {
     InvalidNumericResult { function: String, reason: String },
     /// JSON_PARSE input was not valid JSON text.
     JsonParseFailed { reason: String },
+    /// A catalogued scalar rejected structurally invalid or incompatible values.
+    FunctionEvaluationFailed { function: String, reason: String },
     /// Decoding an expression input would exceed the host's read allowance.
     ReadLimitExceeded {
         required_bytes: usize,
@@ -191,6 +193,9 @@ impl std::fmt::Display for EvalError {
             }
             EvalError::JsonParseFailed { reason } => {
                 write!(f, "JSON_PARSE failed to parse JSON: {reason}")
+            }
+            EvalError::FunctionEvaluationFailed { function, reason } => {
+                write!(f, "{function} failed: {reason}")
             }
             EvalError::ReadLimitExceeded {
                 required_bytes,
@@ -680,11 +685,46 @@ fn eval_cast(
     if src == target {
         return Ok(v);
     }
+    if let Some(result) = explicit_biometric_cast(&v, target) {
+        return result.map_err(|reason| EvalError::CastFailed {
+            from: src,
+            to: target,
+            reason,
+        });
+    }
     coerce_via_catalog(&v, src, target, None).map_err(|reason| EvalError::CastFailed {
         from: src,
         to: target,
         reason,
     })
+}
+
+fn explicit_biometric_cast(value: &Value, target: DataType) -> Option<Result<Value, String>> {
+    let Value::Blob(bytes) = value else {
+        return match (value, target) {
+            (Value::Fingerprint(sample), DataType::Blob)
+            | (Value::Face(sample), DataType::Blob)
+            | (Value::Iris(sample), DataType::Blob) => {
+                Some(Ok(Value::Blob(sample.bytes().to_vec())))
+            }
+            _ => None,
+        };
+    };
+    let modality = match target {
+        DataType::Fingerprint => reddb_types::BiometricModality::Fingerprint,
+        DataType::Face => reddb_types::BiometricModality::Face,
+        DataType::Iris => reddb_types::BiometricModality::Iris,
+        _ => return None,
+    };
+    Some(
+        reddb_types::BiometricSample::detect(modality, bytes.clone())
+            .map(|sample| match modality {
+                reddb_types::BiometricModality::Fingerprint => Value::Fingerprint(sample),
+                reddb_types::BiometricModality::Face => Value::Face(sample),
+                reddb_types::BiometricModality::Iris => Value::Iris(sample),
+            })
+            .map_err(|error| error.to_string()),
+    )
 }
 
 fn eval_function(
@@ -770,6 +810,53 @@ fn dispatch_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
                 }
             })
         }
+        "FINGERPRINT" => {
+            biometric_constructor(name, args, reddb_types::BiometricModality::Fingerprint)
+        }
+        "FACE" => biometric_constructor(name, args, reddb_types::BiometricModality::Face),
+        "IRIS" => biometric_constructor(name, args, reddb_types::BiometricModality::Iris),
+        "FEATURE_VECTOR" => match args {
+            [Value::Uuid(space_id), Value::Vector(values)] => Ok(Value::FeatureVector(
+                reddb_types::FeatureVector::new(*space_id, values.clone())
+                    .map_err(|error| function_failed(name, error))?,
+            )),
+            _ => Err(unknown_function(name, args)),
+        },
+        "BIT_SIGNATURE" => bit_signature_constructor(name, args),
+        "FEATURE_COMPARE" | "FEATURE_MATCH" => feature_function(name, args),
+        "BIT_SIGNATURE_COMPARE" | "BIT_SIGNATURE_MATCH" => bit_signature_function(name, args),
+        "FINGERPRINT_COMPARE" | "FINGERPRINT_MATCH" => fingerprint_function(name, args),
+        "BIOMETRIC_FORMAT" => {
+            let (_, sample) = biometric_argument(name, args)?;
+            Ok(Value::text(sample.format().standard_name()))
+        }
+        "BIOMETRIC_INFO" => {
+            let (modality, sample) = biometric_argument(name, args)?;
+            Ok(Value::Json(
+                format!(
+                    "{{\"modality\":\"{modality}\",\"format\":\"{}\",\"bytes\":{}}}",
+                    sample.format().standard_name(),
+                    sample.bytes().len()
+                )
+                .into_bytes(),
+            ))
+        }
+        "ANSI_NIST_RECORD" => match args {
+            [Value::Blob(bytes), Value::Integer(record_type), Value::Integer(occurrence)] => {
+                let record_type =
+                    u16::try_from(*record_type).map_err(|error| function_failed(name, error))?;
+                let occurrence =
+                    usize::try_from(*occurrence).map_err(|error| function_failed(name, error))?;
+                let sample = reddb_types::select_ansi_nist_sample(bytes, record_type, occurrence)
+                    .map_err(|error| function_failed(name, error))?;
+                Ok(match sample.modality() {
+                    reddb_types::BiometricModality::Fingerprint => Value::Fingerprint(sample),
+                    reddb_types::BiometricModality::Face => Value::Face(sample),
+                    reddb_types::BiometricModality::Iris => Value::Iris(sample),
+                })
+            }
+            _ => Err(unknown_function(name, args)),
+        },
         "UPPER" => match &args[0] {
             Value::Text(s) => Ok(Value::Text(Arc::from(s.to_uppercase()))),
             other => Err(EvalError::UnknownFunction {
@@ -914,6 +1001,174 @@ fn dispatch_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
             name: other.to_string(),
             args: args.iter().map(|v| v.data_type()).collect(),
         }),
+    }
+}
+
+/// Evaluate a resolved biometric or caller-supplied feature function.
+///
+/// The server's fallible legacy expression walk uses this narrow entry point so
+/// invalid records, incompatible feature spaces and invalid thresholds remain
+/// statement errors instead of being collapsed into an unresolved value.
+pub fn evaluate_biometric_function(name: &str, args: &[Value]) -> Option<Result<Value, EvalError>> {
+    if matches!(
+        name,
+        "FINGERPRINT"
+            | "FACE"
+            | "IRIS"
+            | "FEATURE_VECTOR"
+            | "BIT_SIGNATURE"
+            | "FEATURE_COMPARE"
+            | "FEATURE_MATCH"
+            | "BIT_SIGNATURE_COMPARE"
+            | "BIT_SIGNATURE_MATCH"
+            | "FINGERPRINT_COMPARE"
+            | "FINGERPRINT_MATCH"
+            | "BIOMETRIC_FORMAT"
+            | "BIOMETRIC_INFO"
+            | "ANSI_NIST_RECORD"
+    ) {
+        Some(dispatch_function(name, args))
+    } else {
+        None
+    }
+}
+
+fn biometric_constructor(
+    name: &str,
+    args: &[Value],
+    modality: reddb_types::BiometricModality,
+) -> Result<Value, EvalError> {
+    match (modality, args) {
+        (reddb_types::BiometricModality::Fingerprint, [Value::Fingerprint(value)])
+        | (reddb_types::BiometricModality::Face, [Value::Face(value)])
+        | (reddb_types::BiometricModality::Iris, [Value::Iris(value)]) => {
+            return Ok(match modality {
+                reddb_types::BiometricModality::Fingerprint => Value::Fingerprint(value.clone()),
+                reddb_types::BiometricModality::Face => Value::Face(value.clone()),
+                reddb_types::BiometricModality::Iris => Value::Iris(value.clone()),
+            });
+        }
+        _ => {}
+    }
+    let [Value::Blob(bytes)] = args else {
+        return Err(unknown_function(name, args));
+    };
+    let sample = reddb_types::BiometricSample::detect(modality, bytes.clone())
+        .map_err(|error| function_failed(name, error))?;
+    Ok(match modality {
+        reddb_types::BiometricModality::Fingerprint => Value::Fingerprint(sample),
+        reddb_types::BiometricModality::Face => Value::Face(sample),
+        reddb_types::BiometricModality::Iris => Value::Iris(sample),
+    })
+}
+
+fn bit_signature_constructor(name: &str, args: &[Value]) -> Result<Value, EvalError> {
+    let (space_id, bits, mask) = match args {
+        [Value::Uuid(space_id), Value::Blob(bits)] => (*space_id, bits.clone(), None),
+        [Value::Uuid(space_id), Value::Blob(bits), Value::Blob(mask)] => {
+            (*space_id, bits.clone(), Some(mask.clone()))
+        }
+        _ => return Err(unknown_function(name, args)),
+    };
+    Ok(Value::BitSignature(
+        reddb_types::BitSignature::new(space_id, bits, mask)
+            .map_err(|error| function_failed(name, error))?,
+    ))
+}
+
+fn feature_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
+    let [Value::FeatureVector(left), Value::FeatureVector(right), rest @ ..] = args else {
+        return Err(unknown_function(name, args));
+    };
+    let score = left
+        .compare(right)
+        .map_err(|error| function_failed(name, error))?;
+    if name == "FEATURE_COMPARE" && rest.is_empty() {
+        return Ok(Value::Float(score));
+    }
+    let [threshold] = rest else {
+        return Err(unknown_function(name, args));
+    };
+    let threshold = numeric_threshold(threshold).ok_or_else(|| unknown_function(name, args))?;
+    reddb_types::FeatureError::validate_threshold(threshold)
+        .map_err(|error| function_failed(name, error))?;
+    Ok(Value::Boolean(score >= threshold))
+}
+
+fn bit_signature_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
+    let [Value::BitSignature(left), Value::BitSignature(right), rest @ ..] = args else {
+        return Err(unknown_function(name, args));
+    };
+    let score = left
+        .compare(right)
+        .map_err(|error| function_failed(name, error))?;
+    if name == "BIT_SIGNATURE_COMPARE" && rest.is_empty() {
+        return Ok(Value::Float(score));
+    }
+    let [threshold] = rest else {
+        return Err(unknown_function(name, args));
+    };
+    let threshold = numeric_threshold(threshold).ok_or_else(|| unknown_function(name, args))?;
+    reddb_types::FeatureError::validate_threshold(threshold)
+        .map_err(|error| function_failed(name, error))?;
+    Ok(Value::Boolean(score >= threshold))
+}
+
+fn fingerprint_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
+    match args {
+        [Value::Fingerprint(left), Value::Fingerprint(right)] if name == "FINGERPRINT_COMPARE" => {
+            Ok(Value::Float(
+                crate::biometric_matcher::fingerprint_compare(left, right)
+                    .map_err(|error| function_failed(name, error))?,
+            ))
+        }
+        [Value::Fingerprint(left), Value::Fingerprint(right), threshold]
+            if name == "FINGERPRINT_MATCH" =>
+        {
+            let threshold =
+                numeric_threshold(threshold).ok_or_else(|| unknown_function(name, args))?;
+            Ok(Value::Boolean(
+                crate::biometric_matcher::fingerprint_match(left, right, threshold)
+                    .map_err(|error| function_failed(name, error))?,
+            ))
+        }
+        _ => Err(unknown_function(name, args)),
+    }
+}
+
+fn numeric_threshold(value: &Value) -> Option<f64> {
+    match value {
+        Value::Float(value) => Some(*value),
+        Value::Integer(value) => Some(*value as f64),
+        Value::UnsignedInteger(value) => Some(*value as f64),
+        Value::BigInt(value) => Some(*value as f64),
+        _ => None,
+    }
+}
+
+fn biometric_argument<'a>(
+    name: &str,
+    args: &'a [Value],
+) -> Result<(&'static str, &'a reddb_types::BiometricSample), EvalError> {
+    match args {
+        [Value::Fingerprint(sample)] => Ok(("fingerprint", sample)),
+        [Value::Face(sample)] => Ok(("face", sample)),
+        [Value::Iris(sample)] => Ok(("iris", sample)),
+        _ => Err(unknown_function(name, args)),
+    }
+}
+
+fn unknown_function(name: &str, args: &[Value]) -> EvalError {
+    EvalError::UnknownFunction {
+        name: name.to_string(),
+        args: args.iter().map(Value::data_type).collect(),
+    }
+}
+
+fn function_failed(name: &str, error: impl std::fmt::Display) -> EvalError {
+    EvalError::FunctionEvaluationFailed {
+        function: name.to_string(),
+        reason: error.to_string(),
     }
 }
 
@@ -1259,6 +1514,54 @@ mod tests {
 
     fn empty_row() -> impl Row {
         |_field: &FieldRef| -> Option<Value> { None }
+    }
+
+    #[test]
+    fn incompatible_feature_spaces_are_function_errors() {
+        let left =
+            reddb_types::FeatureVector::new([1; 16], vec![1.0, 0.0]).expect("valid feature vector");
+        let right =
+            reddb_types::FeatureVector::new([2; 16], vec![1.0, 0.0]).expect("valid feature vector");
+        let error = evaluate_biometric_function(
+            "FEATURE_COMPARE",
+            &[Value::FeatureVector(left), Value::FeatureVector(right)],
+        )
+        .expect("known biometric function")
+        .expect_err("incompatible spaces must fail");
+
+        assert!(matches!(error, EvalError::FunctionEvaluationFailed { .. }));
+        let message = error.to_string();
+        assert!(message.contains("feature spaces are incompatible"));
+        assert!(
+            !message.contains("[1.0"),
+            "error must not reveal the payload"
+        );
+    }
+
+    #[test]
+    fn match_threshold_is_explicit_finite_and_bounded() {
+        let feature =
+            reddb_types::FeatureVector::new([3; 16], vec![1.0, 0.0]).expect("valid feature vector");
+        let args = |threshold| {
+            vec![
+                Value::FeatureVector(feature.clone()),
+                Value::FeatureVector(feature.clone()),
+                threshold,
+            ]
+        };
+
+        assert_eq!(
+            evaluate_biometric_function("FEATURE_MATCH", &args(Value::Integer(1)))
+                .expect("known biometric function")
+                .expect("integer threshold is numeric"),
+            Value::Boolean(true)
+        );
+        for threshold in [Value::Float(f64::NAN), Value::Float(1.01)] {
+            let error = evaluate_biometric_function("FEATURE_MATCH", &args(threshold))
+                .expect("known biometric function")
+                .expect_err("invalid threshold must fail");
+            assert!(matches!(error, EvalError::FunctionEvaluationFailed { .. }));
+        }
     }
 
     #[test]

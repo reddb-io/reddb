@@ -62,6 +62,7 @@ final class Frame
 
     /** Server feature bitmask: QueryWithParams frame support. */
     public const FEATURE_PARAMS = 0x0000_0001;
+    public const FEATURE_BIOMETRIC_PARAMS = 0x0000_0008;
 
     // --- Flag bits ---
     public const FLAG_COMPRESSED = 0b0000_0001;

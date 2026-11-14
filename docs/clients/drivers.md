@@ -10,6 +10,12 @@ The JS/TS remote client and Rust `Reddb::connect` support
 remote transports. The guide describes the server advertisements, refresh,
 transaction pinning, consistency options, and the scope of driver support.
 
+Official RedWire drivers encode the native biometric and caller-supplied
+feature parameter envelopes only when the server advertises
+`FEATURE_BIOMETRIC_PARAMS`. The value contract is language-neutral; it does not
+expose cloud-provider adapters. See
+[Biometric Records and Comparison Artifacts](../types/biometrics.md).
+
 ## Driver matrix
 
 | Language | Package / coordinate | Embedded | RedWire (TCP / TLS / mTLS) | HTTP / HTTPS | gRPC | Status | Page |

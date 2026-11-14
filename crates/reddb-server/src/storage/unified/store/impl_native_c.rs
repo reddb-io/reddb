@@ -406,14 +406,18 @@ mod tests {
             "one reclaimed page hosts the allocator trunk"
         );
         // One three-page tail may still be quarantined when the next large
-        // artifact is allocated. After that warmup, equal churn must plateau.
-        let maximum_size = size + 3 * crate::storage::engine::PAGE_SIZE as u64;
+        // artifact is allocated, and its catalog publication may need one COW
+        // page. After that warmup, equal churn must plateau.
+        let maximum_size = size + 4 * crate::storage::engine::PAGE_SIZE as u64;
         let mut plateau = None;
         for cycle in 0..8 {
             publish_artifacts(&store, std::slice::from_ref(&large));
             publish_artifacts(&store, std::slice::from_ref(&small));
             let current_size = std::fs::metadata(&path).expect("reused allocation").len();
-            assert!(current_size <= maximum_size);
+            assert!(
+                current_size <= maximum_size,
+                "native blob allocation grew to {current_size} bytes; expected at most {maximum_size}"
+            );
             let free = store
                 .pager()
                 .expect("pager")

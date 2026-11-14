@@ -105,6 +105,39 @@ test "value tag table is pinned" {
     try t.expectEqual(@as(u8, 0x07), @intFromEnum(value_codec.ValueTag.json));
     try t.expectEqual(@as(u8, 0x08), @intFromEnum(value_codec.ValueTag.timestamp));
     try t.expectEqual(@as(u8, 0x09), @intFromEnum(value_codec.ValueTag.uuid));
+    try t.expectEqual(@as(u8, 0x0a), @intFromEnum(value_codec.ValueTag.fingerprint));
+    try t.expectEqual(@as(u8, 0x0b), @intFromEnum(value_codec.ValueTag.face));
+    try t.expectEqual(@as(u8, 0x0c), @intFromEnum(value_codec.ValueTag.iris));
+    try t.expectEqual(@as(u8, 0x0d), @intFromEnum(value_codec.ValueTag.feature_vector));
+    try t.expectEqual(@as(u8, 0x0e), @intFromEnum(value_codec.ValueTag.bit_signature));
+}
+
+test "encodes biometric and caller supplied features" {
+    var space = [_]u8{0} ** 16;
+    space[0] = 0x11;
+    const feature = try value_codec.encodeValue(t.allocator, .{
+        .feature_vector = .{ .space_id = space, .values = &.{ 1.0, -2.0 } },
+    });
+    defer t.allocator.free(feature);
+    try t.expectEqual(@as(u8, 0x0d), feature[0]);
+    try t.expectEqual(@as(u8, 2), feature[17]);
+
+    const signature = try value_codec.encodeValue(t.allocator, .{
+        .bit_signature = .{
+            .space_id = space,
+            .bits = &.{ 0xaa, 0x55 },
+            .mask = &.{ 0xff, 0x0f },
+        },
+    });
+    defer t.allocator.free(signature);
+    try t.expectEqualSlices(u8, &.{ 0xaa, 0x55, 0xff, 0x0f }, signature[21..]);
+
+    const biometric = try value_codec.encodeValue(t.allocator, .{
+        .face = .{ .format = 0x0202, .data = "FAC\x00" },
+    });
+    defer t.allocator.free(biometric);
+    try t.expectEqual(@as(u8, 0x0b), biometric[0]);
+    try t.expectEqualSlices(u8, &.{ 0x02, 0x02 }, biometric[1..3]);
 }
 
 test "encodes scalar values" {

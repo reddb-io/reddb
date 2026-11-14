@@ -158,6 +158,79 @@ impl Value {
             Value::TableRef(name) => JsonValue::String(name.clone()),
             Value::PageRef(page_id) => exact_u64_to_json(u64::from(*page_id)),
             Value::Secret(_) | Value::Password(_) => JsonValue::String("***".to_string()),
+            Value::Fingerprint(value) | Value::Face(value) | Value::Iris(value) => {
+                let modality = match self {
+                    Value::Fingerprint(_) => "fingerprint",
+                    Value::Face(_) => "face",
+                    Value::Iris(_) => "iris",
+                    _ => unreachable!("match arm restricts biometric values"),
+                };
+                single_key_object(
+                    "$biometric",
+                    JsonValue::Object(
+                        [
+                            (
+                                "modality".to_string(),
+                                JsonValue::String(modality.to_string()),
+                            ),
+                            (
+                                "format".to_string(),
+                                JsonValue::String(value.format().standard_name().to_string()),
+                            ),
+                            (
+                                "data".to_string(),
+                                JsonValue::String(hex_encode(value.bytes())),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ),
+                )
+            }
+            Value::FeatureVector(value) => single_key_object(
+                "$feature_vector",
+                JsonValue::Object(
+                    [
+                        (
+                            "space_id".to_string(),
+                            JsonValue::String(hex_encode(&value.space_id())),
+                        ),
+                        (
+                            "values".to_string(),
+                            JsonValue::Array(
+                                value
+                                    .values()
+                                    .iter()
+                                    .map(|entry| JsonValue::Number(f64::from(*entry)))
+                                    .collect(),
+                            ),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ),
+            Value::BitSignature(value) => single_key_object(
+                "$bit_signature",
+                JsonValue::Object(
+                    [
+                        (
+                            "space_id".to_string(),
+                            JsonValue::String(hex_encode(&value.space_id())),
+                        ),
+                        (
+                            "bits".to_string(),
+                            JsonValue::String(hex_encode(value.bits())),
+                        ),
+                        (
+                            "mask".to_string(),
+                            JsonValue::String(hex_encode(value.mask())),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ),
         }
     }
 }

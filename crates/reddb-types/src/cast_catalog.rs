@@ -221,6 +221,22 @@ pub const CAST_CATALOG: &[CastEntry] = &[
         CastContext::Explicit,
         false,
     ),
+    entry(
+        DataType::Blob,
+        DataType::Fingerprint,
+        CastContext::Explicit,
+        false,
+    ),
+    entry(DataType::Blob, DataType::Face, CastContext::Explicit, false),
+    entry(DataType::Blob, DataType::Iris, CastContext::Explicit, false),
+    entry(
+        DataType::Fingerprint,
+        DataType::Blob,
+        CastContext::Explicit,
+        false,
+    ),
+    entry(DataType::Face, DataType::Blob, CastContext::Explicit, false),
+    entry(DataType::Iris, DataType::Blob, CastContext::Explicit, false),
     // ── Text → domain validators (explicit — parsing may fail) ──
     entry(
         DataType::Text,

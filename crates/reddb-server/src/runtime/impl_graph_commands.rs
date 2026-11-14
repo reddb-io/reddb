@@ -595,6 +595,111 @@ impl RedDBRuntime {
                     notice: None,
                 })
             }
+            SearchCommand::TypedSimilarity {
+                kind,
+                value,
+                value_param,
+                collection,
+                column,
+                limit,
+                min_score,
+                exact,
+            } => {
+                if value_param.is_some() || value.is_none() {
+                    return Err(RedDBError::Query(
+                        "typed search value parameter was not bound before execution".to_string(),
+                    ));
+                }
+                let Some(query_value) = value.as_ref() else {
+                    return Err(RedDBError::Query(
+                        "typed search value parameter was not bound before execution".to_string(),
+                    ));
+                };
+                let scope = self.ai_scope();
+                if super::statement_frame::ReadFrame::visible_collections(&scope)
+                    .is_some_and(|visible| !visible.contains(collection))
+                {
+                    return Err(RedDBError::Query(format!(
+                        "SEARCH {kind:?} denied: collection '{collection}' is outside the authenticated visible scope"
+                    )));
+                }
+                let store = self.inner.db.store();
+                let method = match kind {
+                    reddb_rql::ast::TypedSearchKind::Feature => {
+                        super::index_store::IndexMethodKind::Hnsw
+                    }
+                    reddb_rql::ast::TypedSearchKind::Bits => {
+                        super::index_store::IndexMethodKind::Hamming
+                    }
+                    reddb_rql::ast::TypedSearchKind::Fingerprint => {
+                        super::index_store::IndexMethodKind::Minutiae
+                    }
+                };
+                let indexed_candidates = if *exact {
+                    None
+                } else {
+                    self.inner
+                        .index_store
+                        .typed_similarity_candidates(
+                            collection,
+                            column,
+                            method,
+                            query_value,
+                            *limit,
+                            *min_score,
+                        )
+                        .transpose()
+                        .map_err(RedDBError::Query)?
+                };
+                let used_index = indexed_candidates.is_some();
+                let entities =
+                    scan_collection_with_candidates(&store, collection, &indexed_candidates);
+                let mut hits = Vec::new();
+                for entity in &entities {
+                    let Some(stored) = index_fields_from_entity(entity)
+                        .into_iter()
+                        .find_map(|(field, value)| (field == *column).then_some(value))
+                    else {
+                        continue;
+                    };
+                    if stored.is_null() {
+                        continue;
+                    }
+                    let score = typed_similarity_score(*kind, query_value, &stored)
+                        .map_err(RedDBError::Query)?;
+                    if score >= *min_score {
+                        hits.push((entity.id.raw(), score));
+                    }
+                }
+                partial_top_k(&mut hits, *limit, |left, right| {
+                    right
+                        .1
+                        .total_cmp(&left.1)
+                        .then_with(|| left.0.cmp(&right.0))
+                });
+                let mut result =
+                    UnifiedResult::with_columns(vec!["entity_id".into(), "score".into()]);
+                for (entity_id, score) in hits {
+                    let mut record = UnifiedRecord::new();
+                    record.set("entity_id", Value::UnsignedInteger(entity_id));
+                    record.set("score", Value::Float(score));
+                    result.push(record);
+                }
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: QueryMode::Sql,
+                    statement: "search_typed_similarity",
+                    engine: "runtime-search",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                    bookmark: None,
+                    notice: (!*exact && !used_index).then(|| {
+                        "no compatible typed similarity index was available; used exact fallback"
+                            .to_string()
+                    }),
+                })
+            }
             SearchCommand::Text {
                 query,
                 collection,
@@ -1113,6 +1218,35 @@ impl RedDBRuntime {
                     notice,
                 })
             }
+        }
+    }
+}
+
+fn typed_similarity_score(
+    kind: reddb_rql::ast::TypedSearchKind,
+    query: &Value,
+    stored: &Value,
+) -> Result<f64, String> {
+    use reddb_rql::ast::TypedSearchKind;
+    match (kind, query, stored) {
+        (TypedSearchKind::Feature, Value::FeatureVector(query), Value::FeatureVector(stored)) => {
+            query.compare(stored).map_err(|error| error.to_string())
+        }
+        (TypedSearchKind::Bits, Value::BitSignature(query), Value::BitSignature(stored)) => {
+            query.compare(stored).map_err(|error| error.to_string())
+        }
+        (TypedSearchKind::Fingerprint, Value::Fingerprint(query), Value::Fingerprint(stored)) => {
+            reddb_engine::biometric_matcher::fingerprint_compare(query, stored)
+                .map_err(|error| error.to_string())
+        }
+        (TypedSearchKind::Feature, _, _) => {
+            Err("SEARCH FEATURE requires FEATURE_VECTOR query and column values".to_string())
+        }
+        (TypedSearchKind::Bits, _, _) => {
+            Err("SEARCH BITS requires BIT_SIGNATURE query and column values".to_string())
+        }
+        (TypedSearchKind::Fingerprint, _, _) => {
+            Err("SEARCH FINGERPRINT requires FINGERPRINT query and column values".to_string())
         }
     }
 }

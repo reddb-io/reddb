@@ -480,3 +480,41 @@ func TestEncodeQueryWithParams_PropagatesValueError(t *testing.T) {
 		t.Errorf("expected param[0] in error, got %v", err)
 	}
 }
+
+func TestEncodeValueBiometricFeatureParameters(t *testing.T) {
+	space := UUID{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+		0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
+
+	feature, err := EncodeValue(FeatureVector{SpaceID: space, Values: []float32{1, -2}})
+	if err != nil {
+		t.Fatalf("EncodeValue(feature): %v", err)
+	}
+	if feature[0] != byte(TagFeatureVector) || len(feature) != 1+16+4+8 {
+		t.Fatalf("unexpected feature encoding: %x", feature)
+	}
+	if dimensions := binary.LittleEndian.Uint32(feature[17:21]); dimensions != 2 {
+		t.Fatalf("feature dimensions = %d, want 2", dimensions)
+	}
+
+	bits, err := EncodeValue(BitSignature{
+		SpaceID: space,
+		Bits:    []byte{0xaa, 0x55},
+		Mask:    []byte{0xff, 0x0f},
+	})
+	if err != nil {
+		t.Fatalf("EncodeValue(bits): %v", err)
+	}
+	if bits[0] != byte(TagBitSignature) {
+		t.Fatalf("bit signature tag = 0x%02x", bits[0])
+	}
+	if got := bits[len(bits)-4:]; !bytes.Equal(got, []byte{0xaa, 0x55, 0xff, 0x0f}) {
+		t.Fatalf("bit signature suffix = %x", got)
+	}
+}
+
+func TestEncodeValueRejectsBiometricModalityMismatch(t *testing.T) {
+	_, err := EncodeValue(Face{Format: FingerprintISO19794_2, Data: []byte("FMR\x00")})
+	if err == nil {
+		t.Fatal("expected modality mismatch")
+	}
+}

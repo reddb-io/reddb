@@ -276,6 +276,9 @@ mod tests {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         stream
+                            .set_nonblocking(false)
+                            .expect("blocking provider stream");
+                        stream
                             .set_read_timeout(Some(Duration::from_secs(2)))
                             .unwrap();
                         let mut request = [0_u8; 8192];

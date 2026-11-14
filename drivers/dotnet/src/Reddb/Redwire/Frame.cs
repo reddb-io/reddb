@@ -88,6 +88,7 @@ public sealed class Frame
 
     /// <summary>Server feature bitmask: QueryWithParams frame support.</summary>
     public const int FeatureParams = 0x0000_0001;
+    public const int FeatureBiometricParams = 0x0000_0008;
 
     /// <summary>Flag bits that may appear in the header.</summary>
     public static class Flags

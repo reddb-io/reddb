@@ -683,6 +683,11 @@ fn value_kind(value: &Value) -> &'static str {
         Value::PageRef(_) => "PageRef",
         Value::Secret(_) => "Secret",
         Value::Password(_) => "Password",
+        Value::Fingerprint(_) => "Fingerprint",
+        Value::Face(_) => "Face",
+        Value::Iris(_) => "Iris",
+        Value::FeatureVector(_) => "FeatureVector",
+        Value::BitSignature(_) => "BitSignature",
     }
 }
 

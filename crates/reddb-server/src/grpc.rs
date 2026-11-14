@@ -419,7 +419,56 @@ fn grpc_query_value_to_param_value(value: QueryValue) -> Result<ParamValue, Stat
             })?;
             Ok(ParamValue::Uuid(bytes))
         }
+        Kind::FingerprintValue(value) => {
+            grpc_biometric_param(value, reddb_types::BiometricModality::Fingerprint)
+                .map(ParamValue::Fingerprint)
+        }
+        Kind::FaceValue(value) => {
+            grpc_biometric_param(value, reddb_types::BiometricModality::Face).map(ParamValue::Face)
+        }
+        Kind::IrisValue(value) => {
+            grpc_biometric_param(value, reddb_types::BiometricModality::Iris).map(ParamValue::Iris)
+        }
+        Kind::FeatureVectorValue(value) => {
+            let space_id = grpc_space_id(value.space_id)?;
+            reddb_types::FeatureVector::new(space_id, value.values)
+                .map(ParamValue::FeatureVector)
+                .map_err(|error| Status::invalid_argument(error.to_string()))
+        }
+        Kind::BitSignatureValue(value) => {
+            let space_id = grpc_space_id(value.space_id)?;
+            let mask = (!value.mask.is_empty()).then_some(value.mask);
+            reddb_types::BitSignature::new(space_id, value.bits, mask)
+                .map(ParamValue::BitSignature)
+                .map_err(|error| Status::invalid_argument(error.to_string()))
+        }
     }
+}
+
+fn grpc_biometric_param(
+    value: proto::QueryBiometric,
+    expected_modality: reddb_types::BiometricModality,
+) -> Result<reddb_types::BiometricSample, Status> {
+    let code = u16::try_from(value.format_code)
+        .map_err(|_| Status::invalid_argument("invalid biometric format code"))?;
+    let format = reddb_types::BiometricFormat::from_code(code)
+        .ok_or_else(|| Status::invalid_argument("unknown biometric format code"))?;
+    if format.modality() != expected_modality {
+        return Err(Status::invalid_argument(
+            "biometric format does not match parameter modality",
+        ));
+    }
+    reddb_types::BiometricSample::with_format(format, value.data)
+        .map_err(|error| Status::invalid_argument(error.to_string()))
+}
+
+fn grpc_space_id(value: Vec<u8>) -> Result<[u8; 16], Status> {
+    value.try_into().map_err(|value: Vec<u8>| {
+        Status::invalid_argument(format!(
+            "feature space_id must be 16 bytes, got {}",
+            value.len()
+        ))
+    })
 }
 
 /// RAII guard scoping the runtime's thread-local identity to one gRPC SQL
@@ -615,6 +664,22 @@ mod grpc_query_value_tests {
     use super::*;
     use proto::query_value::Kind;
 
+    fn iso_fmr() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"FMR\0 20\0");
+        bytes.extend_from_slice(&36_u32.to_be_bytes());
+        bytes.extend_from_slice(&0_u16.to_be_bytes());
+        bytes.extend_from_slice(&500_u16.to_be_bytes());
+        bytes.extend_from_slice(&500_u16.to_be_bytes());
+        bytes.extend_from_slice(&197_u16.to_be_bytes());
+        bytes.extend_from_slice(&197_u16.to_be_bytes());
+        bytes.extend_from_slice(&[1, 0]);
+        bytes.extend_from_slice(&[1, 0, 100, 1]);
+        bytes.extend_from_slice(&[0x40, 1, 0, 2, 3, 90]);
+        bytes.extend_from_slice(&[0, 0]);
+        bytes
+    }
+
     fn mutation_field(name: &str, kind: Kind) -> proto::MutationField {
         proto::MutationField {
             name: name.to_string(),
@@ -732,6 +797,95 @@ mod grpc_query_value_tests {
             kind: Some(Kind::UuidValue(vec![0; 15])),
         })
         .is_err());
+    }
+
+    #[test]
+    fn grpc_query_value_maps_biometric_and_feature_params() {
+        let asn1 = vec![0x30, 0x03, 0x02, 0x01, 0x01];
+        let cases = vec![
+            QueryValue {
+                kind: Some(Kind::FingerprintValue(proto::QueryBiometric {
+                    format_code: reddb_types::BiometricFormat::FingerprintIso19794_2 as u32,
+                    data: iso_fmr(),
+                })),
+            },
+            QueryValue {
+                kind: Some(Kind::FaceValue(proto::QueryBiometric {
+                    format_code: reddb_types::BiometricFormat::FaceIso39794_5 as u32,
+                    data: asn1.clone(),
+                })),
+            },
+            QueryValue {
+                kind: Some(Kind::IrisValue(proto::QueryBiometric {
+                    format_code: reddb_types::BiometricFormat::IrisIso39794_6 as u32,
+                    data: asn1,
+                })),
+            },
+            QueryValue {
+                kind: Some(Kind::FeatureVectorValue(proto::QueryFeatureVector {
+                    space_id: vec![0x44; 16],
+                    values: vec![1.0, -2.0],
+                })),
+            },
+            QueryValue {
+                kind: Some(Kind::BitSignatureValue(proto::QueryBitSignature {
+                    space_id: vec![0x55; 16],
+                    bits: vec![0xaa, 0x55],
+                    mask: Vec::new(),
+                })),
+            },
+        ];
+
+        assert!(matches!(
+            grpc_query_value_to_param_value(cases[0].clone()),
+            Ok(ParamValue::Fingerprint(_))
+        ));
+        assert!(matches!(
+            grpc_query_value_to_param_value(cases[1].clone()),
+            Ok(ParamValue::Face(_))
+        ));
+        assert!(matches!(
+            grpc_query_value_to_param_value(cases[2].clone()),
+            Ok(ParamValue::Iris(_))
+        ));
+        assert!(matches!(
+            grpc_query_value_to_param_value(cases[3].clone()),
+            Ok(ParamValue::FeatureVector(_))
+        ));
+        let ParamValue::BitSignature(signature) =
+            grpc_query_value_to_param_value(cases[4].clone()).expect("valid signature")
+        else {
+            panic!("expected bit signature")
+        };
+        assert_eq!(signature.mask(), &[0xff, 0xff]);
+    }
+
+    #[test]
+    fn grpc_query_value_rejects_incompatible_typed_metadata() {
+        let wrong_modality = QueryValue {
+            kind: Some(Kind::IrisValue(proto::QueryBiometric {
+                format_code: reddb_types::BiometricFormat::FaceIso39794_5 as u32,
+                data: vec![0x30, 0x03, 0x02, 0x01, 0x01],
+            })),
+        };
+        let bad_space = QueryValue {
+            kind: Some(Kind::FeatureVectorValue(proto::QueryFeatureVector {
+                space_id: vec![0; 15],
+                values: vec![1.0],
+            })),
+        };
+        let bad_mask = QueryValue {
+            kind: Some(Kind::BitSignatureValue(proto::QueryBitSignature {
+                space_id: vec![0; 16],
+                bits: vec![0xaa, 0x55],
+                mask: vec![0xff],
+            })),
+        };
+
+        for value in [wrong_modality, bad_space, bad_mask] {
+            let status = grpc_query_value_to_param_value(value).expect_err("must reject metadata");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        }
     }
 
     #[test]

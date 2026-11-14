@@ -18,6 +18,7 @@ use crate::storage::unified::hash_index::{HashIndexConfig, HashIndexManager};
 use reddb_types::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily, Value};
 
 pub(crate) mod candidates;
+pub(crate) mod similarity;
 
 enum CanonicalizedValue {
     Exact(CanonicalKey),
@@ -1015,9 +1016,14 @@ pub struct RegisteredIndex {
     pub columns: Vec<String>,
     pub method: IndexMethodKind,
     pub unique: bool,
+    pub(crate) similarity_contract: Option<similarity::SimilarityContract>,
 }
 
 impl RegisteredIndex {
+    pub(crate) fn has_stale_similarity_contract(&self) -> bool {
+        self.similarity_contract
+            .is_some_and(|contract| !contract.is_current())
+    }
     /// Name under which this index is registered in the hash store.
     /// Pure Hash indexes use their own name; single-col BTree indexes
     /// store an auxiliary hash side-pocket as `{name}_hash` (see
@@ -1030,6 +1036,9 @@ impl RegisteredIndex {
             IndexMethodKind::Bitmap | IndexMethodKind::H3 { .. } => {
                 std::borrow::Cow::Borrowed(self.name.as_str())
             }
+            IndexMethodKind::Hnsw | IndexMethodKind::Hamming | IndexMethodKind::Minutiae => {
+                std::borrow::Cow::Borrowed(self.name.as_str())
+            }
         }
     }
 
@@ -1040,7 +1049,11 @@ impl RegisteredIndex {
         let has_pocket = match self.method {
             IndexMethodKind::Hash => true,
             IndexMethodKind::BTree => self.unique,
-            IndexMethodKind::Bitmap | IndexMethodKind::H3 { .. } => false,
+            IndexMethodKind::Bitmap
+            | IndexMethodKind::H3 { .. }
+            | IndexMethodKind::Hnsw
+            | IndexMethodKind::Hamming
+            | IndexMethodKind::Minutiae => false,
         };
         (has_pocket && self.columns.len() > 1).then(|| self.hash_lookup_name())
     }
@@ -1060,6 +1073,12 @@ pub enum IndexMethodKind {
     H3 {
         resolution: u8,
     },
+    /// Caller-supplied feature vectors indexed with cosine HNSW.
+    Hnsw,
+    /// Caller-supplied bit signatures indexed by valid-bit postings.
+    Hamming,
+    /// Standard fingerprint minutiae indexed by invariant local descriptors.
+    Minutiae,
 }
 
 impl IndexMethodKind {
@@ -1117,6 +1136,7 @@ pub struct IndexStore {
     pub bitmap: BitmapIndexManager,
     pub sorted: SortedIndexManager,
     pub(super) paged_btrees: RwLock<PagedBtreeProviders>,
+    similarity: similarity::SimilarityIndexManager,
     /// Registry of all created indices: (collection, index_name) → metadata
     registry: RwLock<HashMap<(String, String), RegisteredIndex>>,
     // Keep identities stable across DROP/recreate, including queued writers.
@@ -1152,6 +1172,7 @@ impl IndexStore {
             bitmap: BitmapIndexManager::new(),
             sorted: SortedIndexManager::new(),
             paged_btrees: RwLock::new(HashMap::new()),
+            similarity: similarity::SimilarityIndexManager::new(),
             registry: RwLock::new(HashMap::new()),
             topology: RwLock::new(HashMap::new()),
             indexed_mutations_active: AtomicUsize::new(0),
@@ -1197,6 +1218,8 @@ impl IndexStore {
         let mut paged = self.paged_btrees.write();
         paged.retain(|(table, _), _| table != collection);
         paged.extend(prepared.paged_btrees.into_inner());
+        self.similarity
+            .replace_collection_from(collection, prepared.similarity);
         registry.retain(|(table, _), _| table != collection);
         registry.extend(prepared.registry.into_inner());
     }
@@ -1264,6 +1287,7 @@ impl IndexStore {
                     .map(|provider| provider.memory_bytes())
                     .sum::<u64>(),
             )
+            .saturating_add(self.similarity.memory_bytes())
     }
 
     fn index_is_paged(&self, index: &RegisteredIndex) -> bool {
@@ -1493,6 +1517,13 @@ impl IndexStore {
                 }
                 Ok(count)
             }
+            IndexMethodKind::Hnsw | IndexMethodKind::Hamming | IndexMethodKind::Minutiae => {
+                if columns.len() != 1 {
+                    return Err("typed similarity indexes require exactly one column".to_string());
+                }
+                self.similarity
+                    .create(name, collection, col, method, entities)
+            }
         }
     }
 
@@ -1517,6 +1548,9 @@ impl IndexStore {
                 // pocket is dropped so a same-named index can be rebuilt.
                 IndexMethodKind::BTree => self.hash.drop_index(collection, &format!("{name}_hash")),
                 IndexMethodKind::H3 { .. } => false,
+                IndexMethodKind::Hnsw | IndexMethodKind::Hamming | IndexMethodKind::Minutiae => {
+                    self.similarity.drop_index(collection, name)
+                }
             };
             true
         } else {
@@ -1528,6 +1562,27 @@ impl IndexStore {
     pub fn register(&self, info: RegisteredIndex) {
         let mut registry = write_unpoisoned(&self.registry);
         registry.insert((info.collection.clone(), info.name.clone()), info);
+    }
+
+    pub(crate) fn similarity_contract(
+        &self,
+        collection: &str,
+        name: &str,
+    ) -> Option<similarity::SimilarityContract> {
+        self.similarity.contract(collection, name)
+    }
+
+    pub(crate) fn discard_similarity_backing(&self, collection: &str, name: &str) {
+        self.similarity.drop_index(collection, name);
+    }
+
+    pub(crate) fn install_similarity_contract(
+        &self,
+        collection: &str,
+        name: &str,
+        contract: similarity::SimilarityContract,
+    ) -> Result<(), String> {
+        self.similarity.install_contract(collection, name, contract)
     }
 
     /// Lookup entity IDs via hash index for a collection.column = value
@@ -1614,6 +1669,56 @@ impl IndexStore {
             .collect()
     }
 
+    pub(crate) fn has_typed_similarity_index(&self, collection: &str) -> bool {
+        read_unpoisoned(&self.registry).values().any(|index| {
+            index.collection == collection
+                && !index.has_stale_similarity_contract()
+                && matches!(
+                    index.method,
+                    IndexMethodKind::Hnsw | IndexMethodKind::Hamming | IndexMethodKind::Minutiae
+                )
+        })
+    }
+
+    /// Validate every typed-similarity value before publishing its row. This
+    /// keeps a contract error from leaving durable data behind when secondary
+    /// index maintenance would otherwise fail after the storage write.
+    pub(crate) fn validate_typed_similarity_insert_batch(
+        &self,
+        collection: &str,
+        rows: &[&[(String, Value)]],
+    ) -> Result<(), String> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let registry = read_unpoisoned(&self.registry);
+        for index in registry.values().filter(|index| {
+            index.collection == collection
+                && !index.has_stale_similarity_contract()
+                && matches!(
+                    index.method,
+                    IndexMethodKind::Hnsw | IndexMethodKind::Hamming | IndexMethodKind::Minutiae
+                )
+        }) {
+            let column = index.columns.first().map(String::as_str).unwrap_or("");
+            let values = rows
+                .iter()
+                .filter_map(|fields| index_field_value(fields, column))
+                .filter(|value| !value.as_ref().is_null())
+                .collect::<Vec<_>>();
+            let value_refs = values
+                .iter()
+                .map(|value| value.as_ref())
+                .collect::<Vec<_>>();
+            self.similarity.validate_insert_batch(
+                collection,
+                &index.name,
+                value_refs.as_slice(),
+            )?;
+        }
+        Ok(())
+    }
+
     /// List every operational index without consulting collection payloads.
     pub(crate) fn list_all_indices(&self) -> Vec<RegisteredIndex> {
         read_unpoisoned(&self.registry).values().cloned().collect()
@@ -1671,6 +1776,10 @@ impl IndexStore {
                 .first()
                 .and_then(|column| self.bitmap.index_stats(&index.collection, column).ok())
                 .map(|stats| stats.entity_count as u64)
+                .unwrap_or(0),
+            IndexMethodKind::Hnsw | IndexMethodKind::Hamming | IndexMethodKind::Minutiae => self
+                .similarity
+                .entries(&index.collection, &index.name)
                 .unwrap_or(0),
         })
     }
@@ -1748,7 +1857,7 @@ impl IndexStore {
         // hot loop isn't re-scanning the whole registry per row.
         let relevant: Vec<&RegisteredIndex> = registry
             .values()
-            .filter(|idx| idx.collection == collection)
+            .filter(|idx| idx.collection == collection && !idx.has_stale_similarity_contract())
             .collect();
         if relevant.is_empty() {
             return Ok(());
@@ -1829,6 +1938,19 @@ impl IndexStore {
                                 self.sorted.insert_one(collection, col, &cell, *entity_id);
                             }
                         }
+                        IndexMethodKind::Hnsw
+                        | IndexMethodKind::Hamming
+                        | IndexMethodKind::Minutiae => {
+                            if value.as_ref().is_null() {
+                                continue;
+                            }
+                            self.similarity.insert(
+                                collection,
+                                &idx.name,
+                                *entity_id,
+                                value.as_ref(),
+                            )?;
+                        }
                     }
                 }
             }
@@ -1850,7 +1972,10 @@ impl IndexStore {
         self.paged_btree_overlay_insert(collection, entity_id, fields)?;
         let registry = self.registry.read();
         for idx in registry.values() {
-            if idx.collection != collection || self.index_is_paged(idx) {
+            if idx.collection != collection
+                || self.index_is_paged(idx)
+                || idx.has_stale_similarity_contract()
+            {
                 continue;
             }
 
@@ -1915,6 +2040,15 @@ impl IndexStore {
                             self.sorted.insert_one(collection, col, &cell, entity_id);
                         }
                     }
+                    IndexMethodKind::Hnsw
+                    | IndexMethodKind::Hamming
+                    | IndexMethodKind::Minutiae => {
+                        if value.as_ref().is_null() {
+                            continue;
+                        }
+                        self.similarity
+                            .insert(collection, &idx.name, entity_id, value.as_ref())?;
+                    }
                 }
             }
         }
@@ -1934,7 +2068,10 @@ impl IndexStore {
         self.paged_btree_overlay_delete(collection, entity_id, fields)?;
         let registry = self.registry.read();
         for idx in registry.values() {
-            if idx.collection != collection || self.index_is_paged(idx) {
+            if idx.collection != collection
+                || self.index_is_paged(idx)
+                || idx.has_stale_similarity_contract()
+            {
                 continue;
             }
 
@@ -1990,6 +2127,11 @@ impl IndexStore {
                         if let Some(cell) = h3_cell_value(value.as_ref(), resolution) {
                             self.sorted.delete_one(collection, col, &cell, entity_id);
                         }
+                    }
+                    IndexMethodKind::Hnsw
+                    | IndexMethodKind::Hamming
+                    | IndexMethodKind::Minutiae => {
+                        self.similarity.delete(collection, &idx.name, entity_id);
                     }
                 }
             }
@@ -2141,6 +2283,19 @@ impl IndexStore {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn typed_similarity_candidates(
+        &self,
+        collection: &str,
+        column: &str,
+        method: IndexMethodKind,
+        query: &Value,
+        limit: usize,
+        minimum_score: f64,
+    ) -> Option<Result<std::collections::HashSet<u64>, String>> {
+        self.similarity
+            .candidates(collection, column, method, query, limit, minimum_score)
     }
 }
 
@@ -2359,6 +2514,9 @@ fn estimate_registered_index_growth(index: &RegisteredIndex, fields: &[(String, 
                 .saturating_add(INDEX_GROWTH_ENTRY_BYTES)
                 .saturating_add(canonical_bytes)
                 .saturating_add(key_bytes.max(16))
+        }
+        IndexMethodKind::Hnsw | IndexMethodKind::Hamming | IndexMethodKind::Minutiae => {
+            INDEX_GROWTH_ENTRY_BYTES.saturating_add(value_to_bytes_len(value.as_ref()))
         }
     }
 }
@@ -2680,6 +2838,7 @@ mod tests {
             columns: columns.clone(),
             method: IndexMethodKind::BTree,
             unique: true,
+            similarity_contract: None,
         });
         let old = row(&[("a", Value::text("x")), ("b", Value::text("1"))]);
         let new = row(&[("a", Value::text("x")), ("b", Value::text("2"))]);
@@ -2720,6 +2879,7 @@ mod tests {
             columns: columns.clone(),
             method: IndexMethodKind::Hash,
             unique: false,
+            similarity_contract: None,
         });
         let old = row(&[("a", Value::text("x")), ("b", Value::text("1"))]);
         let new = row(&[("a", Value::text("x")), ("b", Value::text("2"))]);
@@ -2769,6 +2929,7 @@ mod tests {
                 columns,
                 method: IndexMethodKind::BTree,
                 unique: false,
+                similarity_contract: None,
             });
         }
         store
@@ -2817,6 +2978,7 @@ mod tests {
                         columns: columns.clone(),
                         method,
                         unique: false,
+                        similarity_contract: None,
                     });
                 }
                 let rows = (1..=batch_size)
@@ -2878,6 +3040,7 @@ mod tests {
                 columns: columns.clone(),
                 method,
                 unique: false,
+                similarity_contract: None,
             });
             assert_eq!(
                 store
@@ -2909,6 +3072,7 @@ mod tests {
             columns,
             method: IndexMethodKind::Hash,
             unique: false,
+            similarity_contract: None,
         });
         assert_eq!(
             store
@@ -2939,6 +3103,7 @@ mod tests {
             columns,
             method: IndexMethodKind::BTree,
             unique: true,
+            similarity_contract: None,
         });
         let fields = row(&[
             ("a", Value::text("a".repeat(2048))),
@@ -2981,6 +3146,7 @@ mod tests {
             columns,
             method: IndexMethodKind::Hash,
             unique: false,
+            similarity_contract: None,
         });
         store
             .index_entity_insert("rows", EntityId::new(1), &fields)
@@ -3287,6 +3453,7 @@ mod tests {
             columns: vec!["email".to_string()],
             method: IndexMethodKind::Hash,
             unique: false,
+            similarity_contract: None,
         });
 
         let err = store
@@ -3321,6 +3488,7 @@ mod tests {
             columns: columns.clone(),
             method: IndexMethodKind::BTree,
             unique: false,
+            similarity_contract: None,
         });
 
         let rows = vec![
@@ -3383,6 +3551,7 @@ mod tests {
             columns: vec!["email".to_string()],
             method: IndexMethodKind::Hash,
             unique: false,
+            similarity_contract: None,
         });
     }
 
@@ -3421,6 +3590,7 @@ mod tests {
             columns: vec!["email".to_string()],
             method: IndexMethodKind::Hash,
             unique: false,
+            similarity_contract: None,
         });
         store
             .index_entity_delete(

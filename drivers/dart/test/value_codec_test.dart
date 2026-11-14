@@ -19,6 +19,11 @@ void main() {
       expect(ValueCodec.tagJson, 0x07);
       expect(ValueCodec.tagTimestamp, 0x08);
       expect(ValueCodec.tagUuid, 0x09);
+      expect(ValueCodec.tagFingerprint, 0x0a);
+      expect(ValueCodec.tagFace, 0x0b);
+      expect(ValueCodec.tagIris, 0x0c);
+      expect(ValueCodec.tagFeatureVector, 0x0d);
+      expect(ValueCodec.tagBitSignature, 0x0e);
     });
 
     test('encodes scalar values', () {
@@ -110,6 +115,41 @@ void main() {
       expect(ByteData.sublistView(fromList, 1).getUint32(0, Endian.little), 2);
     });
 
+    test('encodes biometric and feature envelopes', () {
+      final feature = ValueCodec.encodeValue({
+        r'$feature_vector': {
+          'space_id': '00112233445566778899aabbccddeeff',
+          'values': [1.0, -2.0],
+        },
+      });
+      expect(feature[0], ValueCodec.tagFeatureVector);
+      expect(ByteData.sublistView(feature, 17).getUint32(0, Endian.little), 2);
+
+      final bits = ValueCodec.encodeValue({
+        r'$bit_signature': {
+          'space_id': '00112233445566778899aabbccddeeff',
+          'bits': 'aa55',
+          'mask': 'ff0f',
+        },
+      });
+      expect(bits[0], ValueCodec.tagBitSignature);
+      expect(ByteData.sublistView(bits, 17).getUint32(0, Endian.little), 2);
+      expect(bits.sublist(21), equals([0xaa, 0x55, 0xff, 0x0f]));
+
+      final biometric = ValueCodec.encodeValue({
+        r'$biometric': {
+          'modality': 'face',
+          'format': 'ISO/IEC 19794-5',
+          'data': '46414300',
+        },
+      });
+      expect(biometric[0], ValueCodec.tagFace);
+      expect(
+        ByteData.sublistView(biometric, 1).getUint16(0, Endian.little),
+        0x0202,
+      );
+    });
+
     test('encodes query with params payload', () {
       final encoded = ValueCodec.encodeQueryWithParams('Q', [42, 'x', null]);
       expect(ByteData.sublistView(encoded, 0).getUint32(0, Endian.little), 1);
@@ -169,9 +209,11 @@ void main() {
         );
       }
 
-      final query = (manifest['queries'] as List<dynamic>).first as Map<String, dynamic>;
+      final query =
+          (manifest['queries'] as List<dynamic>).first as Map<String, dynamic>;
       final params = [
-        for (final name in query['params'] as List<dynamic>) _fixtureValue(name as String),
+        for (final name in query['params'] as List<dynamic>)
+          _fixtureValue(name as String),
       ];
       expect(
         _hex(ValueCodec.encodeQueryWithParams(query['sql'] as String, params)),
@@ -216,7 +258,12 @@ Object? _fixtureValue(String name) {
       return Uint8List.fromList(List<int>.generate(256, (i) => i));
     case 'json_nested':
       return Value.json({
-        'z': [1, {'deep': [true, false]}],
+        'z': [
+          1,
+          {
+            'deep': [true, false],
+          },
+        ],
         'a': null,
       });
     case 'timestamp_zero':

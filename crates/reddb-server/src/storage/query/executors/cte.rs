@@ -549,6 +549,26 @@ where
                 49u8.hash(hasher);
                 hash.hash(hasher);
             }
+            Value::Fingerprint(sample) => {
+                57u8.hash(hasher);
+                sample.hash(hasher);
+            }
+            Value::Face(sample) => {
+                58u8.hash(hasher);
+                sample.hash(hasher);
+            }
+            Value::Iris(sample) => {
+                59u8.hash(hasher);
+                sample.hash(hasher);
+            }
+            Value::FeatureVector(vector) => {
+                60u8.hash(hasher);
+                vector.hash(hasher);
+            }
+            Value::BitSignature(signature) => {
+                61u8.hash(hasher);
+                signature.hash(hasher);
+            }
         }
     }
 }

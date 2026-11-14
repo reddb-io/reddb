@@ -940,6 +940,11 @@ pub(crate) fn value_matches_declared_type(value: &Value, target: DataType) -> bo
             | (Value::PageRef(_), DataType::PageRef)
             | (Value::Secret(_), DataType::Secret)
             | (Value::Password(_), DataType::Password)
+            | (Value::Fingerprint(_), DataType::Fingerprint)
+            | (Value::Face(_), DataType::Face)
+            | (Value::Iris(_), DataType::Iris)
+            | (Value::FeatureVector(_), DataType::FeatureVector)
+            | (Value::BitSignature(_), DataType::BitSignature)
     )
 }
 

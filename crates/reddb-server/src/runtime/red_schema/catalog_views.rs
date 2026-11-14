@@ -142,6 +142,9 @@ fn index_method_kind_name(kind: super::index_store::IndexMethodKind) -> &'static
         super::index_store::IndexMethodKind::BTree => "btree",
         super::index_store::IndexMethodKind::Bitmap => "bitmap",
         super::index_store::IndexMethodKind::H3 { .. } => "spatial.h3",
+        super::index_store::IndexMethodKind::Hnsw => "feature.hnsw",
+        super::index_store::IndexMethodKind::Hamming => "bits.hamming",
+        super::index_store::IndexMethodKind::Minutiae => "fingerprint.minutiae",
     }
 }
 
@@ -441,6 +444,9 @@ fn render_index_method_for_ddl(method: super::index_store::IndexMethodKind) -> &
         super::index_store::IndexMethodKind::BTree => "BTREE",
         super::index_store::IndexMethodKind::Bitmap => "BITMAP",
         super::index_store::IndexMethodKind::H3 { .. } => "H3",
+        super::index_store::IndexMethodKind::Hnsw => "HNSW",
+        super::index_store::IndexMethodKind::Hamming => "HAMMING",
+        super::index_store::IndexMethodKind::Minutiae => "MINUTIAE",
     }
 }
 

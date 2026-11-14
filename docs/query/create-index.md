@@ -1,6 +1,6 @@
 # CREATE INDEX
 
-Create secondary indexes on collections for faster queries. RedDB supports four index types, each optimized for different workloads.
+Create secondary indexes on collections for faster queries. Each method is optimized for a specific workload.
 
 ## Syntax
 
@@ -65,6 +65,23 @@ Indexes `GEOPOINT` columns and document fields holding a `{lat, lon}` object or 
 
 > `USING RTREE` was removed. The in-RAM R-tree indexed nothing and served no queries; use `USING H3`. See [Migration note](/guides/spatial-search.md#migration-note-using-rtree-was-removed).
 
+### HNSW, HAMMING, and MINUTIAE
+
+Typed similarity indexes generate candidates and then rerank with the exact
+comparator:
+
+```sql
+CREATE INDEX idx_face ON identities (face_features) USING HNSW
+CREATE INDEX idx_iris ON identities (iris_code) USING HAMMING
+CREATE INDEX idx_print ON identities (fingerprint) USING MINUTIAE
+```
+
+`HNSW` accepts `FEATURE_VECTOR`, `HAMMING` accepts `BIT_SIGNATURE`, and
+`MINUTIAE` accepts fingerprint records with supported minutiae templates. The
+first non-null value fixes the index feature-space/width or matcher-version
+contract. Incompatible writes are rejected before publication. See
+[Biometric Records and Comparison Artifacts](/types/biometrics.md).
+
 ## Choosing the Right Index
 
 | Query Pattern | Index Type |
@@ -73,6 +90,9 @@ Indexes `GEOPOINT` columns and document fields holding a `{lat, lon}` object or 
 | `WHERE price > 100` | BTREE |
 | `WHERE status = 'active'` | BITMAP |
 | `SEARCH SPATIAL RADIUS 48.85 2.35 10.0 ...` | H3 |
+| `SEARCH FEATURE $1 IN identities COLUMN face_features ...` | HNSW |
+| `SEARCH BITS $1 IN identities COLUMN iris_code ...` | HAMMING |
+| `SEARCH FINGERPRINT $1 IN identities COLUMN fingerprint ...` | MINUTIAE |
 | `ORDER BY created_at DESC` | BTREE |
 | `GROUP BY category` | BITMAP |
 | `SELECT COUNT(*) WHERE role = 'admin'` | BITMAP |

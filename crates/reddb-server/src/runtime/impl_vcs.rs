@@ -1043,7 +1043,7 @@ impl RedDBRuntime {
     pub fn vcs_list_refs(&self, prefix: Option<&str>) -> RedDBResult<Vec<Ref>> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
-        Ok(list_refs_by_prefix(store, prefix)?)
+        list_refs_by_prefix(store, prefix)
     }
 
     pub fn vcs_checkout(&self, input: CheckoutInput) -> RedDBResult<Ref> {
@@ -1474,7 +1474,7 @@ impl RedDBRuntime {
         if start.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(topo_walk(store, &start, &input.range)?)
+        topo_walk(store, &start, &input.range)
     }
 
     pub fn vcs_diff(&self, input: DiffInput) -> RedDBResult<Diff> {

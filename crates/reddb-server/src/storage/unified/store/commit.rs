@@ -1432,7 +1432,9 @@ impl StoreCommitCoordinator {
             }
         }
 
-        if incomplete_wal_tail.is_some() && !ownership_journal.is_empty() {
+        if incomplete_wal_tail.is_some()
+            && reddb_file::page_ownership_journal::pending_epoch(&ownership_journal)?.is_some()
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "incomplete WAL prevents ownership recovery",
@@ -1831,10 +1833,11 @@ impl UnifiedStore {
         &self,
         actions: impl IntoIterator<Item = StoreWalAction>,
     ) -> Result<(), StoreError> {
-        self.finish_paged_write_for_projection(
-            actions,
-            self.config.resident_memory_bytes_max.is_some(),
-        )
+        // Current proof-bearing files keep their published B-trees immutable
+        // between checkpoints. Retain the bounded exact WAL images for every
+        // paged store so sparse checkpoints can project those ordinary writes
+        // without re-encoding the complete collection.
+        self.finish_paged_write_for_projection(actions, self.pager.is_some())
     }
 
     pub(crate) fn finish_paged_write_for_projection(

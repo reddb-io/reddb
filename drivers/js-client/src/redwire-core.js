@@ -61,11 +61,29 @@ export const MessageKind = Object.freeze({
   StreamCancel: 0x2D,
 })
 
-export const Features = Object.freeze({ PARAMS: 0x0000_0001, TOPOLOGY: 0x0000_0002 })
+export const Features = Object.freeze({
+  PARAMS: 0x0000_0001,
+  TOPOLOGY: 0x0000_0002,
+  BIOMETRIC_PARAMS: 0x0000_0008,
+})
 
 export const ValueTag = Object.freeze({
   Null: 0x00, Bool: 0x01, Int: 0x02, Float: 0x03, Text: 0x04,
   Bytes: 0x05, Vector: 0x06, Json: 0x07, Timestamp: 0x08, Uuid: 0x09,
+  Fingerprint: 0x0a, Face: 0x0b, Iris: 0x0c,
+  FeatureVector: 0x0d, BitSignature: 0x0e,
+})
+
+const BIOMETRIC_FORMAT = Object.freeze({
+  'ISO/IEC 39794-2': 0x0101, 'ISO/IEC 39794-4': 0x0102,
+  'ISO/IEC 19794-2': 0x0103, 'ISO/IEC 19794-4': 0x0104,
+  'ANSI INCITS 378': 0x0105, 'ANSI INCITS 381': 0x0106,
+  'ANSI/NIST-ITL Type-4': 0x0107, 'ANSI/NIST-ITL Type-9': 0x0108,
+  'CBEFF fingerprint': 0x0109,
+  'ISO/IEC 39794-5': 0x0201, 'ISO/IEC 19794-5': 0x0202,
+  'ANSI/NIST-ITL Type-10': 0x0203, 'CBEFF face': 0x0204,
+  'ISO/IEC 39794-6': 0x0301, 'ISO/IEC 19794-6': 0x0302,
+  'ANSI/NIST-ITL Type-17': 0x0303, 'CBEFF iris': 0x0304,
 })
 
 const MIN_I64 = -(1n << 63n)
@@ -253,6 +271,10 @@ export class RedWireClient {
     return (this.serverFeatures & Features.PARAMS) === Features.PARAMS
   }
 
+  supportsBiometricParams() {
+    return (this.serverFeatures & Features.BIOMETRIC_PARAMS) === Features.BIOMETRIC_PARAMS
+  }
+
   async call(method, params = {}) {
     if (method === 'topology') {
       if ((this.serverFeatures & Features.TOPOLOGY) === 0) return null
@@ -365,6 +387,12 @@ export class RedWireClient {
           'PARAMS_UNSUPPORTED',
           'server did not advertise FEATURE_PARAMS — upgrade the server '
             + 'to one that supports parameterized queries.',
+        )
+      }
+      if (!this.supportsBiometricParams() && params.some(requiresBiometricFeatureCapability)) {
+        throw new RedDBError(
+          'BIOMETRIC_PARAMS_UNSUPPORTED',
+          'server did not advertise FEATURE_BIOMETRIC_PARAMS',
         )
       }
       kind = MessageKind.QueryWithParams
@@ -1131,10 +1159,118 @@ export function encodeValue(v) {
         out.set(bytes, 1)
         return out
       }
+      if (k === '$biometric') return encodeBiometric(v.$biometric)
+      if (k === '$feature_vector') return encodeFeatureVector(v.$feature_vector)
+      if (k === '$bit_signature') return encodeBitSignature(v.$bit_signature)
     }
     return encodeLenPrefixed(ValueTag.Json, new TextEncoder().encode(canonicalJson(v)))
   }
   throw new RedDBError('UNSUPPORTED_PARAM', `cannot encode param of type ${typeof v}`)
+}
+
+function requiresBiometricFeatureCapability(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  return '$biometric' in value || '$feature_vector' in value || '$bit_signature' in value
+}
+
+function encodeBiometric(value) {
+  if (value === null || typeof value !== 'object') {
+    throw new RedDBError('UNSUPPORTED_PARAM', '$biometric must be an object')
+  }
+  const format = BIOMETRIC_FORMAT[value.format]
+  const expected = { fingerprint: 0x01, face: 0x02, iris: 0x03 }[value.modality]
+  if (format === undefined || expected === undefined || (format >>> 8) !== expected) {
+    throw new RedDBError('UNSUPPORTED_PARAM', 'invalid biometric modality or format')
+  }
+  const data = hexToBytes(value.data, 'biometric data')
+  if (data.length === 0 || data.length > MAX_VALUE_PAYLOAD_LEN) {
+    throw new RedDBError('PAYLOAD_TOO_LARGE', `biometric length ${data.length} is invalid`)
+  }
+  const tag = {
+    fingerprint: ValueTag.Fingerprint,
+    face: ValueTag.Face,
+    iris: ValueTag.Iris,
+  }[value.modality]
+  const out = new Uint8Array(1 + 2 + 4 + data.length)
+  const view = new DataView(out.buffer)
+  out[0] = tag
+  view.setUint16(1, format, true)
+  view.setUint32(3, data.length, true)
+  out.set(data, 7)
+  return out
+}
+
+function encodeFeatureVector(value) {
+  if (value === null || typeof value !== 'object' || !Array.isArray(value.values)) {
+    throw new RedDBError('UNSUPPORTED_PARAM', '$feature_vector must contain values')
+  }
+  if (value.values.length === 0 || value.values.length > 65_536) {
+    throw new RedDBError('UNSUPPORTED_PARAM', 'feature vector dimension is invalid')
+  }
+  const space = parseUuidBytes(value.space_id)
+  const out = new Uint8Array(1 + 16 + 4 + value.values.length * 4)
+  const view = new DataView(out.buffer)
+  out[0] = ValueTag.FeatureVector
+  out.set(space, 1)
+  view.setUint32(17, value.values.length, true)
+  let norm = 0
+  value.values.forEach((coordinate, index) => {
+    if (typeof coordinate !== 'number' || !Number.isFinite(coordinate)) {
+      throw new RedDBError('UNSUPPORTED_PARAM', 'feature vector coordinates must be finite')
+    }
+    norm += coordinate * coordinate
+    view.setFloat32(21 + index * 4, coordinate, true)
+  })
+  if (norm === 0) {
+    throw new RedDBError('UNSUPPORTED_PARAM', 'feature vector norm must be non-zero')
+  }
+  return out
+}
+
+function encodeBitSignature(value) {
+  if (value === null || typeof value !== 'object') {
+    throw new RedDBError('UNSUPPORTED_PARAM', '$bit_signature must be an object')
+  }
+  const space = parseUuidBytes(value.space_id)
+  const bits = hexToBytes(value.bits, 'bit signature bits')
+  const mask = value.mask === undefined
+    ? new Uint8Array(bits.length).fill(0xff)
+    : hexToBytes(value.mask, 'bit signature mask')
+  if (bits.length === 0 || bits.length > 1_048_576 || mask.length !== bits.length) {
+    throw new RedDBError('UNSUPPORTED_PARAM', 'bit signature length or mask is invalid')
+  }
+  if (!mask.some((byte) => byte !== 0)) {
+    throw new RedDBError('UNSUPPORTED_PARAM', 'bit signature mask selects no bits')
+  }
+  const out = new Uint8Array(1 + 16 + 4 + bits.length * 2)
+  const view = new DataView(out.buffer)
+  out[0] = ValueTag.BitSignature
+  out.set(space, 1)
+  view.setUint32(17, bits.length, true)
+  out.set(bits, 21)
+  out.set(mask, 21 + bits.length)
+  return out
+}
+
+function parseUuidBytes(value) {
+  if (typeof value !== 'string') {
+    throw new RedDBError('UUID_INVALID', 'space_id must be a UUID or 32 hexadecimal digits')
+  }
+  return parseUuidHyphenated(value)
+}
+
+function hexToBytes(value, field) {
+  if (typeof value !== 'string' || value.length % 2 !== 0 || /[^0-9a-fA-F]/.test(value)) {
+    throw new RedDBError(
+      'UNSUPPORTED_PARAM',
+      `${field} must be an even-length hexadecimal string`,
+    )
+  }
+  const out = new Uint8Array(value.length / 2)
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(value.slice(i * 2, i * 2 + 2), 16)
+  }
+  return out
 }
 
 function encodeInt(value) {

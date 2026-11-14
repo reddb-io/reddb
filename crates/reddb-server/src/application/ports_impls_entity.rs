@@ -1379,12 +1379,26 @@ impl RedDBRuntime {
             return Ok(());
         }
 
+        let collection = &applied[0].collection;
+        if self
+            .index_store_ref()
+            .has_typed_similarity_index(collection)
+        {
+            let post_fields = applied
+                .iter()
+                .map(|item| entity_row_fields_snapshot(&item.entity))
+                .collect::<Vec<_>>();
+            let field_refs = post_fields.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            self.index_store_ref()
+                .validate_typed_similarity_insert_batch(collection, &field_refs)
+                .map_err(crate::RedDBError::Query)?;
+        }
+
         let store = self.db().store();
         // Fence the in-memory change and its WAL append together. Otherwise a
         // checkpoint can copy a new transaction's rows or truncate a concurrent
         // autocommit's WAL before those rows belong to its frozen generation.
         let _publication = store.vault_publication_lock.lock();
-        let collection = &applied[0].collection;
         let Some(manager) = store.get_collection(collection) else {
             return Err(crate::RedDBError::NotFound(format!(
                 "collection not found: {collection}"
@@ -2662,22 +2676,28 @@ impl RuntimeEntityPort for RedDBRuntime {
     ) -> RedDBResult<Option<(reddb_types::Value, crate::storage::EntityId)>> {
         self.check_collection_privilege(reddb_rql::ast::PolicyAction::Select, collection)?;
         let resolver = crate::runtime::kv_read::KvReadResolver::for_rest_kv(self, collection)?;
+        if crate::runtime::execution_context::current_auth_identity().is_some()
+            && crate::runtime::rls_injection::rls_is_enabled(self, collection)
+        {
+            let Some(entity) = resolver.owned_entity(key)? else {
+                return Ok(None);
+            };
+            if !crate::runtime::rls_injection::entity_passes_rls_action(
+                self,
+                collection,
+                reddb_rql::ast::PolicyAction::Select,
+                &entity,
+            ) {
+                return Ok(None);
+            }
+            let value = crate::runtime::impl_kv::kv_value_from_entity(&entity)
+                .unwrap_or(reddb_types::Value::Null);
+            return Ok(Some((value, entity.id)));
+        }
         let Some(record) = resolver.record(key)? else {
             return Ok(None);
         };
-        let visible = self
-            .db()
-            .store()
-            .get(collection, record.id)
-            .is_some_and(|entity| {
-                crate::runtime::rls_injection::entity_passes_rls_action(
-                    self,
-                    collection,
-                    reddb_rql::ast::PolicyAction::Select,
-                    &entity,
-                )
-            });
-        Ok(visible.then_some((record.value.unwrap_or(Value::Null), record.id)))
+        Ok(Some((record.value.unwrap_or(Value::Null), record.id)))
     }
 
     fn delete_kv(&self, collection: &str, key: &str) -> RedDBResult<bool> {

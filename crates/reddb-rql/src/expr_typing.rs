@@ -447,6 +447,11 @@ fn literal_type(v: &Value) -> DataType {
         Value::Secret(_) => DataType::Secret,
         Value::Password(_) => DataType::Password,
         Value::Temperature(_) => DataType::Temperature,
+        Value::Fingerprint(_) => DataType::Fingerprint,
+        Value::Face(_) => DataType::Face,
+        Value::Iris(_) => DataType::Iris,
+        Value::FeatureVector(_) => DataType::FeatureVector,
+        Value::BitSignature(_) => DataType::BitSignature,
     }
 }
 

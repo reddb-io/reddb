@@ -78,6 +78,28 @@ pub(super) fn preflight(data: &[u8], limit_bytes: usize) -> Result<(usize, usize
                 cursor.take(bytes)?;
                 cursor.charge(bytes)?;
             }
+            DataType::Fingerprint | DataType::Face | DataType::Iris => {
+                cursor.take(3)?; // envelope version + format code
+                let bytes = cursor.length()?;
+                cursor.take(bytes)?;
+                cursor.charge(bytes)?;
+            }
+            DataType::FeatureVector => {
+                cursor.take(17)?; // envelope version + space UUID
+                let dimensions = cursor.length()?;
+                let bytes = dimensions
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or(ValueError::VarintOverflow)?;
+                cursor.take(bytes)?;
+                cursor.charge(bytes)?;
+            }
+            DataType::BitSignature => {
+                cursor.take(17)?; // envelope version + space UUID
+                let bytes = cursor.length()?;
+                let payload = bytes.checked_mul(2).ok_or(ValueError::VarintOverflow)?;
+                cursor.take(payload)?;
+                cursor.charge(payload)?;
+            }
             DataType::IpAddr => {
                 let version = cursor.take(1)?[0];
                 cursor.take(match version {

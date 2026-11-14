@@ -129,6 +129,11 @@ fn remote_param(value: &Bound<'_, PyAny>) -> PyResult<RemoteValue> {
         SV::Vector(value) => RemoteValue::Vector(value),
         SV::Timestamp(value) => RemoteValue::Timestamp(value),
         SV::Uuid(value) => RemoteValue::Uuid(value),
+        SV::Fingerprint(value) => RemoteValue::Fingerprint(value),
+        SV::Face(value) => RemoteValue::Face(value),
+        SV::Iris(value) => RemoteValue::Iris(value),
+        SV::FeatureVector(value) => RemoteValue::FeatureVector(value),
+        SV::BitSignature(value) => RemoteValue::BitSignature(value),
         _ => {
             return Err(err(
                 "PARAMS_UNSUPPORTED",
@@ -1659,6 +1664,78 @@ fn py_to_param_value(value: &Bound<'_, PyAny>) -> PyResult<ParamValue> {
     }
 
     if let Ok(dict) = value.cast::<PyDictT>() {
+        if let Some(envelope) = dict.get_item("$biometric")? {
+            let envelope = envelope
+                .cast::<PyDictT>()
+                .map_err(|_| err("INVALID_PARAMS", "$biometric must be a dictionary"))?;
+            let modality = required_dict_string(envelope, "modality")?;
+            let format_name = required_dict_string(envelope, "format")?;
+            let data =
+                decode_hex_param(&required_dict_string(envelope, "data")?, "biometric data")?;
+            let format = reddb_types::BiometricFormat::from_standard_name(&format_name)
+                .ok_or_else(|| err("INVALID_PARAMS", "unknown biometric format"))?;
+            let expected = match modality.to_ascii_lowercase().as_str() {
+                "fingerprint" => reddb_types::BiometricModality::Fingerprint,
+                "face" => reddb_types::BiometricModality::Face,
+                "iris" => reddb_types::BiometricModality::Iris,
+                _ => return Err(err("INVALID_PARAMS", "unknown biometric modality")),
+            };
+            if format.modality() != expected {
+                return Err(err(
+                    "INVALID_PARAMS",
+                    "biometric format does not match modality",
+                ));
+            }
+            let sample = reddb_types::BiometricSample::with_format(format, data)
+                .map_err(|error| err("INVALID_PARAMS", error.to_string()))?;
+            return Ok(match expected {
+                reddb_types::BiometricModality::Fingerprint => SV::Fingerprint(sample),
+                reddb_types::BiometricModality::Face => SV::Face(sample),
+                reddb_types::BiometricModality::Iris => SV::Iris(sample),
+            });
+        }
+        if let Some(envelope) = dict.get_item("$feature_vector")? {
+            let envelope = envelope
+                .cast::<PyDictT>()
+                .map_err(|_| err("INVALID_PARAMS", "$feature_vector must be a dictionary"))?;
+            let space_id = decode_space_id_param(&required_dict_string(envelope, "space_id")?)?;
+            let values = envelope
+                .get_item("values")?
+                .ok_or_else(|| err("INVALID_PARAMS", "$feature_vector requires values"))?
+                .cast_into::<PyListT>()?
+                .iter()
+                .map(|value| {
+                    value.extract::<f32>().map_err(|_| {
+                        err(
+                            "INVALID_PARAMS",
+                            "feature vector coordinates must be numeric",
+                        )
+                    })
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            return reddb_types::FeatureVector::new(space_id, values)
+                .map(SV::FeatureVector)
+                .map_err(|error| err("INVALID_PARAMS", error.to_string()));
+        }
+        if let Some(envelope) = dict.get_item("$bit_signature")? {
+            let envelope = envelope
+                .cast::<PyDictT>()
+                .map_err(|_| err("INVALID_PARAMS", "$bit_signature must be a dictionary"))?;
+            let space_id = decode_space_id_param(&required_dict_string(envelope, "space_id")?)?;
+            let bits = decode_hex_param(&required_dict_string(envelope, "bits")?, "bits")?;
+            let mask = envelope
+                .get_item("mask")?
+                .map(|value| {
+                    value
+                        .extract::<String>()
+                        .map_err(|_| err("INVALID_PARAMS", "bit signature mask must be text"))
+                        .and_then(|value| decode_hex_param(&value, "mask"))
+                })
+                .transpose()?;
+            return reddb_types::BitSignature::new(space_id, bits, mask)
+                .map(SV::BitSignature)
+                .map_err(|error| err("INVALID_PARAMS", error.to_string()));
+        }
         let json_str = pydict_to_json_str(dict)?;
         return Ok(SV::Json(json_str.into_bytes()));
     }
@@ -1671,6 +1748,67 @@ fn py_to_param_value(value: &Bound<'_, PyAny>) -> PyResult<ParamValue> {
             type_name,
         ),
     ))
+}
+
+#[cfg(feature = "embedded")]
+fn required_dict_string(dict: &Bound<'_, PyDict>, field: &str) -> PyResult<String> {
+    dict.get_item(field)?
+        .ok_or_else(|| {
+            err(
+                "INVALID_PARAMS",
+                format!("typed parameter field '{field}' is required"),
+            )
+        })?
+        .extract::<String>()
+        .map_err(|_| {
+            err(
+                "INVALID_PARAMS",
+                format!("typed parameter field '{field}' must be text"),
+            )
+        })
+}
+
+#[cfg(feature = "embedded")]
+fn decode_hex_param(value: &str, field: &str) -> PyResult<Vec<u8>> {
+    if value.len() % 2 != 0 {
+        return Err(err(
+            "INVALID_PARAMS",
+            format!("{field} must be even-length hexadecimal text"),
+        ));
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = hex_param_nibble(pair[0])?;
+            let low = hex_param_nibble(pair[1])?;
+            Ok((high << 4) | low)
+        })
+        .collect::<PyResult<Vec<_>>>()
+        .map_err(|_| {
+            err(
+                "INVALID_PARAMS",
+                format!("{field} must be hexadecimal text"),
+            )
+        })
+}
+
+#[cfg(feature = "embedded")]
+fn decode_space_id_param(value: &str) -> PyResult<[u8; 16]> {
+    let compact = value.replace('-', "");
+    decode_hex_param(&compact, "space_id")?
+        .try_into()
+        .map_err(|_| err("INVALID_PARAMS", "space_id must contain 16 bytes"))
+}
+
+#[cfg(feature = "embedded")]
+fn hex_param_nibble(value: u8) -> PyResult<u8> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        b'A'..=b'F' => Ok(value - b'A' + 10),
+        _ => Err(err("INVALID_PARAMS", "invalid hexadecimal text")),
+    }
 }
 
 // -----------------------------------------------------------------------

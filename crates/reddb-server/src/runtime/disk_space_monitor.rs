@@ -103,7 +103,7 @@ fn check(path: &Path, critical_pct: u8, last_emit: &mut Option<Instant>) -> bool
             .emit_global();
             *last_emit = Some(Instant::now());
         }
-        return true;
+        return should_emit;
     }
     false
 }
@@ -269,12 +269,9 @@ mod tests {
 
     #[test]
     fn debounce_suppresses_second_emit() {
-        // Simulate two consecutive calls when disk is "full" by passing a
-        // synthetic path check via a local helper.
         let mut last: Option<Instant> = Some(Instant::now()); // pretend just emitted
-                                                              // disk_free_total("/nonexistent") → None → check returns false, no emit
-        let fired = check(Path::new("/nonexistent-path-for-test"), 1, &mut last);
-        assert!(!fired); // can't get disk stats for nonexistent path
+        let fired = check(&std::env::temp_dir(), 1, &mut last);
+        assert!(!fired);
     }
 
     #[test]

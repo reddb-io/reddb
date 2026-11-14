@@ -4,7 +4,8 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import '../conn.dart';
-import '../routing.dart' show TopologySource, topologyFeature, topologyKind, decodeTopology;
+import '../routing.dart'
+    show TopologySource, topologyFeature, topologyKind, decodeTopology;
 import '../errors.dart';
 import '../options.dart';
 import 'codec.dart';
@@ -113,12 +114,14 @@ class RedwireConn implements Conn, TopologySource {
 
     // Hello.
     final methods = token != null ? ['bearer'] : ['anonymous', 'bearer'];
-    final hello = utf8.encode(jsonEncode({
-      'versions': [SUPPORTED_VERSION],
-      'auth_methods': methods,
-      'features': 0,
-      'client_name': clientName,
-    }));
+    final hello = utf8.encode(
+      jsonEncode({
+        'versions': [SUPPORTED_VERSION],
+        'auth_methods': methods,
+        'features': 0,
+        'client_name': clientName,
+      }),
+    );
     await _writeFrame(MessageKind.hello, _next(), Uint8List.fromList(hello));
 
     final ack = await _readFrame(timeout);
@@ -142,17 +145,13 @@ class RedwireConn implements Conn, TopologySource {
       respPayload = Uint8List(0);
     } else if (chosen == 'bearer') {
       if (token == null) {
-        throw AuthRefused(
-          'server demanded bearer but no token was supplied',
-        );
+        throw AuthRefused('server demanded bearer but no token was supplied');
       }
       respPayload = Uint8List.fromList(
         utf8.encode(jsonEncode({'token': token})),
       );
     } else {
-      throw ProtocolError(
-        "server picked unsupported auth method: '$chosen'",
-      );
+      throw ProtocolError("server picked unsupported auth method: '$chosen'");
     }
     await _writeFrame(MessageKind.authResponse, _next(), respPayload);
 
@@ -161,9 +160,7 @@ class RedwireConn implements Conn, TopologySource {
       throw AuthRefused(_jsonReason(fin.payload) ?? 'auth refused');
     }
     if (fin.kind != MessageKind.authOk) {
-      throw ProtocolError(
-        'expected AuthOk, got ${MessageKind.name(fin.kind)}',
-      );
+      throw ProtocolError('expected AuthOk, got ${MessageKind.name(fin.kind)}');
     }
     _serverFeatures = helloFeatures | _featuresOf(_jsonOf(fin.payload));
   }
@@ -175,6 +172,9 @@ class RedwireConn implements Conn, TopologySource {
   bool get supportsParams =>
       (_serverFeatures & FEATURE_PARAMS) == FEATURE_PARAMS;
 
+  bool get supportsBiometricParams =>
+      (_serverFeatures & FEATURE_BIOMETRIC_PARAMS) == FEATURE_BIOMETRIC_PARAMS;
+
   @override
   Future<Uint8List> query(String sql, {List<Object?>? params}) async {
     final queryParams = params ?? const <Object?>[];
@@ -184,7 +184,16 @@ class RedwireConn implements Conn, TopologySource {
         'server did not advertise FEATURE_PARAMS; upgrade the server to use parameterized queries',
       );
     }
-    final kind = supportsParams ? MessageKind.queryWithParams : MessageKind.query;
+    if (hasParams &&
+        !supportsBiometricParams &&
+        queryParams.any(ValueCodec.requiresBiometricCapability)) {
+      throw ParamsUnsupported(
+        'server did not advertise FEATURE_BIOMETRIC_PARAMS',
+      );
+    }
+    final kind = supportsParams
+        ? MessageKind.queryWithParams
+        : MessageKind.query;
     final payload = supportsParams
         ? ValueCodec.encodeQueryWithParams(sql, queryParams)
         : Uint8List.fromList(utf8.encode(sql));
@@ -197,11 +206,13 @@ class RedwireConn implements Conn, TopologySource {
     String collection,
     Map<String, dynamic> payload,
   ) async {
-    final body = utf8.encode(jsonEncode({
-      'collection': collection,
-      'payload': payload,
-    }));
-    final resp = await _request(MessageKind.bulkInsert, Uint8List.fromList(body));
+    final body = utf8.encode(
+      jsonEncode({'collection': collection, 'payload': payload}),
+    );
+    final resp = await _request(
+      MessageKind.bulkInsert,
+      Uint8List.fromList(body),
+    );
     return _expectBulkOrError(resp);
   }
 
@@ -210,11 +221,13 @@ class RedwireConn implements Conn, TopologySource {
     String collection,
     List<Map<String, dynamic>> rows,
   ) async {
-    final body = utf8.encode(jsonEncode({
-      'collection': collection,
-      'payloads': rows,
-    }));
-    final resp = await _request(MessageKind.bulkInsert, Uint8List.fromList(body));
+    final body = utf8.encode(
+      jsonEncode({'collection': collection, 'payloads': rows}),
+    );
+    final resp = await _request(
+      MessageKind.bulkInsert,
+      Uint8List.fromList(body),
+    );
     return _expectBulkOrError(resp);
   }
 
@@ -242,9 +255,7 @@ class RedwireConn implements Conn, TopologySource {
   Future<void> ping() async {
     final resp = await _request(MessageKind.ping, Uint8List(0));
     if (resp.kind != MessageKind.pong) {
-      throw ProtocolError(
-        'expected Pong, got ${MessageKind.name(resp.kind)}',
-      );
+      throw ProtocolError('expected Pong, got ${MessageKind.name(resp.kind)}');
     }
   }
 
@@ -282,8 +293,12 @@ class RedwireConn implements Conn, TopologySource {
   @override
   Future<Map<String, dynamic>?> topology(String protocol) async {
     if ((_serverFeatures & topologyFeature) == 0) return null;
-    final response = await _request(topologyKind, Uint8List.fromList(protocol.codeUnits));
-    if (response.kind != MessageKind.result) throw ProtocolError('invalid topology reply');
+    final response = await _request(
+      topologyKind,
+      Uint8List.fromList(protocol.codeUnits),
+    );
+    if (response.kind != MessageKind.result)
+      throw ProtocolError('invalid topology reply');
     return decodeTopology(response.payload);
   }
 
@@ -313,10 +328,13 @@ class RedwireConn implements Conn, TopologySource {
     if (_eof && !c.isCompleted) {
       _flushWaitersWithEof();
     }
-    return c.future.timeout(timeout, onTimeout: () {
-      _waiters.remove(c);
-      throw RedDBError('TIMEOUT', 'redwire read timed out after $timeout');
-    });
+    return c.future.timeout(
+      timeout,
+      onTimeout: () {
+        _waiters.remove(c);
+        throw RedDBError('TIMEOUT', 'redwire read timed out after $timeout');
+      },
+    );
   }
 
   void _onData(Uint8List chunk) {

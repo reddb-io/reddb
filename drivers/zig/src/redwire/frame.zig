@@ -8,6 +8,7 @@ pub const FRAME_HEADER_SIZE: usize = 16;
 pub const MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024;
 pub const KNOWN_FLAGS: u8 = 0b0000_0011;
 pub const FEATURE_PARAMS: u32 = 0x0000_0001;
+pub const FEATURE_BIOMETRIC_PARAMS: u32 = 0x0000_0008;
 
 pub const Flags = struct {
     pub const COMPRESSED: u8 = 0b0000_0001;

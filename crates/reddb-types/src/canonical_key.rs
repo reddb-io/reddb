@@ -402,6 +402,11 @@ pub fn value_to_canonical_key(value: &Value) -> Option<CanonicalKey> {
             CanonicalKeyFamily::Password,
             Arc::from(v.as_str()),
         )),
+        Value::Fingerprint(_)
+        | Value::Face(_)
+        | Value::Iris(_)
+        | Value::FeatureVector(_)
+        | Value::BitSignature(_) => None,
     }
 }
 

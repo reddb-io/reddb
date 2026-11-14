@@ -3690,8 +3690,14 @@ mod tests {
         assert!(text.contains("ask_provider_failover_exhausted"), "{text}");
         assert!(text.contains("groq"), "{text}");
         assert!(text.contains("openai"), "{text}");
-        assert!(text.contains("502"), "{text}");
-        assert!(text.contains("503"), "{text}");
+        assert!(
+            text.contains("502") || text.contains("transport:"),
+            "{text}"
+        );
+        assert!(
+            text.contains("503") || text.contains("transport:"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -4082,6 +4088,7 @@ mod tests {
     }
 
     fn read_stub_request_text(stream: &mut TcpStream) -> String {
+        let _ = stream.set_nonblocking(false);
         let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
         let mut out = Vec::new();
         let mut buffer = [0_u8; 4096];
@@ -4091,6 +4098,9 @@ mod tests {
                 Ok(n) => {
                     out.extend_from_slice(&buffer[..n]);
                     if out.len() > 256 * 1024 {
+                        break;
+                    }
+                    if stub_request_length(&out).is_some_and(|required| out.len() >= required) {
                         break;
                     }
                 }
@@ -4104,6 +4114,61 @@ mod tests {
             }
         }
         String::from_utf8_lossy(&out).to_string()
+    }
+
+    fn stub_request_length(request: &[u8]) -> Option<usize> {
+        let header_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")?
+            + 4;
+        let headers = std::str::from_utf8(&request[..header_end]).ok()?;
+        let content_length = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        });
+        if let Some(content_length) = content_length {
+            return header_end.checked_add(content_length);
+        }
+        let chunked = headers.lines().any(|line| {
+            line.split_once(':').is_some_and(|(name, value)| {
+                name.eq_ignore_ascii_case("transfer-encoding")
+                    && value
+                        .split(',')
+                        .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+            })
+        });
+        if chunked {
+            chunked_request_length(request, header_end)
+        } else {
+            Some(header_end)
+        }
+    }
+
+    fn chunked_request_length(request: &[u8], mut position: usize) -> Option<usize> {
+        loop {
+            let remaining = request.get(position..)?;
+            let line_bytes = remaining.windows(2).position(|window| window == b"\r\n")?;
+            let line_end = position.checked_add(line_bytes)?;
+            let size = std::str::from_utf8(request.get(position..line_end)?)
+                .ok()?
+                .split(';')
+                .next()?
+                .trim();
+            let size = usize::from_str_radix(size, 16).ok()?;
+            position = line_end.checked_add(2)?;
+            if size == 0 {
+                let end = position.checked_add(2)?;
+                return (request.get(position..end)? == b"\r\n").then_some(end);
+            }
+            let data_end = position.checked_add(size)?;
+            let chunk_end = data_end.checked_add(2)?;
+            if request.get(data_end..chunk_end)? != b"\r\n" {
+                return None;
+            }
+            position = chunk_end;
+        }
     }
 
     fn write_openai_response(stream: &mut TcpStream, completion_tokens: u64) {

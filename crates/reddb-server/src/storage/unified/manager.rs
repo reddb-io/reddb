@@ -289,7 +289,7 @@ mod tests {
             (
                 "runtime/impl_queue.rs",
                 include_str!("../../runtime/impl_queue.rs"),
-                9,
+                8,
                 "maintenance: red.queue.meta bookkeeping (config, groups, acks, \
                  pending, gauge counts) — queue message bodies are \
                  read through scan. \
@@ -306,7 +306,7 @@ mod tests {
             (
                 "runtime/primary_queue_store.rs",
                 include_str!("../../runtime/primary_queue_store.rs"),
-                2,
+                1,
                 "maintenance: the generic red.queue.meta read helper and the \
                  resident-only next-position fallback, which must not collide with \
                  rows invisible to the writer's snapshot",

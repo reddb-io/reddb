@@ -276,6 +276,20 @@ pub fn evaluate_value_function_with_host<H: ValueFunctionHost>(
             Value::Money { scale, .. } => Some(Value::Integer(i64::from(*scale))),
             _ => Some(Value::Null),
         },
+        "FINGERPRINT" => biometric_constructor(args, reddb_types::BiometricModality::Fingerprint),
+        "FACE" => biometric_constructor(args, reddb_types::BiometricModality::Face),
+        "IRIS" => biometric_constructor(args, reddb_types::BiometricModality::Iris),
+        "FEATURE_VECTOR" => feature_vector_constructor(args),
+        "BIT_SIGNATURE" => bit_signature_constructor(args),
+        "FEATURE_COMPARE" => feature_compare(args, false),
+        "FEATURE_MATCH" => feature_compare(args, true),
+        "BIT_SIGNATURE_COMPARE" => bit_signature_compare(args, false),
+        "BIT_SIGNATURE_MATCH" => bit_signature_compare(args, true),
+        "FINGERPRINT_COMPARE" => fingerprint_compare(args, false),
+        "FINGERPRINT_MATCH" => fingerprint_compare(args, true),
+        "BIOMETRIC_FORMAT" => biometric_format(args),
+        "BIOMETRIC_INFO" => biometric_info(args),
+        "ANSI_NIST_RECORD" => ansi_nist_record(args),
         // ─────────────────────────────────────────────────────────────
         // JSON functions (Phase 1.4 PG parity).
         //
@@ -342,6 +356,143 @@ pub fn evaluate_value_function_with_host<H: ValueFunctionHost>(
         }
         _ => host.fallback_function(name, args),
     }
+}
+
+fn biometric_constructor(
+    args: &[Value],
+    modality: reddb_types::BiometricModality,
+) -> Option<Value> {
+    match (modality, args.first()?) {
+        (reddb_types::BiometricModality::Fingerprint, Value::Fingerprint(value)) => {
+            return Some(Value::Fingerprint(value.clone()));
+        }
+        (reddb_types::BiometricModality::Face, Value::Face(value)) => {
+            return Some(Value::Face(value.clone()));
+        }
+        (reddb_types::BiometricModality::Iris, Value::Iris(value)) => {
+            return Some(Value::Iris(value.clone()));
+        }
+        _ => {}
+    }
+    let Value::Blob(bytes) = args.first()? else {
+        return Some(Value::Null);
+    };
+    let sample = reddb_types::BiometricSample::detect(modality, bytes.clone()).ok()?;
+    Some(match modality {
+        reddb_types::BiometricModality::Fingerprint => Value::Fingerprint(sample),
+        reddb_types::BiometricModality::Face => Value::Face(sample),
+        reddb_types::BiometricModality::Iris => Value::Iris(sample),
+    })
+}
+
+fn feature_vector_constructor(args: &[Value]) -> Option<Value> {
+    let (Value::Uuid(space_id), Value::Vector(values)) = (args.first()?, args.get(1)?) else {
+        return Some(Value::Null);
+    };
+    Some(Value::FeatureVector(
+        reddb_types::FeatureVector::new(*space_id, values.clone()).ok()?,
+    ))
+}
+
+fn bit_signature_constructor(args: &[Value]) -> Option<Value> {
+    let (Value::Uuid(space_id), Value::Blob(bits)) = (args.first()?, args.get(1)?) else {
+        return Some(Value::Null);
+    };
+    let mask = match args.get(2) {
+        Some(Value::Blob(mask)) => Some(mask.clone()),
+        Some(_) => return Some(Value::Null),
+        None => None,
+    };
+    Some(Value::BitSignature(
+        reddb_types::BitSignature::new(*space_id, bits.clone(), mask).ok()?,
+    ))
+}
+
+fn feature_compare(args: &[Value], matched: bool) -> Option<Value> {
+    let (Value::FeatureVector(left), Value::FeatureVector(right)) = (args.first()?, args.get(1)?)
+    else {
+        return Some(Value::Null);
+    };
+    let score = left.compare(right).ok()?;
+    if matched {
+        let threshold = value_as_f64(args.get(2)?)?;
+        reddb_types::FeatureError::validate_threshold(threshold).ok()?;
+        Some(Value::Boolean(score >= threshold))
+    } else {
+        Some(Value::Float(score))
+    }
+}
+
+fn bit_signature_compare(args: &[Value], matched: bool) -> Option<Value> {
+    let (Value::BitSignature(left), Value::BitSignature(right)) = (args.first()?, args.get(1)?)
+    else {
+        return Some(Value::Null);
+    };
+    let score = left.compare(right).ok()?;
+    if matched {
+        let threshold = value_as_f64(args.get(2)?)?;
+        reddb_types::FeatureError::validate_threshold(threshold).ok()?;
+        Some(Value::Boolean(score >= threshold))
+    } else {
+        Some(Value::Float(score))
+    }
+}
+
+fn fingerprint_compare(args: &[Value], matched: bool) -> Option<Value> {
+    let (Value::Fingerprint(left), Value::Fingerprint(right)) = (args.first()?, args.get(1)?)
+    else {
+        return Some(Value::Null);
+    };
+    if matched {
+        let threshold = value_as_f64(args.get(2)?)?;
+        Some(Value::Boolean(
+            crate::biometric_matcher::fingerprint_match(left, right, threshold).ok()?,
+        ))
+    } else {
+        Some(Value::Float(
+            crate::biometric_matcher::fingerprint_compare(left, right).ok()?,
+        ))
+    }
+}
+
+fn biometric_value(value: &Value) -> Option<(&'static str, &reddb_types::BiometricSample)> {
+    match value {
+        Value::Fingerprint(sample) => Some(("fingerprint", sample)),
+        Value::Face(sample) => Some(("face", sample)),
+        Value::Iris(sample) => Some(("iris", sample)),
+        _ => None,
+    }
+}
+
+fn biometric_format(args: &[Value]) -> Option<Value> {
+    let (_, sample) = biometric_value(args.first()?)?;
+    Some(Value::text(sample.format().standard_name()))
+}
+
+fn biometric_info(args: &[Value]) -> Option<Value> {
+    let (modality, sample) = biometric_value(args.first()?)?;
+    let json = format!(
+        "{{\"modality\":\"{modality}\",\"format\":\"{}\",\"bytes\":{}}}",
+        sample.format().standard_name(),
+        sample.bytes().len()
+    );
+    Some(Value::Json(json.into_bytes()))
+}
+
+fn ansi_nist_record(args: &[Value]) -> Option<Value> {
+    let (Value::Blob(bytes), Value::Integer(record_type), Value::Integer(occurrence)) =
+        (args.first()?, args.get(1)?, args.get(2)?)
+    else {
+        return Some(Value::Null);
+    };
+    let record_type = u16::try_from(*record_type).ok()?;
+    let occurrence = usize::try_from(*occurrence).ok()?;
+    let sample = reddb_types::select_ansi_nist_sample(bytes, record_type, occurrence).ok()?;
+    Some(match sample.modality() {
+        reddb_types::BiometricModality::Fingerprint => Value::Fingerprint(sample),
+        reddb_types::BiometricModality::Face => Value::Face(sample),
+        reddb_types::BiometricModality::Iris => Value::Iris(sample),
+    })
 }
 
 fn money_from_args(args: &[Value]) -> Option<Value> {

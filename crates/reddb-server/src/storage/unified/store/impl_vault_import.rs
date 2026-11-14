@@ -182,6 +182,27 @@ impl<'a> VaultImportReader<'a> {
             self.variable(64)?; // xmin
             self.variable(64)?; // xmax
         }
+        if format_version >= reddb_file::native_store::STORE_VERSION_V14
+            && !self.remaining.is_empty()
+        {
+            match self.byte()? {
+                0 => {}
+                1 => {
+                    let origin = self.variable(64)?;
+                    let count = self.count_variable()?;
+                    let mut previous = None;
+                    for _ in 0..count {
+                        let epoch = self.variable(64)?;
+                        let xid = self.variable(64)?;
+                        if epoch == origin || xid == 0 || previous.is_some_and(|old| old >= epoch) {
+                            return Err(vault_import_error("invalid native vault branch stamp"));
+                        }
+                        previous = Some(epoch);
+                    }
+                }
+                _ => return Err(vault_import_error("invalid native vault branch flag")),
+            }
+        }
         self.finish()
     }
 
@@ -244,6 +265,41 @@ impl<'a> VaultImportReader<'a> {
             51 => {
                 self.bytes_variable()?;
                 self.take(9)?;
+            }
+            54..=56 => {
+                if self.byte()? != 1 {
+                    return Err(vault_import_error(
+                        "unsupported native vault biometric version",
+                    ));
+                }
+                self.take(2)?;
+                self.bytes_variable()?;
+            }
+            57 => {
+                if self.byte()? != 1 {
+                    return Err(vault_import_error(
+                        "unsupported native vault feature vector version",
+                    ));
+                }
+                self.take(16)?;
+                let dimension = self.size_variable()?;
+                let size = dimension
+                    .checked_mul(4)
+                    .ok_or_else(|| vault_import_error("native vault vector size overflow"))?;
+                self.take(size)?;
+            }
+            58 => {
+                if self.byte()? != 1 {
+                    return Err(vault_import_error(
+                        "unsupported native vault bit signature version",
+                    ));
+                }
+                self.take(16)?;
+                let size = self
+                    .size_variable()?
+                    .checked_mul(2)
+                    .ok_or_else(|| vault_import_error("native vault signature size overflow"))?;
+                self.take(size)?;
             }
             0x85 | 0x86 => {
                 let original_size = self.size_variable()?;
@@ -378,7 +434,12 @@ mod tests {
             let frame = reddb_file::decode_native_entity_record_frame(&bytes)
                 .expect("frame")
                 .expect("native frame");
-            for size in 0..frame.entity.len() {
+            let required_bytes = if format_version >= STORE_VERSION_CURRENT {
+                frame.entity.len() - 1
+            } else {
+                frame.entity.len()
+            };
+            for size in 0..required_bytes {
                 let truncated = reddb_file::encode_native_entity_record_frame(
                     &frame.entity[..size],
                     Some(frame.metadata),
@@ -388,6 +449,14 @@ mod tests {
                         .is_err(),
                     "format {format_version}, truncated at {size}",
                 );
+            }
+            if required_bytes != frame.entity.len() {
+                let legacy = reddb_file::encode_native_entity_record_frame(
+                    &frame.entity[..required_bytes],
+                    Some(frame.metadata),
+                );
+                UnifiedStore::deserialize_vault_entity_record(&legacy, format_version)
+                    .expect("legacy V14 record without branch tail");
             }
         }
     }

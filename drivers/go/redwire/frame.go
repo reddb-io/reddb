@@ -68,6 +68,9 @@ const (
 	// FeatureTypedMutations gates the TypedInsert frame. Clients must not
 	// send kind 0x33 to a server that did not advertise this bit.
 	FeatureTypedMutations uint32 = 0x0000_0004
+	// FeatureBiometricParams gates standardized biometric records and
+	// caller-supplied feature parameters in QueryWithParams.
+	FeatureBiometricParams uint32 = 0x0000_0008
 )
 
 // FrameHeader captures the parsed 16-byte header.

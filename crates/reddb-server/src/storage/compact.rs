@@ -995,10 +995,10 @@ fn compact_paged_inner(
         }
         if let Some(losses) = lost_collections {
             for collection in &losses.collections {
-                if collection.skipped_pages == [collection.root_page] {
-                    if !source.claim_published_tree(collection.root_page)? {
-                        source.claim(collection.root_page)?;
-                    }
+                if collection.skipped_pages == [collection.root_page]
+                    && !source.claim_published_tree(collection.root_page)?
+                {
+                    source.claim(collection.root_page)?;
                 }
             }
         }

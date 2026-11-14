@@ -237,6 +237,13 @@ impl reddb_engine::query::runtime::expression::FallibleRuntimeExpressionHost
         }
     }
     fn evaluate_function(&self, name: &str, args: &[Value]) -> crate::RedDBResult<Option<Value>> {
+        if let Some(result) =
+            reddb_engine::query::evaluator::evaluate_biometric_function(name, args)
+        {
+            return result
+                .map(Some)
+                .map_err(|error| crate::RedDBError::Query(error.to_string()));
+        }
         Ok(
             reddb_engine::query::runtime::expression::RuntimeExpressionHost::evaluate_function(
                 self, name, args,
@@ -1544,6 +1551,40 @@ use reddb_engine::query::runtime::{
 mod tests {
     use super::dispatch_builtin_function;
     use reddb_types::Value;
+
+    #[test]
+    fn fallible_runtime_keeps_feature_incompatibility_as_an_error() {
+        use reddb_rql::ast::{Expr, Span};
+
+        let left =
+            reddb_types::FeatureVector::new([1; 16], vec![1.0, 0.0]).expect("valid feature vector");
+        let right =
+            reddb_types::FeatureVector::new([2; 16], vec![1.0, 0.0]).expect("valid feature vector");
+        let expression = Expr::FunctionCall {
+            name: "FEATURE_COMPARE".into(),
+            args: vec![
+                Expr::Literal {
+                    value: Value::FeatureVector(left),
+                    span: Span::synthetic(),
+                },
+                Expr::Literal {
+                    value: Value::FeatureVector(right),
+                    span: Span::synthetic(),
+                },
+            ],
+            span: Span::synthetic(),
+        };
+        let record = crate::storage::query::unified::UnifiedRecord::new();
+        let error =
+            super::try_evaluate_runtime_expr_with_db(None, &expression, &record, None, None)
+                .expect_err("incompatible spaces must not become NULL");
+        let message = error.to_string();
+        assert!(message.contains("feature spaces are incompatible"));
+        assert!(
+            !message.contains("[1.0"),
+            "error must not reveal the payload"
+        );
+    }
 
     #[test]
     fn shared_value_functions_bound_json_growth_and_signed_abs() {

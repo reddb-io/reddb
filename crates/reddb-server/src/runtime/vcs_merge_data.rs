@@ -369,8 +369,8 @@ fn plan_contexts(
                 }
             }
             for (context, images) in contexts.iter().zip(&mut images) {
-                if snapshot_sees_entity(context, &entity) {
-                    if images
+                if snapshot_sees_entity(context, &entity)
+                    && images
                         .insert(
                             entity.logical_id().raw(),
                             Image {
@@ -379,11 +379,10 @@ fn plan_contexts(
                             },
                         )
                         .is_some()
-                    {
-                        return Err(RedDBError::Internal(
-                            "vcs: multiple visible physical versions".into(),
-                        ));
-                    }
+                {
+                    return Err(RedDBError::Internal(
+                        "vcs: multiple visible physical versions".into(),
+                    ));
                 }
             }
         }

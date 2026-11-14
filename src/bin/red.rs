@@ -939,6 +939,11 @@ fn mcp_client_param(value: &reddb::json::Value) -> Result<reddb_client::Value, S
         }
         ParamValue::Timestamp(value) => Ok(Value::Timestamp(value)),
         ParamValue::Uuid(value) => Ok(Value::Uuid(value)),
+        ParamValue::Fingerprint(value) => Ok(Value::Fingerprint(value)),
+        ParamValue::Face(value) => Ok(Value::Face(value)),
+        ParamValue::Iris(value) => Ok(Value::Iris(value)),
+        ParamValue::FeatureVector(value) => Ok(Value::FeatureVector(value)),
+        ParamValue::BitSignature(value) => Ok(Value::BitSignature(value)),
     }
 }
 
@@ -8217,17 +8222,12 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
     #[test]
     fn file_uri_relative_is_resolved_to_absolute() {
         let out = canonicalize_file_uri("file://./relative.rdb").expect("canonicalizes");
-        assert!(
-            out.starts_with("file:///"),
-            "relative target must become an absolute file:/// URI, got {out}"
-        );
-        assert!(
-            out.ends_with("/relative.rdb"),
-            "the file name must be preserved, got {out}"
-        );
         // Resolved against the real cwd → matches it exactly.
         let cwd = std::env::current_dir().unwrap();
-        assert_eq!(out, format!("file://{}/relative.rdb", cwd.display()));
+        assert_eq!(
+            out,
+            format!("file://{}", cwd.join("relative.rdb").display())
+        );
     }
 
     #[test]
@@ -8235,20 +8235,37 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         // A bare path (no scheme) is accepted and resolved the same way.
         let out = canonicalize_file_uri("./data/x.rdb").expect("canonicalizes");
         let cwd = std::env::current_dir().unwrap();
-        assert_eq!(out, format!("file://{}/data/x.rdb", cwd.display()));
+        assert_eq!(
+            out,
+            format!("file://{}", cwd.join("data").join("x.rdb").display())
+        );
     }
 
     #[test]
     fn file_uri_absolute_is_preserved_and_normalized() {
-        assert_eq!(
-            canonicalize_file_uri("file:///var/lib/reddb/data.rdb").unwrap(),
-            "file:///var/lib/reddb/data.rdb"
-        );
-        // `.` and `..` segments fold lexically without touching disk.
-        assert_eq!(
-            canonicalize_file_uri("file:///var/lib/../lib/./reddb/data.rdb").unwrap(),
-            "file:///var/lib/reddb/data.rdb"
-        );
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                canonicalize_file_uri(r"file://C:\var\lib\reddb\data.rdb").unwrap(),
+                r"file://C:\var\lib\reddb\data.rdb"
+            );
+            assert_eq!(
+                canonicalize_file_uri(r"file://C:\var\lib\..\lib\.\reddb\data.rdb").unwrap(),
+                r"file://C:\var\lib\reddb\data.rdb"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                canonicalize_file_uri("file:///var/lib/reddb/data.rdb").unwrap(),
+                "file:///var/lib/reddb/data.rdb"
+            );
+            // `.` and `..` segments fold lexically without touching disk.
+            assert_eq!(
+                canonicalize_file_uri("file:///var/lib/../lib/./reddb/data.rdb").unwrap(),
+                "file:///var/lib/reddb/data.rdb"
+            );
+        }
     }
 
     #[test]

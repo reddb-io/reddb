@@ -137,6 +137,35 @@ TEST(ValueCodec, ValueTagTableIsPinned) {
     EXPECT_EQ(TAG_JSON, 0x07);
     EXPECT_EQ(TAG_TIMESTAMP, 0x08);
     EXPECT_EQ(TAG_UUID, 0x09);
+    EXPECT_EQ(TAG_FINGERPRINT, 0x0a);
+    EXPECT_EQ(TAG_FACE, 0x0b);
+    EXPECT_EQ(TAG_IRIS, 0x0c);
+    EXPECT_EQ(TAG_FEATURE_VECTOR, 0x0d);
+    EXPECT_EQ(TAG_BIT_SIGNATURE, 0x0e);
+}
+
+TEST(ValueCodec, EncodesBiometricFeatureAndBitValues) {
+    std::array<std::byte, 16> space = {};
+    space[0] = std::byte{0x11};
+    std::array<float, 2> coordinates = {1.0f, -2.0f};
+    auto feature = encode_value(Value::feature_vector(space, coordinates));
+    EXPECT_EQ(feature[0], TAG_FEATURE_VECTOR);
+    EXPECT_EQ(feature[17], 2);
+
+    std::array<std::byte, 2> bits = {std::byte{0xaa}, std::byte{0x55}};
+    std::array<std::byte, 2> mask = {std::byte{0xff}, std::byte{0x0f}};
+    auto signature = encode_value(Value::bit_signature(space, bits, mask));
+    EXPECT_EQ(signature[0], TAG_BIT_SIGNATURE);
+    EXPECT_EQ(std::vector<uint8_t>(signature.begin() + 21, signature.end()),
+              std::vector<uint8_t>({0xaa, 0x55, 0xff, 0x0f}));
+
+    std::array<std::byte, 4> face_bytes = {
+        std::byte{0x46}, std::byte{0x41}, std::byte{0x43}, std::byte{0},
+    };
+    auto face = encode_value(Value::face(0x0202, face_bytes));
+    EXPECT_EQ(face[0], TAG_FACE);
+    EXPECT_EQ(face[1], 0x02);
+    EXPECT_EQ(face[2], 0x02);
 }
 
 TEST(ValueCodec, EncodesScalarValues) {

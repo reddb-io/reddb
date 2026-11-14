@@ -262,6 +262,11 @@ message QueryValue {
     string json_value = 8;
     int64 timestamp_value = 9;
     bytes uuid_value = 10;
+    QueryBiometric fingerprint_value = 11;
+    QueryBiometric face_value = 12;
+    QueryBiometric iris_value = 13;
+    QueryFeatureVector feature_vector_value = 14;
+    QueryBitSignature bit_signature_value = 15;
   }
 }
 
@@ -269,6 +274,22 @@ message QueryNull {}
 
 message QueryVector {
   repeated float values = 1;
+}
+
+message QueryBiometric {
+  uint32 format_code = 1;
+  bytes data = 2;
+}
+
+message QueryFeatureVector {
+  bytes space_id = 1;
+  repeated float values = 2;
+}
+
+message QueryBitSignature {
+  bytes space_id = 1;
+  bytes bits = 2;
+  bytes mask = 3;
 }
 
 message JsonPayloadRequest {

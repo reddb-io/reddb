@@ -389,6 +389,44 @@ pub fn encode(value: &Value, out: &mut Vec<u8>) {
             write_varint(out, bytes.len() as u64);
             out.extend_from_slice(bytes);
         }
+        Value::Fingerprint(value) => {
+            out.push(DataType::Fingerprint.to_byte());
+            out.push(1); // biometric envelope version
+            out.extend_from_slice(&(value.format() as u16).to_le_bytes());
+            write_varint(out, value.bytes().len() as u64);
+            out.extend_from_slice(value.bytes());
+        }
+        Value::Face(value) => {
+            out.push(DataType::Face.to_byte());
+            out.push(1); // biometric envelope version
+            out.extend_from_slice(&(value.format() as u16).to_le_bytes());
+            write_varint(out, value.bytes().len() as u64);
+            out.extend_from_slice(value.bytes());
+        }
+        Value::Iris(value) => {
+            out.push(DataType::Iris.to_byte());
+            out.push(1); // biometric envelope version
+            out.extend_from_slice(&(value.format() as u16).to_le_bytes());
+            write_varint(out, value.bytes().len() as u64);
+            out.extend_from_slice(value.bytes());
+        }
+        Value::FeatureVector(value) => {
+            out.push(DataType::FeatureVector.to_byte());
+            out.push(1); // feature envelope version
+            out.extend_from_slice(&value.space_id());
+            write_varint(out, value.dimensions() as u64);
+            for component in value.values() {
+                out.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+        Value::BitSignature(value) => {
+            out.push(DataType::BitSignature.to_byte());
+            out.push(1); // bit signature envelope version
+            out.extend_from_slice(&value.space_id());
+            write_varint(out, value.len_bytes() as u64);
+            out.extend_from_slice(value.bits());
+            out.extend_from_slice(value.mask());
+        }
     }
 }
 
@@ -967,6 +1005,108 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), ValueError> {
             offset += len as usize;
             Value::Password(hash)
         }
+        DataType::Fingerprint | DataType::Face | DataType::Iris => {
+            if data.get(offset) != Some(&1) {
+                return Err(ValueError::InvalidType(data_type.to_byte()));
+            }
+            offset += 1;
+            let format_bytes = data
+                .get(offset..offset + 2)
+                .ok_or(ValueError::TruncatedData)?;
+            let format = crate::BiometricFormat::from_code(u16::from_le_bytes([
+                format_bytes[0],
+                format_bytes[1],
+            ]))
+            .ok_or(ValueError::InvalidType(data_type.to_byte()))?;
+            offset += 2;
+            if format.modality()
+                != match data_type {
+                    DataType::Fingerprint => crate::BiometricModality::Fingerprint,
+                    DataType::Face => crate::BiometricModality::Face,
+                    DataType::Iris => crate::BiometricModality::Iris,
+                    _ => unreachable!("match arm restricts biometric data types"),
+                }
+            {
+                return Err(ValueError::InvalidType(data_type.to_byte()));
+            }
+            let (length, length_bytes) = read_varint(&data[offset..])?;
+            offset += length_bytes;
+            let length = usize::try_from(length).map_err(|_| ValueError::VarintOverflow)?;
+            let payload = data
+                .get(offset..offset + length)
+                .ok_or(ValueError::TruncatedData)?
+                .to_vec();
+            offset += length;
+            let sample = crate::BiometricSample::with_format(format, payload)
+                .map_err(|_| ValueError::InvalidType(data_type.to_byte()))?;
+            match data_type {
+                DataType::Fingerprint => Value::Fingerprint(sample),
+                DataType::Face => Value::Face(sample),
+                DataType::Iris => Value::Iris(sample),
+                _ => unreachable!("match arm restricts biometric data types"),
+            }
+        }
+        DataType::FeatureVector => {
+            if data.get(offset) != Some(&1) {
+                return Err(ValueError::InvalidType(data_type.to_byte()));
+            }
+            offset += 1;
+            let space_id: [u8; 16] = data
+                .get(offset..offset + 16)
+                .ok_or(ValueError::TruncatedData)?
+                .try_into()
+                .map_err(|_| ValueError::TruncatedData)?;
+            offset += 16;
+            let (dimensions, length_bytes) = read_varint(&data[offset..])?;
+            offset += length_bytes;
+            let dimensions = usize::try_from(dimensions).map_err(|_| ValueError::VarintOverflow)?;
+            let byte_length = dimensions
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or(ValueError::VarintOverflow)?;
+            let payload = data
+                .get(offset..offset + byte_length)
+                .ok_or(ValueError::TruncatedData)?;
+            let mut values = Vec::with_capacity(dimensions);
+            for bytes in payload.chunks_exact(4) {
+                values.push(f32::from_le_bytes(
+                    bytes.try_into().map_err(|_| ValueError::TruncatedData)?,
+                ));
+            }
+            offset += byte_length;
+            Value::FeatureVector(
+                crate::FeatureVector::new(space_id, values)
+                    .map_err(|_| ValueError::InvalidType(data_type.to_byte()))?,
+            )
+        }
+        DataType::BitSignature => {
+            if data.get(offset) != Some(&1) {
+                return Err(ValueError::InvalidType(data_type.to_byte()));
+            }
+            offset += 1;
+            let space_id: [u8; 16] = data
+                .get(offset..offset + 16)
+                .ok_or(ValueError::TruncatedData)?
+                .try_into()
+                .map_err(|_| ValueError::TruncatedData)?;
+            offset += 16;
+            let (length, length_bytes) = read_varint(&data[offset..])?;
+            offset += length_bytes;
+            let length = usize::try_from(length).map_err(|_| ValueError::VarintOverflow)?;
+            let bits = data
+                .get(offset..offset + length)
+                .ok_or(ValueError::TruncatedData)?
+                .to_vec();
+            offset += length;
+            let mask = data
+                .get(offset..offset + length)
+                .ok_or(ValueError::TruncatedData)?
+                .to_vec();
+            offset += length;
+            Value::BitSignature(
+                crate::BitSignature::new(space_id, bits, Some(mask))
+                    .map_err(|_| ValueError::InvalidType(data_type.to_byte()))?,
+            )
+        }
         DataType::Nullable => {
             // Nullable without inner type means null
             Value::Null
@@ -1075,6 +1215,48 @@ mod tests {
             vec![0x05, 0x03, 0x01, 0x02, 0x03],
             "Value::Blob layout drifted"
         );
+    }
+
+    #[test]
+    fn feature_artifact_envelopes_have_stable_bytes_and_roundtrip() {
+        let feature = Value::FeatureVector(
+            crate::FeatureVector::new([1; 16], vec![1.0]).expect("valid feature vector"),
+        );
+        let bytes = feature.to_bytes();
+        assert_eq!(bytes[0], DataType::FeatureVector.to_byte());
+        assert_eq!(bytes[1], 1);
+        assert_eq!(&bytes[2..18], &[1; 16]);
+        assert_eq!(bytes[18], 1);
+        assert_eq!(&bytes[19..23], &1.0_f32.to_le_bytes());
+        assert_eq!(Value::from_bytes(&bytes), Ok((feature, bytes.len())));
+
+        let bits = Value::BitSignature(
+            crate::BitSignature::new([2; 16], vec![0xAA], Some(vec![0xF0]))
+                .expect("valid bit signature"),
+        );
+        let bytes = bits.to_bytes();
+        assert_eq!(bytes[0], DataType::BitSignature.to_byte());
+        assert_eq!(&bytes[19..], &[0xAA, 0xF0]);
+        assert_eq!(Value::from_bytes(&bytes), Ok((bits, bytes.len())));
+    }
+
+    #[test]
+    fn biometric_envelope_has_stable_format_code_and_roundtrips() {
+        let value = Value::Face(
+            crate::BiometricSample::with_format(
+                crate::BiometricFormat::FaceIso39794_5,
+                vec![0x30, 0x03, 0x02, 0x01, 0x00],
+            )
+            .expect("bounded ASN.1 record"),
+        );
+        let bytes = value.to_bytes();
+        assert_eq!(bytes[0], DataType::Face.to_byte());
+        assert_eq!(bytes[1], 1);
+        assert_eq!(
+            &bytes[2..4],
+            &(crate::BiometricFormat::FaceIso39794_5 as u16).to_le_bytes()
+        );
+        assert_eq!(Value::from_bytes(&bytes), Ok((value, bytes.len())));
     }
 
     /// Sanity check that the registry's [`type_tag`] lines up with

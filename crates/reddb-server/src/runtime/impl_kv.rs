@@ -3880,7 +3880,7 @@ fn kv_tags_value(tags: &[String]) -> Value {
     Value::Json(crate::json::to_vec(&json).unwrap_or_default())
 }
 
-pub(super) fn kv_value_from_entity(entity: &crate::storage::UnifiedEntity) -> Option<Value> {
+pub(crate) fn kv_value_from_entity(entity: &crate::storage::UnifiedEntity) -> Option<Value> {
     if let crate::storage::EntityData::Row(ref row) = entity.data {
         return row.get_field("value").cloned();
     }

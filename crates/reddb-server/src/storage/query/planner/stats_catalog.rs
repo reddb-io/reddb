@@ -740,6 +740,11 @@ fn approximate_value_size(value: &Value) -> usize {
         Value::BigInt(_) => 8,
         Value::KeyRef(collection, key) => collection.len() + key.len(),
         Value::IpAddr(_) => 16,
+        Value::Fingerprint(sample) | Value::Face(sample) | Value::Iris(sample) => {
+            sample.bytes().len() + 8
+        }
+        Value::FeatureVector(vector) => 16 + std::mem::size_of_val(vector.values()),
+        Value::BitSignature(signature) => 16 + signature.bits().len() + signature.mask().len(),
     }
 }
 

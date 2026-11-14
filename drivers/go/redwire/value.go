@@ -15,21 +15,31 @@ import (
 type ValueTag uint8
 
 const (
-	TagNull      ValueTag = 0x00
-	TagBool      ValueTag = 0x01
-	TagInt       ValueTag = 0x02
-	TagFloat     ValueTag = 0x03
-	TagText      ValueTag = 0x04
-	TagBytes     ValueTag = 0x05
-	TagVector    ValueTag = 0x06
-	TagJSON      ValueTag = 0x07
-	TagTimestamp ValueTag = 0x08
-	TagUUID      ValueTag = 0x09
+	TagNull          ValueTag = 0x00
+	TagBool          ValueTag = 0x01
+	TagInt           ValueTag = 0x02
+	TagFloat         ValueTag = 0x03
+	TagText          ValueTag = 0x04
+	TagBytes         ValueTag = 0x05
+	TagVector        ValueTag = 0x06
+	TagJSON          ValueTag = 0x07
+	TagTimestamp     ValueTag = 0x08
+	TagUUID          ValueTag = 0x09
+	TagFingerprint   ValueTag = 0x0A
+	TagFace          ValueTag = 0x0B
+	TagIris          ValueTag = 0x0C
+	TagFeatureVector ValueTag = 0x0D
+	TagBitSignature  ValueTag = 0x0E
 )
 
 // MaxParamCount caps the params slice size on QueryWithParams. Mirrors the
 // Rust + JS codecs.
 const MaxParamCount = 65_536
+
+const (
+	MaxFeatureVectorDimensions = 65_536
+	MaxBitSignatureBytes       = 1 << 20
+)
 
 // MaxValuePayloadLen caps a single length-prefixed value's bytes. Mirrors the
 // frame-level cap so a misbehaving caller can't slip through with a single
@@ -47,6 +57,59 @@ type UUID [16]byte
 // Timestamp is the typed wrapper callers pass when they need the full i64
 // timestamp domain. time.Time remains the ergonomic mapping for normal dates.
 type Timestamp int64
+
+// BiometricFormat is the stable RedDB wire identifier for a standardized
+// biometric record. It does not identify a provider or extraction model.
+type BiometricFormat uint16
+
+const (
+	FingerprintISO39794_2 BiometricFormat = 0x0101
+	FingerprintISO39794_4 BiometricFormat = 0x0102
+	FingerprintISO19794_2 BiometricFormat = 0x0103
+	FingerprintISO19794_4 BiometricFormat = 0x0104
+	FingerprintANSI378    BiometricFormat = 0x0105
+	FingerprintANSI381    BiometricFormat = 0x0106
+	FingerprintANSINIST4  BiometricFormat = 0x0107
+	FingerprintANSINIST9  BiometricFormat = 0x0108
+	FingerprintCBEFF      BiometricFormat = 0x0109
+	FaceISO39794_5        BiometricFormat = 0x0201
+	FaceISO19794_5        BiometricFormat = 0x0202
+	FaceANSINIST10        BiometricFormat = 0x0203
+	FaceCBEFF             BiometricFormat = 0x0204
+	IrisISO39794_6        BiometricFormat = 0x0301
+	IrisISO19794_6        BiometricFormat = 0x0302
+	IrisANSINIST17        BiometricFormat = 0x0303
+	IrisCBEFF             BiometricFormat = 0x0304
+)
+
+type Fingerprint struct {
+	Format BiometricFormat
+	Data   []byte
+}
+
+type Face struct {
+	Format BiometricFormat
+	Data   []byte
+}
+
+type Iris struct {
+	Format BiometricFormat
+	Data   []byte
+}
+
+// FeatureVector is a caller-produced vector in an application-defined space.
+type FeatureVector struct {
+	SpaceID UUID
+	Values  []float32
+}
+
+// BitSignature is a caller-produced bit string. A nil Mask means all bits are
+// valid; a non-nil mask must have the same byte length as Bits.
+type BitSignature struct {
+	SpaceID UUID
+	Bits    []byte
+	Mask    []byte
+}
 
 // UUIDFromString parses a canonical RFC 4122 hyphenated UUID. Hyphens
 // elsewhere are tolerated; case is folded.
@@ -155,6 +218,16 @@ func EncodeValue(v any) ([]byte, error) {
 		out[0] = byte(TagUUID)
 		copy(out[1:], x[:])
 		return out, nil
+	case Fingerprint:
+		return encodeBiometric(TagFingerprint, x.Format, 0x01, x.Data)
+	case Face:
+		return encodeBiometric(TagFace, x.Format, 0x02, x.Data)
+	case Iris:
+		return encodeBiometric(TagIris, x.Format, 0x03, x.Data)
+	case FeatureVector:
+		return encodeFeatureVector(x)
+	case BitSignature:
+		return encodeBitSignature(x)
 	case json.RawMessage:
 		var anyv any
 		if err := json.Unmarshal(x, &anyv); err != nil {
@@ -186,6 +259,87 @@ func EncodeValue(v any) ([]byte, error) {
 		return EncodeValue(rv)
 	}
 	return nil, fmt.Errorf("%w: %T", ErrUnsupportedParam, v)
+}
+
+func encodeBiometric(tag ValueTag, format BiometricFormat, modality uint16, data []byte) ([]byte, error) {
+	if uint16(format)>>8 != modality {
+		return nil, fmt.Errorf("redwire: biometric format 0x%04x has wrong modality", format)
+	}
+	if len(data) == 0 || len(data) > MaxValuePayloadLen {
+		return nil, fmt.Errorf("redwire: biometric length %d is invalid", len(data))
+	}
+	out := make([]byte, 1+2+4+len(data))
+	out[0] = byte(tag)
+	binary.LittleEndian.PutUint16(out[1:3], uint16(format))
+	binary.LittleEndian.PutUint32(out[3:7], uint32(len(data)))
+	copy(out[7:], data)
+	return out, nil
+}
+
+func encodeFeatureVector(value FeatureVector) ([]byte, error) {
+	if len(value.Values) == 0 || len(value.Values) > MaxFeatureVectorDimensions {
+		return nil, fmt.Errorf("redwire: feature vector dimensions %d are invalid", len(value.Values))
+	}
+	out := make([]byte, 1+16+4+len(value.Values)*4)
+	out[0] = byte(TagFeatureVector)
+	copy(out[1:17], value.SpaceID[:])
+	binary.LittleEndian.PutUint32(out[17:21], uint32(len(value.Values)))
+	var norm float64
+	for i, coordinate := range value.Values {
+		if math.IsNaN(float64(coordinate)) || math.IsInf(float64(coordinate), 0) {
+			return nil, errors.New("redwire: feature vector contains a non-finite coordinate")
+		}
+		norm += float64(coordinate) * float64(coordinate)
+		binary.LittleEndian.PutUint32(out[21+i*4:25+i*4], math.Float32bits(coordinate))
+	}
+	if norm == 0 {
+		return nil, errors.New("redwire: feature vector must have non-zero norm")
+	}
+	return out, nil
+}
+
+func encodeBitSignature(value BitSignature) ([]byte, error) {
+	if len(value.Bits) == 0 || len(value.Bits) > MaxBitSignatureBytes {
+		return nil, fmt.Errorf("redwire: bit signature length %d is invalid", len(value.Bits))
+	}
+	mask := value.Mask
+	if mask == nil {
+		mask = make([]byte, len(value.Bits))
+		for i := range mask {
+			mask[i] = 0xff
+		}
+	}
+	if len(mask) != len(value.Bits) {
+		return nil, errors.New("redwire: bit signature mask length differs from bits")
+	}
+	var valid byte
+	for _, item := range mask {
+		valid |= item
+	}
+	if valid == 0 {
+		return nil, errors.New("redwire: bit signature mask selects no bits")
+	}
+	out := make([]byte, 1+16+4+len(value.Bits)*2)
+	out[0] = byte(TagBitSignature)
+	copy(out[1:17], value.SpaceID[:])
+	binary.LittleEndian.PutUint32(out[17:21], uint32(len(value.Bits)))
+	copy(out[21:21+len(value.Bits)], value.Bits)
+	copy(out[21+len(value.Bits):], mask)
+	return out, nil
+}
+
+func requiresBiometricFeatureCapability(v any) bool {
+	switch v.(type) {
+	case Fingerprint, Face, Iris, FeatureVector, BitSignature:
+		return true
+	}
+	if isNilPointer(v) {
+		return false
+	}
+	if rv := derefPointer(v); rv != nil {
+		return requiresBiometricFeatureCapability(rv)
+	}
+	return false
 }
 
 func encodeInt(x int64) []byte {
@@ -365,6 +519,16 @@ func derefPointer(v any) any {
 		return *p
 	case *UUID:
 		return *p
+	case *Fingerprint:
+		return *p
+	case *Face:
+		return *p
+	case *Iris:
+		return *p
+	case *FeatureVector:
+		return *p
+	case *BitSignature:
+		return *p
 	}
 	return nil
 }
@@ -386,6 +550,16 @@ func isNilPointer(v any) bool {
 	case *time.Time:
 		return p == nil
 	case *UUID:
+		return p == nil
+	case *Fingerprint:
+		return p == nil
+	case *Face:
+		return p == nil
+	case *Iris:
+		return p == nil
+	case *FeatureVector:
+		return p == nil
+	case *BitSignature:
 		return p == nil
 	}
 	return false

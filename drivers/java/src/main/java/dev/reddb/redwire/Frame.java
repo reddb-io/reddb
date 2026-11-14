@@ -89,6 +89,7 @@ public final class Frame {
 
     /** Server feature bitmask: QueryWithParams frame support. */
     public static final int FEATURE_PARAMS = 0x0000_0001;
+    public static final int FEATURE_BIOMETRIC_PARAMS = 0x0000_0008;
 
     /** Flag bits that may appear in the header. */
     public static final class Flags {

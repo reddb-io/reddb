@@ -245,6 +245,7 @@ When you're ready to point this driver at a production RedDB cluster:
 | **PSC-012** — Server transports expose the same query contract as embedded (HTTP, RedWire, gRPC parity). | ✅ supported |
 | **PSC-013** — Official drivers implement the SDK Helper Spec v1.0 conformance suite (all 22 §12 case IDs). | ✅ supported |
 | **PSC-014** — ASK / SEARCH semantic surfaces return ranked results with stable shape. | ⚠️ partial |
+| **PSC-015** — Standardized fingerprint, face, and iris records plus caller-supplied feature vectors and bit signatures are native typed values with deterministic comparison and indexed search. | ⚠️ partial |
 
 _Status legend: ✅ supported · ⚠️ partial (known gaps) · ❌ unsupported._
 <!-- contract-matrix:end -->

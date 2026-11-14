@@ -32,6 +32,7 @@
 // casts become explicit checked conversions.
 #![allow(clippy::cast_possible_truncation)]
 
+pub mod biometric;
 pub mod canonical_key;
 pub mod cast_catalog;
 pub mod catalog;
@@ -42,6 +43,7 @@ pub mod distance;
 pub mod document_body_codec;
 pub mod duration;
 pub mod encoding;
+pub mod feature;
 pub mod function_catalog;
 pub mod index_hint;
 pub mod json;
@@ -61,7 +63,15 @@ pub mod value_compare;
 pub mod value_json;
 pub mod vector_metadata;
 
+pub use biometric::{
+    select_ansi_nist_record, select_ansi_nist_sample, BiometricError, BiometricFormat,
+    BiometricModality, BiometricSample, Minutia, MinutiaeView, MAX_BIOMETRIC_RECORD_BYTES,
+};
 pub use canonical_key::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily};
+pub use feature::{
+    BitSignature, FeatureError, FeatureVector, MAX_BIT_SIGNATURE_BYTES,
+    MAX_FEATURE_VECTOR_DIMENSIONS,
+};
 pub use operator::BinOp;
 pub use table::{
     ColumnDef, Constraint, ConstraintType, IndexDef, IndexType, TableDef, TableDefError,

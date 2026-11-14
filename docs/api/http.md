@@ -509,6 +509,28 @@ The response groups results by structure type:
 }
 ```
 
+Biometric records and caller-supplied comparison artifacts use typed
+envelopes. Binary fields are hexadecimal; `space_id` is exactly 16 bytes:
+
+```json
+{
+  "query": "SEARCH FEATURE $1 IN identities COLUMN face_features LIMIT 10 MIN_SCORE 0.8",
+  "params": [
+    {
+      "$feature_vector": {
+        "space_id": "00112233445566778899aabbccddeeff",
+        "values": [0.25, 0.75]
+      }
+    }
+  ]
+}
+```
+
+The other envelopes are `$biometric` with `modality`, `format`, and hex
+`data`, and `$bit_signature` with `space_id`, hex `bits`, and an optional hex
+`mask`. See [Biometric Records and Comparison Artifacts](/types/biometrics.md)
+for the complete contract and limits.
+
 ## Configuration
 
 | Method | Path | Description |

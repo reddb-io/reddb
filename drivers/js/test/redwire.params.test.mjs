@@ -52,13 +52,32 @@ test('catalog: QueryWithParams discriminant pinned to 0x28', () => {
 
 test('catalog: FEATURE_PARAMS bit pinned to 0x01', () => {
   assert.equal(Features.PARAMS, 0x01)
+  assert.equal(Features.BIOMETRIC_PARAMS, 0x08)
 })
 
 test('catalog: ValueTag table pinned', () => {
   assert.deepEqual(ValueTag, Object.freeze({
     Null: 0x00, Bool: 0x01, Int: 0x02, Float: 0x03, Text: 0x04,
     Bytes: 0x05, Vector: 0x06, Json: 0x07, Timestamp: 0x08, Uuid: 0x09,
+    Fingerprint: 0x0a, Face: 0x0b, Iris: 0x0c,
+    FeatureVector: 0x0d, BitSignature: 0x0e,
   }))
+})
+
+test('encodeValue: feature vector and bit signature envelopes', () => {
+  const spaceId = '00112233445566778899aabbccddeeff'
+  const feature = encodeValue({
+    $feature_vector: { space_id: spaceId, values: [1, -2] },
+  })
+  assert.equal(feature[0], ValueTag.FeatureVector)
+  assert.equal(feature.length, 1 + 16 + 4 + 8)
+  assert.equal(new DataView(feature.buffer).getUint32(17, true), 2)
+
+  const bits = encodeValue({
+    $bit_signature: { space_id: spaceId, bits: 'aa55', mask: 'ff0f' },
+  })
+  assert.equal(bits[0], ValueTag.BitSignature)
+  assert.deepEqual(Array.from(bits.slice(-4)), [0xaa, 0x55, 0xff, 0x0f])
 })
 
 test('fixtures: manifest value encodings match JS RedWire codec', () => {

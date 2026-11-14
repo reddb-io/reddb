@@ -194,6 +194,27 @@
         "grpc": { "status": "unsupported" },
         "driver_helpers": { "status": "partial", "tests": ["drivers/js/test/ask.test.mjs"] }
       }
+    },
+    {
+      "id": "PSC-015",
+      "source": "docs/types/biometrics.md",
+      "promise": "Standardized fingerprint, face, and iris records plus caller-supplied feature vectors and bit signatures are native typed values with deterministic comparison and indexed search.",
+      "cells": {
+        "sql": { "status": "supported", "tests": ["tests/grouped/multimodel_query/e2e_biometric_search.rs"] },
+        "http": { "status": "partial", "tests": ["crates/reddb-server/src/runtime/query_request.rs"] },
+        "redwire": { "status": "partial", "tests": ["crates/reddb-wire/src/query_with_params.rs", "drivers/js-client/test/redwire-biometric-params.test.mjs"] },
+        "grpc": { "status": "partial", "tests": ["crates/reddb-server/src/grpc.rs", "crates/reddb-client/src/connector/mod.rs"] },
+        "driver_helpers": {
+          "status": "partial",
+          "tests": [
+            "crates/reddb-client/src/params.rs",
+            "drivers/go/redwire/value_test.go",
+            "drivers/java/src/test/java/dev/reddb/ValueCodecTest.java",
+            "drivers/python-asyncio/tests/test_query_params.py",
+            "drivers/js-client/test/redwire-biometric-params.test.mjs"
+          ]
+        }
+      }
     }
   ]
 }

@@ -5522,7 +5522,7 @@ mod tests {
         let store = AuthStore::new(test_config());
         store.create_user("erin", "pw", Role::Write).unwrap();
         let key = store
-            .create_api_key_in_tenant_expiring(None, "erin", "ci", Role::Read, Some(now_ms() + 60))
+            .create_api_key_in_tenant_expiring(None, "erin", "ci", Role::Read, None)
             .unwrap();
         assert!(key.key.starts_with("rk_"));
 
@@ -5538,6 +5538,14 @@ mod tests {
         assert_ne!(stored.key, key.key, "the secret must not be stored");
         assert_eq!(stored.key, api_key_credential_id(&key.key));
 
+        store
+            .users
+            .write()
+            .unwrap()
+            .get_mut(&UserId::from_parts(None, "erin"))
+            .unwrap()
+            .api_keys[0]
+            .expires_at = Some(now_ms() + 60);
         assert!(store.validate_token(&key.key).is_some());
         std::thread::sleep(std::time::Duration::from_millis(80));
         assert!(

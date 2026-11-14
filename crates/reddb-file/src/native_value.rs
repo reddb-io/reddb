@@ -338,6 +338,64 @@ fn read_atom(reader: &mut NativeReader<'_, '_>, tag: u8) -> RdbFileResult<Value>
                 reddb_types::Temperature::new(minor_units, scale, unit).map_err(invalid)?,
             )
         }
+        54..=56 => {
+            if reader.byte()? != 1 {
+                return Err(invalid("unsupported native biometric envelope version"));
+            }
+            let format =
+                reddb_types::BiometricFormat::from_code(u16::from_le_bytes(reader.fixed()?))
+                    .ok_or_else(|| invalid("unknown native biometric format"))?;
+            let modality = match tag {
+                54 => reddb_types::BiometricModality::Fingerprint,
+                55 => reddb_types::BiometricModality::Face,
+                56 => reddb_types::BiometricModality::Iris,
+                _ => unreachable!("match arm restricts native biometric tags"),
+            };
+            if format.modality() != modality {
+                return Err(invalid("native biometric modality mismatch"));
+            }
+            let sample = reddb_types::BiometricSample::with_format(format, reader.owned_bytes()?)
+                .map_err(invalid)?;
+            match modality {
+                reddb_types::BiometricModality::Fingerprint => Value::Fingerprint(sample),
+                reddb_types::BiometricModality::Face => Value::Face(sample),
+                reddb_types::BiometricModality::Iris => Value::Iris(sample),
+            }
+        }
+        57 => {
+            if reader.byte()? != 1 {
+                return Err(invalid(
+                    "unsupported native feature vector envelope version",
+                ));
+            }
+            let space_id = reader.fixed()?;
+            let dimensions = reader.count(std::mem::size_of::<f32>())?;
+            reader.reserve_elements::<f32>(dimensions)?;
+            let mut values = Vec::with_capacity(dimensions);
+            for _ in 0..dimensions {
+                values.push(f32::from_le_bytes(reader.fixed()?));
+            }
+            Value::FeatureVector(
+                reddb_types::FeatureVector::new(space_id, values).map_err(invalid)?,
+            )
+        }
+        58 => {
+            if reader.byte()? != 1 {
+                return Err(invalid("unsupported native bit signature envelope version"));
+            }
+            let space_id = reader.fixed()?;
+            let length = reader.count(2)?;
+            reader.reserve_bytes(
+                length
+                    .checked_mul(2)
+                    .ok_or_else(|| invalid("native bit signature length overflow"))?,
+            )?;
+            let bits = reader.take(length)?.to_vec();
+            let mask = reader.take(length)?.to_vec();
+            Value::BitSignature(
+                reddb_types::BitSignature::new(space_id, bits, Some(mask)).map_err(invalid)?,
+            )
+        }
         0x85 => reader.text(true)?,
         0x86 => Value::Blob(reader.compressed()?),
         _ => return Err(invalid(format!("Unknown Value type: {tag}"))),
@@ -639,13 +697,56 @@ pub fn write_native_value(buf: &mut Vec<u8>, value: &Value) {
             buf.push(value.scale());
             buf.extend_from_slice(&value.minor_units().to_le_bytes());
         }
+        Value::Fingerprint(value) => write_native_biometric(buf, 54, value),
+        Value::Face(value) => write_native_biometric(buf, 55, value),
+        Value::Iris(value) => write_native_biometric(buf, 56, value),
+        Value::FeatureVector(value) => {
+            buf.push(57);
+            buf.push(1);
+            buf.extend_from_slice(&value.space_id());
+            write_varu32(
+                buf,
+                u32::try_from(value.dimensions()).expect("bounded feature vector dimensions"),
+            );
+            for component in value.values() {
+                buf.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+        Value::BitSignature(value) => {
+            buf.push(58);
+            buf.push(1);
+            buf.extend_from_slice(&value.space_id());
+            write_varu32(
+                buf,
+                u32::try_from(value.len_bytes()).expect("bounded bit signature length"),
+            );
+            buf.extend_from_slice(value.bits());
+            buf.extend_from_slice(value.mask());
+        }
     }
+}
+
+fn write_native_biometric(buf: &mut Vec<u8>, tag: u8, value: &reddb_types::BiometricSample) {
+    buf.push(tag);
+    buf.push(1);
+    buf.extend_from_slice(&(value.format() as u16).to_le_bytes());
+    write_varu32(
+        buf,
+        u32::try_from(value.bytes().len()).expect("bounded biometric record length"),
+    );
+    buf.extend_from_slice(value.bytes());
 }
 
 /// Mandatory paged-file capabilities needed to decode this declared type.
 pub fn required_file_capabilities_for_data_type(data_type: reddb_types::DataType) -> u64 {
     match data_type {
         reddb_types::DataType::Temperature => crate::FILE_CAPABILITY_TEMPERATURE,
+        reddb_types::DataType::Fingerprint
+        | reddb_types::DataType::Face
+        | reddb_types::DataType::Iris => crate::FILE_CAPABILITY_BIOMETRIC_VALUES,
+        reddb_types::DataType::FeatureVector | reddb_types::DataType::BitSignature => {
+            crate::FILE_CAPABILITY_FEATURE_VALUES
+        }
         _ => 0,
     }
 }
@@ -656,6 +757,10 @@ pub fn required_file_capabilities(value: &Value) -> u64 {
         Value::Temperature(_) => {
             required_file_capabilities_for_data_type(reddb_types::DataType::Temperature)
         }
+        Value::Fingerprint(_) | Value::Face(_) | Value::Iris(_) => {
+            crate::FILE_CAPABILITY_BIOMETRIC_VALUES
+        }
+        Value::FeatureVector(_) | Value::BitSignature(_) => crate::FILE_CAPABILITY_FEATURE_VALUES,
         Value::Array(values) => values.iter().fold(0, |required, value| {
             required | required_file_capabilities(value)
         }),
