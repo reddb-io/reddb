@@ -750,6 +750,11 @@ fn compact_paged_inner(
     }
     let source = Arc::new(Source::open(&source_path)?);
     let mut catalog = Catalog::read(&source)?;
+    let migrated_system_config = retain_canonical_system_config
+        && catalog
+            .roots
+            .iter()
+            .any(|root| root.collection == "red_config");
     let migrated_system_config_records = if retain_canonical_system_config {
         catalog.migrate_legacy_system_config()?
     } else {
@@ -1092,7 +1097,7 @@ fn compact_paged_inner(
     }
     let report = CompactionReport {
         retired_boot_system_wal_actions: 0,
-        reconciled_system_collections: usize::from(migrated_system_config_records > 0),
+        reconciled_system_collections: usize::from(migrated_system_config),
         imported_system_records: migrated_system_config_records,
         source_bytes: source.bytes,
         destination_bytes: reopened.bytes,

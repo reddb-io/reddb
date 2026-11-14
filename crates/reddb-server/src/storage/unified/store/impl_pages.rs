@@ -2178,10 +2178,16 @@ impl UnifiedStore {
                         if let Some(index) = config_index {
                             recovery_config_roots[index] =
                                 recovery_config_roots[index].saturating_add(1);
-                            let state = resume
+                            let Some(state) = resume
                                 .as_ref()
                                 .and_then(|resume| resume.collections.get(&stored_name))
-                                .expect("present recovery config identity was checked");
+                            else {
+                                return Err(page_integrity(
+                                    1,
+                                    None,
+                                    "config collection has no matching resume identity",
+                                ));
+                            };
                             if state.root_page != root_page {
                                 return Err(page_integrity(
                                     1,
@@ -3997,6 +4003,20 @@ mod checkpoint_work_tests {
         )
     }
 
+    fn legacy_config_recovery_row(id: u64, key: &str, value: i64) -> UnifiedEntity {
+        UnifiedEntity::new(
+            EntityId::new(id),
+            EntityKind::TableRow {
+                table: Arc::from("red_config"),
+                row_id: id,
+            },
+            EntityData::Row(crate::storage::RowData::with_names(
+                vec![Value::text(key), Value::Integer(value)],
+                vec!["key".into(), "value".into()],
+            )),
+        )
+    }
+
     fn authorize_fixture_dwb(path: &Path, frame: &[u8]) {
         use reddb_file::{file_format as f, PAGED_SUPERBLOCK_SLOT_SIZE};
         use std::io::{Seek, SeekFrom, Write};
@@ -4095,6 +4115,10 @@ mod checkpoint_work_tests {
         system_catalog_fixture_with_aliases(true, false, false, false, config_keys, None, false)
     }
 
+    fn single_empty_legacy_system_catalog_fixture() -> DuplicateSystemCatalogFixture {
+        system_catalog_fixture_with_aliases(false, false, false, false, &[], None, false)
+    }
+
     fn system_catalog_fixture_with_aliases(
         legacy_populated: bool,
         canonical_populated: bool,
@@ -4138,11 +4162,13 @@ mod checkpoint_work_tests {
                 } else {
                     for (offset, key) in config_keys.iter().enumerate() {
                         let id = u64::try_from(offset).unwrap() + 1;
+                        let entity = if canonical_identity {
+                            config_recovery_row(id, key, i64::try_from(id).unwrap())
+                        } else {
+                            legacy_config_recovery_row(id, key, i64::try_from(id).unwrap())
+                        };
                         store
-                            .insert_auto(
-                                "cfg_legacy",
-                                config_recovery_row(id, key, i64::try_from(id).unwrap()),
-                            )
+                            .insert_auto("cfg_legacy", entity)
                             .expect("legacy config row");
                     }
                 }
@@ -4309,6 +4335,38 @@ mod checkpoint_work_tests {
                 }
             }
             store.persist().expect("checkpoint duplicate catalog");
+            if !canonical_identity && legacy_populated && !config_keys.is_empty() {
+                let tree = store
+                    .btree_indices
+                    .read()
+                    .get("cfg_legacy")
+                    .cloned()
+                    .expect("legacy config tree");
+                for (offset, key) in config_keys.iter().enumerate() {
+                    let id = u64::try_from(offset).unwrap() + 1;
+                    let entity = legacy_config_recovery_row(id, key, i64::try_from(id).unwrap());
+                    let mut record =
+                        UnifiedStore::serialize_entity_record(&entity, None, STORE_VERSION_CURRENT);
+                    let canonical = b"red.config";
+                    let legacy = b"red_config";
+                    let mut replacements = 0;
+                    for offset in 0..=record.len() - canonical.len() {
+                        if &record[offset..offset + canonical.len()] == canonical {
+                            record[offset..offset + legacy.len()].copy_from_slice(legacy);
+                            replacements += 1;
+                        }
+                    }
+                    assert_eq!(
+                        replacements, 1,
+                        "persisted fixture row must carry one historical table identity"
+                    );
+                    tree.upsert(&id.to_be_bytes(), &record)
+                        .expect("write authenticated historical config row");
+                }
+                store
+                    .flush_paged_registry()
+                    .expect("publish historical config generation");
+            }
             legacy_root = store.collection_root_page("cfg_legacy");
             legacy_key_root = store
                 .key_indices
@@ -4805,8 +4863,102 @@ mod checkpoint_work_tests {
                 recovered.get_config("auth.require_auth"),
                 Some(Value::Integer(1))
             );
+            let mut recovered_rows = 0;
+            recovered
+                .get_collection("red.config")
+                .expect("canonical config collection")
+                .try_for_each_entity(4 * 1024 * 1024, |entity| {
+                    recovered_rows += 1;
+                    assert_eq!(entity.kind.collection(), "red.config");
+                    true
+                })
+                .expect("scan recovered config rows");
+            assert_eq!(recovered_rows, 1);
             assert_eq!(recovered.legacy_red_config_key_count().unwrap(), 0);
         }
+    }
+
+    #[test]
+    fn canonical_system_config_recovery_promotes_empty_legacy_root() {
+        use crate::storage::wal::{WalRecord, WalWriter};
+
+        let fixture = single_empty_legacy_system_catalog_fixture();
+        let wal = reddb_file::unified_wal_path(&fixture.path);
+        let action = reddb_file::encode_store_wal_action_frame(
+            &reddb_file::StoreWalActionFrame::CreateCollection {
+                name: "pending_collection".into(),
+            },
+        )
+        .expect("encode pending action");
+        {
+            let mut writer = WalWriter::open(&wal).expect("open WAL");
+            writer
+                .append(&WalRecord::TxCommitBatch {
+                    tx_id: 1000,
+                    actions: vec![action],
+                })
+                .expect("append committed WAL");
+            writer.sync().expect("sync WAL");
+        }
+        let destination = fixture
+            ._directory
+            .path()
+            .join("recovered-empty-legacy-config");
+
+        let report = crate::storage::compact::recover_paged_wal_canonical_system_config(
+            &fixture.path,
+            &destination,
+        )
+        .expect("recover and promote the empty legacy config root");
+
+        assert_eq!(report.reconciled_system_collections, 1);
+        assert_eq!(report.imported_system_records, 0);
+        for _ in 0..2 {
+            let recovered = UnifiedStore::open_with_config(
+                destination.join("data.rdb"),
+                fixture.config.clone(),
+            )
+            .expect("cold reopen recovered store");
+            let mut collections = recovered.list_collections();
+            collections.sort();
+            assert_eq!(collections, ["pending_collection", "red.config"]);
+            assert_eq!(
+                recovered
+                    .get_collection("red.config")
+                    .expect("canonical config root")
+                    .count(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_system_config_compaction_promotes_empty_legacy_root() {
+        let fixture = single_empty_legacy_system_catalog_fixture();
+        let destination = fixture
+            ._directory
+            .path()
+            .join("compacted-empty-legacy-config");
+
+        let report = crate::storage::compact::compact_paged_canonical_system_config(
+            &fixture.path,
+            &destination,
+        )
+        .expect("compact and promote the empty legacy config root");
+
+        assert_eq!(report.reconciled_system_collections, 1);
+        assert_eq!(report.imported_system_records, 0);
+        let compacted =
+            UnifiedStore::open_with_config(destination.join("data.rdb"), fixture.config.clone())
+                .expect("cold reopen compacted store");
+        assert_eq!(compacted.list_collections(), ["red.config"]);
+        assert_eq!(
+            compacted
+                .get_collection("red.config")
+                .expect("canonical config root")
+                .count(),
+            0
+        );
     }
 
     #[test]
