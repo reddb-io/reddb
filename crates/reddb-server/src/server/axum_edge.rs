@@ -101,6 +101,49 @@ const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 /// single connection can open before the in-flight caps see it.
 const MAX_CONCURRENT_HTTP2_STREAMS: u32 = 256;
 
+/// Cancels a buffered engine call if its async request future disappears before
+/// observing the blocking worker's completion. Hyper may drop that future when
+/// the client disconnects, so relying only on the handler timeout would strand
+/// the worker and its admission permits without degrading readiness.
+struct BufferedExecutionCancellation<'a> {
+    cancellation: &'a crate::runtime::query_budget::RequestCancellation,
+    ticket: Option<&'a Arc<super::execution_watchdog::ExecutionTicket>>,
+    armed: bool,
+}
+
+impl<'a> BufferedExecutionCancellation<'a> {
+    fn new(
+        cancellation: &'a crate::runtime::query_budget::RequestCancellation,
+        ticket: Option<&'a Arc<super::execution_watchdog::ExecutionTicket>>,
+    ) -> Self {
+        Self {
+            cancellation,
+            ticket,
+            armed: true,
+        }
+    }
+
+    fn cancel_if_running(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        if self.ticket.is_some_and(|ticket| ticket.mark_timed_out()) {
+            self.cancellation.cancel();
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for BufferedExecutionCancellation<'_> {
+    fn drop(&mut self) {
+        self.cancel_if_running();
+    }
+}
+
 /// State threaded into the axum fallback handler. Carries a cheap clone of
 /// the server plus which transport this listener represents (so reject /
 /// duration metrics land in the right bucket).
@@ -412,6 +455,8 @@ impl RedDBServer {
         let worker_ticket = execution_ticket.clone();
         let cancellation = crate::runtime::query_budget::RequestCancellation::new();
         let worker_cancellation = cancellation.clone();
+        let mut execution_cancellation =
+            BufferedExecutionCancellation::new(&cancellation, execution_ticket.as_ref());
         let join = tokio::task::spawn_blocking(move || {
             let _execution_completion = worker_ticket.as_ref().map(|ticket| ticket.completion());
             let _cancellation_scope = worker_cancellation.install();
@@ -438,17 +483,20 @@ impl RedDBServer {
         });
         let remaining = self.handler_timeout.saturating_sub(started.elapsed());
         match tokio::time::timeout(remaining, join).await {
-            Ok(Ok(response)) => buffered_response_to_axum(response),
-            Ok(Err(_join_err)) => internal_error_response(),
+            Ok(Ok(response)) => {
+                execution_cancellation.disarm();
+                buffered_response_to_axum(response)
+            }
+            Ok(Err(_join_err)) => {
+                execution_cancellation.disarm();
+                internal_error_response()
+            }
             Err(_elapsed) => {
                 // Dropping a JoinHandle does not stop spawn_blocking work.
                 // Signal the transport-neutral query budget so cooperative
                 // engine checkpoints unwind the worker and release both
                 // admission permits instead of leaving capacity stranded.
-                cancellation.cancel();
-                if let Some(ticket) = execution_ticket {
-                    ticket.mark_timed_out();
-                }
+                execution_cancellation.cancel_if_running();
                 self.http_metrics
                     .record_reject(transport, HttpRejectReason::HandlerTimeout);
                 self.reject_capacity_response(
@@ -1147,6 +1195,94 @@ mod tests {
             out.push(item.expect("frame ok").to_vec());
         }
         out
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn aborted_http_future_cancels_worker_and_marks_readiness_unready() {
+        let runtime = crate::runtime::RedDBRuntime::in_memory().expect("runtime");
+        let server = RedDBServer::new(runtime)
+            .with_http_execution_workers(1)
+            .with_handler_timeout(Duration::from_secs(30));
+        server.set_test_slow_inject_ms(u64::MAX);
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/query")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"query":"SELECT 1"}"#))
+            .expect("request");
+        let request_server = server.clone();
+        let request_task = tokio::spawn(async move {
+            request_server
+                .handle_edge_request(request, HttpTransport::Http)
+                .await
+        });
+
+        for _ in 0..100 {
+            if server.http_execution_active() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            server.http_execution_active(),
+            1,
+            "query worker did not start"
+        );
+
+        request_task.abort();
+        assert!(
+            request_task
+                .await
+                .expect_err("request future must abort")
+                .is_cancelled(),
+            "request task must be cancelled"
+        );
+        let ready_while_worker_is_stuck = server.execution_watchdog.is_ready();
+
+        server.set_test_slow_inject_ms(0);
+        for _ in 0..100 {
+            if server.http_execution_active() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            server.http_execution_active(),
+            0,
+            "query worker did not exit"
+        );
+        assert!(
+            !ready_while_worker_is_stuck,
+            "dropping the HTTP future must cancel and mark its blocking worker unready"
+        );
+        assert!(
+            server.execution_watchdog.is_ready(),
+            "readiness must recover after the worker exits"
+        );
+    }
+
+    #[test]
+    fn completed_worker_is_not_cancelled_when_request_future_drops_late() {
+        let watchdog = super::super::execution_watchdog::ExecutionWatchdog::default();
+        let ticket = watchdog.start();
+        drop(ticket.completion());
+
+        let cancellation = crate::runtime::query_budget::RequestCancellation::new();
+        let _cancellation_scope = cancellation.install();
+        drop(BufferedExecutionCancellation::new(
+            &cancellation,
+            Some(&ticket),
+        ));
+
+        assert!(
+            crate::runtime::query_budget::charge(0).is_ok(),
+            "a completed worker must not be cancelled by a late future drop"
+        );
+        assert!(
+            watchdog.is_ready(),
+            "a completed worker must not degrade readiness"
+        );
     }
 
     #[test]

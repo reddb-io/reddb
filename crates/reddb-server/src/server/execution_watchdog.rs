@@ -39,7 +39,7 @@ impl ExecutionTicket {
         ExecutionCompletion(Arc::clone(self))
     }
 
-    pub(crate) fn mark_timed_out(&self) {
+    pub(crate) fn mark_timed_out(&self) -> bool {
         // Reserve the aggregate slot before publishing TIMED_OUT. Otherwise a
         // concurrent completion can observe TIMED_OUT and decrement the
         // aggregate before this thread increments it.
@@ -50,7 +50,9 @@ impl ExecutionTicket {
             .is_err()
         {
             self.timed_out_inflight.fetch_sub(1, Ordering::AcqRel);
+            return false;
         }
+        true
     }
 
     fn mark_completed(&self) {
