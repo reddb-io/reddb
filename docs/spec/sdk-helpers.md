@@ -355,6 +355,14 @@ bind a collection explicitly. Cache scope is only exposed where the transport
 implements real cache operations; query-only drivers MUST NOT emulate cache
 with KV and claim equivalent semantics.
 
+Runtime-specific cancellation is allowed only when it preserves the settlement
+ordering above. Future/coroutine runtimes cancel and join the handler; native
+thread runtimes set a cooperative cancellation flag and join; synchronous PHP
+handlers expose a checkpoint context and are timed only after returning. A
+driver MUST publish these mechanics and MUST NOT NACK while user code is still
+running. Process- or thread-oriented drivers MAY require one lane per worker
+and use multiple workers for parallelism.
+
 ## 7. Transactions — `tx.*`
 
 ### 7.1 `tx.begin()`, `tx.commit()`, `tx.rollback()`
