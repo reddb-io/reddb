@@ -122,4 +122,3 @@ unexpected growth is a blocker even if dependency count is unchanged.
   validation must not be described as full conformance validation.
 - The addition is minor-version work because it adds SQL, wire tags, persistent
   value tags, and a required file capability without changing existing values.
-
