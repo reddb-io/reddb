@@ -32,7 +32,7 @@ use reddb_server::{RedDBOptions, RedDBRuntime};
 use reddb_types::Value;
 use reddb_wire::redwire::{
     build_auth_response_anonymous_payload, build_auth_response_bearer_payload,
-    build_auth_response_frame, build_client_hello_frame, build_ping_frame,
+    build_auth_response_frame, build_client_hello_frame, build_ping_frame, build_query_frame,
     build_queue_wait_open_frame, read_frame_async, write_frame_async, Frame, MessageKind,
     QueueWaitOpenRequest, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC,
 };
@@ -368,6 +368,56 @@ async fn wait_opened_then_post_open_push_is_delivered() {
         &metrics,
         "queue_wait_duration_ms_count{queue=\"jobs\",scope=\"\"} 1",
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_waiters_do_not_consume_execution_workers() {
+    let server = start_server().await;
+    let execution_limits =
+        RedDBServer::new(server.runtime.as_ref().clone()).with_http_execution_workers(2);
+    server
+        .runtime
+        .execute_query("CREATE QUEUE jobs")
+        .expect("create queue");
+    server
+        .runtime
+        .execute_query("QUEUE GROUP CREATE jobs workers")
+        .expect("create group");
+
+    let mut waiter_one = connect_and_handshake(server.addr).await;
+    let mut waiter_two = connect_and_handshake(server.addr).await;
+    write_frame(
+        &mut waiter_one,
+        &queue_wait_open_with(101, 1, "jobs", "worker1", 1, 5_000),
+    )
+    .await;
+    write_frame(
+        &mut waiter_two,
+        &queue_wait_open_with(102, 2, "jobs", "worker2", 1, 5_000),
+    )
+    .await;
+    wait_for_waiters(&server.runtime, "", "jobs", 2).await;
+
+    assert_eq!(execution_limits.http_execution_workers(), 2);
+    assert_eq!(execution_limits.http_execution_active(), 0);
+
+    let mut query_client = connect_and_handshake(server.addr).await;
+    write_frame(
+        &mut query_client,
+        &build_query_frame(103, "QUEUE LEN jobs").expect("query frame"),
+    )
+    .await;
+    let response = timeout(Duration::from_secs(1), read_frame_async(&mut query_client))
+        .await
+        .expect("normal query must not wait behind live queue waiters")
+        .expect("read query response");
+    assert_eq!(response.kind, MessageKind::Result);
+    assert_eq!(response.correlation_id, 103);
+
+    server.runtime.queue_wait_registry().cancel_all();
+    let _ = read_frame(&mut waiter_one).await;
+    let _ = read_frame(&mut waiter_two).await;
+    server.runtime.queue_wait_registry().reset_cancelled();
 }
 
 #[test]

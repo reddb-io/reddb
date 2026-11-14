@@ -132,6 +132,18 @@ final class HelpersTest extends TestCase
         (new Helpers(new FakeQuerier()))->kv()->list(['limit' => -1]);
     }
 
+    public function testSecretsAreBoundToExplicitCollection(): void
+    {
+        $fq = (new FakeQuerier())
+            ->reply(['affected' => 1])
+            ->reply(['rows' => [['key' => 'token']]]);
+        $secrets = (new Helpers($fq))->secrets('app.prod');
+        $secrets->put('token', 'secret');
+        $secrets->get('token');
+        $this->assertStringStartsWith('VAULT PUT app.prod.token', $fq->calls[0]['sql']);
+        $this->assertSame('VAULT GET app.prod.token', $fq->calls[1]['sql']);
+    }
+
     public function testQueuePushEmitsPriorityAndPayload(): void
     {
         $fq = (new FakeQuerier())->reply(['affected' => 1]);
@@ -166,6 +178,22 @@ final class HelpersTest extends TestCase
     {
         $this->expectException(InvalidArgument::class);
         (new Helpers(new FakeQuerier()))->queue()->push('bad-name!', 'x');
+    }
+
+    public function testScopedQueuePreservesDeliveryIdAndAcks(): void
+    {
+        $fq = (new FakeQuerier())
+            ->reply(['rows' => [[
+                'message_id' => 'm1',
+                'delivery_id' => 'd1',
+                'payload' => 'work',
+            ]]])
+            ->reply(['affected' => 1]);
+        $queue = (new Helpers($fq))->queue('jobs');
+        $messages = $queue->readWait('worker', ['waitMs' => 1_000]);
+        $this->assertSame('d1', $messages[0]->deliveryId);
+        $queue->ack('d1');
+        $this->assertStringStartsWith('QUEUE ACK jobs', $fq->calls[1]['sql']);
     }
 
     public function testDocumentsInsertReturnsRidEnvelope(): void

@@ -149,7 +149,12 @@ The client follows the SDK Helper Spec for the shared JS/TS surface:
   fields.
 - `db.kv(collection?)` preserves exact keys, including namespaced keys such as
   `characters:hansel`, and exposes `put/get/exists/delete/list`.
-- `db.queue` exposes `push/pop/peek/len/purge`.
+- `db.queue` exposes `push/pop/peek/len/purge/readWait/readWaitEntries`.
+  On RedWire, a single-message `readWait` uses the native async queue-wait
+  frame, so an idle consumer does not occupy an engine execution worker.
+  `readWaitEntries` preserves `message_id`, `consumer`, and `delivery_count`
+  for ACK/NACK handling. Multi-message waits retain the SQL compatibility
+  path until the wire protocol has an explicit terminal frame.
 
 ## Accepted URI schemes
 

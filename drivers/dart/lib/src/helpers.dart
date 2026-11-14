@@ -29,11 +29,19 @@ class Helpers {
   /// KV namespace bound to the default collection (``kv_default``).
   KvClient get kv => KvClient(_q);
 
+  /// KV client bound to one explicit collection.
+  KvClient kvNamed(String collection) => KvClient(_q, collection: collection);
+
+  SecretsClient secrets(String collection) => SecretsClient(_q, collection);
+
   /// Queue namespace (spec-canonical alias of [queue]).
   QueueClient get queues => QueueClient(_q);
 
   /// Single-handle queue namespace (legacy singular alias).
   QueueClient get queue => QueueClient(_q);
+
+  /// Queue client bound to one explicit queue name.
+  ScopedQueueClient queueNamed(String name) => QueueClient(_q).scope(name);
 
   /// Imperative transaction client (`begin`/`commit`/`rollback` +
   /// optional callback form). See spec §7.
@@ -85,6 +93,56 @@ class QueuePushResult {
 
   final int affected;
   final String? rid;
+}
+
+class SecretsClient {
+  SecretsClient(this._q, this.collection) {
+    _vaultPart(collection, 'vault collection');
+  }
+
+  final Querier _q;
+  final String collection;
+
+  Future<void> put(String key, Object? value) async {
+    await _q.query('VAULT PUT ${_path(key)} = ${_kvValueLiteral(value)}');
+  }
+
+  Future<Map<String, Object?>?> get(String key) => _read('GET', key);
+  Future<Map<String, Object?>?> reveal(String key) => _read('REVEAL', key);
+
+  Future<Map<String, Object?>?> _read(String verb, String key) async {
+    final body = await _q.query('VAULT $verb ${_path(key)}');
+    return _firstRow(body).$1;
+  }
+
+  String _path(String key) {
+    _vaultPart(key, 'vault key');
+    return '$collection.$key';
+  }
+
+  static void _vaultPart(String value, String label) {
+    if (!RegExp(r'^[A-Za-z0-9_.]+$').hasMatch(value)) {
+      throw InvalidArgument('invalid $label');
+    }
+  }
+}
+
+class QueueMessage {
+  QueueMessage({
+    required this.messageId,
+    required this.deliveryId,
+    required this.payload,
+    required this.consumer,
+    required this.deliveryCount,
+    required this.raw,
+  });
+
+  final String messageId;
+  final String deliveryId;
+  final Object? payload;
+  final String? consumer;
+  final int deliveryCount;
+  final Map<String, Object?> raw;
 }
 
 // --- Documents -------------------------------------------------------
@@ -151,7 +209,8 @@ class DocumentClient {
     Map<String, Object?> patch,
   ) async {
     if (patch.isEmpty) {
-      throw InvalidArgument('documents.patch requires a non-empty patch object');
+      throw InvalidArgument(
+          'documents.patch requires a non-empty patch object');
     }
     final parts = <String>[];
     patch.forEach((field, value) {
@@ -234,8 +293,7 @@ class KvClient {
     List<String>? tags,
     int? expireMs,
   }) =>
-      put(key, value,
-          collection: collection, tags: tags, expireMs: expireMs);
+      put(key, value, collection: collection, tags: tags, expireMs: expireMs);
 
   Future<void> put(
     String key,
@@ -248,9 +306,8 @@ class KvClient {
         ? this.collection
         : collection;
     final lit = _kvValueLiteral(value);
-    final expire = (expireMs != null && expireMs > 0)
-        ? ' EXPIRE $expireMs ms'
-        : '';
+    final expire =
+        (expireMs != null && expireMs > 0) ? ' EXPIRE $expireMs ms' : '';
     final tagClause = (tags == null || tags.isEmpty)
         ? ''
         : ' TAGS [${tags.map(_kvTagLiteral).join(', ')}]';
@@ -313,6 +370,11 @@ class QueueClient {
   QueueClient(this._q);
 
   final Querier _q;
+
+  ScopedQueueClient scope(String name) {
+    _assertIdentifier(name, 'queue name');
+    return ScopedQueueClient(this, name);
+  }
 
   /// Idempotent `CREATE QUEUE IF NOT EXISTS`.
   Future<void> create(String queue) async {
@@ -390,6 +452,23 @@ class QueueClient {
     String? group,
     int? count,
   }) async {
+    final messages = await readWaitEntries(
+      queue,
+      consumer,
+      wait: wait,
+      group: group,
+      count: count,
+    );
+    return messages.map((message) => message.payload).toList();
+  }
+
+  Future<List<QueueMessage>> readWaitEntries(
+    String queue,
+    String consumer, {
+    required Duration wait,
+    String? group,
+    int? count,
+  }) async {
     _assertIdentifier(queue, 'queue name');
     _assertIdentifier(consumer, 'consumer name');
     if (wait.isNegative) {
@@ -413,7 +492,183 @@ class QueueClient {
     final sql =
         'QUEUE READ ${_sqlIdentifier(queue)}$groupClause CONSUMER ${_sqlIdentifier(consumer)}$countClause WAIT ${waitMs}ms';
     final body = await _q.query(sql);
-    return _allRows(body).map((r) => r['payload']).toList();
+    return _allRows(body)
+        .map(
+          (row) => QueueMessage(
+            messageId: row['message_id']?.toString() ?? '',
+            deliveryId: row['delivery_id']?.toString() ?? '',
+            payload: row['payload'],
+            consumer: row['consumer']?.toString(),
+            deliveryCount: (row['delivery_count'] as num?)?.toInt() ?? 0,
+            raw: row,
+          ),
+        )
+        .toList();
+  }
+
+  Future<void> ack(String queue, String deliveryId) async {
+    if (deliveryId.isEmpty) {
+      throw InvalidArgument('queue delivery_id must be non-empty');
+    }
+    await _q.query(
+      'QUEUE ACK ${_sqlIdentifier(queue)} WITH delivery_id = '
+      '${_kvTagLiteral(deliveryId)}',
+    );
+  }
+
+  Future<void> nack(
+    String queue,
+    String deliveryId, {
+    String? delay,
+  }) async {
+    if (deliveryId.isEmpty) {
+      throw InvalidArgument('queue delivery_id must be non-empty');
+    }
+    var delayClause = '';
+    if (delay != null && delay.isNotEmpty) {
+      if (!RegExp(
+        r'^\d+(?:\.\d+)?(?:ms|s|sec|secs|m|min|mins|h|hr|hrs|d|day|days)?$',
+      ).hasMatch(delay)) {
+        throw InvalidArgument('invalid queue retry delay');
+      }
+      delayClause = ' WITH DELAY $delay';
+    }
+    await _q.query(
+      'QUEUE NACK ${_sqlIdentifier(queue)} WITH delivery_id = '
+      '${_kvTagLiteral(deliveryId)}$delayClause',
+    );
+  }
+}
+
+class ScopedQueueClient {
+  ScopedQueueClient(this._queue, this.name);
+
+  final QueueClient _queue;
+  final String name;
+
+  Future<QueuePushResult> push(Object? value, {int? priority}) =>
+      _queue.push(name, value, priority: priority);
+  Future<List<Object?>> pop({int? count}) => _queue.pop(name, count: count);
+  Future<List<Object?>> peek({int? count}) => _queue.peek(name, count: count);
+  Future<int> len() => _queue.len(name);
+  Future<DeleteResult> purge() => _queue.purge(name);
+  Future<List<QueueMessage>> readWait(
+    String consumer, {
+    required Duration wait,
+    String? group,
+    int? count,
+  }) =>
+      _queue.readWaitEntries(
+        name,
+        consumer,
+        wait: wait,
+        group: group,
+        count: count,
+      );
+  Future<void> ack(String deliveryId) => _queue.ack(name, deliveryId);
+  Future<void> nack(String deliveryId, {String? delay}) =>
+      _queue.nack(name, deliveryId, delay: delay);
+  QueueConsumer consumer(QueueConsumerOptions options) =>
+      QueueConsumer(this, options);
+}
+
+typedef QueueMessageHandler = Future<void> Function(QueueMessage message);
+typedef QueueErrorHandler = Future<void> Function(
+  Object error,
+  QueueMessage? message,
+);
+
+class QueueConsumerOptions {
+  QueueConsumerOptions({
+    required this.consumer,
+    required this.handler,
+    this.group,
+    this.wait = const Duration(seconds: 30),
+    this.retryDelay,
+    this.onError,
+  });
+
+  final String consumer;
+  final String? group;
+  final Duration wait;
+  final String? retryDelay;
+  final QueueMessageHandler handler;
+  final QueueErrorHandler? onError;
+}
+
+/// Sequential at-least-once worker. Use one dedicated connection per worker.
+class QueueConsumer {
+  QueueConsumer(this._queue, this._options) {
+    _assertIdentifier(_options.consumer, 'consumer name');
+    final group = _options.group;
+    if (group != null && group.isNotEmpty) {
+      _assertIdentifier(group, 'group name');
+    }
+    if (_options.wait.isNegative) {
+      throw InvalidArgument('queue consumer wait must be non-negative');
+    }
+  }
+
+  final ScopedQueueClient _queue;
+  final QueueConsumerOptions _options;
+  bool _stopping = false;
+  Future<void>? _completion;
+
+  QueueConsumer start() {
+    if (_completion != null) {
+      throw InvalidArgument('queue consumer already started');
+    }
+    _completion = _run();
+    return this;
+  }
+
+  Future<void> stop() async {
+    _stopping = true;
+    await _completion;
+  }
+
+  Future<void> get completion => _completion ?? Future.value();
+
+  Future<void> _run() async {
+    while (!_stopping) {
+      List<QueueMessage> messages;
+      try {
+        messages = await _queue.readWait(
+          _options.consumer,
+          wait: _options.wait,
+          group: _options.group,
+          count: 1,
+        );
+      } catch (error) {
+        final onError = _options.onError;
+        if (onError == null) rethrow;
+        await onError(error, null);
+        continue;
+      }
+      if (messages.isEmpty) continue;
+      final message = messages.first;
+      try {
+        if (message.deliveryId.isEmpty) {
+          throw InvalidResponse('queue delivery is missing delivery_id');
+        }
+        await _options.handler(message);
+      } catch (error) {
+        if (message.deliveryId.isNotEmpty) {
+          await _queue.nack(message.deliveryId, delay: _options.retryDelay);
+        }
+        final onError = _options.onError;
+        if (onError == null) rethrow;
+        await onError(error, message);
+        continue;
+      }
+      try {
+        await _queue.ack(message.deliveryId);
+      } catch (error) {
+        final onError = _options.onError;
+        if (onError == null) rethrow;
+        await onError(error, message);
+      }
+    }
   }
 }
 
@@ -509,7 +764,8 @@ String _kvValueLiteral(Object? value) {
   return "'${s.replaceAll('\\', '\\\\').replaceAll("'", "''")}'";
 }
 
-String _kvTagLiteral(String tag) => "'${tag.replaceAll('\\', '\\\\').replaceAll("'", "''")}'";
+String _kvTagLiteral(String tag) =>
+    "'${tag.replaceAll('\\', '\\\\').replaceAll("'", "''")}'";
 
 String _queueValueLiteral(Object? value) {
   if (value == null) return 'NULL';

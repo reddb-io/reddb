@@ -47,9 +47,9 @@ import { connectRouted } from './core/routing.js'
 
 export { RedDBError, EmbeddedNotSupported, EMBEDDED_REJECTION_MESSAGE, isEmbeddedUri }
 export { RowReadable, RowWritable } from './streaming-web.js'
-export { CacheClient } from './cache.js'
+export { CacheClient, ScopedCacheClient } from './cache.js'
 export { KvClient } from './kv.js'
-export { QueueClient } from './queue.js'
+export { QueueClient, ScopedQueueClient, QueueConsumer } from './queue.js'
 export { DocumentClient } from './documents.js'
 export { ConfigClient } from './config.js'
 export { VaultClient } from './vault.js'

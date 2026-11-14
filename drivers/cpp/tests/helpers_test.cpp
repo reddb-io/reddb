@@ -146,6 +146,18 @@ TEST(KV, ListRejectsNegativeLimit) {
 
 // ---------------------------------------------------------------- Queue
 
+TEST(Secrets, BoundToExplicitCollection) {
+    auto fq = make_fake();
+    fq->replies.push_back(R"({"affected":1})");
+    fq->replies.push_back(R"({"rows":[{"key":"token"}]})");
+    Helpers h(fq);
+    auto secrets = h.secrets("app.prod");
+    secrets.put("token", JsonValue::make_string("secret"));
+    secrets.get("token");
+    EXPECT_EQ(fq->calls[0].sql.rfind("VAULT PUT app.prod.token", 0), 0u);
+    EXPECT_EQ(fq->calls[1].sql, "VAULT GET app.prod.token");
+}
+
 TEST(Queue, PushEmitsPriorityAndPayload) {
     auto fq = make_fake();
     fq->replies.push_back(R"({"affected":1})");
@@ -198,6 +210,20 @@ TEST(Queue, PushRejectsInvalidIdentifier) {
     } catch (const HelperError& e) {
         EXPECT_EQ(e.code(), HelperError::Code::InvalidArgument);
     }
+}
+
+TEST(Queue, ScopedQueuePreservesDeliveryIdAndAcks) {
+    auto fq = make_fake();
+    fq->replies.push_back(
+        R"({"rows":[{"message_id":"m1","delivery_id":"d1","payload":"work"}]})");
+    fq->replies.push_back(R"({"affected":1})");
+    Helpers h(fq);
+    auto queue = h.queue("jobs");
+    auto messages = queue.read_wait("worker", 1000);
+    ASSERT_EQ(messages.size(), 1u);
+    EXPECT_EQ(messages[0].delivery_id, "d1");
+    queue.ack("d1");
+    EXPECT_EQ(fq->calls[1].sql.rfind("QUEUE ACK jobs", 0), 0u);
 }
 
 // ---------------------------------------------------------------- Documents

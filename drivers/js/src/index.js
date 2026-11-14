@@ -32,9 +32,9 @@ import { VaultClient } from './vault.js'
 import { TypedQueryBuilder, collectionExists, listCollections } from './db-helpers.js'
 
 export { RedDBError }
-export { CacheClient } from './cache.js'
+export { CacheClient, ScopedCacheClient } from './cache.js'
 export { KvClient } from './kv.js'
-export { QueueClient } from './queue.js'
+export { QueueClient, ScopedQueueClient, QueueConsumer } from './queue.js'
 export { DocumentClient } from './documents.js'
 export { ConfigClient } from './config.js'
 export { VaultClient } from './vault.js'
@@ -56,6 +56,17 @@ const NESTED_TX_NOT_SUPPORTED = 'NESTED_TX_NOT_SUPPORTED'
 const MIN_I64 = -(1n << 63n)
 const MAX_I64 = (1n << 63n) - 1n
 const MAX_U64 = (1n << 64n) - 1n
+
+function callableClient(instance, createScope) {
+  const callable = (...args) => createScope(...args)
+  Object.defineProperty(callable, '__reddbClientInstance', { value: instance })
+  Object.assign(callable, instance)
+  for (const name of Object.getOwnPropertyNames(Object.getPrototypeOf(instance))) {
+    if (name === 'constructor' || typeof instance[name] !== 'function') continue
+    callable[name] = instance[name].bind(instance)
+  }
+  return callable
+}
 
 /**
  * Connect to a RedDB instance.
@@ -461,14 +472,21 @@ export class RedDB {
     this.client = client
     this.transport = opts.transport ?? null
     this.helperSpecVersion = HELPER_SPEC_VERSION
-    this.cache = new CacheClient(client, this.transport)
-    this.queue = new QueueClient(client)
+    const cacheClient = new CacheClient(client, this.transport)
+    this.cache = callableClient(cacheClient, (namespace) => cacheClient.scope(namespace))
+    const queueClient = new QueueClient(client)
+    this.queue = callableClient(queueClient, (queue) => queueClient.scope(queue))
     // Spec §6: the canonical namespace is the plural `queues`. `queue` is kept
     // as a back-compat alias to the same handle.
     this.queues = this.queue
     this.documents = new DocumentClient(this)
     const defaultKv = new KvClient(client)
-    this.kv = Object.assign((collection = 'kv_default') => new KvClient(client, collection), {
+    this.kv = Object.assign((collection) => {
+      if (typeof collection !== 'string' || collection.length === 0) {
+        throw new TypeError('kv(collection) requires a non-empty collection')
+      }
+      return new KvClient(client, collection)
+    }, {
       put: defaultKv.put.bind(defaultKv),
       invalidateTags: defaultKv.invalidateTags.bind(defaultKv),
       watch: defaultKv.watch.bind(defaultKv),
@@ -476,6 +494,12 @@ export class RedDB {
     })
     this.config = (collection = 'red.config') => new ConfigClient(client, collection)
     this.vault = (collection = 'red.vault') => new VaultClient(client, collection)
+    this.secrets = (collection) => {
+      if (typeof collection !== 'string' || collection.length === 0) {
+        throw new TypeError('secrets(collection) requires a non-empty collection')
+      }
+      return new VaultClient(client, collection)
+    }
     this.inTransaction = false
   }
 

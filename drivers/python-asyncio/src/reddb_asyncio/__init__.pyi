@@ -4,6 +4,7 @@ from .client import (
     DocumentClient as DocumentClient,
     KvClient as KvClient,
     QueueClient as QueueClient,
+    SecretsClient as SecretsClient,
     Reddb as Reddb,
 )
 from .errors import (

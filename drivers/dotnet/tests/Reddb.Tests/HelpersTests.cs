@@ -58,6 +58,18 @@ public class HelpersTests
         Assert.Contains("kv_default.'corpus:version'", fq.Sqls[0]);
     }
 
+    [Fact] public async Task Secrets_AreBoundToExplicitCollection()
+    {
+        var fq = new FakeQuerier()
+            .Reply(M(("affected", 1)))
+            .Reply(M(("rows", new[] { M(("key", "token"), ("value", "redacted")) })));
+        var secrets = new Helpers.Helpers(fq).Secrets("app.prod");
+        await secrets.PutAsync("token", "secret");
+        await secrets.GetAsync("token");
+        Assert.StartsWith("VAULT PUT app.prod.token", fq.Sqls[0]);
+        Assert.Equal("VAULT GET app.prod.token", fq.Sqls[1]);
+    }
+
     [Fact] public async Task Kv_Set_PreservesDotsAndSlashes()
     {
         var fq = new FakeQuerier().Reply(M());
@@ -173,6 +185,23 @@ public class HelpersTests
     {
         await Assert.ThrowsAsync<HelperException.InvalidArgument>(
             async () => await new Helpers.Helpers(new FakeQuerier()).Queue().PushAsync("bad-name!", "x"));
+    }
+
+    [Fact] public async Task Queue_Scope_PreservesDeliveryMetadataAndAcks()
+    {
+        var row = M(
+            ("message_id", "m1"),
+            ("delivery_id", "d1"),
+            ("payload", "work"),
+            ("delivery_count", 2));
+        var fq = new FakeQuerier()
+            .Reply(M(("rows", new[] { row })))
+            .Reply(M(("affected", 1)));
+        var queue = new Helpers.Helpers(fq).Queue("jobs");
+        var messages = await queue.ReadWaitAsync("worker", TimeSpan.FromSeconds(1));
+        Assert.Equal("d1", Assert.Single(messages).DeliveryId);
+        await queue.AckAsync("d1");
+        Assert.Contains("QUEUE ACK jobs", fq.Sqls[1]);
     }
 
     // --- Documents ---------------------------------------------------

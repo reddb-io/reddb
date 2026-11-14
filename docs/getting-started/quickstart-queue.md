@@ -43,16 +43,48 @@ QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 1;
 ```
 
 ```text
- payload | consumer
----------+---------
- job-1   | worker1
+ payload | consumer | delivery_id
+---------+----------+-------------------
+ job-1   | worker1  | <opaque-delivery>
 ```
 
-Acknowledge the message with `QUEUE ACK tasks GROUP workers '<message_id>'`
-once the work is done, or it will be redelivered.
+Acknowledge the message with
+`QUEUE ACK tasks WITH delivery_id = '<opaque-delivery>'` once the work is done,
+or it will be redelivered. Treat `delivery_id` as opaque and return it unchanged.
+
+## 5. Run an application worker
+
+Official SDKs provide a long-running worker that performs the server-side
+wait, invokes the handler, ACKs success, and NACKs failure. JavaScript example:
+
+```javascript
+const worker = db.queue('tasks').consumer({
+  consumer: 'worker-1',
+  group: 'workers',
+  waitMs: 30_000,
+  retryDelay: '5s',
+  async handleMessage(message) {
+    await processJob(message.payload)
+  },
+})
+
+worker.start()
+
+process.once('SIGTERM', async () => {
+  await worker.stop()
+  await db.close()
+})
+```
+
+`QUEUE READ ... WAIT` is a server-side wait, not interval polling. The worker
+is sequential by default and only reads the next delivery after ACK/NACK. Run
+one worker on a dedicated connection in each pod; two pods already give two
+independent consumers. Handlers must be idempotent because delivery is at
+least once.
 
 ## Where to go next
 
 - [Queues & Deques](/data-models/queues.md) — the full queue model
+- [Application clients & queue workers](/clients/application-clients.md) — all SDK APIs and lifecycle guarantees
 - [Events](/data-models/events.md) — pub/sub over the same engine
 - [Event Workflow](/data-models/event-workflow.md) — multi-stage processing

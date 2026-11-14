@@ -31,6 +31,17 @@ import { TypedQueryBuilder, collectionExists, listCollections } from '../db-help
 
 const NESTED_TX_NOT_SUPPORTED = 'NESTED_TX_NOT_SUPPORTED'
 
+function callableClient(instance, createScope) {
+  const callable = (...args) => createScope(...args)
+  Object.defineProperty(callable, '__reddbClientInstance', { value: instance })
+  Object.assign(callable, instance)
+  for (const name of Object.getOwnPropertyNames(Object.getPrototypeOf(instance))) {
+    if (name === 'constructor' || typeof instance[name] !== 'function') continue
+    callable[name] = instance[name].bind(instance)
+  }
+  return callable
+}
+
 /**
  * Connection handle. Methods map 1:1 to JSON-RPC methods on the server.
  * Identical surface to `@reddb-io/sdk`'s `RedDB`, minus the local-spawn
@@ -105,11 +116,19 @@ export class RedDB {
   constructor(client, streaming) {
     this.client = client
     this._streaming = streaming ?? null
-    this.cache = new CacheClient(client)
-    this.queue = new QueueClient(client)
+    const cacheClient = new CacheClient(client)
+    this.cache = callableClient(cacheClient, (namespace) => cacheClient.scope(namespace))
+    const queueClient = new QueueClient(client)
+    this.queue = callableClient(queueClient, (queue) => queueClient.scope(queue))
+    this.queues = this.queue
     this.documents = new DocumentClient(this)
     const defaultKv = new KvClient(client)
-    this.kv = Object.assign((collection = 'kv_default') => new KvClient(client, collection), {
+    this.kv = Object.assign((collection) => {
+      if (typeof collection !== 'string' || collection.length === 0) {
+        throw new TypeError('kv(collection) requires a non-empty collection')
+      }
+      return new KvClient(client, collection)
+    }, {
       put: defaultKv.put.bind(defaultKv),
       invalidateTags: defaultKv.invalidateTags.bind(defaultKv),
       watch: defaultKv.watch.bind(defaultKv),
@@ -117,6 +136,12 @@ export class RedDB {
     })
     this.config = (collection = 'red.config') => new ConfigClient(client, collection)
     this.vault = (collection = 'red.vault') => new VaultClient(client, collection)
+    this.secrets = (collection) => {
+      if (typeof collection !== 'string' || collection.length === 0) {
+        throw new TypeError('secrets(collection) requires a non-empty collection')
+      }
+      return new VaultClient(client, collection)
+    }
     this.inTransaction = false
   }
 

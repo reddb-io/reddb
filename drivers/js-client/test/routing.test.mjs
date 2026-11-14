@@ -104,6 +104,34 @@ test('legacy server without discovery keeps a working seed connection', async ()
   await client.close()
 })
 
+test('routing preserves native queue-wait capability and sends waits to the primary', async () => {
+  const primary = 'red://primary:5050'
+  const calls = []
+  const transport = {
+    binaryQueryParams: true,
+    nativeQueueWait: true,
+    async call(method, params) {
+      calls.push({ method, params })
+      if (method === 'topology') {
+        return { version: 1, primary: { addr: primary }, replicas: [] }
+      }
+      return { rows: [] }
+    },
+    async close() {},
+  }
+  const client = await new RoutingClient(primary, transport, async () => transport, 'red').initialize()
+
+  assert.equal(client.nativeQueueWait, true)
+  assert.deepEqual(
+    await client.call('queue_wait', {
+      queue: 'jobs', consumer: 'worker1', count: 1, waitMs: 1000,
+    }),
+    { rows: [] },
+  )
+  assert.equal(calls.at(-1).method, 'queue_wait')
+  await client.close()
+})
+
 test('SQL classification is conservative around comments, statements and functions', () => {
   for (const sql of ["SELECT 'UPDATE; DELETE' AS text", '/* a /* b */ c */ SELECT * FROM users;', 'SELECT COUNT(*) FROM users']) {
     assert.equal(isReplicaQuery(sql), true, sql)

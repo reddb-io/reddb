@@ -28,7 +28,10 @@ public final class Helpers {
     public DocumentClient documents() { return new DocumentClient(q); }
     public KvClient kv() { return new KvClient(q); }
     public KvClient kv(String collection) { return new KvClient(q, collection); }
+    public SecretsClient secrets(String collection) { return new SecretsClient(q, collection); }
     public QueueClient queue() { return new QueueClient(q); }
+    /** Bind one queue name for read/handle/ACK workers. */
+    public ScopedQueueClient queue(String name) { return new QueueClient(q).scope(name); }
     /** Spec namespace alias for {@link #queue()} (`queues.*`). */
     public QueueClient queues() { return new QueueClient(q); }
     public TxClient tx() { return new TxClient(q); }

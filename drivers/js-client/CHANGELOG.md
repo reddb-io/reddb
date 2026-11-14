@@ -1,5 +1,18 @@
 # @reddb-io/client
 
+## 1.37.0
+
+### Minor Changes
+
+- [#2858](https://github.com/reddb-io/reddb/pull/2858) [`d73c445`](https://github.com/reddb-io/reddb/commit/d73c4459c77a8484d932a0a0cf0d99eae1ae8017) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add application-scoped queue, KV, cache, and secrets clients plus sequential
+  background queue workers with server-side wait and delivery-ID ACK/NACK.
+
+## 1.36.11
+
+### Patch Changes
+
+- [#2855](https://github.com/reddb-io/reddb/pull/2855) [`66ae92b`](https://github.com/reddb-io/reddb/commit/66ae92b949f03123a1b6b29521f45d2170f8bcf0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Use the native RedWire queue-wait frame for single-message `readWait` calls so idle consumers no longer occupy engine execution workers, and expose `readWaitEntries` for delivery metadata.
+
 ## 1.36.10
 
 ## 1.36.9

@@ -9,6 +9,11 @@ public final class QueueClient {
     private final Querier q;
     QueueClient(Querier q) { this.q = q; }
 
+    public ScopedQueueClient scope(String name) {
+        Sql.assertIdentifier(name, "queue name");
+        return new ScopedQueueClient(this, name);
+    }
+
     /** Controls {@link #push(String, Object, PushOptions)}. */
     public static final class PushOptions {
         public Integer priority = null;
@@ -102,6 +107,15 @@ public final class QueueClient {
      * surface as exceptions from the transport.
      */
     public List<Object> readWait(String queue, String consumer, java.time.Duration wait, ReadWaitOptions opts) {
+        List<QueueMessage> messages = readWaitEntries(queue, consumer, wait, opts);
+        List<Object> out = new ArrayList<>(messages.size());
+        for (QueueMessage message : messages) out.add(message.payload());
+        return out;
+    }
+
+    public List<QueueMessage> readWaitEntries(
+        String queue, String consumer, java.time.Duration wait, ReadWaitOptions opts
+    ) {
         Sql.assertIdentifier(queue, "queue name");
         Sql.assertIdentifier(consumer, "consumer name");
         if (wait == null || wait.isNegative()) {
@@ -128,8 +142,53 @@ public final class QueueClient {
             + " WAIT " + waitMs + "ms";
         byte[] body = q.query(sql);
         List<Map<String, Object>> rows = Sql.allRows(body);
-        List<Object> out = new ArrayList<>(rows.size());
-        for (Map<String, Object> r : rows) out.add(r.get("payload"));
+        List<QueueMessage> out = new ArrayList<>(rows.size());
+        for (Map<String, Object> r : rows) {
+            Object deliveryCount = r.get("delivery_count");
+            out.add(new QueueMessage(
+                stringValue(r.get("message_id")),
+                stringValue(r.get("delivery_id")),
+                r.get("payload"),
+                stringValue(r.get("consumer")),
+                deliveryCount instanceof Number n ? n.longValue() : 0L,
+                r));
+        }
         return out;
     }
+
+    void ack(String queue, String deliveryId) {
+        if (deliveryId == null || deliveryId.isEmpty()) {
+            throw new HelperException.InvalidArgument("queue delivery_id must be non-empty");
+        }
+        q.query("QUEUE ACK " + Sql.sqlIdentifier(queue) + " WITH delivery_id = "
+            + Sql.kvTagLiteral(deliveryId));
+    }
+
+    void nack(String queue, String deliveryId, String delay) {
+        if (deliveryId == null || deliveryId.isEmpty()) {
+            throw new HelperException.InvalidArgument("queue delivery_id must be non-empty");
+        }
+        String delayClause = "";
+        if (delay != null && !delay.isEmpty()) {
+            if (!delay.matches("^\\d+(?:\\.\\d+)?(?:ms|s|sec|secs|m|min|mins|h|hr|hrs|d|day|days)?$")) {
+                throw new HelperException.InvalidArgument("invalid queue retry delay");
+            }
+            delayClause = " WITH DELAY " + delay;
+        }
+        q.query("QUEUE NACK " + Sql.sqlIdentifier(queue) + " WITH delivery_id = "
+            + Sql.kvTagLiteral(deliveryId) + delayClause);
+    }
+
+    private static String stringValue(Object value) {
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    public record QueueMessage(
+        String messageId,
+        String deliveryId,
+        Object payload,
+        String consumer,
+        long deliveryCount,
+        Map<String, Object> raw
+    ) {}
 }

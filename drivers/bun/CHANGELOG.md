@@ -1,5 +1,19 @@
 # @reddb-io/client-bun
 
+## 1.37.0
+
+### Patch Changes
+
+- Updated dependencies [[`d73c445`](https://github.com/reddb-io/reddb/commit/d73c4459c77a8484d932a0a0cf0d99eae1ae8017)]:
+  - @reddb-io/client@1.37.0
+
+## 1.36.11
+
+### Patch Changes
+
+- Updated dependencies [[`66ae92b`](https://github.com/reddb-io/reddb/commit/66ae92b949f03123a1b6b29521f45d2170f8bcf0)]:
+  - @reddb-io/client@1.36.11
+
 ## 1.36.10
 
 ### Patch Changes

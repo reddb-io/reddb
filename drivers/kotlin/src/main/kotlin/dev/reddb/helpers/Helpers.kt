@@ -3,6 +3,14 @@ package dev.reddb.helpers
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import dev.reddb.Conn
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * SDK Helper Spec v0.1 — rich helper surface on top of any transport
@@ -45,13 +53,45 @@ public data class QueuePushResult(val affected: Long, val rid: String? = null)
 public class Helpers(private val q: Querier) {
     public fun documents(): DocumentClient = DocumentClient(q)
     public fun kv(collection: String = "kv_default"): KvClient = KvClient(q, collection)
+    public fun secrets(collection: String): SecretsClient = SecretsClient(q, collection)
     public fun queue(): QueueClient = QueueClient(q)
+    public fun queue(name: String): ScopedQueueClient = QueueClient(q).scope(name)
 
     public companion object {
         /** Adapt a [Conn] into a [Helpers] instance. */
         public fun of(conn: Conn): Helpers = Helpers(Querier { sql, params ->
             if (params.isEmpty()) conn.query(sql) else conn.query(sql, *params)
         })
+    }
+}
+
+public class SecretsClient internal constructor(
+    private val q: Querier,
+    public val collection: String,
+) {
+    init { validatePart(collection, "vault collection") }
+
+    public suspend fun put(key: String, value: Any?) {
+        q.query("VAULT PUT ${path(key)} = ${Sql.kvValueLiteral(value)}")
+    }
+
+    public suspend fun get(key: String): Map<String, Any?>? = read("GET", key)
+    public suspend fun reveal(key: String): Map<String, Any?>? = read("REVEAL", key)
+
+    private suspend fun read(verb: String, key: String): Map<String, Any?>? {
+        val body = q.query("VAULT $verb ${path(key)}")
+        return Sql.firstRow(body).first
+    }
+
+    private fun path(key: String): String {
+        validatePart(key, "vault key")
+        return "$collection.$key"
+    }
+
+    private fun validatePart(value: String, label: String) {
+        if (!Regex("^[A-Za-z0-9_.]+$").matches(value)) {
+            throw HelperException.InvalidArgument("invalid $label")
+        }
     }
 }
 
@@ -197,6 +237,11 @@ public class KvClient internal constructor(
 // --- Queue ------------------------------------------------------------------
 
 public class QueueClient internal constructor(private val q: Querier) {
+    public fun scope(name: String): ScopedQueueClient {
+        Sql.assertIdentifier(name, "queue name")
+        return ScopedQueueClient(this, name)
+    }
+
     public data class PushOptions(val priority: Int? = null)
 
     public suspend fun push(
@@ -265,6 +310,15 @@ public class QueueClient internal constructor(private val q: Querier) {
         wait: kotlin.time.Duration,
         opts: ReadWaitOptions = ReadWaitOptions(),
     ): List<Any?> {
+        return readWaitEntries(queue, consumer, wait, opts).map { it.payload }
+    }
+
+    public suspend fun readWaitEntries(
+        queue: String,
+        consumer: String,
+        wait: kotlin.time.Duration,
+        opts: ReadWaitOptions = ReadWaitOptions(),
+    ): List<QueueMessage> {
         Sql.assertIdentifier(queue, "queue name")
         Sql.assertIdentifier(consumer, "consumer name")
         if (wait.isNegative()) {
@@ -285,7 +339,160 @@ public class QueueClient internal constructor(private val q: Querier) {
         val waitMs = wait.inWholeMilliseconds
         val sql = "QUEUE READ ${Sql.identifier(queue)}$groupClause CONSUMER ${Sql.identifier(consumer)}$countClause WAIT ${waitMs}ms"
         val body = q.query(sql)
-        return Sql.allRows(body).map { it["payload"] }
+        return Sql.allRows(body).map { row ->
+            QueueMessage(
+                messageId = row["message_id"]?.toString().orEmpty(),
+                deliveryId = row["delivery_id"]?.toString().orEmpty(),
+                payload = row["payload"],
+                consumer = row["consumer"]?.toString(),
+                deliveryCount = (row["delivery_count"] as? Number)?.toLong() ?: 0L,
+                raw = row,
+            )
+        }
+    }
+
+    internal suspend fun ack(queue: String, deliveryId: String) {
+        if (deliveryId.isEmpty()) {
+            throw HelperException.InvalidArgument("queue delivery_id must be non-empty")
+        }
+        q.query(
+            "QUEUE ACK ${Sql.identifier(queue)} WITH delivery_id = ${Sql.kvTagLiteral(deliveryId)}"
+        )
+    }
+
+    internal suspend fun nack(queue: String, deliveryId: String, delay: String? = null) {
+        if (deliveryId.isEmpty()) {
+            throw HelperException.InvalidArgument("queue delivery_id must be non-empty")
+        }
+        val delayClause = delay?.takeIf { it.isNotEmpty() }?.let {
+            if (!QUEUE_DELAY.matches(it)) {
+                throw HelperException.InvalidArgument("invalid queue retry delay")
+            }
+            " WITH DELAY $it"
+        }.orEmpty()
+        q.query(
+            "QUEUE NACK ${Sql.identifier(queue)} WITH delivery_id = " +
+                "${Sql.kvTagLiteral(deliveryId)}$delayClause"
+        )
+    }
+
+    private companion object {
+        val QUEUE_DELAY = Regex(
+            "^\\d+(?:\\.\\d+)?(?:ms|s|sec|secs|m|min|mins|h|hr|hrs|d|day|days)?$"
+        )
+    }
+}
+
+public data class QueueMessage(
+    val messageId: String,
+    val deliveryId: String,
+    val payload: Any?,
+    val consumer: String?,
+    val deliveryCount: Long,
+    val raw: Map<String, Any?>,
+)
+
+public class ScopedQueueClient internal constructor(
+    private val queue: QueueClient,
+    public val name: String,
+) {
+    public suspend fun push(value: Any?, opts: QueueClient.PushOptions = QueueClient.PushOptions()):
+        QueuePushResult = queue.push(name, value, opts)
+    public suspend fun pop(count: Int? = null): List<Any?> = queue.pop(name, count)
+    public suspend fun peek(count: Int? = null): List<Any?> = queue.peek(name, count)
+    public suspend fun len(): Long = queue.len(name)
+    public suspend fun purge(): DeleteResult = queue.purge(name)
+    public suspend fun readWait(
+        consumer: String,
+        wait: kotlin.time.Duration,
+        opts: QueueClient.ReadWaitOptions = QueueClient.ReadWaitOptions(),
+    ): List<QueueMessage> = queue.readWaitEntries(name, consumer, wait, opts)
+    public suspend fun ack(deliveryId: String): Unit = queue.ack(name, deliveryId)
+    public suspend fun nack(deliveryId: String, delay: String? = null): Unit =
+        queue.nack(name, deliveryId, delay)
+    public fun consumer(options: QueueConsumer.Options): QueueConsumer = QueueConsumer(this, options)
+}
+
+/** Sequential at-least-once worker. Use one dedicated connection per consumer. */
+public class QueueConsumer internal constructor(
+    private val queue: ScopedQueueClient,
+    private val options: Options,
+) {
+    public data class Options(
+        val consumer: String,
+        val group: String? = null,
+        val wait: kotlin.time.Duration = 30.seconds,
+        val retryDelay: String? = null,
+        val handler: suspend (QueueMessage) -> Unit,
+        val onError: (suspend (Throwable, QueueMessage?) -> Unit)? = null,
+    )
+
+    private var stopping: Boolean = false
+    private var job: Job? = null
+
+    init {
+        Sql.assertIdentifier(options.consumer, "consumer name")
+        options.group?.takeIf { it.isNotEmpty() }?.let { Sql.assertIdentifier(it, "group name") }
+        if (options.wait.isNegative()) {
+            throw HelperException.InvalidArgument("queue consumer wait must be non-negative")
+        }
+    }
+
+    public fun start(scope: CoroutineScope): Job {
+        if (job != null) {
+            throw HelperException.InvalidArgument("queue consumer already started")
+        }
+        job = scope.launch { run() }
+        return job!!
+    }
+
+    public suspend fun stop() {
+        stopping = true
+        job?.join()
+    }
+
+    public suspend fun abort() {
+        stopping = true
+        job?.cancelAndJoin()
+    }
+
+    private suspend fun run() {
+        val readOptions = QueueClient.ReadWaitOptions(group = options.group, count = 1)
+        while (!stopping) {
+            currentCoroutineContext().ensureActive()
+            val messages = try {
+                queue.readWait(options.consumer, options.wait, readOptions)
+            } catch (error: Throwable) {
+                val onError = options.onError ?: throw error
+                onError(error, null)
+                continue
+            }
+            if (messages.isEmpty()) continue
+            val message = messages.first()
+            try {
+                if (message.deliveryId.isEmpty()) {
+                    throw HelperException.InvalidResponse("queue delivery is missing delivery_id")
+                }
+                options.handler(message)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (message.deliveryId.isNotEmpty()) {
+                    queue.nack(message.deliveryId, options.retryDelay)
+                }
+                val onError = options.onError ?: throw error
+                onError(error, message)
+                continue
+            }
+            try {
+                queue.ack(message.deliveryId)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                val onError = options.onError ?: throw error
+                onError(error, message)
+            }
+        }
     }
 }
 

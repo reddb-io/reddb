@@ -53,10 +53,17 @@ public sealed record DeleteResult(long Affected, bool Deleted)
 public sealed record ExistsResult(bool Exists);
 public sealed record ListResult(IReadOnlyList<IReadOnlyDictionary<string, object?>> Items, string? NextCursor = null);
 public sealed record QueuePushResult(long Affected, string? Rid);
+public sealed record QueueMessage(
+    string MessageId,
+    string DeliveryId,
+    object? Payload,
+    string? Consumer,
+    long DeliveryCount,
+    IReadOnlyDictionary<string, object?> Raw);
 
 /// <summary>
 /// Groups the rich namespaces (<see cref="Documents"/>, <see cref="Kv"/>,
-/// <see cref="Queue"/>, <see cref="Tx"/>) bound to a single transport.
+/// <see cref="Queue()"/>, <see cref="Tx"/>) bound to a single transport.
 /// Stateless — safe to construct per call. Mirrors
 /// <c>drivers/go/helpers.go</c>.
 /// </summary>
@@ -77,10 +84,12 @@ public sealed class Helpers
 
     public DocumentClient Documents() => new(_q);
     public KvClient Kv(string collection = "kv_default") => new(_q, collection);
+    public SecretsClient Secrets(string collection) => new(_q, collection);
     public QueueClient Queue() => new(_q);
+    public ScopedQueueClient Queue(string name) => Queue().Scope(name);
 
     /// <summary>
-    /// Alias for <see cref="Queue"/> matching the spec namespace name
+    /// Alias for <see cref="Queue()"/> matching the spec namespace name
     /// (<c>queues.*</c>). Both forms return the same client.
     /// </summary>
     public QueueClient Queues() => Queue();
@@ -100,6 +109,55 @@ public sealed class Helpers
             => args is null || args.Length == 0
                 ? _c.QueryAsync(sql, ct)
                 : _c.QueryAsync(sql, args);
+    }
+}
+
+public sealed class SecretsClient
+{
+    private readonly IQuerier _q;
+    public SecretsClient(IQuerier q, string collection)
+    {
+        ValidatePart(collection, "vault collection");
+        _q = q;
+        Collection = collection;
+    }
+
+    public string Collection { get; }
+
+    public async ValueTask PutAsync(
+        string key, object? value, CancellationToken ct = default)
+    {
+        string path = Path(key);
+        await _q.QueryAsync($"VAULT PUT {path} = {Sql.KvValueLiteral(value)}",
+            Array.Empty<object?>(), ct).ConfigureAwait(false);
+    }
+
+    public ValueTask<IReadOnlyDictionary<string, object?>?> GetAsync(
+        string key, CancellationToken ct = default) => ReadAsync("GET", key, ct);
+
+    public ValueTask<IReadOnlyDictionary<string, object?>?> RevealAsync(
+        string key, CancellationToken ct = default) => ReadAsync("REVEAL", key, ct);
+
+    private async ValueTask<IReadOnlyDictionary<string, object?>?> ReadAsync(
+        string verb, string key, CancellationToken ct)
+    {
+        var body = await _q.QueryAsync($"VAULT {verb} {Path(key)}",
+            Array.Empty<object?>(), ct).ConfigureAwait(false);
+        var (row, _) = Sql.FirstRow(body.Span);
+        return row;
+    }
+
+    private string Path(string key)
+    {
+        ValidatePart(key, "vault key");
+        return $"{Collection}.{key}";
+    }
+
+    private static void ValidatePart(string value, string label)
+    {
+        if (string.IsNullOrEmpty(value)
+            || value.Any(ch => !(char.IsAsciiLetterOrDigit(ch) || ch is '_' or '.')))
+            throw new HelperException.InvalidArgument($"invalid {label}");
     }
 }
 
@@ -279,6 +337,12 @@ public sealed class QueueClient
     private readonly IQuerier _q;
     internal QueueClient(IQuerier q) { _q = q; }
 
+    public ScopedQueueClient Scope(string name)
+    {
+        Sql.AssertIdentifier(name, "queue name");
+        return new ScopedQueueClient(this, name);
+    }
+
     public sealed class PushOptions
     {
         public int? Priority { get; set; }
@@ -426,6 +490,255 @@ public sealed class QueueClient
             out_.Add(p);
         }
         return out_;
+    }
+
+    internal async ValueTask<IReadOnlyList<QueueMessage>> ReadWaitEntriesAsync(
+        string queue,
+        string consumer,
+        TimeSpan wait,
+        ReadWaitOptions? opts = null,
+        CancellationToken ct = default)
+    {
+        Sql.AssertIdentifier(queue, "queue name");
+        Sql.AssertIdentifier(consumer, "consumer name");
+        if (wait < TimeSpan.Zero)
+            throw new HelperException.InvalidArgument(
+                "queue ReadWait requires a non-negative wait duration (no infinite wait)");
+        opts ??= new ReadWaitOptions();
+        string groupClause = "";
+        if (!string.IsNullOrEmpty(opts.Group))
+        {
+            Sql.AssertIdentifier(opts.Group!, "group name");
+            groupClause = $" GROUP {Sql.Identifier(opts.Group!)}";
+        }
+        string countClause = "";
+        if (opts.Count is not null)
+        {
+            if (opts.Count < 0)
+                throw new HelperException.InvalidArgument(
+                    "queue count must be a non-negative integer");
+            countClause = $" COUNT {opts.Count}";
+        }
+        long waitMs = (long)wait.TotalMilliseconds;
+        string sql = $"QUEUE READ {Sql.Identifier(queue)}{groupClause} CONSUMER {Sql.Identifier(consumer)}{countClause} WAIT {waitMs}ms";
+        var body = await _q.QueryAsync(sql, Array.Empty<object?>(), ct).ConfigureAwait(false);
+        var rows = Sql.AllRows(body.Span);
+        var messages = new List<QueueMessage>(rows.Count);
+        foreach (var row in rows)
+        {
+            row.TryGetValue("message_id", out var messageId);
+            row.TryGetValue("delivery_id", out var deliveryId);
+            row.TryGetValue("payload", out var payload);
+            row.TryGetValue("consumer", out var deliveredConsumer);
+            row.TryGetValue("delivery_count", out var deliveryCount);
+            messages.Add(new QueueMessage(
+                Convert.ToString(messageId) ?? "",
+                Convert.ToString(deliveryId) ?? "",
+                payload,
+                Convert.ToString(deliveredConsumer),
+                ToInt64(deliveryCount),
+                row));
+        }
+        return messages;
+    }
+
+    internal async ValueTask AckAsync(
+        string queue, string deliveryId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(deliveryId))
+            throw new HelperException.InvalidArgument("queue delivery_id must be non-empty");
+        await _q.QueryAsync(
+            $"QUEUE ACK {Sql.Identifier(queue)} WITH delivery_id = {Sql.KvTagLiteral(deliveryId)}",
+            Array.Empty<object?>(), ct).ConfigureAwait(false);
+    }
+
+    internal async ValueTask NackAsync(
+        string queue, string deliveryId, string? delay = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(deliveryId))
+            throw new HelperException.InvalidArgument("queue delivery_id must be non-empty");
+        string delayClause = "";
+        if (!string.IsNullOrEmpty(delay))
+        {
+            if (!System.Text.RegularExpressions.Regex.IsMatch(
+                    delay, @"^\d+(?:\.\d+)?(?:ms|s|sec|secs|m|min|mins|h|hr|hrs|d|day|days)?$"))
+                throw new HelperException.InvalidArgument("invalid queue retry delay");
+            delayClause = $" WITH DELAY {delay}";
+        }
+        await _q.QueryAsync(
+            $"QUEUE NACK {Sql.Identifier(queue)} WITH delivery_id = {Sql.KvTagLiteral(deliveryId)}{delayClause}",
+            Array.Empty<object?>(), ct).ConfigureAwait(false);
+    }
+
+    private static long ToInt64(object? value) => value switch
+    {
+        long v => v,
+        int v => v,
+        double v => (long)v,
+        JsonElement v when v.ValueKind == JsonValueKind.Number => v.GetInt64(),
+        _ => 0,
+    };
+}
+
+public sealed class ScopedQueueClient
+{
+    private readonly QueueClient _queue;
+    internal ScopedQueueClient(QueueClient queue, string name)
+    {
+        _queue = queue;
+        Name = name;
+    }
+
+    public string Name { get; }
+
+    public ValueTask<QueuePushResult> PushAsync(
+        object? value, QueueClient.PushOptions? opts = null, CancellationToken ct = default)
+        => _queue.PushAsync(Name, value, opts, ct);
+
+    public ValueTask<IReadOnlyList<object?>> PopAsync(
+        int? count = null, CancellationToken ct = default)
+        => _queue.PopAsync(Name, count, ct);
+
+    public ValueTask<IReadOnlyList<object?>> PeekAsync(
+        int? count = null, CancellationToken ct = default)
+        => _queue.PeekAsync(Name, count, ct);
+
+    public ValueTask<long> LenAsync(CancellationToken ct = default)
+        => _queue.LenAsync(Name, ct);
+
+    public ValueTask<DeleteResult> PurgeAsync(CancellationToken ct = default)
+        => _queue.PurgeAsync(Name, ct);
+
+    public ValueTask<IReadOnlyList<QueueMessage>> ReadWaitAsync(
+        string consumer,
+        TimeSpan wait,
+        QueueClient.ReadWaitOptions? opts = null,
+        CancellationToken ct = default)
+        => _queue.ReadWaitEntriesAsync(Name, consumer, wait, opts, ct);
+
+    public ValueTask AckAsync(string deliveryId, CancellationToken ct = default)
+        => _queue.AckAsync(Name, deliveryId, ct);
+
+    public ValueTask NackAsync(
+        string deliveryId, string? delay = null, CancellationToken ct = default)
+        => _queue.NackAsync(Name, deliveryId, delay, ct);
+
+    public QueueConsumer Consumer(QueueConsumerOptions options) => new(this, options);
+}
+
+public sealed class QueueConsumerOptions
+{
+    public required string Consumer { get; init; }
+    public string? Group { get; init; }
+    public TimeSpan Wait { get; init; } = TimeSpan.FromSeconds(30);
+    public string? RetryDelay { get; init; }
+    public required Func<QueueMessage, CancellationToken, ValueTask> Handler { get; init; }
+    public Func<Exception, QueueMessage?, CancellationToken, ValueTask>? OnError { get; init; }
+}
+
+public sealed class QueueConsumer : IAsyncDisposable
+{
+    private readonly ScopedQueueClient _queue;
+    private readonly QueueConsumerOptions _options;
+    private readonly CancellationTokenSource _abort = new();
+    private volatile bool _stopping;
+    private Task? _run;
+
+    internal QueueConsumer(ScopedQueueClient queue, QueueConsumerOptions options)
+    {
+        Sql.AssertIdentifier(options.Consumer, "consumer name");
+        if (!string.IsNullOrEmpty(options.Group))
+            Sql.AssertIdentifier(options.Group!, "group name");
+        if (options.Wait < TimeSpan.Zero)
+            throw new HelperException.InvalidArgument("queue consumer wait must be non-negative");
+        _queue = queue;
+        _options = options;
+    }
+
+    public Task StartAsync(CancellationToken ct = default)
+    {
+        if (_run is not null)
+            throw new HelperException.InvalidArgument("queue consumer already started");
+        _run = RunAsync(ct);
+        return Task.CompletedTask;
+    }
+
+    public async Task StopAsync()
+    {
+        _stopping = true;
+        if (_run is not null) await _run.ConfigureAwait(false);
+    }
+
+    public void Abort()
+    {
+        _stopping = true;
+        _abort.Cancel();
+    }
+
+    public Task Completion => _run ?? Task.CompletedTask;
+
+    private async Task RunAsync(CancellationToken external)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(external, _abort.Token);
+        var ct = linked.Token;
+        var readOptions = new QueueClient.ReadWaitOptions { Group = _options.Group, Count = 1 };
+        while (!_stopping && !ct.IsCancellationRequested)
+        {
+            IReadOnlyList<QueueMessage> messages;
+            try
+            {
+                messages = await _queue.ReadWaitAsync(
+                    _options.Consumer, _options.Wait, readOptions, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception error)
+            {
+                if (_options.OnError is null) throw;
+                await _options.OnError(error, null, ct).ConfigureAwait(false);
+                continue;
+            }
+            if (messages.Count == 0) continue;
+            var message = messages[0];
+            try
+            {
+                if (string.IsNullOrEmpty(message.DeliveryId))
+                    throw new HelperException.InvalidResponse(
+                        "queue delivery is missing delivery_id");
+                await _options.Handler(message, ct).ConfigureAwait(false);
+            }
+            catch (Exception error)
+            {
+                if (!string.IsNullOrEmpty(message.DeliveryId))
+                    await _queue.NackAsync(message.DeliveryId, _options.RetryDelay, ct)
+                        .ConfigureAwait(false);
+                if (_options.OnError is null) throw;
+                await _options.OnError(error, message, ct).ConfigureAwait(false);
+                continue;
+            }
+            try
+            {
+                await _queue.AckAsync(message.DeliveryId, ct).ConfigureAwait(false);
+            }
+            catch (Exception error)
+            {
+                if (_options.OnError is null) throw;
+                await _options.OnError(error, message, ct).ConfigureAwait(false);
+            }
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        Abort();
+        if (_run is not null)
+        {
+            try { await _run.ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+        }
+        _abort.Dispose();
     }
 }
 
