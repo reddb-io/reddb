@@ -185,7 +185,7 @@ test("main Docker image builds from files present in the repository", () => {
 
   assert.match(dockerfile, /COPY crates\/ crates\//);
   assert.match(dockerfile, /cargo fetch --locked/);
-  assert.match(dockerfile, /cargo build --release --locked --bin red/);
+  assert.match(dockerfile, /cargo build --profile release-static --locked --bin red/);
   assert.doesNotMatch(dockerfile, /echo 'fn main\(\) \{\}'/);
   assert.doesNotMatch(dockerfile, /COPY proto\//);
   assert.doesNotMatch(dockerfile, /COPY benches\//);

@@ -3,6 +3,10 @@ use reddb_server::runtime::mvcc::{clear_current_connection_id, set_current_conne
 use reddb_server::storage::EntityId;
 use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
+// A pending preimage may require one authenticated replacement generation.
+// Keep that work bounded independently of the logical history size.
+const CHECKPOINT_PAGE_READS_MAX: u64 = 512;
+
 #[test]
 fn growing_preimage_keeps_identity_through_pending_checkpoint_and_rollback() {
     qualify_preimage(false);
@@ -145,7 +149,7 @@ fn qualify_preimage(seal_before_update: bool) {
         "allocator reused an adopted sequence"
     );
     assert!(
-        pending_reads < 128 && rollback_reads < 128,
+        pending_reads < CHECKPOINT_PAGE_READS_MAX && rollback_reads < CHECKPOINT_PAGE_READS_MAX,
         "preimage relocation scanned history: pending={pending_reads}, rollback={rollback_reads}"
     );
 }

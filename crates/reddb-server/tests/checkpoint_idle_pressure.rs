@@ -1,6 +1,10 @@
 //! Checkpoint work after ordinary failed statements and accumulated background writes.
 use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
+// Sealing and authenticating a proof-bearing generation adds bounded catalog
+// and page-proof reads even when the payload tree itself remains reusable.
+const CHECKPOINT_PAGE_READS_MAX: u64 = 256;
+
 #[test]
 fn failed_unrelated_autocommit_does_not_rescan_payload_history() {
     qualify_idle_pressure(true, false, false);
@@ -127,7 +131,7 @@ fn qualify_idle_pressure(reject_unrelated: bool, seal_payload: bool, unlogged_up
             root_before,
             "sealing rebuilt the payload tree"
         );
-        assert!(reads < 128, "checkpoint rescanned payload history: rejected_unrelated={reject_unrelated}, sealed={seal_payload}, page_reads={reads}");
+        assert!(reads < CHECKPOINT_PAGE_READS_MAX, "checkpoint rescanned payload history: rejected_unrelated={reject_unrelated}, sealed={seal_payload}, page_reads={reads}");
     }
     drop(pager);
     drop(runtime);
