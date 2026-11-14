@@ -1,5 +1,12 @@
 # @reddb-io/client
 
+## 1.37.0
+
+### Minor Changes
+
+- [#2858](https://github.com/reddb-io/reddb/pull/2858) [`d73c445`](https://github.com/reddb-io/reddb/commit/d73c4459c77a8484d932a0a0cf0d99eae1ae8017) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add application-scoped queue, KV, cache, and secrets clients plus sequential
+  background queue workers with server-side wait and delivery-ID ACK/NACK.
+
 ## 1.36.11
 
 ### Patch Changes
