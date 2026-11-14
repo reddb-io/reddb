@@ -188,6 +188,47 @@ async def test_queue_read_wait_requires_non_negative_wait_ms():
         await queue.read_wait("jobs", "w", wait_ms=1.5)  # type: ignore[arg-type]
 
 
+async def test_scoped_queue_consumer_handles_and_acks():
+    transport = FakeTransport(replies=[
+        {"rows": [{"message_id": "m1", "delivery_id": "d1", "payload": "work"}]},
+        {"rows": []},
+    ])
+    queue = QueueClient(transport)("jobs")
+    handled: list[str] = []
+    worker = None
+
+    async def handle(message: dict[str, Any]) -> None:
+        handled.append(message["payload"])
+        assert worker is not None
+        await worker.stop()
+
+    worker = queue.consumer(
+        consumer="worker1", wait_ms=1000, handle_message=handle
+    )
+    worker.start()
+    await worker.wait()
+
+    assert handled == ["work"]
+    assert [call[1][0] for call in transport.calls] == [
+        "QUEUE READ jobs CONSUMER worker1 COUNT 1 WAIT 1000ms",
+        "QUEUE ACK jobs WITH delivery_id = 'd1'",
+    ]
+
+
+async def test_scoped_secrets_separates_metadata_and_reveal():
+    transport = FakeTransport(replies=[{}, {}, {}])
+    db = Reddb(transport)
+    secrets = db.secrets("auth.vault")
+    await secrets.put("smtp.password", "secret")
+    await secrets.get("smtp.password")
+    await secrets.reveal("smtp.password")
+    assert [call[1][0] for call in transport.calls] == [
+        "VAULT PUT auth.vault.smtp.password = 'secret'",
+        "VAULT GET auth.vault.smtp.password",
+        "VAULT REVEAL auth.vault.smtp.password",
+    ]
+
+
 # ---------------------------------------------------------- Document helpers
 
 

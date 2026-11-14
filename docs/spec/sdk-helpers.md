@@ -317,6 +317,31 @@ Out-of-scope for v1.0:
   group via raw SQL until v1.x.
 - Dead-letter routing — **out-of-scope**: deferred to v1.x.
 
+### 6.7 Application-scoped queue and consumer extension (additive v1.x)
+
+Official drivers MAY bind a queue name once and expose a long-running worker.
+The scoped handle MUST preserve the queue name for every read, ACK, NACK, and
+push. The worker contract is:
+
+- issue a bounded, server-side `QUEUE READ ... WAIT` with `COUNT 1`;
+- pass the complete delivery, including opaque `delivery_id`, to the handler;
+- ACK only after successful handler completion;
+- NACK after handler failure, optionally with a validated retry delay;
+- process sequentially unless the caller creates multiple workers;
+- stop gracefully after the active delivery reaches ACK/NACK.
+
+This extension is at-least-once. It does not promise exactly-once effects,
+lease extension, or concurrent callbacks inside one worker. Drivers SHOULD
+recommend a dedicated connection per worker and horizontal concurrency through
+multiple workers or pods. The cross-language API map and transport details are
+documented in [Application clients and queue workers](../clients/application-clients.md).
+
+The extension also defines explicit KV and Vault/secret scope handles. Legacy
+default namespaces remain wire-compatible, but new application code SHOULD
+bind a collection explicitly. Cache scope is only exposed where the transport
+implements real cache operations; query-only drivers MUST NOT emulate cache
+with KV and claim equivalent semantics.
+
 ## 7. Transactions — `tx.*`
 
 ### 7.1 `tx.begin()`, `tx.commit()`, `tx.rollback()`

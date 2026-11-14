@@ -253,6 +253,7 @@ test('domain clients expose explicit kv config and vault surfaces', async () => 
   try {
     const db = await connect(stub.baseUrl)
     assert.equal(typeof db.kv, 'function')
+    assert.throws(() => db.kv(), /non-empty collection/)
     await db.kv('sessions').put('token', 'abc')
     await db.config('app').put('api_key', null, {
       secretRef: { collection: 'secrets', key: 'api_key' },
@@ -261,6 +262,8 @@ test('domain clients expose explicit kv config and vault surfaces', async () => 
     await db.vault('secrets').get('api_key')
     await db.vault('secrets').unseal('api_key')
     await db.vault('secrets').reveal('api_key')
+    await db.secrets('secrets').reveal('api_key')
+    assert.throws(() => db.secrets(), /non-empty collection/)
 
     assert.equal(seen[0], "KV PUT sessions.token = 'abc'")
     assert.equal(seen[1], 'PUT CONFIG app api_key = SECRET_REF(vault, secrets.api_key)')
@@ -268,6 +271,7 @@ test('domain clients expose explicit kv config and vault surfaces', async () => 
     assert.equal(seen[3], 'VAULT GET secrets.api_key')
     assert.equal(seen[4], 'VAULT REVEAL secrets.api_key')
     assert.equal(seen[5], 'VAULT REVEAL secrets.api_key')
+    assert.equal(seen[6], 'VAULT REVEAL secrets.api_key')
     await db.close()
   } finally {
     await stub.close()

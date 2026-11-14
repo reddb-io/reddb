@@ -343,10 +343,15 @@ test('db.cache is a CacheClient instance', async () => {
   const { CacheClient } = await import('../src/cache.js')
   const stub = await startMockServer({
     'GET /health': () => ({ ok: true, version: 'mock' }),
+    'GET /cache/ns/scoped/key': () => ({ value: Buffer.from('value').toString('base64') }),
   })
   try {
     const db = await connect(stub.baseUrl)
     assert.ok(db.cache instanceof CacheClient)
+    assert.equal(typeof db.cache, 'function')
+    const value = await db.cache('scoped').get('key')
+    assert.equal(Buffer.from(value).toString(), 'value')
+    assert.throws(() => db.cache(''), /non-empty namespace/)
   } finally {
     await stub.close()
   }

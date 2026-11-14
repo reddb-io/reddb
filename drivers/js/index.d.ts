@@ -233,6 +233,7 @@ export interface CacheInvalidateResult {
  * RPC.
  */
 export class CacheClient {
+  scope(namespace: string): ScopedCacheClient
   /** Fetch a cached value. Returns Uint8Array on hit, null on miss. */
   get(namespace: string, key: string): Promise<Uint8Array | null>
   /** Store a value in the cache. */
@@ -252,6 +253,17 @@ export class CacheClient {
   invalidateTags(namespace: string, tags: string[]): Promise<number>
   /** Remove entries through the caller-scoped POST /cache/ns/:namespace/flush endpoint. */
   flushNamespace(namespace: string): Promise<void>
+}
+
+export class ScopedCacheClient {
+  readonly namespace: string
+  get(key: string): Promise<Uint8Array | null>
+  put(key: string, value: Uint8Array | Buffer | string, opts?: CachePutOptions): Promise<void>
+  exists(key: string): Promise<CacheExistsStatus>
+  invalidate(key: string): Promise<void>
+  invalidatePrefix(prefix: string): Promise<number>
+  invalidateTags(tags: string[]): Promise<number>
+  flush(): Promise<void>
 }
 
 export interface KvWatchEvent {
@@ -322,6 +334,7 @@ export class DocumentClient {
 }
 
 export class QueueClient {
+  scope(queue: string): ScopedQueueClient
   /** Idempotent CREATE QUEUE IF NOT EXISTS (spec §6.1). */
   create(queue: string): Promise<QueryResult>
   push(
@@ -345,6 +358,51 @@ export class QueueClient {
     consumer: string,
     options: { waitMs: number; group?: string; count?: number },
   ): Promise<unknown[]>
+  readWaitEntries(
+    queue: string,
+    consumer: string,
+    options: { waitMs: number; group?: string; count?: number },
+  ): Promise<QueueMessage[]>
+}
+
+export interface QueueMessage {
+  message_id?: string
+  delivery_id: string
+  payload: unknown
+  consumer?: string
+  delivery_count?: number
+  [key: string]: unknown
+}
+
+export interface QueueConsumerOptions {
+  consumer: string
+  group?: string
+  waitMs?: number
+  retryDelay?: string
+  handleMessage(message: QueueMessage): void | Promise<void>
+  onError?(error: unknown, message: QueueMessage | null): void | Promise<void>
+}
+
+export class ScopedQueueClient {
+  readonly name: string
+  create(): Promise<QueryResult>
+  push(value: unknown, options?: { priority?: number; key?: string; dedup?: string; delay?: string; at?: number }): Promise<QueryResult>
+  pop(count?: number): Promise<unknown[]>
+  peek(count?: number): Promise<unknown[]>
+  len(): Promise<number>
+  purge(): Promise<QueryResult>
+  readWait(consumer: string, options: { waitMs: number; group?: string; count?: number }): Promise<unknown[]>
+  readWaitEntries(consumer: string, options: { waitMs: number; group?: string; count?: number }): Promise<QueueMessage[]>
+  ack(deliveryId: string): Promise<QueryResult>
+  nack(deliveryId: string, options?: { delay?: string }): Promise<QueryResult>
+  consumer(options: QueueConsumerOptions): QueueConsumer
+}
+
+export class QueueConsumer {
+  readonly status: { isRunning: boolean }
+  start(): this
+  stop(): Promise<void>
+  finished(): Promise<void>
 }
 
 /**
@@ -422,14 +480,15 @@ export class RedDB {
   readonly transport: string | null
   /** SDK Helper Spec version this driver implements (spec §14). */
   readonly helperSpecVersion: string
-  readonly cache: CacheClient
-  readonly queue: QueueClient
+  readonly cache: CacheClient & ((namespace: string) => ScopedCacheClient)
+  readonly queue: QueueClient & ((queue: string) => ScopedQueueClient)
   /** Spec-canonical plural alias for `queue` (spec §6). */
-  readonly queues: QueueClient
+  readonly queues: QueueClient & ((queue: string) => ScopedQueueClient)
   readonly documents: DocumentClient
   readonly kv: KvClient & ((collection?: string) => KvClient)
   readonly config: (collection?: string) => ConfigClient
   readonly vault: (collection?: string) => VaultClient
+  readonly secrets: (collection: string) => VaultClient
 
   query(sql: `ASK ${string}`): Promise<AskQueryResult>
   query(sql: string): Promise<QueryResult>

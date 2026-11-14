@@ -121,6 +121,17 @@ class HelpersTest {
             () -> new Helpers(new FakeQuerier()).kv().list(opts));
     }
 
+    @Test void secrets_areBoundToExplicitCollection() {
+        FakeQuerier fq = new FakeQuerier()
+            .reply(map("affected", 1))
+            .reply(map("rows", List.of(map("key", "token"))));
+        SecretsClient secrets = new Helpers(fq).secrets("app.prod");
+        secrets.put("token", "secret");
+        secrets.get("token");
+        assertTrue(fq.sqls.get(0).startsWith("VAULT PUT app.prod.token"));
+        assertEquals("VAULT GET app.prod.token", fq.sqls.get(1));
+    }
+
     // --- Queue -------------------------------------------------------
 
     @Test void queue_push_emitsPriorityAndPayload() {
@@ -153,6 +164,18 @@ class HelpersTest {
     @Test void queue_push_rejectsInvalidIdentifier() {
         assertThrows(HelperException.InvalidArgument.class,
             () -> new Helpers(new FakeQuerier()).queue().push("bad-name!", "x"));
+    }
+
+    @Test void scopedQueue_preservesDeliveryIdAndAcks() {
+        FakeQuerier fq = new FakeQuerier()
+            .reply(map("rows", List.of(map(
+                "message_id", "m1", "delivery_id", "d1", "payload", "work"))))
+            .reply(map("affected", 1));
+        ScopedQueueClient queue = new Helpers(fq).queue("jobs");
+        var messages = queue.readWait("worker", java.time.Duration.ofSeconds(1), null);
+        assertEquals("d1", messages.get(0).deliveryId());
+        queue.ack("d1");
+        assertTrue(fq.sqls.get(1).startsWith("QUEUE ACK jobs"));
     }
 
     // --- Documents ---------------------------------------------------

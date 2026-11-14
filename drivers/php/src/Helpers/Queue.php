@@ -13,6 +13,12 @@ final class Queue
 {
     public function __construct(private readonly Querier $q) {}
 
+    public function scope(string $name): ScopedQueue
+    {
+        Sql::assertIdentifier($name, 'queue name');
+        return new ScopedQueue($this, $name);
+    }
+
     /**
      * Create the queue if it does not exist (idempotent). Wraps
      * `CREATE QUEUE IF NOT EXISTS`.
@@ -108,6 +114,18 @@ final class Queue
      */
     public function readWait(string $queue, string $consumer, array $opts): array
     {
+        return array_map(
+            static fn (QueueMessage $message): mixed => $message->payload,
+            $this->readWaitEntries($queue, $consumer, $opts),
+        );
+    }
+
+    /**
+     * @param array{waitMs:int, group?:string, count?:int} $opts
+     * @return list<QueueMessage>
+     */
+    public function readWaitEntries(string $queue, string $consumer, array $opts): array
+    {
         Sql::assertIdentifier($queue, 'queue name');
         Sql::assertIdentifier($consumer, 'consumer name');
         $waitMs = $opts['waitMs'] ?? null;
@@ -140,7 +158,48 @@ final class Queue
         $body = $this->q->query($sql);
         $rows = Sql::allRows($body);
         $out = [];
-        foreach ($rows as $r) $out[] = $r['payload'] ?? null;
+        foreach ($rows as $r) {
+            $out[] = new QueueMessage(
+                (string) ($r['message_id'] ?? ''),
+                (string) ($r['delivery_id'] ?? ''),
+                $r['payload'] ?? null,
+                isset($r['consumer']) ? (string) $r['consumer'] : null,
+                (int) ($r['delivery_count'] ?? 0),
+                $r,
+            );
+        }
         return $out;
+    }
+
+    public function ack(string $queue, string $deliveryId): void
+    {
+        if ($deliveryId === '') {
+            throw new InvalidArgument('queue delivery_id must be non-empty');
+        }
+        $this->q->query(sprintf(
+            'QUEUE ACK %s WITH delivery_id = %s',
+            Sql::identifier($queue),
+            Sql::kvTagLiteral($deliveryId),
+        ));
+    }
+
+    public function nack(string $queue, string $deliveryId, ?string $delay = null): void
+    {
+        if ($deliveryId === '') {
+            throw new InvalidArgument('queue delivery_id must be non-empty');
+        }
+        $delayClause = '';
+        if ($delay !== null && $delay !== '') {
+            if (preg_match('/^\d+(?:\.\d+)?(?:ms|s|sec|secs|m|min|mins|h|hr|hrs|d|day|days)?$/D', $delay) !== 1) {
+                throw new InvalidArgument('invalid queue retry delay');
+            }
+            $delayClause = ' WITH DELAY ' . $delay;
+        }
+        $this->q->query(sprintf(
+            'QUEUE NACK %s WITH delivery_id = %s%s',
+            Sql::identifier($queue),
+            Sql::kvTagLiteral($deliveryId),
+            $delayClause,
+        ));
     }
 }

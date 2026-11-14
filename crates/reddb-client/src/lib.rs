@@ -278,6 +278,14 @@ impl Reddb {
         QueueClient { db: self }
     }
 
+    /// Bind queue operations to one explicit queue name.
+    pub fn queue_scope<'a>(&'a self, queue: &'a str) -> Result<ScopedQueueClient<'a>> {
+        Ok(ScopedQueueClient {
+            queue: self.queue(),
+            name: sql_identifier(queue)?,
+        })
+    }
+
     pub fn kv_collection<'a>(&'a self, collection: &'a str) -> KvClient<'a> {
         KvClient {
             db: self,
@@ -332,6 +340,12 @@ impl Reddb {
             db: self,
             collection,
         }
+    }
+
+    /// Bind secret operations to one explicit Vault collection.
+    pub fn secrets<'a>(&'a self, collection: &'a str) -> Result<VaultClient<'a>> {
+        kv_collection_identifier(collection)?;
+        Ok(self.vault_collection(collection))
     }
 }
 
@@ -445,6 +459,22 @@ impl<'a> DocumentClient<'a> {
 #[derive(Debug)]
 pub struct QueueClient<'a> {
     db: &'a Reddb,
+}
+
+#[derive(Debug)]
+pub struct ScopedQueueClient<'a> {
+    queue: QueueClient<'a>,
+    name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueueMessage {
+    pub message_id: Option<String>,
+    pub delivery_id: String,
+    pub payload: Option<ValueOut>,
+    pub consumer: Option<String>,
+    pub delivery_count: Option<u64>,
+    pub raw: Row,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -579,6 +609,21 @@ impl<'a> QueueClient<'a> {
         wait: std::time::Duration,
         opts: QueueReadWaitOptions<'_>,
     ) -> Result<ListResult> {
+        let messages = self.read_wait_entries(queue, consumer, wait, opts).await?;
+        Ok(ListResult {
+            affected: messages.len() as u64,
+            items: messages.into_iter().map(|message| message.raw).collect(),
+        })
+    }
+
+    /// Like [`Self::read_wait`], but preserves the opaque delivery handle.
+    pub async fn read_wait_entries(
+        &self,
+        queue: &str,
+        consumer: &str,
+        wait: std::time::Duration,
+        opts: QueueReadWaitOptions<'_>,
+    ) -> Result<Vec<QueueMessage>> {
         let queue = sql_identifier(queue)?;
         let consumer = sql_identifier(consumer)?;
         let group = match opts.group {
@@ -592,10 +637,11 @@ impl<'a> QueueClient<'a> {
         let wait_ms = wait.as_millis() as u64;
         let sql = format!("QUEUE READ {queue}{group} CONSUMER {consumer}{count} WAIT {wait_ms}ms");
         let result = self.db.query(&sql).await?;
-        Ok(ListResult {
-            affected: result.affected,
-            items: result.rows,
-        })
+        result
+            .rows
+            .into_iter()
+            .map(queue_message_from_row)
+            .collect()
     }
 }
 
@@ -607,6 +653,133 @@ pub struct QueueReadWaitOptions<'a> {
     pub group: Option<&'a str>,
     /// Maximum number of messages to deliver. Defaults to 1 server-side.
     pub count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct QueueConsumerOptions<'a> {
+    pub consumer: &'a str,
+    pub group: Option<&'a str>,
+    pub wait: std::time::Duration,
+    pub retry_delay: Option<&'a str>,
+}
+
+impl<'a> ScopedQueueClient<'a> {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub async fn push(&self, value: &JsonValue, options: QueuePushOptions) -> Result<QueryResult> {
+        self.queue.push(&self.name, value, options).await
+    }
+
+    pub async fn len(&self) -> Result<u64> {
+        self.queue.len(&self.name).await
+    }
+
+    pub async fn read_wait_entries(
+        &self,
+        consumer: &str,
+        wait: std::time::Duration,
+        options: QueueReadWaitOptions<'_>,
+    ) -> Result<Vec<QueueMessage>> {
+        self.queue
+            .read_wait_entries(&self.name, consumer, wait, options)
+            .await
+    }
+
+    pub async fn ack(&self, delivery_id: &str) -> Result<QueryResult> {
+        if delivery_id.is_empty() {
+            return Err(ClientError::new(
+                ErrorCode::InvalidArgument,
+                "queue delivery_id must be non-empty",
+            ));
+        }
+        self.queue
+            .db
+            .query(&format!(
+                "QUEUE ACK {} WITH delivery_id = {}",
+                self.name,
+                sql_string_literal(delivery_id)
+            ))
+            .await
+    }
+
+    pub async fn nack(&self, delivery_id: &str, retry_delay: Option<&str>) -> Result<QueryResult> {
+        if delivery_id.is_empty() {
+            return Err(ClientError::new(
+                ErrorCode::InvalidArgument,
+                "queue delivery_id must be non-empty",
+            ));
+        }
+        let delay = match retry_delay {
+            Some(delay) if valid_duration_literal(delay) => format!(" WITH DELAY {delay}"),
+            Some(_) => {
+                return Err(ClientError::new(
+                    ErrorCode::InvalidArgument,
+                    "invalid queue retry delay",
+                ))
+            }
+            None => String::new(),
+        };
+        self.queue
+            .db
+            .query(&format!(
+                "QUEUE NACK {} WITH delivery_id = {}{delay}",
+                self.name,
+                sql_string_literal(delivery_id)
+            ))
+            .await
+    }
+
+    /// Run a sequential at-least-once consumer until `stopping` becomes true.
+    ///
+    /// The caller should dedicate this connection to the consumer. A successful
+    /// handler is ACKed; a failed handler is NACKed before the error is returned.
+    pub async fn consume<F, Fut>(
+        &self,
+        options: QueueConsumerOptions<'_>,
+        stopping: &std::sync::atomic::AtomicBool,
+        mut handle: F,
+    ) -> Result<()>
+    where
+        F: FnMut(QueueMessage) -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        sql_identifier(options.consumer)?;
+        if let Some(group) = options.group {
+            sql_identifier(group)?;
+        }
+        if let Some(delay) = options.retry_delay {
+            if !valid_duration_literal(delay) {
+                return Err(ClientError::new(
+                    ErrorCode::InvalidArgument,
+                    "invalid queue retry delay",
+                ));
+            }
+        }
+        while !stopping.load(std::sync::atomic::Ordering::Acquire) {
+            let messages = self
+                .read_wait_entries(
+                    options.consumer,
+                    options.wait,
+                    QueueReadWaitOptions {
+                        group: options.group,
+                        count: Some(1),
+                    },
+                )
+                .await?;
+            let Some(message) = messages.into_iter().next() else {
+                continue;
+            };
+            let delivery_id = message.delivery_id.clone();
+            if let Err(handler_error) = handle(message).await {
+                self.nack(&delivery_id, options.retry_delay).await?;
+                return Err(handler_error);
+            }
+            self.ack(&delivery_id).await?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -924,6 +1097,67 @@ fn queue_push_options_sql(options: &QueuePushOptions) -> String {
         sql.push_str(&format!(" AVAILABLE AT {at}"));
     }
     sql
+}
+
+fn queue_message_from_row(row: Row) -> Result<QueueMessage> {
+    let value = |name: &str| {
+        row.iter()
+            .find(|(column, _)| column == name)
+            .map(|(_, value)| value)
+    };
+    let delivery_id = value("delivery_id")
+        .and_then(value_as_string)
+        .ok_or_else(|| {
+            ClientError::new(
+                ErrorCode::InvalidResponse,
+                "queue delivery is missing delivery_id",
+            )
+        })?;
+    Ok(QueueMessage {
+        message_id: value("message_id").and_then(value_as_string),
+        delivery_id,
+        payload: value("payload").cloned(),
+        consumer: value("consumer").and_then(value_as_string),
+        delivery_count: value("delivery_count").and_then(value_as_u64),
+        raw: row,
+    })
+}
+
+fn valid_duration_literal(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    if index == 0 {
+        return false;
+    }
+    if index < bytes.len() && bytes[index] == b'.' {
+        index += 1;
+        let fractional_start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == fractional_start {
+            return false;
+        }
+    }
+    matches!(
+        &value[index..],
+        "" | "ms"
+            | "s"
+            | "sec"
+            | "secs"
+            | "m"
+            | "min"
+            | "mins"
+            | "h"
+            | "hr"
+            | "hrs"
+            | "d"
+            | "day"
+            | "days"
+    )
 }
 
 /// ADR 0067 (#1709): a document body is emitted as an inline strict-JSON

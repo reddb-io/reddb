@@ -1,8 +1,17 @@
 import { RedDBError } from './protocol.js'
 
 export class QueueClient {
+  static [Symbol.hasInstance](value) {
+    const candidate = value?.__reddbClientInstance ?? value
+    return this.prototype.isPrototypeOf(candidate)
+  }
+
   constructor(client) {
     this.client = client
+  }
+
+  scope(queue) {
+    return new ScopedQueueClient(this, requiredQueueName(queue))
   }
 
   push(queue, value, options = {}) {
@@ -59,6 +68,160 @@ export class QueueClient {
   }
 }
 
+export class ScopedQueueClient {
+  constructor(queueClient, queue) {
+    this.queueClient = queueClient
+    this.name = queue
+  }
+
+  push(value, options = {}) {
+    return this.queueClient.push(this.name, value, options)
+  }
+
+  pop(count) {
+    return this.queueClient.pop(this.name, count)
+  }
+
+  peek(count) {
+    return this.queueClient.peek(this.name, count)
+  }
+
+  len() {
+    return this.queueClient.len(this.name)
+  }
+
+  purge() {
+    return this.queueClient.purge(this.name)
+  }
+
+  readWait(consumer, options = {}) {
+    return this.queueClient.readWait(this.name, consumer, options)
+  }
+
+  readWaitEntries(consumer, options = {}) {
+    return this.queueClient.readWaitEntries(this.name, consumer, options)
+  }
+
+  ack(deliveryId) {
+    return this.queueClient.client.call('query', {
+      sql: `QUEUE ACK ${this.name} WITH delivery_id = ${queueStringLiteral(requiredDeliveryId(deliveryId))}`,
+    })
+  }
+
+  nack(deliveryId, options = {}) {
+    const delay = queueRetryDelay(options.delay)
+    return this.queueClient.client.call('query', {
+      sql: `QUEUE NACK ${this.name} WITH delivery_id = ${queueStringLiteral(requiredDeliveryId(deliveryId))}${delay}`,
+    })
+  }
+
+  consumer(options) {
+    return new QueueConsumer(this, options)
+  }
+}
+
+export class QueueConsumer {
+  constructor(queue, options = {}) {
+    if (!(queue instanceof ScopedQueueClient)) {
+      throw new TypeError('QueueConsumer requires a scoped queue')
+    }
+    if (typeof options.handleMessage !== 'function') {
+      throw new TypeError('queue consumer requires handleMessage(message)')
+    }
+    this.queue = queue
+    this.consumerName = requiredQueueName(options.consumer, 'consumer')
+    this.group = options.group == null ? null : requiredQueueName(options.group, 'group')
+    this.waitMs = options.waitMs ?? 30_000
+    if (!Number.isInteger(this.waitMs) || this.waitMs < 0) {
+      throw new TypeError('queue consumer waitMs must be a non-negative integer')
+    }
+    this.handleMessage = options.handleMessage
+    this.onError = options.onError ?? null
+    if (this.onError != null && typeof this.onError !== 'function') {
+      throw new TypeError('queue consumer onError must be a function')
+    }
+    this.retryDelay = options.retryDelay ?? null
+    queueRetryDelay(this.retryDelay)
+    this.running = false
+    this.loopPromise = null
+  }
+
+  get status() {
+    return { isRunning: this.running }
+  }
+
+  start() {
+    if (this.running) return this
+    this.running = true
+    this.loopPromise = this.#run().finally(() => {
+      this.running = false
+    })
+    return this
+  }
+
+  stop() {
+    this.running = false
+    return this.finished()
+  }
+
+  finished() {
+    return this.loopPromise ?? Promise.resolve()
+  }
+
+  async #run() {
+    while (this.running) {
+      let entries
+      try {
+        entries = await this.queue.readWaitEntries(this.consumerName, {
+          group: this.group,
+          count: 1,
+          waitMs: this.waitMs,
+        })
+      } catch (error) {
+        if (!this.running) return
+        await this.#reportError(error, null)
+        continue
+      }
+      if (entries.length === 0) continue
+      const message = entries[0]
+      const deliveryId = message?.delivery_id
+      if (deliveryId == null || String(deliveryId).length === 0) {
+        await this.#reportError(
+          new RedDBError('INVALID_QUEUE_DELIVERY', 'queue delivery is missing delivery_id'),
+          message,
+        )
+        continue
+      }
+      try {
+        await this.handleMessage(message)
+      } catch (error) {
+        try {
+          await this.queue.nack(deliveryId, { delay: this.retryDelay })
+        } catch (nackError) {
+          if (nackError !== error && error != null && typeof error === 'object') {
+            error.nackError = nackError
+          }
+        }
+        await this.#reportError(error, message)
+        continue
+      }
+      try {
+        await this.queue.ack(deliveryId)
+      } catch (error) {
+        await this.#reportError(error, message)
+      }
+    }
+  }
+
+  async #reportError(error, message) {
+    if (this.onError != null) {
+      await this.onError(error, message)
+      return
+    }
+    throw error
+  }
+}
+
 function buildQueueReadWaitRequest(queue, consumer, options) {
   const { waitMs, group = null, count = null } = options ?? {}
   if (!Number.isInteger(waitMs) || waitMs < 0) {
@@ -90,6 +253,30 @@ function queueIdentifier(value) {
     )
   }
   return ident
+}
+
+function requiredQueueName(value, kind = 'queue') {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new RedDBError('INVALID_QUEUE_NAME', `${kind} scope requires a non-empty ${kind} name`)
+  }
+  return queueIdentifier(value)
+}
+
+function requiredDeliveryId(value) {
+  const deliveryId = String(value ?? '')
+  if (deliveryId.length === 0) {
+    throw new RedDBError('INVALID_ARGUMENT', 'queue delivery_id must be non-empty')
+  }
+  return deliveryId
+}
+
+function queueRetryDelay(value) {
+  if (value == null) return ''
+  const delay = String(value)
+  if (!/^(?:\d+(?:\.\d+)?)(?:ms|s|sec|secs|m|min|mins|h|hr|hrs|d|day|days)?$/.test(delay)) {
+    throw new RedDBError('INVALID_ARGUMENT', `invalid queue retry delay "${delay}"`)
+  }
+  return ` WITH DELAY ${delay}`
 }
 
 function queueCount(count) {

@@ -644,6 +644,9 @@ fn reddb(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<high_level::DocumentClient>()?;
         m.add_class::<high_level::KvClient>()?;
         m.add_class::<high_level::QueueClient>()?;
+        m.add_class::<high_level::ScopedQueueClient>()?;
+        m.add_class::<high_level::QueueConsumer>()?;
+        m.add_class::<high_level::SecretsClient>()?;
         m.add_class::<high_level::TxClient>()?;
         m.add("helper_spec_version", high_level::HELPER_SPEC_VERSION)?;
     }

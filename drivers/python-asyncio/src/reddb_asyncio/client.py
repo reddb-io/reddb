@@ -25,11 +25,12 @@ from .kv import (
 )
 from .params import normalize_params
 from .queue import QueueClient
+from .secrets import SecretsClient
 from .redwire import RedwireClient, RedwireOptions
 from .url import ParsedUri, parse_uri
 from .routing import RoutingClient, endpoint
 
-__all__ = ["connect", "Reddb", "KvClient", "DocumentClient", "QueueClient"]
+__all__ = ["connect", "Reddb", "KvClient", "DocumentClient", "QueueClient", "SecretsClient"]
 
 
 async def connect(uri: str, **opts: Any) -> "Reddb":
@@ -205,6 +206,11 @@ class Reddb:
         self.kv = KvClient(transport)
         self.documents = DocumentClient(self)
         self.queue = QueueClient(transport)
+
+    def secrets(self, collection: str) -> SecretsClient:
+        if not collection:
+            raise RedDBError("secrets(collection) requires a non-empty collection", code="INVALID_ARGUMENT")
+        return SecretsClient(self._t, collection)
 
     async def __aenter__(self) -> "Reddb":
         return self

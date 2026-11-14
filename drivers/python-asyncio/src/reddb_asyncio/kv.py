@@ -29,6 +29,11 @@ class KvClient:
         self._t = transport
         self.collection = collection
 
+    def __call__(self, collection: str) -> "KvClient":
+        if not collection:
+            raise RedDBError("kv(collection) requires a non-empty collection", code="INVALID_ARGUMENT")
+        return KvClient(self._t, collection)
+
     # ------------------------------------------------------------------ spec
 
     async def set(self, key: str, value: Any, **opts: Any) -> dict[str, Any]:

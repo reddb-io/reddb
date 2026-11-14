@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { QueueClient, RedDBError } from '../src/index.js'
+import { QueueClient, QueueConsumer, RedDBError } from '../src/index.js'
 
 function fakeQueue(responder) {
   const calls = []
@@ -187,4 +187,157 @@ test('queue rejects ordering key with delayed availability before query', () => 
     },
   )
   assert.equal(calls.length, 0)
+})
+
+test('scoped queue binds the queue name once', async () => {
+  const { queue, calls } = fakeQueue((_, params) => {
+    if (params.sql === 'QUEUE LEN jobs') return { rows: [{ len: 2 }] }
+    return { rows: [] }
+  })
+  const jobs = queue.scope('jobs')
+
+  await jobs.push({ task: 'ship' })
+  assert.equal(await jobs.len(), 2)
+  await jobs.ack("delivery'1")
+  await jobs.nack('delivery-2', { delay: '5s' })
+
+  assert.deepEqual(calls.map((call) => call.params.sql), [
+    'QUEUE PUSH jobs {"task":"ship"}',
+    'QUEUE LEN jobs',
+    "QUEUE ACK jobs WITH delivery_id = 'delivery''1'",
+    "QUEUE NACK jobs WITH delivery_id = 'delivery-2' WITH DELAY 5s",
+  ])
+})
+
+test('scoped queue rejects missing scope and invalid retry delay', async () => {
+  const { queue, calls } = fakeQueue()
+  assert.throws(() => queue.scope(''), /non-empty queue name/)
+  assert.throws(
+    () => queue.scope('jobs').nack('delivery-1', { delay: '5s; DROP QUEUE jobs' }),
+    /invalid queue retry delay/,
+  )
+  assert.equal(calls.length, 0)
+})
+
+test('queue consumer waits, handles, ACKs, and stops gracefully', async () => {
+  const calls = []
+  let waits = 0
+  const queue = new QueueClient({
+    nativeQueueWait: true,
+    async call(method, params) {
+      calls.push({ method, params })
+      if (method === 'queue_wait') {
+        waits += 1
+        return waits === 1
+          ? { rows: [{ delivery_id: 'd1', payload: { task: 'ship' }, delivery_count: 1 }] }
+          : { rows: [] }
+      }
+      return { rows: [] }
+    },
+  }).scope('jobs')
+  const handled = []
+  let worker
+  worker = new QueueConsumer(queue, {
+    consumer: 'worker1',
+    group: 'workers',
+    waitMs: 1000,
+    async handleMessage(message) {
+      handled.push(message.payload)
+      void worker.stop()
+    },
+  })
+
+  worker.start()
+  await worker.finished()
+
+  assert.deepEqual(handled, [{ task: 'ship' }])
+  assert.equal(worker.status.isRunning, false)
+  assert.deepEqual(calls, [
+    {
+      method: 'queue_wait',
+      params: {
+        queue: 'jobs', group: 'workers', consumer: 'worker1', count: 1, waitMs: 1000,
+      },
+    },
+    {
+      method: 'query',
+      params: { sql: "QUEUE ACK jobs WITH delivery_id = 'd1'" },
+    },
+  ])
+})
+
+test('queue consumer NACKs handler failures and reports them', async () => {
+  const calls = []
+  const errors = []
+  let waits = 0
+  const queue = new QueueClient({
+    nativeQueueWait: true,
+    async call(method, params) {
+      calls.push({ method, params })
+      if (method === 'queue_wait') {
+        waits += 1
+        return waits === 1
+          ? { rows: [{ delivery_id: 'd1', payload: 'work', delivery_count: 1 }] }
+          : { rows: [] }
+      }
+      return { rows: [] }
+    },
+  }).scope('jobs')
+  let worker
+  worker = queue.consumer({
+    consumer: 'worker1',
+    waitMs: 1000,
+    retryDelay: '2s',
+    async handleMessage() {
+      void worker.stop()
+      throw new Error('handler failed')
+    },
+    async onError(error) {
+      errors.push(error.message)
+    },
+  })
+
+  worker.start()
+  await worker.finished()
+
+  assert.deepEqual(errors, ['handler failed'])
+  assert.deepEqual(calls.at(-1), {
+    method: 'query',
+    params: { sql: "QUEUE NACK jobs WITH delivery_id = 'd1' WITH DELAY 2s" },
+  })
+})
+
+test('queue consumer reports ACK failure without issuing NACK', async () => {
+  const calls = []
+  const errors = []
+  let waits = 0
+  let worker
+  const queue = new QueueClient({
+    nativeQueueWait: true,
+    async call(method, params) {
+      calls.push({ method, params })
+      if (method === 'queue_wait') {
+        waits += 1
+        return waits === 1 ? { rows: [{ delivery_id: 'd1', payload: 'work' }] } : { rows: [] }
+      }
+      if (params.sql.startsWith('QUEUE ACK')) throw new Error('ACK response lost')
+      return { rows: [] }
+    },
+  }).scope('jobs')
+  worker = queue.consumer({
+    consumer: 'worker1',
+    waitMs: 1000,
+    async handleMessage() {
+      void worker.stop()
+    },
+    async onError(error) {
+      errors.push(error.message)
+    },
+  })
+
+  worker.start()
+  await worker.finished()
+
+  assert.deepEqual(errors, ['ACK response lost'])
+  assert.equal(calls.some((call) => call.params?.sql?.startsWith('QUEUE NACK')), false)
 })

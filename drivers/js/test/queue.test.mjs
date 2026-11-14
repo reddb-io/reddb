@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { QueueClient, RedDBError } from '../src/index.js'
+import { QueueClient, QueueConsumer, RedDBError } from '../src/index.js'
 
 function fakeQueue(responder) {
   const calls = []
@@ -138,4 +138,39 @@ test('queue rejects invalid names counts and priorities before query', async () 
   await assert.rejects(() => queue.pop('jobs', -1), /non-negative integer/)
   assert.throws(() => queue.push('jobs', 'x', { priority: 1.5 }), /priority must be an integer/)
   assert.equal(calls.length, 0)
+})
+
+test('scoped queue preserves delivery metadata and ACKs', async () => {
+  const { queue, calls } = fakeQueue((_, params) => {
+    if (params.sql.startsWith('QUEUE READ')) {
+      return { rows: [{ delivery_id: 'd1', message_id: 'm1', payload: 'work' }] }
+    }
+    return { affected: 1 }
+  })
+  const scoped = queue.scope('jobs')
+  const [message] = await scoped.readWaitEntries('worker', { waitMs: 1000 })
+  assert.equal(message.delivery_id, 'd1')
+  await scoped.ack('d1')
+  assert.match(calls.at(-1).params.sql, /^QUEUE ACK jobs/)
+})
+
+test('queue consumer ACKs success and NACKs handler failure', async () => {
+  let reads = 0
+  const { queue, calls } = fakeQueue((_, params) => {
+    if (params.sql.startsWith('QUEUE READ')) {
+      reads += 1
+      if (reads === 1) return { rows: [{ delivery_id: 'd1', payload: 'ok' }] }
+      return new Promise(() => {})
+    }
+    return { affected: 1 }
+  })
+  const consumer = queue.scope('jobs').consumer({
+    consumer: 'worker',
+    waitMs: 1,
+    handleMessage: () => { queueMicrotask(() => consumer.stop()) },
+  })
+  assert.ok(consumer instanceof QueueConsumer)
+  consumer.start()
+  await consumer.finished()
+  assert.ok(calls.some((call) => call.params.sql?.startsWith('QUEUE ACK jobs')))
 })

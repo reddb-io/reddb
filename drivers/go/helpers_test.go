@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeQuerier records each SQL call and replays scripted JSON responses.
@@ -89,6 +90,27 @@ func TestKVPath_PreservesDotsAndSlashes(t *testing.T) {
 
 func TestKVPath_RejectsBadCollection(t *testing.T) {
 	_, err := KVPath("bad-name!", "k")
+	if !IsCode(err, CodeInvalidArgument) {
+		t.Fatalf("want INVALID_ARGUMENT, got %v", err)
+	}
+}
+
+func TestKVScope_BindsCollection(t *testing.T) {
+	fq := &fakeQuerier{replies: [][]byte{reply(t, map[string]any{})}}
+	kv, err := NewHelpers(fq).KVScope("runtime_config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kv.Set(context.Background(), "feature", true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fq.calls[0].sql, "runtime_config.feature") {
+		t.Fatalf("unexpected SQL: %s", fq.calls[0].sql)
+	}
+}
+
+func TestKVScope_RejectsInvalidCollection(t *testing.T) {
+	_, err := NewHelpers(&fakeQuerier{}).KVScope("bad collection")
 	if !IsCode(err, CodeInvalidArgument) {
 		t.Fatalf("want INVALID_ARGUMENT, got %v", err)
 	}
@@ -253,6 +275,105 @@ func TestQueue_Push_RejectsInvalidIdentifier(t *testing.T) {
 	_, err := q.Push(context.Background(), "bad-name!", "x")
 	if !IsCode(err, CodeInvalidArgument) {
 		t.Fatalf("want INVALID_ARGUMENT: %v", err)
+	}
+}
+
+func TestQueueScope_BindsNameAndPreservesDeliveryMetadata(t *testing.T) {
+	fq := &fakeQuerier{replies: [][]byte{
+		reply(t, map[string]any{"rows": []any{map[string]any{
+			"message_id": "m1", "delivery_id": "d1", "payload": "work",
+			"consumer": "worker1", "delivery_count": 2,
+		}}}),
+		reply(t, map[string]any{}),
+	}}
+	queue, err := NewHelpers(fq).QueueScope("jobs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, err := queue.ReadWaitEntries(
+		context.Background(), "worker1", time.Second, ReadWaitOptions{Group: "workers", Count: 1})
+	if err != nil || len(messages) != 1 {
+		t.Fatalf("read: %+v %v", messages, err)
+	}
+	if messages[0].DeliveryID != "d1" || messages[0].DeliveryCount != 2 {
+		t.Fatalf("metadata: %+v", messages[0])
+	}
+	if err := queue.Ack(context.Background(), messages[0].DeliveryID); err != nil {
+		t.Fatal(err)
+	}
+	if fq.calls[1].sql != "QUEUE ACK jobs WITH delivery_id = 'd1'" {
+		t.Fatalf("ack SQL: %s", fq.calls[1].sql)
+	}
+}
+
+func TestQueueConsumer_HandlesAndAcks(t *testing.T) {
+	fq := &fakeQuerier{replies: [][]byte{
+		reply(t, map[string]any{"rows": []any{map[string]any{
+			"message_id": "m1", "delivery_id": "d1", "payload": "work",
+		}}}),
+		reply(t, map[string]any{}),
+	}}
+	queue, err := NewHelpers(fq).QueueScope("jobs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var consumer *QueueConsumer
+	consumer, err = queue.Consumer(QueueConsumerOptions{
+		Consumer: "worker1",
+		Wait:     time.Second,
+		Handle: func(_ context.Context, message QueueMessage) error {
+			if message.Payload != "work" {
+				t.Fatalf("payload: %v", message.Payload)
+			}
+			consumer.Stop()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := consumer.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := consumer.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if len(fq.calls) != 2 || fq.calls[1].sql != "QUEUE ACK jobs WITH delivery_id = 'd1'" {
+		t.Fatalf("calls: %+v", fq.calls)
+	}
+}
+
+func TestSecrets_RequiresScopeAndSeparatesReveal(t *testing.T) {
+	fq := &fakeQuerier{replies: [][]byte{
+		reply(t, map[string]any{}),
+		reply(t, map[string]any{"rows": []any{map[string]any{"key": "smtp.password"}}}),
+		reply(t, map[string]any{"rows": []any{map[string]any{"value": "secret"}}}),
+	}}
+	secrets, err := NewHelpers(fq).Secrets("auth.vault")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := secrets.Put(context.Background(), "smtp.password", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := secrets.Get(context.Background(), "smtp.password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := secrets.Reveal(context.Background(), "smtp.password"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"VAULT PUT auth.vault.smtp.password = 'secret'",
+		"VAULT GET auth.vault.smtp.password",
+		"VAULT REVEAL auth.vault.smtp.password",
+	}
+	for index := range want {
+		if fq.calls[index].sql != want[index] {
+			t.Fatalf("call %d: got %q want %q", index, fq.calls[index].sql, want[index])
+		}
+	}
+	if _, err := NewHelpers(fq).Secrets(""); !IsCode(err, CodeInvalidArgument) {
+		t.Fatalf("missing collection: %v", err)
 	}
 }
 

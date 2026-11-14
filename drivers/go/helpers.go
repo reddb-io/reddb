@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -38,12 +40,40 @@ func (h *Helpers) Documents() *DocumentClient { return &DocumentClient{q: h.q} }
 // (“kv_default“).
 func (h *Helpers) KV() *KVClient { return &KVClient{q: h.q, Collection: "kv_default"} }
 
+// KVScope binds the KV helper to one explicit collection. KV() remains for
+// compatibility with applications that use the historical kv_default scope.
+func (h *Helpers) KVScope(collection string) (*KVClient, error) {
+	if err := assertIdentifier(collection, "KV collection"); err != nil {
+		return nil, err
+	}
+	return &KVClient{q: h.q, Collection: collection}, nil
+}
+
 // Queue returns the queue namespace client.
 func (h *Helpers) Queue() *QueueClient { return &QueueClient{q: h.q} }
 
 // Queues is an alias for Queue() that matches the spec namespace name
 // (`queues.*`). Both forms call into the same client.
 func (h *Helpers) Queues() *QueueClient { return h.Queue() }
+
+// QueueScope binds one queue name so application code cannot accidentally
+// read from one queue and ACK on another.
+func (h *Helpers) QueueScope(name string) (*ScopedQueueClient, error) {
+	return h.Queue().Scope(name)
+}
+
+// Secrets binds the Vault helper to one explicit collection.
+func (h *Helpers) Secrets(collection string) (*SecretsClient, error) {
+	if !vaultIdentifierPattern.MatchString(collection) {
+		return nil, NewError(CodeInvalidArgument, "invalid vault collection")
+	}
+	return &SecretsClient{q: h.q, Collection: collection}, nil
+}
+
+// Vault is an alias for Secrets.
+func (h *Helpers) Vault(collection string) (*SecretsClient, error) {
+	return h.Secrets(collection)
+}
 
 // Tx returns the transaction namespace client implementing `tx.begin`,
 // `tx.commit`, `tx.rollback`.
@@ -83,6 +113,71 @@ type ListResult struct {
 type QueuePushResult struct {
 	Affected uint64 `json:"affected"`
 	RID      string `json:"rid,omitempty"`
+}
+
+// QueueMessage preserves the server-issued delivery handle required by ACK/NACK.
+type QueueMessage struct {
+	MessageID     string
+	DeliveryID    string
+	Payload       any
+	Consumer      string
+	DeliveryCount uint64
+	Raw           map[string]any
+}
+
+// SecretsClient exposes metadata reads separately from explicit plaintext reveal.
+type SecretsClient struct {
+	q          Querier
+	Collection string
+}
+
+var vaultIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9_.]+$`)
+
+func (v *SecretsClient) Put(ctx context.Context, key string, value any) error {
+	path, err := v.path(key)
+	if err != nil {
+		return err
+	}
+	literal, err := kvValueLiteral(value)
+	if err != nil {
+		return err
+	}
+	_, err = v.q.Query(ctx, "VAULT PUT "+path+" = "+literal)
+	return err
+}
+
+func (v *SecretsClient) Get(ctx context.Context, key string) (map[string]any, error) {
+	return v.read(ctx, "GET", key)
+}
+
+func (v *SecretsClient) Reveal(ctx context.Context, key string) (map[string]any, error) {
+	return v.read(ctx, "REVEAL", key)
+}
+
+func (v *SecretsClient) read(ctx context.Context, verb, key string) (map[string]any, error) {
+	path, err := v.path(key)
+	if err != nil {
+		return nil, err
+	}
+	body, err := v.q.Query(ctx, "VAULT "+verb+" "+path)
+	if err != nil {
+		return nil, err
+	}
+	row, _, err := firstRow(body)
+	if err != nil {
+		return nil, err
+	}
+	if len(row) == 0 {
+		return nil, nil
+	}
+	return row, nil
+}
+
+func (v *SecretsClient) path(key string) (string, error) {
+	if !vaultIdentifierPattern.MatchString(key) {
+		return "", NewError(CodeInvalidArgument, "invalid vault key")
+	}
+	return v.Collection + "." + key, nil
 }
 
 // --- Documents -------------------------------------------------------
@@ -394,6 +489,20 @@ func (k *KVClient) List(ctx context.Context, opts KVListOptions) (*ListResult, e
 // QueueClient implements `queue.*` from the SDK Helper Spec.
 type QueueClient struct{ q Querier }
 
+// ScopedQueueClient binds all operations to one explicit queue name.
+type ScopedQueueClient struct {
+	queue *QueueClient
+	Name  string
+}
+
+// Scope binds this helper to one queue.
+func (qc *QueueClient) Scope(name string) (*ScopedQueueClient, error) {
+	if err := assertIdentifier(name, "queue name"); err != nil {
+		return nil, err
+	}
+	return &ScopedQueueClient{queue: qc, Name: name}, nil
+}
+
 // PushOptions controls queue push behaviour.
 type PushOptions struct {
 	Priority *int
@@ -544,6 +653,24 @@ func (qc *QueueClient) ReadWait(
 	wait time.Duration,
 	opts ...ReadWaitOptions,
 ) ([]any, error) {
+	messages, err := qc.ReadWaitEntries(ctx, queue, consumer, wait, opts...)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]any, 0, len(messages))
+	for _, message := range messages {
+		out = append(out, message.Payload)
+	}
+	return out, nil
+}
+
+// ReadWaitEntries is ReadWait without discarding delivery metadata.
+func (qc *QueueClient) ReadWaitEntries(
+	ctx context.Context,
+	queue, consumer string,
+	wait time.Duration,
+	opts ...ReadWaitOptions,
+) ([]QueueMessage, error) {
 	if err := assertIdentifier(queue, "queue name"); err != nil {
 		return nil, err
 	}
@@ -584,11 +711,50 @@ func (qc *QueueClient) ReadWait(
 	if err != nil {
 		return nil, err
 	}
-	out := make([]any, 0, len(rows))
+	out := make([]QueueMessage, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, row["payload"])
+		out = append(out, queueMessageFromRow(row))
 	}
 	return out, nil
+}
+
+func queueMessageFromRow(row map[string]any) QueueMessage {
+	return QueueMessage{
+		MessageID:     stringValue(row["message_id"]),
+		DeliveryID:    stringValue(row["delivery_id"]),
+		Payload:       row["payload"],
+		Consumer:      stringValue(row["consumer"]),
+		DeliveryCount: uintValue(row["delivery_count"]),
+		Raw:           row,
+	}
+}
+
+func stringValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprint(value)
+}
+
+func uintValue(value any) uint64 {
+	switch typed := value.(type) {
+	case uint64:
+		return typed
+	case int64:
+		if typed >= 0 {
+			return uint64(typed)
+		}
+	case float64:
+		if typed >= 0 {
+			return uint64(typed)
+		}
+	case json.Number:
+		parsed, err := strconv.ParseUint(string(typed), 10, 64)
+		if err == nil {
+			return parsed
+		}
+	}
+	return 0
 }
 
 // Create makes the queue if it does not exist (idempotent). Wraps
@@ -605,6 +771,218 @@ func (qc *QueueClient) Create(ctx context.Context, queue string) error {
 		return nil
 	}
 	return err
+}
+
+// Push adds one message to the bound queue.
+func (q *ScopedQueueClient) Push(ctx context.Context, value any, opts ...PushOptions) (*QueuePushResult, error) {
+	return q.queue.Push(ctx, q.Name, value, opts...)
+}
+
+func (q *ScopedQueueClient) Pop(ctx context.Context, count ...int) ([]any, error) {
+	return q.queue.Pop(ctx, q.Name, count...)
+}
+
+func (q *ScopedQueueClient) Peek(ctx context.Context, count ...int) ([]any, error) {
+	return q.queue.Peek(ctx, q.Name, count...)
+}
+
+func (q *ScopedQueueClient) Len(ctx context.Context) (uint64, error) {
+	return q.queue.Len(ctx, q.Name)
+}
+
+func (q *ScopedQueueClient) Purge(ctx context.Context) (*DeleteResult, error) {
+	return q.queue.Purge(ctx, q.Name)
+}
+
+func (q *ScopedQueueClient) ReadWaitEntries(
+	ctx context.Context,
+	consumer string,
+	wait time.Duration,
+	opts ...ReadWaitOptions,
+) ([]QueueMessage, error) {
+	return q.queue.ReadWaitEntries(ctx, q.Name, consumer, wait, opts...)
+}
+
+func (q *ScopedQueueClient) Ack(ctx context.Context, deliveryID string) error {
+	if deliveryID == "" {
+		return NewError(CodeInvalidArgument, "queue delivery_id must be non-empty")
+	}
+	_, err := q.queue.q.Query(ctx, fmt.Sprintf(
+		"QUEUE ACK %s WITH delivery_id = %s", sqlIdentifier(q.Name), kvTagLiteral(deliveryID)))
+	return err
+}
+
+var queueRetryDelayPattern = regexp.MustCompile(`^(?:\d+(?:\.\d+)?)(?:ms|s|sec|secs|m|min|mins|h|hr|hrs|d|day|days)?$`)
+
+func (q *ScopedQueueClient) Nack(ctx context.Context, deliveryID, delay string) error {
+	if deliveryID == "" {
+		return NewError(CodeInvalidArgument, "queue delivery_id must be non-empty")
+	}
+	delayClause := ""
+	if delay != "" {
+		if !queueRetryDelayPattern.MatchString(delay) {
+			return NewError(CodeInvalidArgument, "invalid queue retry delay")
+		}
+		delayClause = " WITH DELAY " + delay
+	}
+	_, err := q.queue.q.Query(ctx, fmt.Sprintf(
+		"QUEUE NACK %s WITH delivery_id = %s%s",
+		sqlIdentifier(q.Name), kvTagLiteral(deliveryID), delayClause))
+	return err
+}
+
+// QueueConsumerOptions configures one sequential at-least-once worker.
+// Use one dedicated Conn per consumer; start additional consumers for parallelism.
+type QueueConsumerOptions struct {
+	Consumer    string
+	Group       string
+	Wait        time.Duration
+	RetryDelay  string
+	Handle      func(context.Context, QueueMessage) error
+	HandleError func(context.Context, error, *QueueMessage) error
+}
+
+// QueueConsumer owns the read/handle/ACK loop for a scoped queue.
+type QueueConsumer struct {
+	queue    *ScopedQueueClient
+	options  QueueConsumerOptions
+	mu       sync.Mutex
+	cancel   context.CancelFunc
+	stopping bool
+	done     chan struct{}
+	err      error
+}
+
+func (q *ScopedQueueClient) Consumer(options QueueConsumerOptions) (*QueueConsumer, error) {
+	if options.Consumer == "" {
+		return nil, NewError(CodeInvalidArgument, "queue consumer name must be non-empty")
+	}
+	if err := assertIdentifier(options.Consumer, "consumer name"); err != nil {
+		return nil, err
+	}
+	if options.Group != "" {
+		if err := assertIdentifier(options.Group, "group name"); err != nil {
+			return nil, err
+		}
+	}
+	if options.Wait < 0 {
+		return nil, NewError(CodeInvalidArgument, "queue consumer wait must be non-negative")
+	}
+	if options.Wait == 0 {
+		options.Wait = 30 * time.Second
+	}
+	if options.RetryDelay != "" && !queueRetryDelayPattern.MatchString(options.RetryDelay) {
+		return nil, NewError(CodeInvalidArgument, "invalid queue retry delay")
+	}
+	if options.Handle == nil {
+		return nil, NewError(CodeInvalidArgument, "queue consumer requires a handler")
+	}
+	return &QueueConsumer{queue: q, options: options}, nil
+}
+
+func (c *QueueConsumer) Start(parent context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.done != nil {
+		return NewError(CodeInvalidArgument, "queue consumer already started")
+	}
+	ctx, cancel := context.WithCancel(parent)
+	c.cancel = cancel
+	c.done = make(chan struct{})
+	go func() {
+		defer close(c.done)
+		c.err = c.run(ctx)
+	}()
+	return nil
+}
+
+func (c *QueueConsumer) Stop() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stopping = true
+}
+
+// Abort cancels the in-flight wait and handler context immediately.
+func (c *QueueConsumer) Abort() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stopping = true
+	if c.cancel != nil {
+		c.cancel()
+	}
+}
+
+func (c *QueueConsumer) Wait() error {
+	c.mu.Lock()
+	done := c.done
+	c.mu.Unlock()
+	if done == nil {
+		return NewError(CodeInvalidArgument, "queue consumer has not started")
+	}
+	<-done
+	return c.err
+}
+
+func (c *QueueConsumer) run(ctx context.Context) error {
+	readOptions := ReadWaitOptions{Group: c.options.Group, Count: 1}
+	for {
+		if c.isStopping() {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
+		messages, err := c.queue.ReadWaitEntries(
+			ctx, c.options.Consumer, c.options.Wait, readOptions)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if reportErr := c.reportError(ctx, err, nil); reportErr != nil {
+				return reportErr
+			}
+			continue
+		}
+		if len(messages) == 0 {
+			continue
+		}
+		message := messages[0]
+		if message.DeliveryID == "" {
+			err = NewError(CodeInvalidResponse, "queue delivery is missing delivery_id")
+		} else {
+			err = c.options.Handle(ctx, message)
+		}
+		if err == nil {
+			err = c.queue.Ack(ctx, message.DeliveryID)
+		} else if message.DeliveryID != "" {
+			nackErr := c.queue.Nack(ctx, message.DeliveryID, c.options.RetryDelay)
+			if nackErr != nil {
+				err = fmt.Errorf("%w; queue NACK failed: %v", err, nackErr)
+			}
+		}
+		if err != nil {
+			if reportErr := c.reportError(ctx, err, &message); reportErr != nil {
+				return reportErr
+			}
+		}
+	}
+}
+
+func (c *QueueConsumer) isStopping() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stopping
+}
+
+func (c *QueueConsumer) reportError(
+	ctx context.Context,
+	err error,
+	message *QueueMessage,
+) error {
+	if c.options.HandleError == nil {
+		return err
+	}
+	return c.options.HandleError(ctx, err, message)
 }
 
 // --- Transactions -----------------------------------------------------
