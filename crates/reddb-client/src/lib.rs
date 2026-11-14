@@ -456,12 +456,12 @@ impl<'a> DocumentClient<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct QueueClient<'a> {
     db: &'a Reddb,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ScopedQueueClient<'a> {
     queue: QueueClient<'a>,
     name: String,
@@ -663,6 +663,218 @@ pub struct QueueConsumerOptions<'a> {
     pub retry_delay: Option<&'a str>,
 }
 
+/// Bounded exponential backoff for transient receive failures.
+#[derive(Debug, Clone, Copy)]
+pub struct QueueReceiveBackoff {
+    pub initial: std::time::Duration,
+    pub max: std::time::Duration,
+    pub multiplier: f64,
+    pub jitter: bool,
+}
+
+impl Default for QueueReceiveBackoff {
+    fn default() -> Self {
+        Self {
+            initial: std::time::Duration::from_millis(250),
+            max: std::time::Duration::from_secs(30),
+            multiplier: 2.0,
+            jitter: true,
+        }
+    }
+}
+
+/// Options for [`ScopedQueueClient::worker`].
+#[derive(Debug, Clone)]
+pub struct QueueWorkerOptions {
+    pub consumer: String,
+    pub group: Option<String>,
+    pub wait: std::time::Duration,
+    pub retry_delay: Option<String>,
+    pub concurrency: usize,
+    pub receive_backoff: QueueReceiveBackoff,
+    pub lease_heartbeat: Option<std::time::Duration>,
+    pub handler_timeout: Option<std::time::Duration>,
+}
+
+impl QueueWorkerOptions {
+    pub fn new(consumer: impl Into<String>) -> Self {
+        Self {
+            consumer: consumer.into(),
+            group: None,
+            wait: std::time::Duration::from_secs(30),
+            retry_delay: None,
+            concurrency: 1,
+            receive_backoff: QueueReceiveBackoff::default(),
+            lease_heartbeat: None,
+            handler_timeout: None,
+        }
+    }
+
+    pub fn group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
+        self
+    }
+
+    pub fn wait(mut self, wait: std::time::Duration) -> Self {
+        self.wait = wait;
+        self
+    }
+
+    pub fn retry_delay(mut self, retry_delay: impl Into<String>) -> Self {
+        self.retry_delay = Some(retry_delay.into());
+        self
+    }
+
+    pub fn concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency;
+        self
+    }
+
+    pub fn receive_backoff(mut self, receive_backoff: QueueReceiveBackoff) -> Self {
+        self.receive_backoff = receive_backoff;
+        self
+    }
+
+    pub fn lease_heartbeat(mut self, lease_heartbeat: std::time::Duration) -> Self {
+        self.lease_heartbeat = Some(lease_heartbeat);
+        self
+    }
+
+    pub fn handler_timeout(mut self, handler_timeout: std::time::Duration) -> Self {
+        self.handler_timeout = Some(handler_timeout);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueWorkerState {
+    Idle,
+    Running,
+    Paused,
+    Stopping,
+    Stopped,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueWorkerStatus {
+    pub state: QueueWorkerState,
+    pub is_running: bool,
+    pub is_paused: bool,
+    pub in_flight: usize,
+    pub concurrency: usize,
+}
+
+#[derive(Debug)]
+struct QueueWorkerShared {
+    state: std::sync::atomic::AtomicU8,
+    started: std::sync::atomic::AtomicBool,
+    paused: std::sync::atomic::AtomicBool,
+    stopping: std::sync::atomic::AtomicBool,
+    aborted: std::sync::atomic::AtomicBool,
+    in_flight: std::sync::atomic::AtomicUsize,
+    concurrency: usize,
+    changed: tokio::sync::Notify,
+}
+
+/// Cloneable lifecycle handle for a running queue worker.
+#[derive(Debug, Clone)]
+pub struct QueueWorkerControl {
+    shared: std::sync::Arc<QueueWorkerShared>,
+}
+
+impl QueueWorkerControl {
+    pub fn pause(&self) {
+        use std::sync::atomic::Ordering;
+        if self.shared.state.load(Ordering::Acquire)
+            == queue_worker_state_code(QueueWorkerState::Running)
+        {
+            self.shared.paused.store(true, Ordering::Release);
+            self.shared.state.store(
+                queue_worker_state_code(QueueWorkerState::Paused),
+                Ordering::Release,
+            );
+        }
+    }
+
+    pub fn resume(&self) {
+        use std::sync::atomic::Ordering;
+        if self.shared.paused.swap(false, Ordering::AcqRel) {
+            self.shared.state.store(
+                queue_worker_state_code(QueueWorkerState::Running),
+                Ordering::Release,
+            );
+            self.shared.changed.notify_waiters();
+        }
+    }
+
+    /// Stop receiving new deliveries and let in-flight handlers settle.
+    pub fn stop(&self) {
+        use std::sync::atomic::Ordering;
+        self.shared.stopping.store(true, Ordering::Release);
+        self.shared.paused.store(false, Ordering::Release);
+        let state = self.shared.state.load(Ordering::Acquire);
+        if state != queue_worker_state_code(QueueWorkerState::Idle)
+            && state != queue_worker_state_code(QueueWorkerState::Stopped)
+            && state != queue_worker_state_code(QueueWorkerState::Failed)
+        {
+            self.shared.state.store(
+                queue_worker_state_code(QueueWorkerState::Stopping),
+                Ordering::Release,
+            );
+        }
+        self.shared.changed.notify_waiters();
+    }
+
+    /// Stop immediately, cancelling in-flight handler futures by dropping them.
+    pub fn abort(&self) {
+        use std::sync::atomic::Ordering;
+        self.shared.aborted.store(true, Ordering::Release);
+        self.stop();
+    }
+
+    pub fn status(&self) -> QueueWorkerStatus {
+        use std::sync::atomic::Ordering;
+        let state = queue_worker_state(self.shared.state.load(Ordering::Acquire));
+        QueueWorkerStatus {
+            state,
+            is_running: matches!(state, QueueWorkerState::Running | QueueWorkerState::Paused),
+            is_paused: self.shared.paused.load(Ordering::Acquire),
+            in_flight: self.shared.in_flight.load(Ordering::Acquire),
+            concurrency: self.shared.concurrency,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct QueueWorker<'a> {
+    queue: ScopedQueueClient<'a>,
+    options: QueueWorkerOptions,
+    control: QueueWorkerControl,
+}
+
+const fn queue_worker_state_code(state: QueueWorkerState) -> u8 {
+    match state {
+        QueueWorkerState::Idle => 0,
+        QueueWorkerState::Running => 1,
+        QueueWorkerState::Paused => 2,
+        QueueWorkerState::Stopping => 3,
+        QueueWorkerState::Stopped => 4,
+        QueueWorkerState::Failed => 5,
+    }
+}
+
+const fn queue_worker_state(code: u8) -> QueueWorkerState {
+    match code {
+        1 => QueueWorkerState::Running,
+        2 => QueueWorkerState::Paused,
+        3 => QueueWorkerState::Stopping,
+        4 => QueueWorkerState::Stopped,
+        5 => QueueWorkerState::Failed,
+        _ => QueueWorkerState::Idle,
+    }
+}
+
 impl<'a> ScopedQueueClient<'a> {
     pub fn name(&self) -> &str {
         &self.name
@@ -749,6 +961,73 @@ impl<'a> ScopedQueueClient<'a> {
             .await
     }
 
+    /// Build a managed at-least-once worker without starting it.
+    pub fn worker(&self, options: QueueWorkerOptions) -> Result<QueueWorker<'a>> {
+        sql_identifier(&options.consumer)?;
+        if let Some(group) = options.group.as_deref() {
+            sql_identifier(group)?;
+        }
+        if options.wait.is_zero() {
+            return Err(ClientError::new(
+                ErrorCode::InvalidArgument,
+                "queue worker wait must be greater than zero",
+            ));
+        }
+        if !(1..=128).contains(&options.concurrency) {
+            return Err(ClientError::new(
+                ErrorCode::InvalidArgument,
+                "queue worker concurrency must be between 1 and 128",
+            ));
+        }
+        if options.receive_backoff.initial.is_zero()
+            || options.receive_backoff.max < options.receive_backoff.initial
+            || !options.receive_backoff.multiplier.is_finite()
+            || options.receive_backoff.multiplier < 1.0
+        {
+            return Err(ClientError::new(
+                ErrorCode::InvalidArgument,
+                "invalid queue receive backoff",
+            ));
+        }
+        if options
+            .lease_heartbeat
+            .is_some_and(|duration| duration.is_zero())
+            || options
+                .handler_timeout
+                .is_some_and(|duration| duration.is_zero())
+        {
+            return Err(ClientError::new(
+                ErrorCode::InvalidArgument,
+                "queue worker heartbeat and timeout must be greater than zero",
+            ));
+        }
+        if let Some(delay) = options.retry_delay.as_deref() {
+            if !valid_duration_literal(delay) {
+                return Err(ClientError::new(
+                    ErrorCode::InvalidArgument,
+                    "invalid queue retry delay",
+                ));
+            }
+        }
+        let shared = std::sync::Arc::new(QueueWorkerShared {
+            state: std::sync::atomic::AtomicU8::new(queue_worker_state_code(
+                QueueWorkerState::Idle,
+            )),
+            started: std::sync::atomic::AtomicBool::new(false),
+            paused: std::sync::atomic::AtomicBool::new(false),
+            stopping: std::sync::atomic::AtomicBool::new(false),
+            aborted: std::sync::atomic::AtomicBool::new(false),
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            concurrency: options.concurrency,
+            changed: tokio::sync::Notify::new(),
+        });
+        Ok(QueueWorker {
+            queue: self.clone(),
+            options,
+            control: QueueWorkerControl { shared },
+        })
+    }
+
     /// Run a sequential at-least-once consumer until `stopping` becomes true.
     ///
     /// The caller should dedicate this connection to the consumer. A successful
@@ -797,6 +1076,282 @@ impl<'a> ScopedQueueClient<'a> {
             self.ack(&delivery_id).await?;
         }
         Ok(())
+    }
+}
+
+impl QueueWorker<'_> {
+    pub fn control(&self) -> QueueWorkerControl {
+        self.control.clone()
+    }
+
+    pub fn status(&self) -> QueueWorkerStatus {
+        self.control.status()
+    }
+
+    /// Run until stopped, aborted, or the first unhandled error.
+    pub async fn run<H, HF>(&self, handle: H) -> Result<()>
+    where
+        H: Fn(QueueMessage) -> HF + Sync,
+        HF: std::future::Future<Output = Result<()>>,
+    {
+        self.run_with_error_handler(handle, |error, _message| async move { Err(error) })
+            .await
+    }
+
+    /// Run with an error hook. Returning `Ok(())` from `on_error` keeps the
+    /// worker alive; returning an error fails the worker and stops all lanes.
+    pub async fn run_with_error_handler<H, HF, E, EF>(&self, handle: H, on_error: E) -> Result<()>
+    where
+        H: Fn(QueueMessage) -> HF + Sync,
+        HF: std::future::Future<Output = Result<()>>,
+        E: Fn(ClientError, Option<QueueMessage>) -> EF + Sync,
+        EF: std::future::Future<Output = Result<()>>,
+    {
+        use futures_util::{stream::FuturesUnordered, StreamExt};
+        use std::sync::atomic::Ordering;
+
+        if self.control.shared.started.swap(true, Ordering::AcqRel) {
+            return Err(ClientError::new(
+                ErrorCode::InvalidArgument,
+                "queue worker already started",
+            ));
+        }
+        self.control.shared.state.store(
+            queue_worker_state_code(QueueWorkerState::Running),
+            Ordering::Release,
+        );
+
+        let mut lanes = FuturesUnordered::new();
+        for _ in 0..self.options.concurrency {
+            lanes.push(self.run_lane(&handle, &on_error));
+        }
+        let mut first_error = None;
+        while let Some(result) = lanes.next().await {
+            if let Err(error) = result {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                    self.control.stop();
+                }
+            }
+        }
+        self.control.shared.state.store(
+            queue_worker_state_code(if first_error.is_some() {
+                QueueWorkerState::Failed
+            } else {
+                QueueWorkerState::Stopped
+            }),
+            Ordering::Release,
+        );
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    async fn run_lane<H, HF, E, EF>(&self, handle: &H, on_error: &E) -> Result<()>
+    where
+        H: Fn(QueueMessage) -> HF + Sync,
+        HF: std::future::Future<Output = Result<()>>,
+        E: Fn(ClientError, Option<QueueMessage>) -> EF + Sync,
+        EF: std::future::Future<Output = Result<()>>,
+    {
+        use std::sync::atomic::Ordering;
+
+        let mut receive_failures = 0_u32;
+        loop {
+            if !self.wait_until_ready().await {
+                return Ok(());
+            }
+            let read = self.queue.read_wait_entries(
+                &self.options.consumer,
+                self.options.wait,
+                QueueReadWaitOptions {
+                    group: self.options.group.as_deref(),
+                    count: Some(1),
+                },
+            );
+            tokio::pin!(read);
+            let messages = tokio::select! {
+                result = &mut read => result,
+                () = self.control.shared.changed.notified() => {
+                    if self.control.shared.stopping.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    continue;
+                }
+            };
+            let messages = match messages {
+                Ok(messages) => {
+                    receive_failures = 0;
+                    messages
+                }
+                Err(error) => {
+                    on_error(error, None).await?;
+                    receive_failures = receive_failures.saturating_add(1);
+                    if !self.receive_backoff(receive_failures).await {
+                        return Ok(());
+                    }
+                    continue;
+                }
+            };
+            if let Some(message) = messages.into_iter().next() {
+                self.process_message(message, handle, on_error).await?;
+            }
+        }
+    }
+
+    async fn process_message<H, HF, E, EF>(
+        &self,
+        message: QueueMessage,
+        handle: &H,
+        on_error: &E,
+    ) -> Result<()>
+    where
+        H: Fn(QueueMessage) -> HF + Sync,
+        HF: std::future::Future<Output = Result<()>>,
+        E: Fn(ClientError, Option<QueueMessage>) -> EF + Sync,
+        EF: std::future::Future<Output = Result<()>>,
+    {
+        use std::sync::atomic::Ordering;
+
+        enum HandlerOutcome {
+            Settled(Result<()>),
+            LeaseLost(ClientError),
+            TimedOut,
+            Aborted,
+        }
+
+        self.control.shared.in_flight.fetch_add(1, Ordering::AcqRel);
+        let outcome = {
+            let handler = handle(message.clone());
+            tokio::pin!(handler);
+            let heartbeat = async {
+                let Some(period) = self.options.lease_heartbeat else {
+                    return std::future::pending::<Result<()>>().await;
+                };
+                loop {
+                    tokio::time::sleep(period).await;
+                    if let Err(error) = self.queue.extend(&message.delivery_id).await {
+                        return Err(error);
+                    }
+                }
+            };
+            tokio::pin!(heartbeat);
+            let timeout = async {
+                match self.options.handler_timeout {
+                    Some(timeout) => tokio::time::sleep(timeout).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::pin!(timeout);
+            let abort = async {
+                loop {
+                    let changed = self.control.shared.changed.notified();
+                    if self.control.shared.aborted.load(Ordering::Acquire) {
+                        return;
+                    }
+                    changed.await;
+                }
+            };
+            tokio::pin!(abort);
+            tokio::select! {
+                biased;
+                () = &mut abort => HandlerOutcome::Aborted,
+                result = &mut heartbeat => match result {
+                    Err(error) => HandlerOutcome::LeaseLost(error),
+                    Ok(()) => unreachable!("queue heartbeat only completes on error"),
+                },
+                () = &mut timeout => HandlerOutcome::TimedOut,
+                result = &mut handler => HandlerOutcome::Settled(result),
+            }
+        };
+        self.control.shared.in_flight.fetch_sub(1, Ordering::AcqRel);
+
+        match outcome {
+            HandlerOutcome::Settled(Ok(())) => {
+                if let Err(error) = self.queue.ack(&message.delivery_id).await {
+                    on_error(error, Some(message)).await?;
+                }
+            }
+            HandlerOutcome::Settled(Err(mut error)) => {
+                if let Err(nack_error) = self
+                    .queue
+                    .nack(&message.delivery_id, self.options.retry_delay.as_deref())
+                    .await
+                {
+                    error.message = format!("{}; queue NACK failed: {nack_error}", error.message);
+                }
+                on_error(error, Some(message)).await?;
+            }
+            HandlerOutcome::LeaseLost(error) => {
+                // Ownership is no longer certain. Never ACK or NACK this delivery.
+                on_error(error, Some(message)).await?;
+            }
+            HandlerOutcome::TimedOut => {
+                let mut error = ClientError::new(
+                    ErrorCode::QueueHandlerTimeout,
+                    format!(
+                        "queue handler exceeded {:?}",
+                        self.options
+                            .handler_timeout
+                            .expect("timeout outcome has duration")
+                    ),
+                );
+                if let Err(nack_error) = self
+                    .queue
+                    .nack(&message.delivery_id, self.options.retry_delay.as_deref())
+                    .await
+                {
+                    error.message =
+                        format!("queue handler timed out and NACK failed: {nack_error}");
+                }
+                on_error(error, Some(message)).await?;
+            }
+            HandlerOutcome::Aborted => {}
+        }
+        Ok(())
+    }
+
+    async fn wait_until_ready(&self) -> bool {
+        use std::sync::atomic::Ordering;
+
+        loop {
+            if self.control.shared.stopping.load(Ordering::Acquire) {
+                return false;
+            }
+            if !self.control.shared.paused.load(Ordering::Acquire) {
+                return true;
+            }
+            let changed = self.control.shared.changed.notified();
+            if !self.control.shared.paused.load(Ordering::Acquire) {
+                continue;
+            }
+            changed.await;
+        }
+    }
+
+    async fn receive_backoff(&self, failures: u32) -> bool {
+        use std::sync::atomic::Ordering;
+
+        let options = self.options.receive_backoff;
+        let exponent = i32::try_from(failures.saturating_sub(1)).unwrap_or(i32::MAX);
+        let multiplier = options.multiplier.powi(exponent);
+        let max_seconds = options.max.as_secs_f64();
+        let mut seconds = (options.initial.as_secs_f64() * multiplier).min(max_seconds);
+        if options.jitter {
+            let mut random = [0_u8; 8];
+            if getrandom::fill(&mut random).is_ok() {
+                seconds *= u64::from_le_bytes(random) as f64 / u64::MAX as f64;
+            }
+        }
+        let sleep = tokio::time::sleep(std::time::Duration::from_secs_f64(seconds));
+        tokio::pin!(sleep);
+        tokio::select! {
+            () = &mut sleep => true,
+            () = self.control.shared.changed.notified() => {
+                !self.control.shared.stopping.load(Ordering::Acquire)
+            }
+        }
     }
 }
 
