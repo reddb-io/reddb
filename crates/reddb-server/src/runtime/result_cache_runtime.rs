@@ -454,10 +454,19 @@ impl RedDBRuntime {
 
     fn result_cache_entry_reusable(&self, entry: &RuntimeResultCacheEntry) -> bool {
         let store = self.inner.db.store();
-        if !matches!(
+        let runtime_table_entry = matches!(
             entry.result.engine,
             "runtime-table" | "runtime-table-rls" | "runtime-join" | "runtime-join-rls"
-        ) || entry.scopes.is_empty()
+        ) && !entry.scopes.is_empty();
+        if runtime_table_entry
+            && entry
+                .scopes
+                .iter()
+                .any(|scope| !self.inner.index_store.collection_indexes_queryable(scope))
+        {
+            return false;
+        }
+        if !runtime_table_entry
             || entry
                 .scopes
                 .iter()
@@ -511,17 +520,23 @@ impl RedDBRuntime {
         if data_epoch != epoch || self.inner.db.store().result_cache_epoch() != Some(epoch) {
             return None;
         }
-        let mut cache = self.inner.result_blob_entries.write();
-        if cache.3 != revision {
-            return None;
-        }
-        let (ref mut map, ref mut order, ref mut untracked, ..) = *cache;
         let new_entry = RuntimeResultCacheEntry {
             result: result.clone(),
             cached_at: std::time::Instant::now(),
             scopes,
             data_epoch,
         };
+        // The lifecycle gate may close while the durable cache read is in
+        // flight.  Re-check the decoded dependencies before publishing the
+        // entry into L1 or returning its result.
+        if !self.result_cache_entry_reusable(&new_entry) {
+            return None;
+        }
+        let mut cache = self.inner.result_blob_entries.write();
+        if cache.3 != revision {
+            return None;
+        }
+        let (ref mut map, ref mut order, ref mut untracked, ..) = *cache;
         // Single hash lookup: drive the LRU-order push_back only on Vacant.
         match map.entry(key.to_string()) {
             Entry::Occupied(mut slot) => {

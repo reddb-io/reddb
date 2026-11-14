@@ -176,6 +176,7 @@ impl<'a> DmlTargetScan<'a> {
             || matches!(self.target, Some(UpdateTarget::Documents))
             || crate::runtime::impl_core::current_snapshot_requires_index_fallback()
             || !can_retry
+            || !query_exec::runtime_indexes_queryable(self.table, index_store)
             || index_store.indexed_mutation_active()
             || snapshot.as_ref().is_some_and(dml_snapshot_index_is_stale);
         if !scan_required {

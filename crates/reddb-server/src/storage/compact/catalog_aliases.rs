@@ -33,6 +33,8 @@ struct Alias {
 #[derive(Default)]
 pub(crate) struct CanonicalCatalogPlan {
     aliases: Vec<Alias>,
+    single_legacy_config: bool,
+    single_legacy_config_records: usize,
 }
 
 fn text_field(fields: &Fields, name: &str) -> Result<String> {
@@ -120,6 +122,13 @@ impl CanonicalCatalogPlan {
             return Ok(Self::default());
         };
         let mut plan = Self::default();
+        if let (Some(legacy), None) = (
+            resume.collections.get("red_config"),
+            resume.collections.get("red.config"),
+        ) {
+            plan.single_legacy_config = true;
+            plan.single_legacy_config_records = usize::try_from(legacy.entities)?;
+        }
         let mut bytes_read = 0usize;
         for &(legacy, canonical) in PAIRS {
             let (Some(a), Some(b)) = (
@@ -253,10 +262,11 @@ impl CanonicalCatalogPlan {
             .any(|a| a.legacy == legacy && a.canonical == canonical)
     }
     pub(super) fn reconciled_count(&self) -> usize {
-        self.aliases.len()
+        self.aliases.len() + usize::from(self.single_legacy_config)
     }
     pub(super) fn imported_count(&self) -> usize {
-        self.aliases.iter().map(|a| a.missing.len()).sum()
+        self.aliases.iter().map(|a| a.missing.len()).sum::<usize>()
+            + self.single_legacy_config_records
     }
 
     pub(super) fn restore(&self, store: &UnifiedStore) -> Result<()> {

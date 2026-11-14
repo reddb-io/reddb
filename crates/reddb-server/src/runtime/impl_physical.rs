@@ -569,43 +569,68 @@ impl RedDBRuntime {
         enabled: bool,
     ) -> RedDBResult<crate::PhysicalIndexState> {
         self.check_write(crate::runtime::write_gate::WriteKind::Maintenance)?;
-        self.inner
+        let _lifecycle = self.inner.index_store.lifecycle_transition();
+        self.close_runtime_index_gate(name);
+        let result = self
+            .inner
             .db
             .set_index_enabled(name, enabled)
             .map_err(|err| RedDBError::Internal(err.to_string()))?
-            .ok_or_else(|| RedDBError::NotFound(name.to_string()))
+            .ok_or_else(|| RedDBError::NotFound(name.to_string()));
+        self.refresh_runtime_index_queryability();
+        result
     }
 
     pub fn mark_index_building(&self, name: &str) -> RedDBResult<crate::PhysicalIndexState> {
-        self.inner
+        let _lifecycle = self.inner.index_store.lifecycle_transition();
+        self.close_runtime_index_gate(name);
+        let result = self
+            .inner
             .db
             .mark_index_building(name)
             .map_err(|err| RedDBError::Internal(err.to_string()))?
-            .ok_or_else(|| RedDBError::NotFound(name.to_string()))
+            .ok_or_else(|| RedDBError::NotFound(name.to_string()));
+        self.refresh_runtime_index_queryability();
+        result
     }
 
     pub fn fail_index(&self, name: &str) -> RedDBResult<crate::PhysicalIndexState> {
-        self.inner
+        let _lifecycle = self.inner.index_store.lifecycle_transition();
+        self.close_runtime_index_gate(name);
+        let result = self
+            .inner
             .db
             .fail_index(name)
             .map_err(|err| RedDBError::Internal(err.to_string()))?
-            .ok_or_else(|| RedDBError::NotFound(name.to_string()))
+            .ok_or_else(|| RedDBError::NotFound(name.to_string()));
+        self.refresh_runtime_index_queryability();
+        result
     }
 
     pub fn mark_index_stale(&self, name: &str) -> RedDBResult<crate::PhysicalIndexState> {
-        self.inner
+        let _lifecycle = self.inner.index_store.lifecycle_transition();
+        self.close_runtime_index_gate(name);
+        let result = self
+            .inner
             .db
             .mark_index_stale(name)
             .map_err(|err| RedDBError::Internal(err.to_string()))?
-            .ok_or_else(|| RedDBError::NotFound(name.to_string()))
+            .ok_or_else(|| RedDBError::NotFound(name.to_string()));
+        self.refresh_runtime_index_queryability();
+        result
     }
 
     pub fn mark_index_ready(&self, name: &str) -> RedDBResult<crate::PhysicalIndexState> {
-        self.inner
+        let _lifecycle = self.inner.index_store.lifecycle_transition();
+        self.close_runtime_index_gate(name);
+        let result = self
+            .inner
             .db
             .mark_index_ready(name)
             .map_err(|err| RedDBError::Internal(err.to_string()))?
-            .ok_or_else(|| RedDBError::NotFound(name.to_string()))
+            .ok_or_else(|| RedDBError::NotFound(name.to_string()));
+        self.refresh_runtime_index_queryability();
+        result
     }
 
     pub fn warmup_index_with_lifecycle(
@@ -623,21 +648,49 @@ impl RedDBRuntime {
     }
 
     pub fn warmup_index(&self, name: &str) -> RedDBResult<crate::PhysicalIndexState> {
-        self.inner
+        let _lifecycle = self.inner.index_store.lifecycle_transition();
+        self.close_runtime_index_gate(name);
+        let result = self
+            .inner
             .db
             .warmup_index(name)
             .map_err(|err| RedDBError::Internal(err.to_string()))?
-            .ok_or_else(|| RedDBError::NotFound(name.to_string()))
+            .ok_or_else(|| RedDBError::NotFound(name.to_string()));
+        self.refresh_runtime_index_queryability();
+        result
     }
 
     pub fn rebuild_indexes(
         &self,
         collection: Option<&str>,
     ) -> RedDBResult<Vec<crate::PhysicalIndexState>> {
-        self.inner
+        let _lifecycle = self.inner.index_store.lifecycle_transition();
+        match collection {
+            Some(collection) => self
+                .inner
+                .index_store
+                .mark_collection_non_queryable(collection),
+            None => {
+                for collection in self
+                    .declared_indexes()
+                    .into_iter()
+                    .filter_map(|index| index.collection)
+                {
+                    self.inner
+                        .index_store
+                        .mark_collection_non_queryable(&collection);
+                }
+            }
+        }
+        self.invalidate_plan_cache();
+        self.invalidate_result_cache();
+        let result = self
+            .inner
             .db
             .rebuild_index_registry(collection)
-            .map_err(|err| RedDBError::Internal(err.to_string()))
+            .map_err(|err| RedDBError::Internal(err.to_string()));
+        self.refresh_runtime_index_queryability();
+        result
     }
 
     pub fn rebuild_indexes_with_lifecycle(

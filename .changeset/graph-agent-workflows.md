@@ -2,4 +2,4 @@
 "@reddb-io/sdk": minor
 ---
 
-Add optional graph contracts with one concrete type per vertex and relation-aware hybrid search. Complete branch-isolated VCS data merges, autocommit history and recovery across all 14 collection models, with atomic metadata publication and contract/authorization enforcement. Enabling graph contracts or VCS upgrades native storage to V14; readers retain V1–V13 compatibility.
+Add native standardized fingerprint, face and iris records, caller-supplied feature vectors and bit signatures, deterministic matching, exact reranking, typed similarity indexes, wire support and bounded parsers without computer-vision dependencies. Complete branch-isolated VCS data merges, autocommit history and recovery across all collection models, including graph, queue, vault, config, metrics, probabilistic and time-series state.

@@ -173,6 +173,7 @@ impl RedDBRuntime {
         query: &DropTimeSeriesQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         self.vcs_reject_destructive_ddl(&query.name)?;
         if super::impl_ddl::is_system_schema_name(&query.name) {
             return Err(RedDBError::Query("system schema is read-only".to_string()));

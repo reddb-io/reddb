@@ -668,6 +668,7 @@ impl RedDBRuntime {
         query: &DropTableQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         self.vcs_reject_destructive_ddl(&query.name)?;
 
         if is_system_schema_name(&query.name) {
@@ -820,6 +821,7 @@ impl RedDBRuntime {
             return Err(RedDBError::Query("system schema is read-only".to_string()));
         }
         let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         self.vcs_reject_destructive_ddl(&query.name)?;
         if store.get_collection(&query.name).is_none() {
             if query.if_exists {
@@ -1949,6 +1951,7 @@ impl RedDBRuntime {
         label: &str,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
         self.vcs_reject_destructive_ddl(name)?;
         if store.get_collection(name).is_none() {
             if if_exists {
@@ -2075,6 +2078,8 @@ impl RedDBRuntime {
         label: &str,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
+        let _publication = store.vault_publication_lock.lock();
+        self.vcs_reject_destructive_ddl(name)?;
 
         // Emit 1 collection_dropped event before storage is wiped.
         // Queue is preserved; subscription is removed with the contract below.

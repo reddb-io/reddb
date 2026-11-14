@@ -1,5 +1,29 @@
 # @reddb-io/sdk
 
+## 1.36.10
+
+## 1.36.9
+
+## 1.36.8
+
+## 1.36.7
+
+## 1.36.6
+
+## 1.36.5
+
+## 1.36.4
+
+## 1.36.3
+
+## 1.36.2
+
+## 1.36.0
+
+### Minor Changes
+
+- [#2820](https://github.com/reddb-io/reddb/pull/2820) [`a1a11a8`](https://github.com/reddb-io/reddb/commit/a1a11a8659fb58996f3af2af31487d7cabec66ec) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add optional graph contracts with one concrete type per vertex and relation-aware hybrid search. Complete branch-isolated VCS data merges, autocommit history and recovery across all 14 collection models, with atomic metadata publication and contract/authorization enforcement. Enabling graph contracts or VCS upgrades native storage to V14; readers retain V1–V13 compatibility.
+
 ## 1.35.0
 
 ## 1.34.1

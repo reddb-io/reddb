@@ -97,8 +97,13 @@ impl SecondaryIndexProjector for HashProjection {
 }
 
 fn projection_identity(columns: &[String], schema: Option<&[String]>) -> SecondaryIndexIdentity {
+    let codec_version =
+        crate::storage::unified::store::secondary_index::runtime_secondary_index_codec_version();
     let mut digest = Sha256::new();
-    digest.update(b"runtime-current-hash-sha256-v2");
+    digest.update(match codec_version {
+        2 => b"runtime-current-hash-sha256-v2".as_slice(),
+        _ => b"runtime-current-hash-sha256-v3".as_slice(),
+    });
     digest.update([u8::from(schema.is_some())]);
     for names in [columns, schema.unwrap_or(&[])] {
         digest.update((names.len() as u64).to_le_bytes());
@@ -108,7 +113,7 @@ fn projection_identity(columns: &[String], schema: Option<&[String]>) -> Seconda
         }
     }
     SecondaryIndexIdentity {
-        codec_version: 2,
+        codec_version,
         definition: digest.finalize().into(),
     }
 }

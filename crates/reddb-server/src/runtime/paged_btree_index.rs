@@ -878,8 +878,14 @@ impl RedDBRuntime {
             columns: index.columns.clone(),
             schema,
         });
+        let codec_version =
+            crate::storage::unified::store::secondary_index::runtime_secondary_index_codec_version(
+            );
         let mut digest = Sha256::new();
-        digest.update(b"runtime-btree-current-ordered-v2");
+        digest.update(match codec_version {
+            2 => b"runtime-btree-current-ordered-v2".as_slice(),
+            _ => b"runtime-btree-current-ordered-v3".as_slice(),
+        });
         digest.update([
             u8::from(index.unique),
             u8::from(projection.schema.is_some()),
@@ -899,7 +905,7 @@ impl RedDBRuntime {
             }
         }
         let identity = SecondaryIndexIdentity {
-            codec_version: 2,
+            codec_version,
             definition: digest.finalize().into(),
         };
         self.db().store().register_secondary_index(

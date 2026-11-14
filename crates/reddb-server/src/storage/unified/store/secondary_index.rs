@@ -12,6 +12,83 @@ pub use reddb_engine::storage::secondary_index_read::SECONDARY_KEY_BYTES_MAX;
 pub type SecondaryIndexRead =
     reddb_engine::storage::secondary_index_read::SecondaryIndexRead<Pager>;
 
+pub(crate) const RUNTIME_SECONDARY_INDEX_CODEC_VERSION: u32 = 3;
+
+#[cfg(test)]
+std::thread_local! {
+    static LEGACY_RUNTIME_SECONDARY_INDEX_IDENTITY: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static CHECKPOINT_SECONDARY_INDEX_SKIP_ENTITY:
+        std::cell::RefCell<Option<(String, u64)>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn runtime_secondary_index_codec_version() -> u32 {
+    #[cfg(test)]
+    if LEGACY_RUNTIME_SECONDARY_INDEX_IDENTITY.with(std::cell::Cell::get) {
+        return 2;
+    }
+    RUNTIME_SECONDARY_INDEX_CODEC_VERSION
+}
+
+#[cfg(test)]
+pub(crate) struct LegacyRuntimeSecondaryIndexIdentityGuard;
+
+#[cfg(test)]
+impl Drop for LegacyRuntimeSecondaryIndexIdentityGuard {
+    fn drop(&mut self) {
+        LEGACY_RUNTIME_SECONDARY_INDEX_IDENTITY.with(|legacy| legacy.set(false));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn use_legacy_runtime_secondary_index_identity(
+) -> LegacyRuntimeSecondaryIndexIdentityGuard {
+    assert!(
+        !LEGACY_RUNTIME_SECONDARY_INDEX_IDENTITY.with(|legacy| legacy.replace(true)),
+        "legacy runtime secondary-index identity is already active"
+    );
+    LegacyRuntimeSecondaryIndexIdentityGuard
+}
+
+#[cfg(test)]
+pub(crate) struct CheckpointSecondaryIndexSkipEntityGuard;
+
+#[cfg(test)]
+impl Drop for CheckpointSecondaryIndexSkipEntityGuard {
+    fn drop(&mut self) {
+        CHECKPOINT_SECONDARY_INDEX_SKIP_ENTITY.with(|skip| {
+            skip.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn checkpoint_secondary_indices_without_entity(
+    collection: &str,
+    entity_id: u64,
+) -> CheckpointSecondaryIndexSkipEntityGuard {
+    CHECKPOINT_SECONDARY_INDEX_SKIP_ENTITY.with(|skip| {
+        let previous = skip.borrow_mut().replace((
+            UnifiedStore::canonical_collection(collection).to_string(),
+            entity_id,
+        ));
+        assert!(
+            previous.is_none(),
+            "secondary-index checkpoint skip is already active"
+        );
+    });
+    CheckpointSecondaryIndexSkipEntityGuard
+}
+
+#[cfg(test)]
+fn checkpoint_skips_secondary_index_entity(collection: &str, entity_id: u64) -> bool {
+    CHECKPOINT_SECONDARY_INDEX_SKIP_ENTITY.with(|skip| {
+        skip.borrow()
+            .as_ref()
+            .is_some_and(|(candidate, id)| candidate == collection && *id == entity_id)
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecondaryIndexIdentity {
     pub codec_version: u32,
@@ -62,6 +139,37 @@ impl PublishedKeyIndex {
 }
 
 impl UnifiedStore {
+    #[cfg(test)]
+    pub(crate) fn rebuild_secondary_indices_on_next_checkpoint(
+        &self,
+        collection: &str,
+        names: &[&str],
+    ) {
+        let collection = Self::canonical_collection(collection);
+        let _publication = self.vault_publication_lock.lock();
+        let removed = {
+            let mut generations = self.key_indices.write();
+            let generation = generations
+                .get_mut(collection)
+                .expect("secondary-index checkpoint fixture generation");
+            names
+                .iter()
+                .filter_map(|name| generation.secondary.remove(*name))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            removed.len(),
+            names.len(),
+            "secondary-index checkpoint fixture must remove every requested artifact"
+        );
+        for index in removed {
+            self.retire_btree(index.tree);
+        }
+        self.resident
+            .paged_registry_dirty
+            .store(true, Ordering::Release);
+    }
+
     /// Check a registered index against its immutable checkpoint source. This
     /// is an operator pass: O(rows * log(postings)), one bounded row at a time.
     /// Source read failures propagate; only derived-tree failures are findings.
@@ -299,6 +407,10 @@ impl UnifiedStore {
         let mut key = [0; SECONDARY_KEY_BYTES_MAX];
         while let Some(record) = cursor.next_record(limit_bytes)? {
             let (entity, _) = record.decode_with_budget(self.format_version(), limit_bytes)?;
+            #[cfg(test)]
+            if checkpoint_skips_secondary_index_entity(collection, entity.id.raw()) {
+                continue;
+            }
             for (_, spec, tree) in &builds {
                 let Some(length) = spec.projector.project(&entity, &mut key)? else {
                     continue;

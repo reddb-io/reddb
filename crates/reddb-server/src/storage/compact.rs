@@ -81,8 +81,9 @@ pub fn compact_paged(source: &Path, destination: &Path) -> Result<CompactionRepo
 }
 
 /// Rewrite a closed store while explicitly retiring the obsolete physical
-/// `red_config` identity. The canonical `red.config` tree is preserved as-is;
-/// the source remains unchanged and ordinary compaction never enables this.
+/// `red_config` identity. A populated legacy tree is promoted when the
+/// canonical tree is empty; two populated trees fail closed. The source
+/// remains unchanged and ordinary compaction never enables this.
 pub fn compact_paged_canonical_system_config(
     source: &Path,
     destination: &Path,
@@ -485,6 +486,118 @@ fn verify_wal_recovery_action(bytes: &[u8], retain_canonical_system_config: bool
 mod canonical_config_wal_tests {
     use super::*;
 
+    fn legacy_config_without_resume(path: &Path) -> crate::storage::unified::UnifiedStoreConfig {
+        use crate::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
+
+        let config = crate::storage::unified::UnifiedStoreConfig::default();
+        {
+            let store =
+                crate::storage::unified::UnifiedStore::open_with_config(path, config.clone())
+                    .expect("create legacy fixture");
+            store
+                .create_collection("cfg_legacy")
+                .expect("create legacy config collection");
+            store
+                .insert_auto(
+                    "cfg_legacy",
+                    UnifiedEntity::new(
+                        EntityId::new(1),
+                        EntityKind::TableRow {
+                            table: "red_config".into(),
+                            row_id: 1,
+                        },
+                        EntityData::Row(RowData::with_names(
+                            vec![
+                                reddb_types::Value::text("red.auth.require_auth"),
+                                reddb_types::Value::Boolean(true),
+                            ],
+                            vec!["key".into(), "value".into()],
+                        )),
+                    ),
+                )
+                .expect("insert legacy config row");
+            store.persist().expect("publish prepared fixture");
+        }
+
+        let source = Arc::new(Source::open(path).expect("open prepared fixture"));
+        let mut catalog = Catalog::read(&source).expect("read prepared catalog");
+        assert!(!source.header.requires_disk_residency());
+        assert!(
+            catalog.resume.is_none(),
+            "legacy fixture has no resume trailer"
+        );
+        let config_root = catalog
+            .roots
+            .iter_mut()
+            .find(|root| root.collection == "cfg_legacy")
+            .expect("legacy fixture root");
+        config_root.collection = "red_config".into();
+        let identity = catalog
+            .roots
+            .iter()
+            .map(|root| (root.root_page, root.root_page))
+            .collect();
+        let encoded = catalog
+            .encode_with_proofs(&identity, None)
+            .expect("encode legacy catalog");
+        drop(source);
+
+        let pager = Pager::open(path, PagerConfig::default()).expect("open fixture pager");
+        catalog::write_catalog(&pager, &encoded).expect("publish no-resume legacy catalog");
+        pager.sync().expect("sync no-resume legacy catalog");
+        drop(pager);
+        crate::storage::operational_manifest::OperationalManifest::for_db_path(path)
+            .rename_collections(&[("cfg_legacy", "red_config")])
+            .expect("publish legacy operational name");
+
+        let source = Arc::new(Source::open(path).expect("reopen no-resume fixture"));
+        let catalog = Catalog::read(&source).expect("read no-resume catalog");
+        assert!(catalog.resume.is_none());
+        assert!(catalog
+            .roots
+            .iter()
+            .any(|root| root.collection == "red_config"));
+        config
+    }
+
+    #[test]
+    fn canonical_compaction_prepares_legacy_catalog_without_resume_trailer() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let source = directory.path().join("data.rdb");
+        let destination = directory.path().join("compacted");
+        let config = legacy_config_without_resume(&source);
+        let original = std::fs::read(&source).expect("source bytes");
+
+        let report = compact_paged_canonical_system_config(&source, &destination)
+            .expect("compact and prepare legacy catalog");
+
+        assert_eq!(report.reconciled_system_collections, 1);
+        assert_eq!(report.imported_system_records, 1);
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        let output = destination.join("data.rdb");
+        {
+            let prepared = Arc::new(Source::open(&output).expect("inspect compacted store"));
+            assert!(!prepared.header.requires_disk_residency());
+            let catalog = Catalog::read(&prepared).expect("read compacted catalog");
+            assert!(catalog.resume.is_none());
+            assert!(catalog
+                .roots
+                .iter()
+                .all(|root| root.collection != "red_config"));
+        }
+        for _ in 0..2 {
+            let compacted =
+                crate::storage::unified::UnifiedStore::open_with_config(&output, config.clone())
+                    .expect("cold reopen compacted store");
+            assert_eq!(compacted.list_collections(), vec!["red.config".to_string()]);
+            assert_eq!(
+                compacted.get_config("auth.require_auth"),
+                Some(reddb_types::Value::Boolean(true))
+            );
+            assert_eq!(compacted.legacy_red_config_key_count().unwrap(), 0);
+        }
+    }
+
     #[test]
     fn compaction_progress_is_machine_readable() {
         let directory = tempfile::tempdir().expect("progress directory");
@@ -749,11 +862,58 @@ fn compact_paged_inner(
     }
     let source = Arc::new(Source::open(&source_path)?);
     let mut catalog = Catalog::read(&source)?;
-    if retain_canonical_system_config {
-        catalog.retain_canonical_system_config()?;
+    let prepare_legacy_catalog = retain_canonical_system_config && catalog.resume.is_none();
+    let had_legacy_system_config = catalog
+        .roots
+        .iter()
+        .any(|root| root.collection == "red_config");
+    let had_canonical_system_config = catalog
+        .roots
+        .iter()
+        .any(|root| root.collection == "red.config");
+    let migrated_system_config = retain_canonical_system_config && had_legacy_system_config;
+    if prepare_legacy_catalog {
+        let legacy_roots = catalog
+            .roots
+            .iter()
+            .filter(|root| root.collection == "red_config")
+            .count();
+        let canonical_roots = catalog
+            .roots
+            .iter()
+            .filter(|root| root.collection == "red.config")
+            .count();
+        ensure(
+            legacy_roots <= 1 && canonical_roots <= 1,
+            "canonical config migration requires unique config roots",
+        )?;
+        ensure(
+            legacy_roots + canonical_roots > 0,
+            "canonical config migration requires a config root",
+        )?;
+        ensure(
+            salvage.is_none() && lost_collections.is_none(),
+            "legacy catalog preparation cannot be combined with salvage",
+        )?;
+        ensure(
+            !wal_has_records(&f::unified_wal_path(&source_path))?
+                && !wal_has_records(&f::engine_wal_path(&source_path))?,
+            "legacy catalog preparation requires checkpointed WALs",
+        )?;
+        if migrated_system_config {
+            catalog.verify_alias_has_no_references("red_config")?;
+        }
     }
+    let mut migrated_system_config_records =
+        if retain_canonical_system_config && !prepare_legacy_catalog {
+            catalog.migrate_legacy_system_config()?
+        } else {
+            0
+        };
     ensure(
-        !source.header.requires_disk_residency() || catalog.resume.is_some(),
+        !source.header.requires_disk_residency()
+            || catalog.resume.is_some()
+            || prepare_legacy_catalog,
         "prepared disk-resident file has no resume catalog",
     )?;
     if let Some(salvage) = salvage {
@@ -840,6 +1000,8 @@ fn compact_paged_inner(
     let mut recovered_trees = BTreeMap::new();
     let mut records = 0;
     let mut repaired_leaf_backlinks = 0;
+    let mut legacy_config_records = 0;
+    let mut canonical_config_records = 0;
     for collection in &catalog.roots {
         let loss = lost_collections.and_then(|report| {
             report
@@ -867,6 +1029,13 @@ fn compact_paged_inner(
                 resume.collections[&collection.collection].entities == count,
                 "collection count disagrees with resume",
             )?;
+        }
+        if prepare_legacy_catalog {
+            match collection.collection.as_str() {
+                "red_config" => legacy_config_records = count,
+                "red.config" => canonical_config_records = count,
+                _ => {}
+            }
         }
         records += count;
         completed_trees += 1;
@@ -918,6 +1087,15 @@ fn compact_paged_inner(
                     records,
                 )?;
             }
+        }
+    }
+    if prepare_legacy_catalog {
+        ensure(
+            legacy_config_records == 0 || canonical_config_records == 0,
+            "both red_config and red.config contain records; refusing lossy migration",
+        )?;
+        if legacy_config_records > 0 {
+            migrated_system_config_records = usize::try_from(legacy_config_records)?;
         }
     }
     write_compaction_progress(destination, "assets", completed_trees, total_trees, records)?;
@@ -1087,10 +1265,10 @@ fn compact_paged_inner(
             "native asset failed readback parity",
         )?;
     }
-    let report = CompactionReport {
+    let mut report = CompactionReport {
         retired_boot_system_wal_actions: 0,
-        reconciled_system_collections: 0,
-        imported_system_records: 0,
+        reconciled_system_collections: usize::from(migrated_system_config),
+        imported_system_records: migrated_system_config_records,
         source_bytes: source.bytes,
         destination_bytes: reopened.bytes,
         source_allocated_bytes: allocated_bytes(&source_path)?,
@@ -1101,17 +1279,24 @@ fn compact_paged_inner(
     };
     drop(reopened);
     copy_sidecars(&source_path, &output, false)?;
-    if retain_canonical_system_config {
+    if retain_canonical_system_config && had_legacy_system_config {
         let operational_path = output.with_file_name(format!("{}.ops", f::data_file_name(&output)));
         if operational_path.exists() {
+            let collision = if !had_canonical_system_config || migrated_system_config_records > 0 {
+                ("red_config", "red.config", "red.config")
+            } else {
+                ("red.config", "red_config", "red.config")
+            };
             crate::storage::operational_manifest::OperationalManifest::for_db_path(&output)
-                .reconcile_collection_collisions(&[("red.config", "red_config", "red.config")])?;
+                .reconcile_collection_collisions(&[collision])?;
         }
     }
-    write_new(
-        &destination.join("compaction.json"),
-        report.machine_json().as_bytes(),
-    )?;
+    if !prepare_legacy_catalog {
+        write_new(
+            &destination.join("compaction.json"),
+            report.machine_json().as_bytes(),
+        )?;
+    }
     if let Some(salvage) = salvage {
         write_new(
             &destination.join("salvage.json"),
@@ -1137,6 +1322,61 @@ fn compact_paged_inner(
     sync_directory(destination)?;
     std::fs::remove_file(&temporary)?;
     sync_directory(destination)?;
+    if prepare_legacy_catalog {
+        write_compaction_progress(
+            destination,
+            "prepare",
+            completed_trees,
+            total_trees,
+            records,
+        )?;
+        let config = crate::storage::unified::UnifiedStoreConfig {
+            resident_memory_bytes_max: source
+                .header
+                .requires_disk_residency()
+                .then_some(64 * 1024 * 1024),
+            ..Default::default()
+        };
+        {
+            let prepared =
+                crate::storage::unified::UnifiedStore::open_with_config(&output, config)?;
+            prepared.persist()?;
+        }
+        let verified = scrub_paged(&output)?;
+        ensure(
+            verified.assets_verified
+                && verified.trees.findings.is_empty()
+                && verified.unclassified_pages == 0,
+            "prepared legacy catalog failed scrub",
+        )?;
+        let prepared = Arc::new(Source::open(&output)?);
+        let prepared_catalog = Catalog::read(&prepared)?;
+        ensure(
+            !source.header.requires_disk_residency() || prepared_catalog.resume.is_some(),
+            "disk-resident legacy catalog preparation did not publish a resume catalog",
+        )?;
+        ensure(
+            prepared_catalog
+                .roots
+                .iter()
+                .all(|root| root.collection != "red_config")
+                && prepared_catalog
+                    .roots
+                    .iter()
+                    .any(|root| root.collection == "red.config"),
+            "legacy config identity survived catalog preparation",
+        )?;
+        drop(prepared);
+        report.destination_bytes = std::fs::metadata(&output)?.len();
+        report.destination_allocated_bytes = allocated_bytes(&output)?;
+        report.records = verified.trees.records_verified;
+        report.trees = usize::try_from(verified.trees.trees_verified)?;
+        write_new(
+            &destination.join("compaction.json"),
+            report.machine_json().as_bytes(),
+        )?;
+        sync_directory(destination)?;
+    }
     if let Some(parent) = destination.parent().filter(|p| !p.as_os_str().is_empty()) {
         sync_directory(parent)?;
     }

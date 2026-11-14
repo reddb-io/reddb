@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.36.10
+
+### Patch Changes
+
+- [#2853](https://github.com/reddb-io/reddb/pull/2853) [`95037f4`](https://github.com/reddb-io/reddb/commit/95037f4cef0677f5738d247c880f9f0837d098b6) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Prepare legacy no-resume catalogs on the isolated compaction output before canonical config migration.
+
+## 1.36.9
+
+### Patch Changes
+
+- [#2851](https://github.com/reddb-io/reddb/pull/2851) [`06fa3d5`](https://github.com/reddb-io/reddb/commit/06fa3d58ffb90a0b3f29a22d54d08d5ab01c6e26) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Cancel detached HTTP executions so disconnected clients cannot strand server capacity while readiness remains healthy.
+
+## 1.36.8
+
+### Patch Changes
+
+- [#2849](https://github.com/reddb-io/reddb/pull/2849) [`90d07ac`](https://github.com/reddb-io/reddb/commit/90d07ac6674b5fff00c78d0e8c782c2f96b01918) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve and report historical `red_config` recovery correctly when the single legacy root is empty, while proving that persisted legacy row identities reopen canonically as `red.config`.
+
+## 1.36.7
+
+### Patch Changes
+
+- [#2847](https://github.com/reddb-io/reddb/pull/2847) [`b276f15`](https://github.com/reddb-io/reddb/commit/b276f15ca21ca5200c4ff2b8212c4935e3db51d0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Report the reconciled collection and preserved record count when canonical WAL recovery promotes a single historical `red_config` identity, so operators can verify that the physical migration retained its configuration inventory.
+
+## 1.36.6
+
+### Patch Changes
+
+- [#2844](https://github.com/reddb-io/reddb/pull/2844) [`f25f64d`](https://github.com/reddb-io/reddb/commit/f25f64d09a3bfe88b70343f33eb1a6d5dec335f4) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow canonical configuration recovery to replay pending WAL when a historical database contains only the populated `red_config` resume identity. Promote that single root to `red.config`, normalize its legacy keys, and preserve the source database and WAL unchanged.
+
+## 1.36.5
+
+### Patch Changes
+
+- [#2842](https://github.com/reddb-io/reddb/pull/2842) [`eb3217b`](https://github.com/reddb-io/reddb/commit/eb3217b505a8c2ca4d5bf69e75f72273ede03078) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Rebuild persisted HASH and BTREE runtime indexes on cold open with a new generation identity. Fall back to source scans while physical index artifacts are not queryable, including when a stale miss exists in the result cache.
+
+## 1.36.4
+
+### Patch Changes
+
+- [#2840](https://github.com/reddb-io/reddb/pull/2840) [`2d08274`](https://github.com/reddb-io/reddb/commit/2d08274519767111f173a4ab037a5af8478b92af) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve literal, parameterized, HASH, and BTREE lookups for long text identifiers after recovery from an interrupted MVCC checkpoint publication.
+
+## 1.36.3
+
+### Patch Changes
+
+- [#2838](https://github.com/reddb-io/reddb/pull/2838) [`a4deec3`](https://github.com/reddb-io/reddb/commit/a4deec337f60b548c30dc0e3e8fae6c66419e44d) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow canonical configuration recovery to migrate historical databases that contain only the populated `red_config` identity, preserving its complete tree as `red.config`; treat canonical-only databases as already migrated and continue to fail closed on missing or ambiguous identities.
+
+## 1.36.2
+
+### Patch Changes
+
+- [#2836](https://github.com/reddb-io/reddb/pull/2836) [`dad1ced`](https://github.com/reddb-io/reddb/commit/dad1cedec6d7ab5961fa9298f255f6e0f93963e3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve all configuration records when offline compaction retires the obsolete physical `red_config` collection: promote the complete populated tree into an empty `red.config` identity, report the migrated records, and fail closed when both identities contain data.
+
+## 1.36.0
+
 ## 1.35.0
 
 ### Minor Changes

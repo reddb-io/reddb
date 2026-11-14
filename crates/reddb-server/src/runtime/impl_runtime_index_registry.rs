@@ -214,6 +214,43 @@ fn index_method_kind_from_str(
 }
 
 impl RedDBRuntime {
+    pub(crate) fn refresh_runtime_index_queryability(&self) {
+        let non_queryable = self
+            .inner
+            .db
+            .index_statuses()
+            .into_iter()
+            .filter_map(|status| {
+                (matches!(status.kind.as_str(), "btree" | "hash" | "bitmap") && !status.queryable)
+                    .then_some(status.collection)
+                    .flatten()
+            });
+        self.inner
+            .index_store
+            .replace_non_queryable_collections(non_queryable);
+        self.invalidate_plan_cache();
+        self.invalidate_result_cache();
+    }
+
+    pub(crate) fn close_runtime_index_gate(&self, name: &str) {
+        if let Some(collection) = self
+            .inner
+            .db
+            .index_status(name)
+            .and_then(|status| status.collection)
+        {
+            self.close_runtime_index_collection_gate(&collection);
+        }
+    }
+
+    pub(crate) fn close_runtime_index_collection_gate(&self, collection: &str) {
+        self.inner
+            .index_store
+            .mark_collection_non_queryable(collection);
+        self.invalidate_plan_cache();
+        self.invalidate_result_cache();
+    }
+
     pub(crate) fn rebuild_runtime_indexes_for_table(&self, table: &str) -> RedDBResult<()> {
         let topology_lock = self.inner.index_store.collection_topology_lock(table);
         let _topology_guard = topology_lock.write();
@@ -599,8 +636,10 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn rehydrate_runtime_index_registry(&self) -> RedDBResult<()> {
+        let _lifecycle = self.inner.index_store.lifecycle_transition();
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection(RUNTIME_INDEX_REGISTRY_COLLECTION) else {
+            self.refresh_runtime_index_queryability();
             return Ok(());
         };
         // A cold registry is physical data too. Reduce by durable entity ID,
@@ -708,6 +747,7 @@ impl RedDBRuntime {
         if store.config().resident_memory_bytes_max.is_some() {
             store.checkpoint_missing_secondary_indices()?;
         }
+        self.refresh_runtime_index_queryability();
         self.invalidate_plan_cache();
         Ok(())
     }
