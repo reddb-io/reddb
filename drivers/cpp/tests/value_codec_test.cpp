@@ -142,6 +142,21 @@ TEST(ValueCodec, ValueTagTableIsPinned) {
     EXPECT_EQ(TAG_IRIS, 0x0c);
     EXPECT_EQ(TAG_FEATURE_VECTOR, 0x0d);
     EXPECT_EQ(TAG_BIT_SIGNATURE, 0x0e);
+    EXPECT_EQ(TAG_LANDMARK_SET, 0x0f);
+}
+
+TEST(ValueCodec, EncodesLandmarkSet) {
+    std::array<std::byte, 16> space = {};
+    std::vector<Value::LandmarkPair> pairs = {
+        {{-2.0f, 1.0f}, {2.0f, 1.0f}},
+        {{-1.0f, -1.0f}, {1.0f, -1.0f}},
+    };
+    auto encoded = encode_value(Value::landmark_set(space, 2, pairs, {{0.0f, 2.0f}}));
+    EXPECT_EQ(encoded[0], TAG_LANDMARK_SET);
+    EXPECT_EQ(encoded[17], 2);
+    EXPECT_EQ(encoded[18], 2);
+    EXPECT_TRUE(requires_landmark_capability(
+        Value::landmark_set(space, 2, pairs, {{0.0f, 2.0f}})));
 }
 
 TEST(ValueCodec, EncodesBiometricFeatureAndBitValues) {

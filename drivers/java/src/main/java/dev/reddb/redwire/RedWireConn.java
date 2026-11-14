@@ -323,6 +323,11 @@ public final class RedWireConn implements Conn, dev.reddb.TopologySource {
             throw new RedDBException.ParamsUnsupported(
                 "server did not advertise FEATURE_BIOMETRIC_PARAMS");
         }
+        if ((serverFeatures & Frame.FEATURE_LANDMARK_PARAMS) != Frame.FEATURE_LANDMARK_PARAMS
+            && java.util.Arrays.stream(params).anyMatch(ValueCodec::requiresLandmarkCapability)) {
+            throw new RedDBException.ParamsUnsupported(
+                "server did not advertise FEATURE_LANDMARK_PARAMS");
+        }
         return sendQuery(Frame.Kind.QueryWithParams, ValueCodec.encodeQueryWithParams(sql, params), "query");
     }
 

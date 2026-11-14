@@ -98,10 +98,11 @@ Use the binary wire when:
 - You're writing a high-throughput client in Rust / Go / C++ / Node and want sub-50µs round-trips.
 
 Parameterized biometric records, feature vectors, and bit signatures use
-RedWire value tags `0x0a` through `0x0e`. A driver sends those tags only after
-the server advertises `FEATURE_BIOMETRIC_PARAMS` (feature bit `0x00000008`). A
-server or driver without that capability fails the request before emitting an
-unknown tag. The equivalent HTTP envelopes are documented under
+RedWire value tags `0x0a` through `0x0e`. Landmark sets use tag `0x0f` and the
+separate `FEATURE_LANDMARK_PARAMS` bit `0x00000010`. A driver sends these tags
+only after the server advertises the corresponding capability. A server or
+driver without it fails the request before emitting an unknown tag. The
+equivalent HTTP envelopes are documented under
 [Biometric Records and Comparison Artifacts](../types/biometrics.md).
 
 For dashboard / dev workloads pick HTTP or PG wire instead.

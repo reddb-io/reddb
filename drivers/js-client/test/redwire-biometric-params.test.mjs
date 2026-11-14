@@ -5,11 +5,31 @@ import { Features, ValueTag, encodeValue } from '../src/redwire-core.js'
 
 test('biometric feature capability and tags remain stable', () => {
   assert.equal(Features.BIOMETRIC_PARAMS, 0x08)
+  assert.equal(Features.LANDMARK_PARAMS, 0x10)
   assert.equal(ValueTag.Fingerprint, 0x0a)
   assert.equal(ValueTag.Face, 0x0b)
   assert.equal(ValueTag.Iris, 0x0c)
   assert.equal(ValueTag.FeatureVector, 0x0d)
   assert.equal(ValueTag.BitSignature, 0x0e)
+  assert.equal(ValueTag.LandmarkSet, 0x0f)
+})
+
+test('landmark set envelope uses structured RedWire layout', () => {
+  const encoded = encodeValue({
+    $landmark_set: {
+      space_id: '00112233445566778899aabbccddeeff',
+      dimensions: 2,
+      pairs: [
+        { left: [-1, 1], right: [1, 1] },
+        { left: [-2, -1], right: [2, -1] },
+      ],
+      midline: [[0, 2]],
+    },
+  })
+  assert.equal(encoded[0], ValueTag.LandmarkSet)
+  assert.equal(encoded[17], 2)
+  assert.equal(new DataView(encoded.buffer).getUint32(18, true), 2)
+  assert.equal(new DataView(encoded.buffer).getUint32(22, true), 1)
 })
 
 test('feature vector and bit signature envelopes use structured RedWire layout', () => {

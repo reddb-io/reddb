@@ -53,6 +53,7 @@ test('catalog: QueryWithParams discriminant pinned to 0x28', () => {
 test('catalog: FEATURE_PARAMS bit pinned to 0x01', () => {
   assert.equal(Features.PARAMS, 0x01)
   assert.equal(Features.BIOMETRIC_PARAMS, 0x08)
+  assert.equal(Features.LANDMARK_PARAMS, 0x10)
 })
 
 test('catalog: ValueTag table pinned', () => {
@@ -60,7 +61,7 @@ test('catalog: ValueTag table pinned', () => {
     Null: 0x00, Bool: 0x01, Int: 0x02, Float: 0x03, Text: 0x04,
     Bytes: 0x05, Vector: 0x06, Json: 0x07, Timestamp: 0x08, Uuid: 0x09,
     Fingerprint: 0x0a, Face: 0x0b, Iris: 0x0c,
-    FeatureVector: 0x0d, BitSignature: 0x0e,
+    FeatureVector: 0x0d, BitSignature: 0x0e, LandmarkSet: 0x0f,
   }))
 })
 
@@ -78,6 +79,25 @@ test('encodeValue: feature vector and bit signature envelopes', () => {
   })
   assert.equal(bits[0], ValueTag.BitSignature)
   assert.deepEqual(Array.from(bits.slice(-4)), [0xaa, 0x55, 0xff, 0x0f])
+})
+
+test('encodeValue: landmark set uses reserved RedWire layout', () => {
+  const encoded = encodeValue({
+    $landmark_set: {
+      space_id: '00112233445566778899aabbccddeeff',
+      dimensions: 2,
+      pairs: [
+        { left: [-1, 1], right: [1, 1] },
+        { left: [-2, -1], right: [2, -1] },
+      ],
+      midline: [[0, 2]],
+    },
+  })
+  assert.equal(encoded[0], 0x0f)
+  assert.equal(encoded[17], 2)
+  assert.equal(new DataView(encoded.buffer).getUint32(18, true), 2)
+  assert.equal(new DataView(encoded.buffer).getUint32(22, true), 1)
+  assert.equal(encoded.length, 26 + 5 * 2 * 4)
 })
 
 test('fixtures: manifest value encodings match JS RedWire codec', () => {

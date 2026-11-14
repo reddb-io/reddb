@@ -231,6 +231,58 @@ impl Value {
                     .collect(),
                 ),
             ),
+            Value::LandmarkSet(value) => {
+                let dimensions = usize::from(value.dimensions());
+                let point = |coordinates: &crate::LandmarkCoordinates| {
+                    JsonValue::Array(
+                        coordinates
+                            .iter()
+                            .take(dimensions)
+                            .map(|coordinate| JsonValue::Number(f64::from(*coordinate)))
+                            .collect(),
+                    )
+                };
+                single_key_object(
+                    "$landmark_set",
+                    JsonValue::Object(
+                        [
+                            (
+                                "space_id".to_string(),
+                                JsonValue::String(hex_encode(&value.space_id())),
+                            ),
+                            (
+                                "dimensions".to_string(),
+                                JsonValue::Integer(i64::from(value.dimensions())),
+                            ),
+                            (
+                                "pairs".to_string(),
+                                JsonValue::Array(
+                                    value
+                                        .pairs()
+                                        .iter()
+                                        .map(|(left, right)| {
+                                            JsonValue::Object(
+                                                [
+                                                    ("left".to_string(), point(left)),
+                                                    ("right".to_string(), point(right)),
+                                                ]
+                                                .into_iter()
+                                                .collect(),
+                                            )
+                                        })
+                                        .collect(),
+                                ),
+                            ),
+                            (
+                                "midline".to_string(),
+                                JsonValue::Array(value.midline().iter().map(point).collect()),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ),
+                )
+            }
         }
     }
 }

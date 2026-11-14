@@ -30,11 +30,13 @@ final class ValueCodec
     public const TAG_IRIS = 0x0C;
     public const TAG_FEATURE_VECTOR = 0x0D;
     public const TAG_BIT_SIGNATURE = 0x0E;
+    public const TAG_LANDMARK_SET = 0x0F;
 
     public const MAX_PARAM_COUNT = 65_536;
     public const MAX_VALUE_PAYLOAD_LEN = Frame::MAX_FRAME_SIZE;
     public const MAX_FEATURE_VECTOR_DIMENSIONS = 65_536;
     public const MAX_BIT_SIGNATURE_BYTES = 1 << 20;
+    public const MAX_LANDMARK_POINTS = 4_096;
 
     public static function requiresBiometricCapability(mixed $value): bool
     {
@@ -43,6 +45,11 @@ final class ValueCodec
             || array_key_exists('$feature_vector', $value)
             || array_key_exists('$bit_signature', $value)
         );
+    }
+
+    public static function requiresLandmarkCapability(mixed $value): bool
+    {
+        return is_array($value) && array_key_exists('$landmark_set', $value);
     }
 
     public static function encodeQueryWithParams(string $sql, array $params): string
@@ -106,6 +113,9 @@ final class ValueCodec
             }
             if (count($value) === 1 && array_key_exists('$bit_signature', $value)) {
                 return self::encodeBitSignature($value['$bit_signature']);
+            }
+            if (count($value) === 1 && array_key_exists('$landmark_set', $value)) {
+                return self::encodeLandmarkSet($value['$landmark_set']);
             }
             if (self::isNumericList($value)) {
                 return self::encodeVector($value);
@@ -274,6 +284,53 @@ final class ValueCodec
             throw new \InvalidArgumentException('invalid bit signature length or mask');
         }
         return chr(self::TAG_BIT_SIGNATURE) . $space . pack('V', strlen($bits)) . $bits . $mask;
+    }
+
+    private static function encodeLandmarkSet(mixed $value): string
+    {
+        if (!is_array($value) || count($value) !== 4
+            || !isset($value['pairs'], $value['midline'])
+            || !is_array($value['pairs']) || !array_is_list($value['pairs'])
+            || !is_array($value['midline']) || !array_is_list($value['midline'])) {
+            throw new \InvalidArgumentException('$landmark_set must be a canonical object');
+        }
+        $dimensions = $value['dimensions'] ?? null;
+        $pairs = $value['pairs'];
+        $midline = $value['midline'];
+        $pointCount = count($pairs) * 2 + count($midline);
+        if (!is_int($dimensions) || ($dimensions !== 2 && $dimensions !== 3)
+            || count($pairs) < 2 || $pointCount > self::MAX_LANDMARK_POINTS) {
+            throw new \InvalidArgumentException('invalid landmark geometry');
+        }
+        $out = chr(self::TAG_LANDMARK_SET)
+            . self::parseUuid(self::requiredText($value, 'space_id'))
+            . chr($dimensions)
+            . pack('V2', count($pairs), count($midline));
+        $putPoint = static function (mixed $point) use ($dimensions): string {
+            if (!is_array($point) || !array_is_list($point) || count($point) !== $dimensions) {
+                throw new \InvalidArgumentException('invalid landmark geometry');
+            }
+            $bytes = '';
+            foreach ($point as $coordinate) {
+                if ((!is_int($coordinate) && !is_float($coordinate))
+                    || !is_finite((float) $coordinate)) {
+                    throw new \InvalidArgumentException('invalid landmark geometry');
+                }
+                $bytes .= pack('g', (float) $coordinate);
+            }
+            return $bytes;
+        };
+        foreach ($pairs as $pair) {
+            if (!is_array($pair) || count($pair) !== 2
+                || !array_key_exists('left', $pair) || !array_key_exists('right', $pair)) {
+                throw new \InvalidArgumentException('invalid landmark geometry');
+            }
+            $out .= $putPoint($pair['left']) . $putPoint($pair['right']);
+        }
+        foreach ($midline as $point) {
+            $out .= $putPoint($point);
+        }
+        return $out;
     }
 
     /** @param array<string,mixed> $value */

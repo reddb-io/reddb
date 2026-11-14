@@ -1,7 +1,9 @@
 use reddb_server::replication::ReplicationConfig;
 use reddb_server::runtime::mvcc::{clear_current_connection_id, set_current_connection_id};
 use reddb_server::{RedDBOptions, RedDBRuntime};
-use reddb_types::{BiometricFormat, BiometricSample, BitSignature, FeatureVector, Value};
+use reddb_types::{
+    BiometricFormat, BiometricSample, BitSignature, FeatureVector, LandmarkSet, Value,
+};
 
 const BIOMETRIC_SPACE: [u8; 16] = [0x62; 16];
 
@@ -23,7 +25,7 @@ fn fingerprint_sample() -> BiometricSample {
         .expect("standard fingerprint minutiae")
 }
 
-fn typed_values() -> [Value; 5] {
+fn typed_values() -> [Value; 6] {
     let asn1 = vec![0x30, 0x03, 0x02, 0x01, 0x01];
     [
         Value::Fingerprint(fingerprint_sample()),
@@ -41,6 +43,18 @@ fn typed_values() -> [Value; 5] {
         Value::BitSignature(
             BitSignature::new(BIOMETRIC_SPACE, vec![0xaa, 0x55], Some(vec![0xff, 0x0f]))
                 .expect("bit signature"),
+        ),
+        Value::LandmarkSet(
+            LandmarkSet::new(
+                BIOMETRIC_SPACE,
+                2,
+                vec![
+                    ([-2.0, 1.0, 0.0], [2.0, 1.0, 0.0]),
+                    ([-1.0, -1.0, 0.0], [1.0, -1.0, 0.0]),
+                ],
+                vec![[0.0, 2.0, 0.0]],
+            )
+            .expect("landmark set"),
         ),
     ]
 }
@@ -174,7 +188,7 @@ fn logical_replication_preserves_all_typed_biometric_values() {
     )
     .expect("primary");
     let replica = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("replica");
-    let schema = "CREATE TABLE replicated_biometrics (id INTEGER, print FINGERPRINT, face FACE, iris IRIS, features FEATURE_VECTOR, signature BIT_SIGNATURE)";
+    let schema = "CREATE TABLE replicated_biometrics (id INTEGER, print FINGERPRINT, face FACE, iris IRIS, features FEATURE_VECTOR, signature BIT_SIGNATURE, landmarks LANDMARK_SET)";
     primary.execute_query(schema).expect("primary schema");
     replica.execute_query(schema).expect("replica schema");
 
@@ -183,7 +197,7 @@ fn logical_replication_preserves_all_typed_biometric_values() {
     parameters.extend(values.iter().cloned());
     primary
         .execute_query_with_params(
-            "INSERT INTO replicated_biometrics (id,print,face,iris,features,signature) VALUES ($1,$2,$3,$4,$5,$6)",
+            "INSERT INTO replicated_biometrics (id,print,face,iris,features,signature,landmarks) VALUES ($1,$2,$3,$4,$5,$6,$7)",
             &parameters,
         )
         .expect("typed primary insert");
@@ -205,14 +219,21 @@ fn logical_replication_preserves_all_typed_biometric_values() {
 
     let result = replica
         .execute_query(
-            "SELECT print,face,iris,features,signature FROM replicated_biometrics WHERE id = 1",
+            "SELECT print,face,iris,features,signature,landmarks FROM replicated_biometrics WHERE id = 1",
         )
         .expect("replica typed readback")
         .result;
     assert_eq!(result.records.len(), 1);
-    for (column, expected) in ["print", "face", "iris", "features", "signature"]
-        .into_iter()
-        .zip(values.iter())
+    for (column, expected) in [
+        "print",
+        "face",
+        "iris",
+        "features",
+        "signature",
+        "landmarks",
+    ]
+    .into_iter()
+    .zip(values.iter())
     {
         assert_eq!(
             result.records[0].get(column),

@@ -368,6 +368,12 @@ public sealed class RedWireConn : IConn, ITopologySource
             throw new RedDBException.ParamsUnsupported(
                 "server did not advertise FEATURE_BIOMETRIC_PARAMS");
         }
+        if ((_serverFeatures & Frame.FeatureLandmarkParams) != Frame.FeatureLandmarkParams
+            && args.Any(ValueCodec.RequiresLandmarkCapability))
+        {
+            throw new RedDBException.ParamsUnsupported(
+                "server did not advertise FEATURE_LANDMARK_PARAMS");
+        }
         return await SendQueryAsync(
             Frame.Kind.QueryWithParams,
             ValueCodec.EncodeQueryWithParams(sql, args),

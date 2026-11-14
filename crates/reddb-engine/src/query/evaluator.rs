@@ -857,6 +857,40 @@ fn dispatch_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
             }
             _ => Err(unknown_function(name, args)),
         },
+        "LANDMARK_SET" => match args {
+            [Value::Uuid(space_id), Value::Json(geometry)] => Ok(Value::LandmarkSet(
+                reddb_types::LandmarkSet::from_geometry_json(*space_id, geometry)
+                    .map_err(|error| function_failed(name, error))?,
+            )),
+            _ => Err(unknown_function(name, args)),
+        },
+        "LANDMARK_SYMMETRY" => match args {
+            [Value::LandmarkSet(landmarks)] => Ok(Value::Float(
+                landmarks
+                    .symmetry_score()
+                    .map_err(|error| function_failed(name, error))?,
+            )),
+            _ => Err(unknown_function(name, args)),
+        },
+        "LANDMARK_IS_SYMMETRIC" => match args {
+            [Value::LandmarkSet(landmarks), threshold] => {
+                let threshold =
+                    numeric_threshold(threshold).ok_or_else(|| unknown_function(name, args))?;
+                Ok(Value::Boolean(
+                    landmarks
+                        .is_symmetric(threshold)
+                        .map_err(|error| function_failed(name, error))?,
+                ))
+            }
+            _ => Err(unknown_function(name, args)),
+        },
+        "FACE_LANDMARKS" => match args {
+            [Value::Face(face)] => Ok(Value::LandmarkSet(
+                face.face_landmarks()
+                    .map_err(|error| function_failed(name, error))?,
+            )),
+            _ => Err(unknown_function(name, args)),
+        },
         "UPPER" => match &args[0] {
             Value::Text(s) => Ok(Value::Text(Arc::from(s.to_uppercase()))),
             other => Err(EvalError::UnknownFunction {
@@ -1026,6 +1060,10 @@ pub fn evaluate_biometric_function(name: &str, args: &[Value]) -> Option<Result<
             | "BIOMETRIC_FORMAT"
             | "BIOMETRIC_INFO"
             | "ANSI_NIST_RECORD"
+            | "LANDMARK_SET"
+            | "LANDMARK_SYMMETRY"
+            | "LANDMARK_IS_SYMMETRIC"
+            | "FACE_LANDMARKS"
     ) {
         Some(dispatch_function(name, args))
     } else {

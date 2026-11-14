@@ -368,7 +368,8 @@ fn coarse_type_for(value: &StorageValue) -> &'static str {
         StorageValue::Fingerprint(_)
         | StorageValue::Face(_)
         | StorageValue::Iris(_)
-        | StorageValue::BitSignature(_) => "object",
+        | StorageValue::BitSignature(_)
+        | StorageValue::LandmarkSet(_) => "object",
         StorageValue::NodeRef(_)
         | StorageValue::EdgeRef(_)
         | StorageValue::VectorRef(_, _)

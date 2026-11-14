@@ -267,6 +267,7 @@ message QueryValue {
     QueryBiometric iris_value = 13;
     QueryFeatureVector feature_vector_value = 14;
     QueryBitSignature bit_signature_value = 15;
+    QueryLandmarkSet landmark_set_value = 16;
   }
 }
 
@@ -290,6 +291,22 @@ message QueryBitSignature {
   bytes space_id = 1;
   bytes bits = 2;
   bytes mask = 3;
+}
+
+message QueryLandmarkPoint {
+  repeated float coordinates = 1;
+}
+
+message QueryLandmarkPair {
+  QueryLandmarkPoint left = 1;
+  QueryLandmarkPoint right = 2;
+}
+
+message QueryLandmarkSet {
+  bytes space_id = 1;
+  uint32 dimensions = 2;
+  repeated QueryLandmarkPair pairs = 3;
+  repeated QueryLandmarkPoint midline = 4;
 }
 
 message JsonPayloadRequest {

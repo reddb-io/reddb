@@ -381,5 +381,10 @@ pub fn summarize_value(value: &Value) -> String {
         Value::BitSignature(value) => {
             format!("bit_signature(bytes={})", value.len_bytes())
         }
+        Value::LandmarkSet(value) => format!(
+            "landmark_set(dimensions={},points={})",
+            value.dimensions(),
+            value.point_count()
+        ),
     }
 }

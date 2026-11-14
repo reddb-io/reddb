@@ -688,6 +688,7 @@ fn value_kind(value: &Value) -> &'static str {
         Value::Iris(_) => "Iris",
         Value::FeatureVector(_) => "FeatureVector",
         Value::BitSignature(_) => "BitSignature",
+        Value::LandmarkSet(_) => "LandmarkSet",
     }
 }
 

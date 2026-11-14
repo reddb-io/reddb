@@ -135,6 +135,7 @@ fn data_type_name(data_type: DataType) -> &'static str {
         DataType::Iris => "iris",
         DataType::FeatureVector => "feature_vector",
         DataType::BitSignature => "bit_signature",
+        DataType::LandmarkSet => "landmark_set",
         DataType::ColorAlpha => "color_alpha",
         DataType::BigInt => "bigint",
         DataType::KeyRef => "keyref",

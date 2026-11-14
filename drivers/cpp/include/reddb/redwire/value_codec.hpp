@@ -27,12 +27,14 @@ constexpr uint8_t TAG_FACE = 0x0b;
 constexpr uint8_t TAG_IRIS = 0x0c;
 constexpr uint8_t TAG_FEATURE_VECTOR = 0x0d;
 constexpr uint8_t TAG_BIT_SIGNATURE = 0x0e;
+constexpr uint8_t TAG_LANDMARK_SET = 0x0f;
 
 constexpr size_t MAX_PARAM_COUNT = 65'536;
 constexpr size_t MAX_VALUE_PAYLOAD_LEN = MAX_FRAME_SIZE;
 
 std::vector<uint8_t> encode_value(const reddb::Value& value);
 bool requires_biometric_capability(const reddb::Value& value) noexcept;
+bool requires_landmark_capability(const reddb::Value& value) noexcept;
 std::vector<uint8_t> encode_query_with_params(std::string_view sql,
                                               std::span<const reddb::Value> params);
 inline std::vector<uint8_t> encode_query_with_params(

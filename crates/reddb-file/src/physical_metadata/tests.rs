@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 
 #[test]
 fn imported_sidecar_cleanup_preserves_database_and_unrecognized_files() {

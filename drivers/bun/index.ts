@@ -14,6 +14,7 @@ const SUPPORTED_VERSION = 0x01
 const FRAME_HEADER_SIZE = 16
 const MAX_FRAME_SIZE = 16 * 1024 * 1024
 const FEATURE_PARAMS = 0x0000_0001
+const FEATURE_LANDMARK_PARAMS = 0x0000_0010
 
 const MSG_QUERY = 0x01
 const MSG_RESULT = 0x02
@@ -38,6 +39,7 @@ const VALUE_VECTOR = 0x06
 const VALUE_JSON = 0x07
 const VALUE_TIMESTAMP = 0x08
 const VALUE_UUID = 0x09
+const VALUE_LANDMARK_SET = 0x0f
 
 type QueryParam =
   | null
@@ -278,6 +280,13 @@ export class RedDBConnection {
         'server did not advertise FEATURE_PARAMS; upgrade the server',
       )
     }
+    if (wireParams.some(isLandmarkParam) &&
+        (this.serverFeatures & FEATURE_LANDMARK_PARAMS) !== FEATURE_LANDMARK_PARAMS) {
+      throw new RedDBError(
+        'PARAMS_UNSUPPORTED',
+        'server did not advertise FEATURE_LANDMARK_PARAMS',
+      )
+    }
     // Legacy Query returns a summary only. Capable servers return rows via
     // QueryWithParams even when the parameter vector is empty.
     const resp = await this._send(
@@ -485,9 +494,73 @@ function encodeValue(value: QueryParam): Buffer {
       Buffer.from(record.$uuid.replace(/-/g, ''), 'hex').copy(out, 1)
       return out
     }
+    if (keys.length === 1 && record.$landmark_set !== undefined) {
+      return encodeLandmarkSet(record.$landmark_set)
+    }
     return encodeBytes(VALUE_JSON, Buffer.from(canonicalJson(value), 'utf8'))
   }
   throw new RedDBError('UNSUPPORTED_PARAM', `cannot encode query parameter of type ${typeof value}`)
+}
+
+function isLandmarkParam(value: QueryParam): boolean {
+  return typeof value === 'object' && value !== null &&
+    Object.getPrototypeOf(value) === Object.prototype &&
+    Object.keys(value).length === 1 && '$landmark_set' in value
+}
+
+function encodeLandmarkSet(raw: unknown): Buffer {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new RedDBError('UNSUPPORTED_PARAM', 'invalid landmark geometry')
+  }
+  const value = raw as Record<string, unknown>
+  if (Object.keys(value).length !== 4 ||
+      (value.dimensions !== 2 && value.dimensions !== 3) ||
+      !Array.isArray(value.pairs) || value.pairs.length < 2 ||
+      !Array.isArray(value.midline) ||
+      value.pairs.length * 2 + value.midline.length > 4096 ||
+      typeof value.space_id !== 'string') {
+    throw new RedDBError('UNSUPPORTED_PARAM', 'invalid landmark geometry')
+  }
+  const compactSpace = value.space_id.replace(/-/g, '')
+  if (!/^[0-9a-fA-F]{32}$/.test(compactSpace)) {
+    throw new RedDBError('UNSUPPORTED_PARAM', 'invalid landmark geometry')
+  }
+  const dimensions = value.dimensions
+  const points: number[][] = []
+  for (const rawPair of value.pairs) {
+    if (typeof rawPair !== 'object' || rawPair === null || Array.isArray(rawPair)) {
+      throw new RedDBError('UNSUPPORTED_PARAM', 'invalid landmark geometry')
+    }
+    const pair = rawPair as Record<string, unknown>
+    if (Object.keys(pair).length !== 2 || !('left' in pair) || !('right' in pair)) {
+      throw new RedDBError('UNSUPPORTED_PARAM', 'invalid landmark geometry')
+    }
+    points.push(validateLandmarkPoint(pair.left, dimensions))
+    points.push(validateLandmarkPoint(pair.right, dimensions))
+  }
+  for (const point of value.midline) points.push(validateLandmarkPoint(point, dimensions))
+  const out = Buffer.alloc(1 + 16 + 1 + 4 + 4 + points.length * dimensions * 4)
+  out[0] = VALUE_LANDMARK_SET
+  Buffer.from(compactSpace, 'hex').copy(out, 1)
+  out[17] = dimensions
+  out.writeUInt32LE(value.pairs.length, 18)
+  out.writeUInt32LE(value.midline.length, 22)
+  let offset = 26
+  for (const point of points) {
+    for (const coordinate of point) {
+      out.writeFloatLE(coordinate, offset)
+      offset += 4
+    }
+  }
+  return out
+}
+
+function validateLandmarkPoint(raw: unknown, dimensions: 2 | 3): number[] {
+  if (!Array.isArray(raw) || raw.length !== dimensions ||
+      raw.some((coordinate) => typeof coordinate !== 'number' || !Number.isFinite(coordinate))) {
+    throw new RedDBError('UNSUPPORTED_PARAM', 'invalid landmark geometry')
+  }
+  return raw as number[]
 }
 
 function encodeBytes(tag: number, bytes: Buffer): Buffer {

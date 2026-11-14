@@ -24,6 +24,32 @@ void main() {
       expect(ValueCodec.tagIris, 0x0c);
       expect(ValueCodec.tagFeatureVector, 0x0d);
       expect(ValueCodec.tagBitSignature, 0x0e);
+      expect(ValueCodec.tagLandmarkSet, 0x0f);
+    });
+
+    test('encodes landmark sets', () {
+      final encoded = ValueCodec.encodeValue({
+        r'$landmark_set': {
+          'space_id': '33333333333333333333333333333333',
+          'dimensions': 2,
+          'pairs': [
+            {
+              'left': [-2.0, 1.0],
+              'right': [2.0, 1.0]
+            },
+            {
+              'left': [-1.0, -1.0],
+              'right': [1.0, -1.0]
+            },
+          ],
+          'midline': [
+            [0.0, 2.0]
+          ],
+        },
+      });
+      expect(encoded[0], ValueCodec.tagLandmarkSet);
+      expect(encoded[17], 2);
+      expect(ByteData.sublistView(encoded).getUint32(18, Endian.little), 2);
     });
 
     test('encodes scalar values', () {

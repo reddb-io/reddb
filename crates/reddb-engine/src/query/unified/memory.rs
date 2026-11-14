@@ -224,6 +224,16 @@ fn scalar_heap_bytes(value: &Value) -> usize {
             .dimensions()
             .saturating_mul(std::mem::size_of::<f32>()),
         Value::BitSignature(value) => value.len_bytes().saturating_mul(2),
+        Value::LandmarkSet(value) => value
+            .pairs()
+            .len()
+            .saturating_mul(std::mem::size_of::<reddb_types::LandmarkPair>())
+            .saturating_add(
+                value
+                    .midline()
+                    .len()
+                    .saturating_mul(std::mem::size_of::<reddb_types::LandmarkCoordinates>()),
+            ),
         Value::Array(_) => unreachable!("arrays use the bounded stack"),
         Value::Null
         | Value::Integer(_)

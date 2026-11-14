@@ -51,6 +51,7 @@ pub enum Value {
     Iris(reddb_types::BiometricSample),
     FeatureVector(reddb_types::FeatureVector),
     BitSignature(reddb_types::BitSignature),
+    LandmarkSet(reddb_types::LandmarkSet),
 }
 
 impl Value {
@@ -102,6 +103,7 @@ impl Value {
                     "mask": hex_encode(signature.mask()),
                 }
             }),
+            Value::LandmarkSet(landmarks) => landmark_json(&landmarks),
         }
     }
 
@@ -127,8 +129,24 @@ impl Value {
             Value::Iris(value) => SV::Iris(value),
             Value::FeatureVector(value) => SV::FeatureVector(value),
             Value::BitSignature(value) => SV::BitSignature(value),
+            Value::LandmarkSet(value) => SV::LandmarkSet(value),
         }
     }
+}
+
+fn landmark_json(landmarks: &reddb_types::LandmarkSet) -> serde_json::Value {
+    let dimensions = usize::from(landmarks.dimensions());
+    let point = |coordinates: &reddb_types::LandmarkCoordinates| coordinates[..dimensions].to_vec();
+    serde_json::json!({
+        "$landmark_set": {
+            "space_id": hex_encode(&landmarks.space_id()),
+            "dimensions": landmarks.dimensions(),
+            "pairs": landmarks.pairs().iter().map(|(left, right)| {
+                serde_json::json!({"left": point(left), "right": point(right)})
+            }).collect::<Vec<_>>(),
+            "midline": landmarks.midline().iter().map(point).collect::<Vec<_>>(),
+        }
+    })
 }
 
 fn biometric_json(modality: &str, sample: &reddb_types::BiometricSample) -> serde_json::Value {
@@ -508,6 +526,26 @@ mod tests {
         let bits = Value::BitSignature(signature).into_json_param();
         assert_eq!(bits["$bit_signature"]["bits"].as_str(), Some("aa"));
         assert_eq!(bits["$bit_signature"]["mask"].as_str(), Some("0f"));
+
+        let landmarks = reddb_types::LandmarkSet::new(
+            [0x33; 16],
+            2,
+            vec![
+                ([-2.0, 1.0, 0.0], [2.0, 1.0, 0.0]),
+                ([-1.0, -1.0, 0.0], [1.0, -1.0, 0.0]),
+            ],
+            vec![[0.0, 2.0, 0.0]],
+        )
+        .expect("valid landmarks");
+        let geometry = Value::LandmarkSet(landmarks).into_json_param();
+        assert_eq!(
+            geometry["$landmark_set"]["space_id"].as_str(),
+            Some("33333333333333333333333333333333")
+        );
+        assert_eq!(
+            geometry["$landmark_set"]["pairs"].as_array().map(Vec::len),
+            Some(2)
+        );
     }
 
     #[test]

@@ -27,7 +27,8 @@ pub use reddb_grpc_proto::{
 pub fn params_to_grpc_values(params: &[crate::Value]) -> Vec<reddb_grpc_proto::QueryValue> {
     use reddb_grpc_proto::query_value::Kind;
     use reddb_grpc_proto::{
-        QueryBiometric, QueryBitSignature, QueryFeatureVector, QueryNull, QueryValue, QueryVector,
+        QueryBiometric, QueryBitSignature, QueryFeatureVector, QueryLandmarkPair,
+        QueryLandmarkPoint, QueryLandmarkSet, QueryNull, QueryValue, QueryVector,
     };
 
     params
@@ -68,6 +69,24 @@ pub fn params_to_grpc_values(params: &[crate::Value]) -> Vec<reddb_grpc_proto::Q
                     bits: value.bits().to_vec(),
                     mask: value.mask().to_vec(),
                 }),
+                crate::Value::LandmarkSet(value) => {
+                    let point = |coordinates: &[f32; 3]| QueryLandmarkPoint {
+                        coordinates: coordinates[..usize::from(value.dimensions())].to_vec(),
+                    };
+                    Kind::LandmarkSetValue(QueryLandmarkSet {
+                        space_id: value.space_id().to_vec(),
+                        dimensions: u32::from(value.dimensions()),
+                        pairs: value
+                            .pairs()
+                            .iter()
+                            .map(|(left, right)| QueryLandmarkPair {
+                                left: Some(point(left)),
+                                right: Some(point(right)),
+                            })
+                            .collect(),
+                        midline: value.midline().iter().map(point).collect(),
+                    })
+                }
             };
             QueryValue { kind: Some(kind) }
         })
@@ -106,11 +125,22 @@ mod tests {
             reddb_types::FeatureVector::new([0x11; 16], vec![1.0, -2.0]).expect("valid feature");
         let signature = reddb_types::BitSignature::new([0x22; 16], vec![0xaa], Some(vec![0x0f]))
             .expect("valid signature");
+        let landmarks = reddb_types::LandmarkSet::new(
+            [0x33; 16],
+            2,
+            vec![
+                ([-2.0, 1.0, 0.0], [2.0, 1.0, 0.0]),
+                ([-1.0, -1.0, 0.0], [1.0, -1.0, 0.0]),
+            ],
+            vec![[0.0, 2.0, 0.0]],
+        )
+        .expect("valid landmarks");
 
         let encoded = params_to_grpc_values(&[
             crate::Value::Fingerprint(fingerprint),
             crate::Value::FeatureVector(feature),
             crate::Value::BitSignature(signature),
+            crate::Value::LandmarkSet(landmarks),
         ]);
 
         let Some(Kind::FingerprintValue(value)) = &encoded[0].kind else {
@@ -128,5 +158,11 @@ mod tests {
             panic!("expected bit signature")
         };
         assert_eq!(value.mask, vec![0x0f]);
+        let Some(Kind::LandmarkSetValue(value)) = &encoded[3].kind else {
+            panic!("expected landmark set")
+        };
+        assert_eq!(value.space_id, vec![0x33; 16]);
+        assert_eq!(value.dimensions, 2);
+        assert_eq!(value.pairs.len(), 2);
     }
 }

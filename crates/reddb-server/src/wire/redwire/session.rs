@@ -25,7 +25,7 @@ use crate::runtime::RedDBRuntime;
 use crate::serde_json::{self, Value as JsonValue};
 use reddb_wire::query_with_params::{
     decode_query_with_params_request, ParamValue as RedWireParamValue, FEATURE_BIOMETRIC_PARAMS,
-    FEATURE_PARAMS,
+    FEATURE_LANDMARK_PARAMS, FEATURE_PARAMS,
 };
 use reddb_wire::redwire::operations::{
     decode_delete_payload, decode_get_payload, decode_insert_dispatch_payload,
@@ -1345,6 +1345,7 @@ where
     // RPC after the connection is established.
     let server_features = FEATURE_PARAMS
         | FEATURE_BIOMETRIC_PARAMS
+        | FEATURE_LANDMARK_PARAMS
         | reddb_wire::routing::FEATURE_TOPOLOGY
         | FEATURE_TYPED_MUTATIONS;
     let topology = build_topology_for_hello_ack(runtime);
@@ -1793,6 +1794,7 @@ fn param_to_request_value(value: RedWireParamValue) -> ParamValue {
         RedWireParamValue::Iris(value) => ParamValue::Iris(value),
         RedWireParamValue::FeatureVector(value) => ParamValue::FeatureVector(value),
         RedWireParamValue::BitSignature(value) => ParamValue::BitSignature(value),
+        RedWireParamValue::LandmarkSet(value) => ParamValue::LandmarkSet(value),
     }
 }
 

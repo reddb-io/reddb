@@ -225,11 +225,14 @@ impl RedDBRuntime {
                     .then_some(status.collection)
                     .flatten()
             });
-        self.inner
+        let queryability_changed = self
+            .inner
             .index_store
             .replace_non_queryable_collections(non_queryable);
         self.invalidate_plan_cache();
-        self.invalidate_result_cache();
+        if queryability_changed {
+            self.invalidate_result_cache();
+        }
     }
 
     pub(crate) fn close_runtime_index_gate(&self, name: &str) {

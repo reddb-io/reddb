@@ -40,10 +40,20 @@ public:
         std::vector<std::byte> bits;
         std::vector<std::byte> mask;
     };
+    struct LandmarkPair {
+        std::vector<float> left;
+        std::vector<float> right;
+    };
+    struct LandmarkSet {
+        std::array<std::byte, 16> space_id;
+        uint8_t dimensions;
+        std::vector<LandmarkPair> pairs;
+        std::vector<std::vector<float>> midline;
+    };
 
     using Storage = std::variant<Null, bool, int64_t, double, std::string,
                                  Bytes, Vector, Json, Timestamp, Uuid,
-                                 Fingerprint, Face, Iris, FeatureVector, BitSignature>;
+                                 Fingerprint, Face, Iris, FeatureVector, BitSignature, LandmarkSet>;
 
     Value() : storage_(Null{}) {}
     Value(std::nullopt_t) : storage_(Null{}) {}
@@ -76,6 +86,10 @@ public:
     static Value bit_signature(std::array<std::byte, 16> space_id,
                                std::span<const std::byte> bits,
                                std::span<const std::byte> mask = {});
+    static Value landmark_set(std::array<std::byte, 16> space_id,
+                              uint8_t dimensions,
+                              std::vector<LandmarkPair> pairs,
+                              std::vector<std::vector<float>> midline = {});
 
     const Storage& storage() const noexcept { return storage_; }
 

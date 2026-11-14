@@ -396,6 +396,53 @@ fn read_atom(reader: &mut NativeReader<'_, '_>, tag: u8) -> RdbFileResult<Value>
                 reddb_types::BitSignature::new(space_id, bits, Some(mask)).map_err(invalid)?,
             )
         }
+        59 => {
+            if reader.byte()? != 1 {
+                return Err(invalid("unsupported native landmark envelope version"));
+            }
+            let space_id = reader.fixed()?;
+            let dimensions = reader.byte()?;
+            if !matches!(dimensions, 2 | 3) {
+                return Err(invalid("invalid native landmark dimensions"));
+            }
+            let pair_count = reader.length()?;
+            let midline_count = reader.length()?;
+            let point_count = pair_count
+                .checked_mul(2)
+                .and_then(|count| count.checked_add(midline_count))
+                .ok_or_else(|| invalid("native landmark point count overflow"))?;
+            if pair_count < 2 || point_count > reddb_types::MAX_LANDMARK_POINTS {
+                return Err(invalid("invalid native landmark point count"));
+            }
+            let coordinate_bytes = point_count
+                .checked_mul(usize::from(dimensions))
+                .and_then(|count| count.checked_mul(std::mem::size_of::<f32>()))
+                .ok_or_else(|| invalid("native landmark payload length overflow"))?;
+            if coordinate_bytes > reader.remaining() {
+                return Err(invalid("truncated native landmark payload"));
+            }
+            reader.reserve_elements::<reddb_types::LandmarkPair>(pair_count)?;
+            reader.reserve_elements::<reddb_types::LandmarkCoordinates>(midline_count)?;
+            let read_point = |reader: &mut NativeReader<'_, '_>| -> RdbFileResult<[f32; 3]> {
+                let mut point = [0.0_f32; 3];
+                for coordinate in point.iter_mut().take(usize::from(dimensions)) {
+                    *coordinate = f32::from_le_bytes(reader.fixed()?);
+                }
+                Ok(point)
+            };
+            let mut pairs = Vec::with_capacity(pair_count);
+            for _ in 0..pair_count {
+                pairs.push((read_point(reader)?, read_point(reader)?));
+            }
+            let mut midline = Vec::with_capacity(midline_count);
+            for _ in 0..midline_count {
+                midline.push(read_point(reader)?);
+            }
+            Value::LandmarkSet(
+                reddb_types::LandmarkSet::new(space_id, dimensions, pairs, midline)
+                    .map_err(invalid)?,
+            )
+        }
         0x85 => reader.text(true)?,
         0x86 => Value::Blob(reader.compressed()?),
         _ => return Err(invalid(format!("Unknown Value type: {tag}"))),
@@ -723,6 +770,34 @@ pub fn write_native_value(buf: &mut Vec<u8>, value: &Value) {
             buf.extend_from_slice(value.bits());
             buf.extend_from_slice(value.mask());
         }
+        Value::LandmarkSet(value) => {
+            buf.push(59);
+            buf.push(1);
+            buf.extend_from_slice(&value.space_id());
+            buf.push(value.dimensions());
+            write_varu32(
+                buf,
+                u32::try_from(value.pairs().len()).expect("bounded landmark pair count"),
+            );
+            write_varu32(
+                buf,
+                u32::try_from(value.midline().len()).expect("bounded landmark midline count"),
+            );
+            let dimensions = usize::from(value.dimensions());
+            for (left, right) in value.pairs() {
+                for coordinate in left.iter().take(dimensions) {
+                    buf.extend_from_slice(&coordinate.to_le_bytes());
+                }
+                for coordinate in right.iter().take(dimensions) {
+                    buf.extend_from_slice(&coordinate.to_le_bytes());
+                }
+            }
+            for point in value.midline() {
+                for coordinate in point.iter().take(dimensions) {
+                    buf.extend_from_slice(&coordinate.to_le_bytes());
+                }
+            }
+        }
     }
 }
 
@@ -747,6 +822,7 @@ pub fn required_file_capabilities_for_data_type(data_type: reddb_types::DataType
         reddb_types::DataType::FeatureVector | reddb_types::DataType::BitSignature => {
             crate::FILE_CAPABILITY_FEATURE_VALUES
         }
+        reddb_types::DataType::LandmarkSet => crate::FILE_CAPABILITY_LANDMARK_VALUES,
         _ => 0,
     }
 }
@@ -761,6 +837,7 @@ pub fn required_file_capabilities(value: &Value) -> u64 {
             crate::FILE_CAPABILITY_BIOMETRIC_VALUES
         }
         Value::FeatureVector(_) | Value::BitSignature(_) => crate::FILE_CAPABILITY_FEATURE_VALUES,
+        Value::LandmarkSet(_) => crate::FILE_CAPABILITY_LANDMARK_VALUES,
         Value::Array(values) => values.iter().fold(0, |required, value| {
             required | required_file_capabilities(value)
         }),
@@ -784,4 +861,55 @@ pub fn read_native_value_with_budget(
     ))?;
     *position = next;
     Ok(value)
+}
+
+#[cfg(test)]
+mod landmark_tests {
+    use super::*;
+
+    fn landmark_value() -> Value {
+        Value::LandmarkSet(
+            reddb_types::LandmarkSet::new(
+                [0x44; 16],
+                2,
+                vec![
+                    ([-1.0, 1.0, 0.0], [1.0, 1.0, 0.0]),
+                    ([-2.0, -1.0, 0.0], [2.0, -1.0, 0.0]),
+                ],
+                Vec::new(),
+            )
+            .expect("valid landmarks"),
+        )
+    }
+
+    #[test]
+    fn native_landmark_tag_and_capability_are_stable() {
+        let value = landmark_value();
+        let mut bytes = Vec::new();
+        write_native_value(&mut bytes, &value);
+
+        assert_eq!(bytes[0], 59);
+        assert_eq!(bytes[1], 1);
+        assert_eq!(crate::FILE_CAPABILITY_LANDMARK_VALUES, 1 << 8);
+        assert_eq!(
+            required_file_capabilities(&value),
+            crate::FILE_CAPABILITY_LANDMARK_VALUES
+        );
+        assert_eq!(
+            required_file_capabilities_for_data_type(reddb_types::DataType::LandmarkSet),
+            crate::FILE_CAPABILITY_LANDMARK_VALUES
+        );
+
+        let mut position = 0;
+        assert_eq!(read_native_value(&bytes, &mut position).unwrap(), value);
+        assert_eq!(position, bytes.len());
+
+        for end in 0..bytes.len() {
+            let mut position = 0;
+            assert!(
+                read_native_value(&bytes[..end], &mut position).is_err(),
+                "truncated native landmark decoded at byte {end}"
+            );
+        }
+    }
 }

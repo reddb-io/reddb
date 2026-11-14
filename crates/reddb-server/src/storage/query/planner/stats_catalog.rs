@@ -745,6 +745,11 @@ fn approximate_value_size(value: &Value) -> usize {
         }
         Value::FeatureVector(vector) => 16 + std::mem::size_of_val(vector.values()),
         Value::BitSignature(signature) => 16 + signature.bits().len() + signature.mask().len(),
+        Value::LandmarkSet(landmarks) => {
+            17 + landmarks.point_count()
+                * usize::from(landmarks.dimensions())
+                * std::mem::size_of::<f32>()
+        }
     }
 }
 

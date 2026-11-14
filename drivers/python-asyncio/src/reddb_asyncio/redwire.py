@@ -49,6 +49,7 @@ MAX_FRAME_SIZE: int = 16 * 1024 * 1024
 KNOWN_FLAGS: int = 0b0000_0011
 FEATURE_PARAMS: int = 0x0000_0001
 FEATURE_BIOMETRIC_PARAMS: int = 0x0000_0008
+FEATURE_LANDMARK_PARAMS: int = 0x0000_0010
 
 DEFAULT_TIMEOUT_SECS: float = 30.0
 
@@ -95,6 +96,7 @@ class ValueTag:
     Iris = 0x0C
     FeatureVector = 0x0D
     BitSignature = 0x0E
+    LandmarkSet = 0x0F
 
 
 BIOMETRIC_FORMATS: dict[str, int] = {
@@ -284,6 +286,11 @@ class RedwireClient:
             self._server_features & FEATURE_BIOMETRIC_PARAMS
         ) == FEATURE_BIOMETRIC_PARAMS
 
+    def supports_landmark_params(self) -> bool:
+        return (
+            self._server_features & FEATURE_LANDMARK_PARAMS
+        ) == FEATURE_LANDMARK_PARAMS
+
     @classmethod
     async def connect(cls, opts: RedwireOptions) -> "RedwireClient":
         """Open a TCP/TLS socket, run the handshake, return a client."""
@@ -319,6 +326,13 @@ class RedwireClient:
                 raise RedDBError(
                     "server did not advertise FEATURE_BIOMETRIC_PARAMS",
                     code="BIOMETRIC_PARAMS_UNSUPPORTED",
+                )
+            if not self.supports_landmark_params() and any(
+                _requires_landmark_capability(value) for value in binds
+            ):
+                raise RedDBError(
+                    "server did not advertise FEATURE_LANDMARK_PARAMS",
+                    code="LANDMARK_PARAMS_UNSUPPORTED",
                 )
             frame = Frame(
                 kind=Kind.QueryWithParams,
@@ -761,6 +775,8 @@ def _encode_value(value: Any) -> bytes:
             return _encode_feature_vector(value["$feature_vector"])
         if set(value) == {"$bit_signature"}:
             return _encode_bit_signature(value["$bit_signature"])
+        if set(value) == {"$landmark_set"}:
+            return _encode_landmark_set(value["$landmark_set"])
         body = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
         return _encode_len_prefixed(ValueTag.Json, body)
     raise RedDBError(
@@ -773,6 +789,10 @@ def _requires_biometric_feature_capability(value: Any) -> bool:
     return isinstance(value, dict) and any(
         key in value for key in ("$biometric", "$feature_vector", "$bit_signature")
     )
+
+
+def _requires_landmark_capability(value: Any) -> bool:
+    return isinstance(value, dict) and "$landmark_set" in value
 
 
 def _encode_biometric(value: Any) -> bytes:
@@ -850,6 +870,67 @@ def _encode_bit_signature(value: Any) -> bytes:
     )
 
 
+def _encode_landmark_set(value: Any) -> bytes:
+    required = {"space_id", "dimensions", "pairs", "midline"}
+    if not isinstance(value, dict) or set(value) != required:
+        raise RedDBError(
+            "$landmark_set must contain space_id, dimensions, pairs, and midline",
+            code="UNSUPPORTED_PARAM",
+        )
+    dimensions = value["dimensions"]
+    pairs = value["pairs"]
+    midline = value["midline"]
+    if dimensions not in (2, 3) or isinstance(dimensions, bool):
+        raise RedDBError("landmark dimensions must be 2 or 3", code="UNSUPPORTED_PARAM")
+    if not isinstance(pairs, list) or len(pairs) < 2 or not isinstance(midline, list):
+        raise RedDBError("landmark topology is invalid", code="UNSUPPORTED_PARAM")
+    point_count = len(pairs) * 2 + len(midline)
+    if point_count > 4_096:
+        raise RedDBError("landmark set exceeds 4096 points", code="UNSUPPORTED_PARAM")
+    space_id = _decode_uuid(value["space_id"], "landmark space_id")
+    coordinates = bytearray()
+
+    def append_point(point: Any) -> None:
+        if not isinstance(point, list) or len(point) != dimensions:
+            raise RedDBError(
+                "landmark coordinate count differs from dimensions",
+                code="UNSUPPORTED_PARAM",
+            )
+        for coordinate in point:
+            if (
+                isinstance(coordinate, bool)
+                or not isinstance(coordinate, (int, float))
+                or not math.isfinite(coordinate)
+            ):
+                raise RedDBError(
+                    "landmark coordinates must be finite f32 values",
+                    code="UNSUPPORTED_PARAM",
+                )
+            try:
+                coordinates.extend(struct.pack("<f", float(coordinate)))
+            except OverflowError as exc:
+                raise RedDBError(
+                    "landmark coordinates must be finite f32 values",
+                    code="UNSUPPORTED_PARAM",
+                ) from exc
+
+    for pair in pairs:
+        if not isinstance(pair, dict) or set(pair) != {"left", "right"}:
+            raise RedDBError(
+                "landmark pair must contain left and right",
+                code="UNSUPPORTED_PARAM",
+            )
+        append_point(pair["left"])
+        append_point(pair["right"])
+    for point in midline:
+        append_point(point)
+    return (
+        bytes([ValueTag.LandmarkSet])
+        + space_id
+        + bytes([dimensions])
+        + struct.pack("<II", len(pairs), len(midline))
+        + coordinates
+    )
 def _decode_uuid(value: Any, field: str) -> bytes:
     if not isinstance(value, str):
         raise RedDBError(f"{field} must be a UUID", code="UNSUPPORTED_PARAM")
@@ -904,6 +985,7 @@ __all__ = [
     "MAX_FRAME_SIZE",
     "FEATURE_PARAMS",
     "FEATURE_BIOMETRIC_PARAMS",
+    "FEATURE_LANDMARK_PARAMS",
     "Kind",
     "ValueTag",
     "Flags",

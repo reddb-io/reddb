@@ -161,7 +161,8 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
         | Value::Face(_)
         | Value::Iris(_)
         | Value::FeatureVector(_)
-        | Value::BitSignature(_) => value.to_json(),
+        | Value::BitSignature(_)
+        | Value::LandmarkSet(_) => value.to_json(),
     }
 }
 

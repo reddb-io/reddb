@@ -528,7 +528,8 @@ envelopes. Binary fields are hexadecimal; `space_id` is exactly 16 bytes:
 
 The other envelopes are `$biometric` with `modality`, `format`, and hex
 `data`, and `$bit_signature` with `space_id`, hex `bits`, and an optional hex
-`mask`. See [Biometric Records and Comparison Artifacts](/types/biometrics.md)
+`mask`. `$landmark_set` carries `space_id`, `dimensions`, bilateral `pairs`,
+and `midline` coordinates. See [Biometric Records and Comparison Artifacts](/types/biometrics.md)
 for the complete contract and limits.
 
 ## Configuration

@@ -30,6 +30,7 @@ const (
 	TagIris          ValueTag = 0x0C
 	TagFeatureVector ValueTag = 0x0D
 	TagBitSignature  ValueTag = 0x0E
+	TagLandmarkSet   ValueTag = 0x0F
 )
 
 // MaxParamCount caps the params slice size on QueryWithParams. Mirrors the
@@ -39,6 +40,7 @@ const MaxParamCount = 65_536
 const (
 	MaxFeatureVectorDimensions = 65_536
 	MaxBitSignatureBytes       = 1 << 20
+	MaxLandmarkPoints          = 4_096
 )
 
 // MaxValuePayloadLen caps a single length-prefixed value's bytes. Mirrors the
@@ -109,6 +111,19 @@ type BitSignature struct {
 	SpaceID UUID
 	Bits    []byte
 	Mask    []byte
+}
+
+type LandmarkPair struct {
+	Left  []float32
+	Right []float32
+}
+
+// LandmarkSet is caller-supplied bilateral geometry in an application-defined space.
+type LandmarkSet struct {
+	SpaceID    UUID
+	Dimensions uint8
+	Pairs      []LandmarkPair
+	Midline    [][]float32
 }
 
 // UUIDFromString parses a canonical RFC 4122 hyphenated UUID. Hyphens
@@ -228,6 +243,8 @@ func EncodeValue(v any) ([]byte, error) {
 		return encodeFeatureVector(x)
 	case BitSignature:
 		return encodeBitSignature(x)
+	case LandmarkSet:
+		return encodeLandmarkSet(x)
 	case json.RawMessage:
 		var anyv any
 		if err := json.Unmarshal(x, &anyv); err != nil {
@@ -328,6 +345,53 @@ func encodeBitSignature(value BitSignature) ([]byte, error) {
 	return out, nil
 }
 
+func encodeLandmarkSet(value LandmarkSet) ([]byte, error) {
+	if value.Dimensions != 2 && value.Dimensions != 3 {
+		return nil, errors.New("redwire: landmark dimensions must be 2 or 3")
+	}
+	if len(value.Pairs) < 2 {
+		return nil, errors.New("redwire: landmark set requires at least two pairs")
+	}
+	pointCount := len(value.Pairs)*2 + len(value.Midline)
+	if pointCount > MaxLandmarkPoints {
+		return nil, fmt.Errorf("redwire: landmark point count %d exceeds limit", pointCount)
+	}
+	out := make([]byte, 1+16+1+4+4+pointCount*int(value.Dimensions)*4)
+	out[0] = byte(TagLandmarkSet)
+	copy(out[1:17], value.SpaceID[:])
+	out[17] = value.Dimensions
+	binary.LittleEndian.PutUint32(out[18:22], uint32(len(value.Pairs)))
+	binary.LittleEndian.PutUint32(out[22:26], uint32(len(value.Midline)))
+	offset := 26
+	writePoint := func(point []float32) error {
+		if len(point) != int(value.Dimensions) {
+			return errors.New("redwire: landmark coordinate count differs from dimensions")
+		}
+		for _, coordinate := range point {
+			if math.IsNaN(float64(coordinate)) || math.IsInf(float64(coordinate), 0) {
+				return errors.New("redwire: landmark coordinates must be finite")
+			}
+			binary.LittleEndian.PutUint32(out[offset:offset+4], math.Float32bits(coordinate))
+			offset += 4
+		}
+		return nil
+	}
+	for _, pair := range value.Pairs {
+		if err := writePoint(pair.Left); err != nil {
+			return nil, err
+		}
+		if err := writePoint(pair.Right); err != nil {
+			return nil, err
+		}
+	}
+	for _, point := range value.Midline {
+		if err := writePoint(point); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 func requiresBiometricFeatureCapability(v any) bool {
 	switch v.(type) {
 	case Fingerprint, Face, Iris, FeatureVector, BitSignature:
@@ -338,6 +402,20 @@ func requiresBiometricFeatureCapability(v any) bool {
 	}
 	if rv := derefPointer(v); rv != nil {
 		return requiresBiometricFeatureCapability(rv)
+	}
+	return false
+}
+
+func requiresLandmarkCapability(v any) bool {
+	switch v.(type) {
+	case LandmarkSet:
+		return true
+	}
+	if isNilPointer(v) {
+		return false
+	}
+	if rv := derefPointer(v); rv != nil {
+		return requiresLandmarkCapability(rv)
 	}
 	return false
 }

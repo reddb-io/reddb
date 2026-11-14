@@ -119,4 +119,11 @@ Value Value::bit_signature(std::array<std::byte, 16> space_id,
     return Value(std::move(value));
 }
 
+Value Value::landmark_set(std::array<std::byte, 16> space_id,
+                          uint8_t dimensions,
+                          std::vector<LandmarkPair> pairs,
+                          std::vector<std::vector<float>> midline) {
+    return Value(LandmarkSet{space_id, dimensions, std::move(pairs), std::move(midline)});
+}
+
 } // namespace reddb

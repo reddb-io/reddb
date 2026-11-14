@@ -6,7 +6,9 @@ use std::sync::{mpsc, Arc, Mutex};
 use reddb_server::storage::backend::{BackendError, LocalBackend, RemoteBackend};
 use reddb_server::storage::wal::PointInTimeRecovery;
 use reddb_server::{RedDBOptions, RedDBRuntime};
-use reddb_types::{BiometricFormat, BiometricSample, BitSignature, FeatureVector, Value};
+use reddb_types::{
+    BiometricFormat, BiometricSample, BitSignature, FeatureVector, LandmarkSet, Value,
+};
 
 const BIOMETRIC_SPACE: [u8; 16] = [0x61; 16];
 
@@ -28,7 +30,7 @@ fn fingerprint_sample() -> BiometricSample {
         .expect("standard fingerprint minutiae")
 }
 
-fn typed_values() -> [Value; 5] {
+fn typed_values() -> [Value; 6] {
     let asn1 = vec![0x30, 0x03, 0x02, 0x01, 0x01];
     [
         Value::Fingerprint(fingerprint_sample()),
@@ -46,6 +48,18 @@ fn typed_values() -> [Value; 5] {
         Value::BitSignature(
             BitSignature::new(BIOMETRIC_SPACE, vec![0xaa, 0x55], Some(vec![0xff, 0x0f]))
                 .expect("bit signature"),
+        ),
+        Value::LandmarkSet(
+            LandmarkSet::new(
+                BIOMETRIC_SPACE,
+                2,
+                vec![
+                    ([-1.0, 1.0, 0.0], [1.0, 1.0, 0.0]),
+                    ([-2.0, -1.0, 0.0], [2.0, -1.0, 0.0]),
+                ],
+                vec![[0.0, 2.0, 0.0]],
+            )
+            .expect("landmark set"),
         ),
     ]
 }
@@ -144,7 +158,7 @@ fn populated_single_file_backup_restores_into_an_independent_store() {
     }
     runtime
         .execute_query(
-            "CREATE TABLE backup_biometrics (id INTEGER, print FINGERPRINT, face FACE, iris IRIS, features FEATURE_VECTOR, signature BIT_SIGNATURE)",
+            "CREATE TABLE backup_biometrics (id INTEGER, print FINGERPRINT, face FACE, iris IRIS, features FEATURE_VECTOR, signature BIT_SIGNATURE, landmarks LANDMARK_SET)",
         )
         .expect("typed schema");
     let values = typed_values();
@@ -152,7 +166,7 @@ fn populated_single_file_backup_restores_into_an_independent_store() {
     parameters.extend(values.iter().cloned());
     runtime
         .execute_query_with_params(
-            "INSERT INTO backup_biometrics (id,print,face,iris,features,signature) VALUES ($1,$2,$3,$4,$5,$6)",
+            "INSERT INTO backup_biometrics (id,print,face,iris,features,signature,landmarks) VALUES ($1,$2,$3,$4,$5,$6,$7)",
             &parameters,
         )
         .expect("typed backup row");
@@ -189,14 +203,21 @@ fn populated_single_file_backup_restores_into_an_independent_store() {
     );
     let restored_typed = restored
         .execute_query(
-            "SELECT print,face,iris,features,signature FROM backup_biometrics WHERE id = 1",
+            "SELECT print,face,iris,features,signature,landmarks FROM backup_biometrics WHERE id = 1",
         )
         .expect("restored typed readback")
         .result;
     assert_eq!(restored_typed.records.len(), 1);
-    for (column, expected) in ["print", "face", "iris", "features", "signature"]
-        .into_iter()
-        .zip(values.iter())
+    for (column, expected) in [
+        "print",
+        "face",
+        "iris",
+        "features",
+        "signature",
+        "landmarks",
+    ]
+    .into_iter()
+    .zip(values.iter())
     {
         assert_eq!(
             restored_typed.records[0].get(column),

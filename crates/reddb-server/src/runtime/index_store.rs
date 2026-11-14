@@ -1222,8 +1222,14 @@ impl IndexStore {
     pub(crate) fn replace_non_queryable_collections(
         &self,
         collections: impl IntoIterator<Item = String>,
-    ) {
-        *self.non_queryable_collections.write() = collections.into_iter().collect();
+    ) -> bool {
+        let replacement = collections.into_iter().collect();
+        let mut current = self.non_queryable_collections.write();
+        if *current == replacement {
+            return false;
+        }
+        *current = replacement;
+        true
     }
 
     /// The caller exclusively fences collection topology until publication.

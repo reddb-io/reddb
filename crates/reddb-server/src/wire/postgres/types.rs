@@ -94,7 +94,8 @@ impl PgOid {
             | Value::Face(_)
             | Value::Iris(_)
             | Value::FeatureVector(_)
-            | Value::BitSignature(_) => PgOid::Jsonb,
+            | Value::BitSignature(_)
+            | Value::LandmarkSet(_) => PgOid::Jsonb,
             // Domain / richer types collapse to TEXT so psql can render them.
             _ => PgOid::Text,
         }
@@ -309,7 +310,8 @@ pub fn value_to_pg_wire_bytes(value: &Value) -> Option<Vec<u8>> {
         | Value::Face(_)
         | Value::Iris(_)
         | Value::FeatureVector(_)
-        | Value::BitSignature(_) => Some(value.to_json().to_string_compact().into_bytes()),
+        | Value::BitSignature(_)
+        | Value::LandmarkSet(_) => Some(value.to_json().to_string_compact().into_bytes()),
         // Everything else renders via Display — catches Uuid, Date,
         // Timestamp, Email, Phone, Money, GeoPoint, etc. PG clients see
         // these as TEXT columns (OID 25) and can render them verbatim.
@@ -450,6 +452,11 @@ mod tests {
             decode_json_param(bits),
             Ok(ParamValue::BitSignature(_))
         ));
+        let landmarks = br#"{"$landmark_set":{"space_id":"33333333333333333333333333333333","dimensions":2,"pairs":[{"left":[-2.0,1.0],"right":[2.0,1.0]},{"left":[-1.0,-1.0],"right":[1.0,-1.0]}],"midline":[[0.0,2.0]]}}"#;
+        assert!(matches!(
+            decode_json_param(landmarks),
+            Ok(ParamValue::LandmarkSet(_))
+        ));
 
         let mut binary_jsonb = vec![1];
         binary_jsonb.extend_from_slice(feature);
@@ -472,5 +479,22 @@ mod tests {
         let text = std::str::from_utf8(&encoded).expect("JSON text");
         assert!(text.contains("$biometric"));
         assert!(text.contains("3003020101"));
+
+        let landmarks = reddb_types::LandmarkSet::new(
+            [0x33; 16],
+            2,
+            vec![
+                ([-2.0, 1.0, 0.0], [2.0, 1.0, 0.0]),
+                ([-1.0, -1.0, 0.0], [1.0, -1.0, 0.0]),
+            ],
+            vec![[0.0, 2.0, 0.0]],
+        )
+        .expect("valid landmarks");
+        let value = Value::LandmarkSet(landmarks);
+        assert_eq!(PgOid::from_value(&value), PgOid::Jsonb);
+        let encoded = value_to_pg_wire_bytes(&value).expect("JSONB payload");
+        let text = std::str::from_utf8(&encoded).expect("JSON text");
+        assert!(text.contains("$landmark_set"));
+        assert!(text.contains("33333333333333333333333333333333"));
     }
 }

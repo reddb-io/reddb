@@ -157,6 +157,9 @@ const ARGS_FINGERPRINT: &[DataType] = &[DataType::Fingerprint];
 const ARGS_FACE: &[DataType] = &[DataType::Face];
 const ARGS_IRIS: &[DataType] = &[DataType::Iris];
 const ARGS_ANSI_NIST_RECORD: &[DataType] = &[DataType::Blob, DataType::Integer, DataType::Integer];
+const ARGS_UUID_JSON: &[DataType] = &[DataType::Uuid, DataType::Json];
+const ARGS_LANDMARK_SET: &[DataType] = &[DataType::LandmarkSet];
+const ARGS_LANDMARK_MATCH: &[DataType] = &[DataType::LandmarkSet, DataType::Float];
 
 // JSON function signatures (Phase 1.4 PG parity).
 //
@@ -1043,6 +1046,34 @@ pub const FUNCTION_CATALOG: &[FunctionEntry] = &[
         "ANSI_NIST_RECORD",
         ARGS_ANSI_NIST_RECORD,
         DataType::Unknown,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "LANDMARK_SET",
+        ARGS_UUID_JSON,
+        DataType::LandmarkSet,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "LANDMARK_SYMMETRY",
+        ARGS_LANDMARK_SET,
+        DataType::Float,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "LANDMARK_IS_SYMMETRIC",
+        ARGS_LANDMARK_MATCH,
+        DataType::Boolean,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "FACE_LANDMARKS",
+        ARGS_FACE,
+        DataType::LandmarkSet,
         FunctionKind::Scalar,
         false,
     ),

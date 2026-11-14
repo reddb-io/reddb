@@ -1,5 +1,7 @@
 use reddb_file::native_value::{read_native_value_with_budget, write_native_value};
-use reddb_types::{BiometricFormat, BiometricSample, BitSignature, FeatureVector, Value};
+use reddb_types::{
+    BiometricFormat, BiometricSample, BitSignature, FeatureVector, LandmarkSet, Value,
+};
 
 #[test]
 fn compressed_native_text_cannot_expand_past_decode_budget() {
@@ -70,8 +72,20 @@ fn biometric_and_feature_values_roundtrip_with_capabilities() {
     let bits = Value::BitSignature(
         BitSignature::new([2; 16], vec![0xAA], Some(vec![0xF0])).expect("valid bit signature"),
     );
+    let landmarks = Value::LandmarkSet(
+        LandmarkSet::new(
+            [3; 16],
+            2,
+            vec![
+                ([-2.0, 1.0, 0.0], [2.0, 1.0, 0.0]),
+                ([-1.0, -1.0, 0.0], [1.0, -1.0, 0.0]),
+            ],
+            vec![[0.0, 2.0, 0.0]],
+        )
+        .expect("valid landmark set"),
+    );
 
-    for value in [&face, &feature, &bits] {
+    for value in [&face, &feature, &bits, &landmarks] {
         let mut encoded = Vec::new();
         write_native_value(&mut encoded, value);
         assert_eq!(
@@ -87,6 +101,10 @@ fn biometric_and_feature_values_roundtrip_with_capabilities() {
     assert_eq!(
         reddb_file::native_value::required_file_capabilities(&feature),
         reddb_file::FILE_CAPABILITY_FEATURE_VALUES
+    );
+    assert_eq!(
+        reddb_file::native_value::required_file_capabilities(&landmarks),
+        reddb_file::FILE_CAPABILITY_LANDMARK_VALUES
     );
 }
 

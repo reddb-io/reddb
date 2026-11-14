@@ -198,20 +198,26 @@
     {
       "id": "PSC-015",
       "source": "docs/types/biometrics.md",
-      "promise": "Standardized fingerprint, face, and iris records plus caller-supplied feature vectors and bit signatures are native typed values with deterministic comparison and indexed search.",
+      "promise": "Standardized fingerprint, face, and iris records plus caller-supplied feature vectors, bit signatures, and landmark sets are native typed values with deterministic comparison, symmetry scoring, and indexed search where applicable.",
       "cells": {
-        "sql": { "status": "supported", "tests": ["tests/grouped/multimodel_query/e2e_biometric_search.rs"] },
+        "sql": { "status": "supported", "tests": ["tests/grouped/multimodel_query/e2e_biometric_search.rs", "tests/grouped/schema_query_core/e2e_native_sql_functions.rs"] },
         "http": { "status": "partial", "tests": ["crates/reddb-server/src/runtime/query_request.rs"] },
-        "redwire": { "status": "partial", "tests": ["crates/reddb-wire/src/query_with_params.rs", "drivers/js-client/test/redwire-biometric-params.test.mjs"] },
+        "redwire": { "status": "partial", "tests": ["crates/reddb-wire/src/query_with_params.rs", "drivers/cpp/tests/value_codec_test.cpp", "drivers/dart/test/value_codec_test.dart", "drivers/dotnet/tests/Reddb.Tests/ValueCodecTests.cs", "drivers/go/redwire/value_test.go", "drivers/java/src/test/java/dev/reddb/ValueCodecTest.java", "drivers/js/test/redwire.params.test.mjs", "drivers/js-client/test/redwire-biometric-params.test.mjs", "drivers/kotlin/src/test/kotlin/dev/reddb/ValueCodecTest.kt", "drivers/php/tests/ValueCodecTest.php", "drivers/python-asyncio/tests/test_query_params.py", "drivers/zig/tests/value_codec_test.zig"] },
         "grpc": { "status": "partial", "tests": ["crates/reddb-server/src/grpc.rs", "crates/reddb-client/src/connector/mod.rs"] },
         "driver_helpers": {
           "status": "partial",
           "tests": [
             "crates/reddb-client/src/params.rs",
+            "drivers/cpp/tests/value_codec_test.cpp",
+            "drivers/dart/test/value_codec_test.dart",
+            "drivers/dotnet/tests/Reddb.Tests/ValueCodecTests.cs",
             "drivers/go/redwire/value_test.go",
             "drivers/java/src/test/java/dev/reddb/ValueCodecTest.java",
+            "drivers/kotlin/src/test/kotlin/dev/reddb/ValueCodecTest.kt",
+            "drivers/php/tests/ValueCodecTest.php",
             "drivers/python-asyncio/tests/test_query_params.py",
-            "drivers/js-client/test/redwire-biometric-params.test.mjs"
+            "drivers/js-client/test/redwire-biometric-params.test.mjs",
+            "drivers/zig/tests/value_codec_test.zig"
           ]
         }
       }

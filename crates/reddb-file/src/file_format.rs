@@ -47,6 +47,8 @@ pub const FILE_CAPABILITY_DWB_PUBLICATION: u64 = 1 << 5;
 pub const FILE_CAPABILITY_BIOMETRIC_VALUES: u64 = 1 << 6;
 /// Extractor-scoped feature vectors or bit signatures may appear in payloads.
 pub const FILE_CAPABILITY_FEATURE_VALUES: u64 = 1 << 7;
+/// Caller-supplied landmark geometry may appear in payloads.
+pub const FILE_CAPABILITY_LANDMARK_VALUES: u64 = 1 << 8;
 // Freeze the old entry point's reader contract. An older engine may link a
 // newer compatible codec crate without implementing its new recovery rules.
 const FILE_CAPABILITIES_LEGACY_HEADER: u64 =
@@ -59,7 +61,8 @@ pub const FILE_CAPABILITIES_SUPPORTED: u64 = FILE_CAPABILITY_TEMPERATURE
     | FILE_CAPABILITY_TREE_PROOFS
     | FILE_CAPABILITY_DWB_PUBLICATION
     | FILE_CAPABILITY_BIOMETRIC_VALUES
-    | FILE_CAPABILITY_FEATURE_VALUES;
+    | FILE_CAPABILITY_FEATURE_VALUES
+    | FILE_CAPABILITY_LANDMARK_VALUES;
 
 /// Whether a pre-capability format version implies disk residency.
 /// Capability-aware callers must use [`DatabaseHeader::requires_disk_residency`].

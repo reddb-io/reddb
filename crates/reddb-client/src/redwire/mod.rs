@@ -32,7 +32,7 @@ use tokio::net::TcpStream;
 
 use reddb_wire::query_with_params::{
     encode_query_with_params, ParamValue as RedWireParamValue, FEATURE_BIOMETRIC_PARAMS,
-    FEATURE_PARAMS,
+    FEATURE_LANDMARK_PARAMS, FEATURE_PARAMS,
 };
 
 /// Boxed read+write trait object. Lets `RedWireClient` carry
@@ -380,6 +380,14 @@ impl RedWireClient {
                 "server did not advertise RedWire biometric parameter support",
             ));
         }
+        if params.iter().any(is_landmark_param)
+            && self.server_features & FEATURE_LANDMARK_PARAMS == 0
+        {
+            return Err(ClientError::new(
+                ErrorCode::ParamsUnsupported,
+                "server did not advertise RedWire landmark parameter support",
+            ));
+        }
         let wire_params = params.iter().map(param_to_redwire).collect::<Vec<_>>();
         let payload = encode_query_with_params(sql, &wire_params)
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("encode params: {e}")))?;
@@ -585,6 +593,10 @@ fn is_biometric_param(value: &crate::params::Value) -> bool {
     )
 }
 
+fn is_landmark_param(value: &crate::params::Value) -> bool {
+    matches!(value, crate::params::Value::LandmarkSet(_))
+}
+
 fn param_to_redwire(value: &crate::params::Value) -> RedWireParamValue {
     match value {
         crate::params::Value::Null => RedWireParamValue::Null,
@@ -606,6 +618,7 @@ fn param_to_redwire(value: &crate::params::Value) -> RedWireParamValue {
             RedWireParamValue::FeatureVector(value.clone())
         }
         crate::params::Value::BitSignature(value) => RedWireParamValue::BitSignature(value.clone()),
+        crate::params::Value::LandmarkSet(value) => RedWireParamValue::LandmarkSet(value.clone()),
     }
 }
 

@@ -48,6 +48,7 @@ public class Frame(
         /** Server feature bitmask: QueryWithParams frame support. */
         public const val FEATURE_PARAMS: Int = 0x0000_0001
         public const val FEATURE_BIOMETRIC_PARAMS: Int = 0x0000_0008
+        public const val FEATURE_LANDMARK_PARAMS: Int = 0x0000_0010
 
         /**
          * Encode a frame into wire bytes. Honours the COMPRESSED flag —

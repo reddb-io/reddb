@@ -25,11 +25,13 @@ class ValueCodec {
   static const int tagIris = 0x0c;
   static const int tagFeatureVector = 0x0d;
   static const int tagBitSignature = 0x0e;
+  static const int tagLandmarkSet = 0x0f;
 
   static const int maxParamCount = 65536;
   static const int maxValuePayloadLen = MAX_FRAME_SIZE;
   static const int maxFeatureVectorDimensions = 65536;
   static const int maxBitSignatureBytes = 1 << 20;
+  static const int maxLandmarkPoints = 4096;
 
   static const Map<String, int> _biometricFormats = {
     'ISO/IEC 39794-2': 0x0101,
@@ -56,6 +58,9 @@ class ValueCodec {
       (value.containsKey(r'$biometric') ||
           value.containsKey(r'$feature_vector') ||
           value.containsKey(r'$bit_signature'));
+
+  static bool requiresLandmarkCapability(Object? value) =>
+      value is Map && value.containsKey(r'$landmark_set');
 
   static Uint8List encodeQueryWithParams(String sql, List<Object?> params) {
     if (params.length > maxParamCount) {
@@ -132,6 +137,9 @@ class ValueCodec {
       }
       if (value.containsKey(r'$bit_signature')) {
         return _encodeBitSignature(value[r'$bit_signature']);
+      }
+      if (value.containsKey(r'$landmark_set')) {
+        return _encodeLandmarkSet(value[r'$landmark_set']);
       }
     }
     if (value is Map || value is List) {
@@ -371,6 +379,60 @@ class ValueCodec {
     bytes.setUint32(17, bits.length, Endian.little);
     out.setRange(21, 21 + bits.length, bits);
     out.setRange(21 + bits.length, out.length, mask);
+    return out;
+  }
+
+  static Uint8List _encodeLandmarkSet(Object? raw) {
+    if (raw is! Map || raw.length != 4) {
+      throw ArgumentError(r'$landmark_set must be a canonical object');
+    }
+    final space = _parseSpaceId(raw['space_id']);
+    final dimensions = raw['dimensions'];
+    final pairs = raw['pairs'];
+    final midline = raw['midline'];
+    if ((dimensions != 2 && dimensions != 3) ||
+        pairs is! List ||
+        pairs.length < 2 ||
+        midline is! List ||
+        pairs.length * 2 + midline.length > maxLandmarkPoints) {
+      throw ArgumentError('invalid landmark geometry');
+    }
+    final pointCount = pairs.length * 2 + midline.length;
+    final out =
+        Uint8List(1 + 16 + 1 + 4 + 4 + pointCount * (dimensions as int) * 4);
+    final bytes = ByteData.sublistView(out);
+    out[0] = tagLandmarkSet;
+    out.setRange(1, 17, space);
+    out[17] = dimensions;
+    bytes.setUint32(18, pairs.length, Endian.little);
+    bytes.setUint32(22, midline.length, Endian.little);
+    var offset = 26;
+    void writePoint(Object? rawPoint) {
+      if (rawPoint is! List || rawPoint.length != dimensions) {
+        throw ArgumentError('invalid landmark geometry');
+      }
+      for (final coordinate in rawPoint) {
+        if (coordinate is! num || !coordinate.isFinite) {
+          throw ArgumentError('invalid landmark geometry');
+        }
+        bytes.setFloat32(offset, coordinate.toDouble(), Endian.little);
+        offset += 4;
+      }
+    }
+
+    for (final pair in pairs) {
+      if (pair is! Map ||
+          pair.length != 2 ||
+          !pair.containsKey('left') ||
+          !pair.containsKey('right')) {
+        throw ArgumentError('invalid landmark geometry');
+      }
+      writePoint(pair['left']);
+      writePoint(pair['right']);
+    }
+    for (final point in midline) {
+      writePoint(point);
+    }
     return out;
   }
 

@@ -37,6 +37,7 @@ pub enum ParamValue {
     Iris(reddb_types::BiometricSample),
     FeatureVector(reddb_types::FeatureVector),
     BitSignature(reddb_types::BitSignature),
+    LandmarkSet(reddb_types::LandmarkSet),
 }
 
 impl From<ParamValue> for Value {
@@ -59,6 +60,7 @@ impl From<ParamValue> for Value {
             ParamValue::Iris(value) => Self::Iris(value),
             ParamValue::FeatureVector(value) => Self::FeatureVector(value),
             ParamValue::BitSignature(value) => Self::BitSignature(value),
+            ParamValue::LandmarkSet(value) => Self::LandmarkSet(value),
         }
     }
 }
@@ -168,6 +170,9 @@ impl ParamValue {
                     if let Some(value) = map.get("$bit_signature") {
                         return decode_bit_signature_json(value);
                     }
+                    if let Some(value) = map.get("$landmark_set") {
+                        return decode_landmark_set_json(value);
+                    }
                 }
                 Ok(Self::Json(crate::json::to_vec(value).unwrap_or_default()))
             }
@@ -263,6 +268,20 @@ fn decode_bit_signature_json(value: &crate::json::Value) -> Result<ParamValue, S
         .transpose()?;
     reddb_types::BitSignature::new(space_id, bits, mask)
         .map(ParamValue::BitSignature)
+        .map_err(|error| error.to_string())
+}
+
+fn decode_landmark_set_json(value: &crate::json::Value) -> Result<ParamValue, String> {
+    let crate::json::Value::Object(object) = value else {
+        return Err("invalid $landmark_set envelope".to_string());
+    };
+    let space_id = decode_space_id(json_string_field(object, "space_id")?)?;
+    let mut geometry = object.clone();
+    geometry.remove("space_id");
+    let bytes = crate::json::to_vec(&crate::json::Value::Object(geometry))
+        .map_err(|_| "invalid landmark geometry".to_string())?;
+    reddb_types::LandmarkSet::from_geometry_json(space_id, &bytes)
+        .map(ParamValue::LandmarkSet)
         .map_err(|error| error.to_string())
 }
 
@@ -945,6 +964,16 @@ mod typed_param_tests {
             panic!("expected bit signature")
         };
         assert_eq!(signature.mask(), &[0xff, 0xff]);
+
+        let landmarks = decode(
+            r#"{"$landmark_set":{"space_id":"33333333333333333333333333333333","dimensions":2,"pairs":[{"left":[-2.0,1.0],"right":[2.0,1.0]},{"left":[-1.0,-1.0],"right":[1.0,-1.0]}],"midline":[[0.0,2.0]]}}"#,
+        )
+        .expect("valid landmark set");
+        let ParamValue::LandmarkSet(landmarks) = landmarks else {
+            panic!("expected landmark set")
+        };
+        assert_eq!(landmarks.space_id(), [0x33; 16]);
+        assert_eq!(landmarks.point_count(), 5);
     }
 
     #[test]
@@ -960,6 +989,12 @@ mod typed_param_tests {
         )
         .expect_err("mask length must agree");
         assert!(bad_mask.contains("mask"));
+
+        let weighted_landmarks = decode(
+            r#"{"$landmark_set":{"space_id":"33333333333333333333333333333333","dimensions":2,"pairs":[{"left":[-2.0,1.0],"right":[2.0,1.0],"weight":1},{"left":[-1.0,-1.0],"right":[1.0,-1.0]}],"midline":[]}}"#,
+        )
+        .expect_err("weights are not part of the canonical geometry");
+        assert!(weighted_landmarks.contains("invalid"));
     }
 }
 

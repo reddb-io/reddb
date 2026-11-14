@@ -327,6 +327,8 @@ pub enum DataType {
     FeatureVector = 60,
     /// Caller-supplied bit signature and validity mask scoped by space UUID.
     BitSignature = 61,
+    /// Caller-supplied bilateral landmark geometry scoped by space UUID.
+    LandmarkSet = 62,
 }
 
 /// Type categories used by the Fase 3 coercion resolver. Mirrors
@@ -437,7 +439,9 @@ impl DataType {
             DataType::Uuid => TypeCategory::Uuid,
             DataType::Secret | DataType::Password => TypeCategory::Opaque,
             DataType::Fingerprint | DataType::Face | DataType::Iris => TypeCategory::Biometric,
-            DataType::FeatureVector | DataType::BitSignature => TypeCategory::Feature,
+            DataType::FeatureVector | DataType::BitSignature | DataType::LandmarkSet => {
+                TypeCategory::Feature
+            }
             DataType::NodeRef
             | DataType::EdgeRef
             | DataType::VectorRef
@@ -553,6 +557,7 @@ impl DataType {
             59 => Some(DataType::Iris),
             60 => Some(DataType::FeatureVector),
             61 => Some(DataType::BitSignature),
+            62 => Some(DataType::LandmarkSet),
             _ => None,
         }
     }
@@ -620,6 +625,7 @@ impl DataType {
             "IRIS" => DataType::Iris,
             "FEATURE_VECTOR" | "FEATUREVECTOR" => DataType::FeatureVector,
             "BIT_SIGNATURE" | "BITSIGNATURE" => DataType::BitSignature,
+            "LANDMARK_SET" | "LANDMARKSET" => DataType::LandmarkSet,
             "DECIMAL_TEXT" | "DECIMALTEXT" => DataType::DecimalText,
             "ENUM" => DataType::Enum,
             "ARRAY" => DataType::Array,
@@ -691,7 +697,8 @@ impl DataType {
             | DataType::Face
             | DataType::Iris
             | DataType::FeatureVector
-            | DataType::BitSignature => None,
+            | DataType::BitSignature
+            | DataType::LandmarkSet => None,
             DataType::Money => None,  // variable-length asset + scale + i64
             DataType::KeyRef => None, // variable-length (collection + key)
             DataType::DocRef => None, // variable-length (collection + u64)
@@ -828,6 +835,7 @@ impl fmt::Display for DataType {
             DataType::Iris => write!(f, "IRIS"),
             DataType::FeatureVector => write!(f, "FEATURE_VECTOR"),
             DataType::BitSignature => write!(f, "BIT_SIGNATURE"),
+            DataType::LandmarkSet => write!(f, "LANDMARK_SET"),
             DataType::DecimalText => write!(f, "DECIMAL_TEXT"),
             DataType::ColorAlpha => write!(f, "COLOR_ALPHA"),
             DataType::BigInt => write!(f, "BIGINT"),
@@ -968,6 +976,8 @@ pub enum Value {
     FeatureVector(crate::FeatureVector),
     /// Caller-supplied bit signature scoped by an extractor space UUID.
     BitSignature(crate::BitSignature),
+    /// Caller-supplied bilateral landmark geometry scoped by a space UUID.
+    LandmarkSet(crate::LandmarkSet),
 }
 
 /// Manual `Eq` impl: consistent with the manual `Hash` impl below.
@@ -1081,6 +1091,7 @@ impl std::hash::Hash for Value {
             Value::Fingerprint(v) | Value::Face(v) | Value::Iris(v) => v.hash(state),
             Value::FeatureVector(v) => v.hash(state),
             Value::BitSignature(v) => v.hash(state),
+            Value::LandmarkSet(v) => v.hash(state),
         }
     }
 }
@@ -1157,6 +1168,7 @@ impl Value {
             Value::Iris(..) => DataType::Iris,
             Value::FeatureVector(..) => DataType::FeatureVector,
             Value::BitSignature(..) => DataType::BitSignature,
+            Value::LandmarkSet(..) => DataType::LandmarkSet,
         }
     }
 
@@ -1624,6 +1636,12 @@ impl fmt::Display for Value {
             Value::BitSignature(value) => {
                 write!(f, "<bit_signature bytes={}>", value.len_bytes())
             }
+            Value::LandmarkSet(value) => write!(
+                f,
+                "<landmark_set dimensions={} points={}>",
+                value.dimensions(),
+                value.point_count()
+            ),
         }
     }
 }

@@ -155,6 +155,12 @@ func (c *Conn) SupportsBiometricParams() bool {
 	return c.features&FeatureBiometricParams == FeatureBiometricParams
 }
 
+// SupportsLandmarkParams reports whether caller-supplied landmark geometry
+// can be emitted on this connection.
+func (c *Conn) SupportsLandmarkParams() bool {
+	return c.features&FeatureLandmarkParams == FeatureLandmarkParams
+}
+
 // SupportsTypedMutations reports whether TypedInsert frames are safe to send.
 func (c *Conn) SupportsTypedMutations() bool {
 	return c.features&FeatureTypedMutations == FeatureTypedMutations
@@ -591,6 +597,13 @@ func (c *Conn) Query(ctx context.Context, sql string, params ...any) ([]byte, er
 				}
 			}
 		}
+		if !c.SupportsLandmarkParams() {
+			for _, param := range params {
+				if requiresLandmarkCapability(param) {
+					return nil, ErrLandmarkParamsUnsupported
+				}
+			}
+		}
 		payload, err := EncodeQueryWithParams(sql, params)
 		if err != nil {
 			return nil, err
@@ -623,6 +636,10 @@ var ErrParamsUnsupported = errors.New(
 
 var ErrBiometricParamsUnsupported = errors.New(
 	"redwire: server did not advertise FEATURE_BIOMETRIC_PARAMS",
+)
+
+var ErrLandmarkParamsUnsupported = errors.New(
+	"redwire: server did not advertise FEATURE_LANDMARK_PARAMS",
 )
 
 // Insert delivers a single row into the named collection.

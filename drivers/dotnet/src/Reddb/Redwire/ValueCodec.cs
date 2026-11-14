@@ -31,11 +31,13 @@ public static class ValueCodec
     public const byte TagIris = 0x0c;
     public const byte TagFeatureVector = 0x0d;
     public const byte TagBitSignature = 0x0e;
+    public const byte TagLandmarkSet = 0x0f;
 
     public const int MaxParamCount = 65_536;
     public const int MaxValuePayloadLen = Frame.MaxFrameSize;
     public const int MaxFeatureVectorDimensions = 65_536;
     public const int MaxBitSignatureBytes = 1 << 20;
+    public const int MaxLandmarkPoints = 4_096;
 
     public readonly record struct Timestamp(long Seconds);
 
@@ -46,6 +48,13 @@ public static class ValueCodec
         return envelope is not null &&
             (envelope.ContainsKey("$biometric") || envelope.ContainsKey("$feature_vector")
              || envelope.ContainsKey("$bit_signature"));
+    }
+
+    public static bool RequiresLandmarkCapability(object? value)
+    {
+        if (!IsJsonParam(value ?? string.Empty)) return false;
+        JsonObject? envelope = Canonicalize(value) as JsonObject;
+        return envelope is not null && envelope.ContainsKey("$landmark_set");
     }
 
     public static byte[] EncodeQueryWithParams(string sql, object?[]? parameters)
@@ -114,6 +123,8 @@ public static class ValueCodec
                     return EncodeFeatureVector(feature);
                 if (envelope.TryGetPropertyValue("$bit_signature", out JsonNode? bits))
                     return EncodeBitSignature(bits);
+                if (envelope.TryGetPropertyValue("$landmark_set", out JsonNode? landmarks))
+                    return EncodeLandmarkSet(landmarks);
             }
             byte[] json = Encoding.UTF8.GetBytes(CanonicalJson(value));
             return EncodeLenPrefixed(TagJson, json);
@@ -297,6 +308,55 @@ public static class ValueCodec
         BinaryPrimitives.WriteInt32LittleEndian(output.AsSpan(17, 4), bits.Length);
         bits.CopyTo(output.AsSpan(21));
         mask.CopyTo(output.AsSpan(21 + bits.Length));
+        return output;
+    }
+
+    private static byte[] EncodeLandmarkSet(JsonNode? node)
+    {
+        if (node is not JsonObject value || value.Count != 4
+            || value["pairs"] is not JsonArray pairs
+            || value["midline"] is not JsonArray midline)
+            throw new ArgumentException("$landmark_set must be a canonical object");
+        byte[] space = DecodeSpaceId(RequiredText(value, "space_id"));
+        int dimensions;
+        try { dimensions = value["dimensions"]!.GetValue<int>(); }
+        catch (Exception ex) { throw new ArgumentException("invalid landmark geometry", ex); }
+        int pointCount = checked(pairs.Count * 2 + midline.Count);
+        if ((dimensions != 2 && dimensions != 3) || pairs.Count < 2
+            || pointCount > MaxLandmarkPoints)
+            throw new ArgumentException("invalid landmark geometry");
+        byte[] output = new byte[1 + 16 + 1 + 4 + 4 + checked(pointCount * dimensions * 4)];
+        output[0] = TagLandmarkSet;
+        space.CopyTo(output.AsSpan(1));
+        output[17] = (byte)dimensions;
+        BinaryPrimitives.WriteInt32LittleEndian(output.AsSpan(18, 4), pairs.Count);
+        BinaryPrimitives.WriteInt32LittleEndian(output.AsSpan(22, 4), midline.Count);
+        int offset = 26;
+        void WritePoint(JsonNode? pointNode)
+        {
+            if (pointNode is not JsonArray point || point.Count != dimensions)
+                throw new ArgumentException("invalid landmark geometry");
+            foreach (JsonNode? coordinateNode in point)
+            {
+                float coordinate;
+                try { coordinate = coordinateNode!.GetValue<float>(); }
+                catch (Exception ex) { throw new ArgumentException("invalid landmark geometry", ex); }
+                if (!float.IsFinite(coordinate))
+                    throw new ArgumentException("invalid landmark geometry");
+                BinaryPrimitives.WriteInt32LittleEndian(
+                    output.AsSpan(offset, 4), BitConverter.SingleToInt32Bits(coordinate));
+                offset += 4;
+            }
+        }
+        foreach (JsonNode? pairNode in pairs)
+        {
+            if (pairNode is not JsonObject pair || pair.Count != 2
+                || !pair.ContainsKey("left") || !pair.ContainsKey("right"))
+                throw new ArgumentException("invalid landmark geometry");
+            WritePoint(pair["left"]);
+            WritePoint(pair["right"]);
+        }
+        foreach (JsonNode? point in midline) WritePoint(point);
         return output;
     }
 

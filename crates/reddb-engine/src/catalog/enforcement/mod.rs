@@ -945,6 +945,7 @@ pub(crate) fn value_matches_declared_type(value: &Value, target: DataType) -> bo
             | (Value::Iris(_), DataType::Iris)
             | (Value::FeatureVector(_), DataType::FeatureVector)
             | (Value::BitSignature(_), DataType::BitSignature)
+            | (Value::LandmarkSet(_), DataType::LandmarkSet)
     )
 }
 

@@ -71,6 +71,8 @@ const (
 	// FeatureBiometricParams gates standardized biometric records and
 	// caller-supplied feature parameters in QueryWithParams.
 	FeatureBiometricParams uint32 = 0x0000_0008
+	// FeatureLandmarkParams gates caller-supplied landmark geometry.
+	FeatureLandmarkParams uint32 = 0x0000_0010
 )
 
 // FrameHeader captures the parsed 16-byte header.

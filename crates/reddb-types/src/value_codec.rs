@@ -427,6 +427,28 @@ pub fn encode(value: &Value, out: &mut Vec<u8>) {
             out.extend_from_slice(value.bits());
             out.extend_from_slice(value.mask());
         }
+        Value::LandmarkSet(value) => {
+            out.push(DataType::LandmarkSet.to_byte());
+            out.push(1); // landmark envelope version
+            out.extend_from_slice(&value.space_id());
+            out.push(value.dimensions());
+            write_varint(out, value.pairs().len() as u64);
+            write_varint(out, value.midline().len() as u64);
+            let dimensions = usize::from(value.dimensions());
+            for (left, right) in value.pairs() {
+                for coordinate in left.iter().take(dimensions) {
+                    out.extend_from_slice(&coordinate.to_le_bytes());
+                }
+                for coordinate in right.iter().take(dimensions) {
+                    out.extend_from_slice(&coordinate.to_le_bytes());
+                }
+            }
+            for point in value.midline() {
+                for coordinate in point.iter().take(dimensions) {
+                    out.extend_from_slice(&coordinate.to_le_bytes());
+                }
+            }
+        }
     }
 }
 
@@ -1107,6 +1129,68 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), ValueError> {
                     .map_err(|_| ValueError::InvalidType(data_type.to_byte()))?,
             )
         }
+        DataType::LandmarkSet => {
+            if data.get(offset) != Some(&1) {
+                return Err(ValueError::InvalidType(data_type.to_byte()));
+            }
+            offset += 1;
+            let space_id: [u8; 16] = data
+                .get(offset..offset + 16)
+                .ok_or(ValueError::TruncatedData)?
+                .try_into()
+                .map_err(|_| ValueError::TruncatedData)?;
+            offset += 16;
+            let dimensions = *data.get(offset).ok_or(ValueError::TruncatedData)?;
+            offset += 1;
+            if !matches!(dimensions, 2 | 3) {
+                return Err(ValueError::InvalidType(data_type.to_byte()));
+            }
+            let (pair_count, pair_count_bytes) = read_varint(&data[offset..])?;
+            offset += pair_count_bytes;
+            let pair_count = usize::try_from(pair_count).map_err(|_| ValueError::VarintOverflow)?;
+            let (midline_count, midline_count_bytes) = read_varint(&data[offset..])?;
+            offset += midline_count_bytes;
+            let midline_count =
+                usize::try_from(midline_count).map_err(|_| ValueError::VarintOverflow)?;
+            let point_count = pair_count
+                .checked_mul(2)
+                .and_then(|count| count.checked_add(midline_count))
+                .ok_or(ValueError::VarintOverflow)?;
+            if point_count > crate::MAX_LANDMARK_POINTS {
+                return Err(ValueError::InvalidType(data_type.to_byte()));
+            }
+            let coordinate_count = point_count
+                .checked_mul(usize::from(dimensions))
+                .ok_or(ValueError::VarintOverflow)?;
+            let byte_length = coordinate_count
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or(ValueError::VarintOverflow)?;
+            let payload = data
+                .get(offset..offset + byte_length)
+                .ok_or(ValueError::TruncatedData)?;
+            offset += byte_length;
+            let mut chunks = payload.as_chunks::<4>().0.iter();
+            let mut read_point = || -> Result<[f32; 3], ValueError> {
+                let mut point = [0.0_f32; 3];
+                for coordinate in point.iter_mut().take(usize::from(dimensions)) {
+                    *coordinate =
+                        f32::from_le_bytes(*chunks.next().ok_or(ValueError::TruncatedData)?);
+                }
+                Ok(point)
+            };
+            let mut pairs = Vec::with_capacity(pair_count);
+            for _ in 0..pair_count {
+                pairs.push((read_point()?, read_point()?));
+            }
+            let mut midline = Vec::with_capacity(midline_count);
+            for _ in 0..midline_count {
+                midline.push(read_point()?);
+            }
+            Value::LandmarkSet(
+                crate::LandmarkSet::new(space_id, dimensions, pairs, midline)
+                    .map_err(|_| ValueError::InvalidType(data_type.to_byte()))?,
+            )
+        }
         DataType::Nullable => {
             // Nullable without inner type means null
             Value::Null
@@ -1257,6 +1341,40 @@ mod tests {
             &(crate::BiometricFormat::FaceIso39794_5 as u16).to_le_bytes()
         );
         assert_eq!(Value::from_bytes(&bytes), Ok((value, bytes.len())));
+    }
+
+    #[test]
+    fn landmark_envelope_has_stable_tag_and_roundtrips() {
+        let landmarks = crate::LandmarkSet::new(
+            [0x33; 16],
+            2,
+            vec![
+                ([-1.0, 1.0, 0.0], [1.0, 1.0, 0.0]),
+                ([-2.0, -1.0, 0.0], [2.0, -1.0, 0.0]),
+            ],
+            vec![[0.0, 2.0, 0.0]],
+        )
+        .expect("valid landmarks");
+        let value = Value::LandmarkSet(landmarks);
+        let bytes = value.to_bytes();
+
+        assert_eq!(DataType::LandmarkSet.to_byte(), 62);
+        assert_eq!(bytes[0], 62);
+        assert_eq!(bytes[1], 1);
+        assert_eq!(&bytes[2..18], &[0x33; 16]);
+        assert_eq!(&bytes[18..21], &[2, 2, 1]);
+        assert_eq!(Value::from_bytes(&bytes), Ok((value, bytes.len())));
+
+        for end in 0..bytes.len() {
+            assert!(
+                Value::from_bytes(&bytes[..end]).is_err(),
+                "truncated landmark envelope decoded at byte {end}"
+            );
+        }
+
+        let mut excessive = bytes;
+        excessive[19..21].copy_from_slice(&[0x82, 0x10]);
+        assert!(Value::from_bytes(&excessive).is_err());
     }
 
     /// Sanity check that the registry's [`type_tag`] lines up with

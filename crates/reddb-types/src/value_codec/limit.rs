@@ -100,6 +100,28 @@ pub(super) fn preflight(data: &[u8], limit_bytes: usize) -> Result<(usize, usize
                 cursor.take(payload)?;
                 cursor.charge(payload)?;
             }
+            DataType::LandmarkSet => {
+                cursor.take(17)?; // envelope version + space UUID
+                let dimensions = cursor.take(1)?[0];
+                if !matches!(dimensions, 2 | 3) {
+                    return Err(ValueError::InvalidType(tag));
+                }
+                let pairs = cursor.length()?;
+                let midline = cursor.length()?;
+                let points = pairs
+                    .checked_mul(2)
+                    .and_then(|count| count.checked_add(midline))
+                    .ok_or(ValueError::VarintOverflow)?;
+                if points > crate::MAX_LANDMARK_POINTS {
+                    return Err(ValueError::InvalidType(tag));
+                }
+                let bytes = points
+                    .checked_mul(usize::from(dimensions))
+                    .and_then(|count| count.checked_mul(std::mem::size_of::<f32>()))
+                    .ok_or(ValueError::VarintOverflow)?;
+                cursor.take(bytes)?;
+                cursor.charge(bytes)?;
+            }
             DataType::IpAddr => {
                 let version = cursor.take(1)?[0];
                 cursor.take(match version {

@@ -134,6 +134,7 @@ fn remote_param(value: &Bound<'_, PyAny>) -> PyResult<RemoteValue> {
         SV::Iris(value) => RemoteValue::Iris(value),
         SV::FeatureVector(value) => RemoteValue::FeatureVector(value),
         SV::BitSignature(value) => RemoteValue::BitSignature(value),
+        SV::LandmarkSet(value) => RemoteValue::LandmarkSet(value),
         _ => {
             return Err(err(
                 "PARAMS_UNSUPPORTED",
@@ -1734,6 +1735,24 @@ fn py_to_param_value(value: &Bound<'_, PyAny>) -> PyResult<ParamValue> {
                 .transpose()?;
             return reddb_types::BitSignature::new(space_id, bits, mask)
                 .map(SV::BitSignature)
+                .map_err(|error| err("INVALID_PARAMS", error.to_string()));
+        }
+        if let Some(envelope) = dict.get_item("$landmark_set")? {
+            let envelope = envelope
+                .cast::<PyDictT>()
+                .map_err(|_| err("INVALID_PARAMS", "$landmark_set must be a dictionary"))?;
+            let space_id = decode_space_id_param(&required_dict_string(envelope, "space_id")?)?;
+            let mut geometry: serde_json::Value =
+                serde_json::from_str(&pydict_to_json_str(envelope)?)
+                    .map_err(|_| err("INVALID_PARAMS", "invalid landmark geometry"))?;
+            let object = geometry
+                .as_object_mut()
+                .ok_or_else(|| err("INVALID_PARAMS", "$landmark_set must be a dictionary"))?;
+            object.remove("space_id");
+            let geometry = serde_json::to_vec(&geometry)
+                .map_err(|_| err("INVALID_PARAMS", "invalid landmark geometry"))?;
+            return reddb_types::LandmarkSet::from_geometry_json(space_id, &geometry)
+                .map(SV::LandmarkSet)
                 .map_err(|error| err("INVALID_PARAMS", error.to_string()));
         }
         let json_str = pydict_to_json_str(dict)?;

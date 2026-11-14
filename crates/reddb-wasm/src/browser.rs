@@ -341,6 +341,102 @@ fn typed_query_parameter(value: &JsValue) -> Result<Option<reddb_types::Value>, 
             .map_err(|error| coded_error("INVALID_ARGUMENT", error))?;
         return Ok(Some(Value::BitSignature(signature)));
     }
+    if let Some(envelope) = object_property(value, "$landmark_set")? {
+        let keys = js_sys::Object::keys(&js_sys::Object::from(envelope.clone()));
+        if keys.length() != 4
+            || !js_sys::Reflect::has(&envelope, &JsValue::from_str("space_id"))?
+            || !js_sys::Reflect::has(&envelope, &JsValue::from_str("dimensions"))?
+            || !js_sys::Reflect::has(&envelope, &JsValue::from_str("pairs"))?
+            || !js_sys::Reflect::has(&envelope, &JsValue::from_str("midline"))?
+        {
+            return Err(coded_error(
+                "INVALID_ARGUMENT",
+                "$landmark_set must contain space_id, dimensions, pairs, and midline",
+            ));
+        }
+        let space_id = decode_space_id(&string_property(&envelope, "space_id")?)?;
+        let dimensions = js_sys::Reflect::get(&envelope, &JsValue::from_str("dimensions"))?
+            .as_f64()
+            .filter(|value| *value == 2.0 || *value == 3.0)
+            .map(|value| value as u8)
+            .ok_or_else(|| coded_error("INVALID_ARGUMENT", "Landmark dimensions must be 2 or 3"))?;
+        let parse_point = |value: JsValue| {
+            if !Array::is_array(&value) {
+                return Err(coded_error(
+                    "INVALID_ARGUMENT",
+                    "Landmark point must be an array",
+                ));
+            }
+            let values = Array::from(&value);
+            if values.length() != u32::from(dimensions) {
+                return Err(coded_error(
+                    "INVALID_ARGUMENT",
+                    "Landmark coordinate count differs from dimensions",
+                ));
+            }
+            let mut point = [0.0_f32; 3];
+            for (index, coordinate) in values.iter().enumerate() {
+                let number = coordinate
+                    .as_f64()
+                    .filter(|number| number.is_finite())
+                    .ok_or_else(|| {
+                        coded_error("INVALID_ARGUMENT", "Landmark coordinates must be finite")
+                    })?;
+                #[allow(clippy::cast_possible_truncation)]
+                let stored = number as f32;
+                if !stored.is_finite() {
+                    return Err(coded_error(
+                        "INVALID_ARGUMENT",
+                        "Landmark coordinates must fit f32",
+                    ));
+                }
+                point[index] = stored;
+            }
+            Ok(point)
+        };
+        let pair_values = js_sys::Reflect::get(&envelope, &JsValue::from_str("pairs"))?;
+        let midline_values = js_sys::Reflect::get(&envelope, &JsValue::from_str("midline"))?;
+        if !Array::is_array(&pair_values) || !Array::is_array(&midline_values) {
+            return Err(coded_error(
+                "INVALID_ARGUMENT",
+                "Landmark pairs and midline must be arrays",
+            ));
+        }
+        let pair_values = Array::from(&pair_values);
+        let midline_values = Array::from(&midline_values);
+        let point_count = usize::try_from(pair_values.length())
+            .ok()
+            .and_then(|count| count.checked_mul(2))
+            .and_then(|count| count.checked_add(midline_values.length() as usize))
+            .ok_or_else(|| coded_error("INVALID_ARGUMENT", "Too many landmark points"))?;
+        if point_count > reddb_types::MAX_LANDMARK_POINTS {
+            return Err(coded_error("INVALID_ARGUMENT", "Too many landmark points"));
+        }
+        let mut pairs = Vec::with_capacity(pair_values.length() as usize);
+        for pair in pair_values.iter() {
+            if !pair.is_object()
+                || js_sys::Object::keys(&js_sys::Object::from(pair.clone())).length() != 2
+                || !js_sys::Reflect::has(&pair, &JsValue::from_str("left"))?
+                || !js_sys::Reflect::has(&pair, &JsValue::from_str("right"))?
+            {
+                return Err(coded_error(
+                    "INVALID_ARGUMENT",
+                    "Landmark pair must contain left and right",
+                ));
+            }
+            pairs.push((
+                parse_point(js_sys::Reflect::get(&pair, &JsValue::from_str("left"))?)?,
+                parse_point(js_sys::Reflect::get(&pair, &JsValue::from_str("right"))?)?,
+            ));
+        }
+        let midline = midline_values
+            .iter()
+            .map(parse_point)
+            .collect::<Result<Vec<_>, _>>()?;
+        let landmarks = reddb_types::LandmarkSet::new(space_id, dimensions, pairs, midline)
+            .map_err(|error| coded_error("INVALID_ARGUMENT", error))?;
+        return Ok(Some(Value::LandmarkSet(landmarks)));
+    }
     Ok(None)
 }
 

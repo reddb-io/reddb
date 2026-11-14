@@ -27,6 +27,25 @@ final class ValueCodecTest extends TestCase
         $this->assertSame(0x0c, ValueCodec::TAG_IRIS);
         $this->assertSame(0x0d, ValueCodec::TAG_FEATURE_VECTOR);
         $this->assertSame(0x0e, ValueCodec::TAG_BIT_SIGNATURE);
+        $this->assertSame(0x0f, ValueCodec::TAG_LANDMARK_SET);
+    }
+
+    public function testEncodesLandmarkSet(): void
+    {
+        $encoded = ValueCodec::encodeValue([
+            '$landmark_set' => [
+                'space_id' => '33333333333333333333333333333333',
+                'dimensions' => 2,
+                'pairs' => [
+                    ['left' => [-2.0, 1.0], 'right' => [2.0, 1.0]],
+                    ['left' => [-1.0, -1.0], 'right' => [1.0, -1.0]],
+                ],
+                'midline' => [[0.0, 2.0]],
+            ],
+        ]);
+        $this->assertSame(ValueCodec::TAG_LANDMARK_SET, ord($encoded[0]));
+        $this->assertSame(2, ord($encoded[17]));
+        $this->assertSame(2, unpack('V', substr($encoded, 18, 4))[1]);
     }
 
     public function test_encode_biometric_feature_and_bit_envelopes(): void

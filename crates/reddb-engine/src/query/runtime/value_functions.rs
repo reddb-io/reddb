@@ -290,6 +290,22 @@ pub fn evaluate_value_function_with_host<H: ValueFunctionHost>(
         "BIOMETRIC_FORMAT" => biometric_format(args),
         "BIOMETRIC_INFO" => biometric_info(args),
         "ANSI_NIST_RECORD" => ansi_nist_record(args),
+        "LANDMARK_SET" => landmark_set(args),
+        "LANDMARK_SYMMETRY" => match args {
+            [Value::LandmarkSet(landmarks)] => landmarks.symmetry_score().ok().map(Value::Float),
+            _ => Some(Value::Null),
+        },
+        "LANDMARK_IS_SYMMETRIC" => match args {
+            [Value::LandmarkSet(landmarks), threshold] => landmarks
+                .is_symmetric(value_as_f64(threshold)?)
+                .ok()
+                .map(Value::Boolean),
+            _ => Some(Value::Null),
+        },
+        "FACE_LANDMARKS" => match args {
+            [Value::Face(face)] => face.face_landmarks().ok().map(Value::LandmarkSet),
+            _ => Some(Value::Null),
+        },
         // ─────────────────────────────────────────────────────────────
         // JSON functions (Phase 1.4 PG parity).
         //
@@ -406,6 +422,15 @@ fn bit_signature_constructor(args: &[Value]) -> Option<Value> {
     Some(Value::BitSignature(
         reddb_types::BitSignature::new(*space_id, bits.clone(), mask).ok()?,
     ))
+}
+
+fn landmark_set(args: &[Value]) -> Option<Value> {
+    let [Value::Uuid(space_id), Value::Json(geometry)] = args else {
+        return Some(Value::Null);
+    };
+    reddb_types::LandmarkSet::from_geometry_json(*space_id, geometry)
+        .ok()
+        .map(Value::LandmarkSet)
 }
 
 fn feature_compare(args: &[Value], matched: bool) -> Option<Value> {

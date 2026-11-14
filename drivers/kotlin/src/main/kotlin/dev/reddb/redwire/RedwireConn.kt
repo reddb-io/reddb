@@ -369,6 +369,13 @@ public class RedwireConn internal constructor(
                 "server did not advertise FEATURE_BIOMETRIC_PARAMS"
             )
         }
+        if ((serverFeatures and Frame.FEATURE_LANDMARK_PARAMS) != Frame.FEATURE_LANDMARK_PARAMS &&
+            params.any(ValueCodec::requiresLandmarkCapability)
+        ) {
+            throw RedDBException.ParamsUnsupported(
+                "server did not advertise FEATURE_LANDMARK_PARAMS"
+            )
+        }
         return sendQuery(MessageKind.QueryWithParams, ValueCodec.encodeQueryWithParams(sql, params), "query")
     }
 

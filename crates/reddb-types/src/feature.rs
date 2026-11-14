@@ -8,10 +8,19 @@ pub const MAX_FEATURE_VECTOR_DIMENSIONS: usize = 65_536;
 /// Largest bit signature admitted by the logical type (one MiB).
 pub const MAX_BIT_SIGNATURE_BYTES: usize = 1_048_576;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FeatureVector {
     space_id: [u8; 16],
     values: Vec<f32>,
+}
+
+impl fmt::Debug for FeatureVector {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FeatureVector")
+            .field("dimensions", &self.values.len())
+            .finish()
+    }
 }
 
 impl PartialEq for FeatureVector {
@@ -104,11 +113,20 @@ impl Hash for FeatureVector {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct BitSignature {
     space_id: [u8; 16],
     bits: Vec<u8>,
     mask: Vec<u8>,
+}
+
+impl fmt::Debug for BitSignature {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BitSignature")
+            .field("bytes", &self.bits.len())
+            .finish()
+    }
 }
 
 impl BitSignature {
@@ -331,6 +349,15 @@ mod tests {
             FeatureError::validate_threshold(1.01),
             Err(FeatureError::InvalidThreshold)
         );
+    }
+
+    #[test]
+    fn debug_output_does_not_expose_feature_payloads() {
+        let vector = FeatureVector::new(SPACE, vec![123.5, -456.25]).expect("valid vector");
+        let signature = BitSignature::new(SPACE, vec![0xaa, 0x55], Some(vec![0xf0, 0x0f]))
+            .expect("valid signature");
+        assert_eq!(format!("{vector:?}"), "FeatureVector { dimensions: 2 }");
+        assert_eq!(format!("{signature:?}"), "BitSignature { bytes: 2 }");
     }
 
     proptest::proptest! {

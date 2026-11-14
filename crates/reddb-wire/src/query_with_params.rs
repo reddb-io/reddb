@@ -6,13 +6,15 @@
 use std::fmt;
 
 use reddb_types::{
-    BiometricFormat, BiometricModality, BiometricSample, BitSignature, FeatureVector,
-    MAX_BIT_SIGNATURE_BYTES, MAX_FEATURE_VECTOR_DIMENSIONS,
+    BiometricFormat, BiometricModality, BiometricSample, BitSignature, FeatureVector, LandmarkSet,
+    MAX_BIT_SIGNATURE_BYTES, MAX_FEATURE_VECTOR_DIMENSIONS, MAX_LANDMARK_POINTS,
 };
 
 pub const FEATURE_PARAMS: u32 = 0x0000_0001;
 /// Typed biometric and caller-supplied feature parameter envelopes.
 pub const FEATURE_BIOMETRIC_PARAMS: u32 = 0x0000_0008;
+/// Caller-supplied landmark parameter envelopes.
+pub const FEATURE_LANDMARK_PARAMS: u32 = 0x0000_0010;
 pub const MAX_PARAM_COUNT: usize = 65_536;
 
 const OPTIONS_MAGIC: &[u8; 4] = b"RQP1";
@@ -32,6 +34,7 @@ const TAG_FACE: u8 = 0x0b;
 const TAG_IRIS: u8 = 0x0c;
 const TAG_FEATURE_VECTOR: u8 = 0x0d;
 const TAG_BIT_SIGNATURE: u8 = 0x0e;
+const TAG_LANDMARK_SET: u8 = 0x0f;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParamValue {
@@ -50,6 +53,7 @@ pub enum ParamValue {
     Iris(BiometricSample),
     FeatureVector(FeatureVector),
     BitSignature(BitSignature),
+    LandmarkSet(LandmarkSet),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,6 +278,27 @@ pub fn encode_value(value: &ParamValue, out: &mut Vec<u8>) -> Result<(), ParamCo
             out.extend_from_slice(value.bits());
             out.extend_from_slice(value.mask());
         }
+        ParamValue::LandmarkSet(value) => {
+            out.push(TAG_LANDMARK_SET);
+            out.extend_from_slice(&value.space_id());
+            out.push(value.dimensions());
+            out.extend_from_slice(&(value.pairs().len() as u32).to_le_bytes());
+            out.extend_from_slice(&(value.midline().len() as u32).to_le_bytes());
+            let dimensions = usize::from(value.dimensions());
+            for (left, right) in value.pairs() {
+                for coordinate in left.iter().take(dimensions) {
+                    out.extend_from_slice(&coordinate.to_le_bytes());
+                }
+                for coordinate in right.iter().take(dimensions) {
+                    out.extend_from_slice(&coordinate.to_le_bytes());
+                }
+            }
+            for point in value.midline() {
+                for coordinate in point.iter().take(dimensions) {
+                    out.extend_from_slice(&coordinate.to_le_bytes());
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -368,6 +393,46 @@ pub fn decode_value(payload: &[u8], pos: &mut usize) -> Result<ParamValue, Param
             let mask = read_bytes(payload, pos, len, "bit_mask")?.to_vec();
             BitSignature::new(space_id, bits, Some(mask))
                 .map(ParamValue::BitSignature)
+                .map_err(|_| ParamCodecError::InvalidTypedValue)
+        }
+        TAG_LANDMARK_SET => {
+            let space_id = read_array(payload, pos, "landmark_space_id")?;
+            let dimensions = read_bytes(payload, pos, 1, "landmark_dimensions")?[0];
+            if !matches!(dimensions, 2 | 3) {
+                return Err(ParamCodecError::InvalidTypedValue);
+            }
+            let pair_count = read_u32(payload, pos, "landmark_pair_count")? as usize;
+            let midline_count = read_u32(payload, pos, "landmark_midline_count")? as usize;
+            let point_count = pair_count
+                .checked_mul(2)
+                .and_then(|count| count.checked_add(midline_count))
+                .ok_or(ParamCodecError::InvalidTypedValue)?;
+            if pair_count < 2 || point_count > MAX_LANDMARK_POINTS {
+                return Err(ParamCodecError::InvalidTypedValue);
+            }
+            let byte_length = point_count
+                .checked_mul(usize::from(dimensions))
+                .and_then(|count| count.checked_mul(std::mem::size_of::<f32>()))
+                .ok_or(ParamCodecError::InvalidTypedValue)?;
+            ensure_remaining(payload, *pos, byte_length, "landmark_coordinates")?;
+            let read_point = |payload: &[u8], pos: &mut usize| {
+                let mut point = [0.0_f32; 3];
+                for coordinate in point.iter_mut().take(usize::from(dimensions)) {
+                    *coordinate =
+                        f32::from_le_bytes(read_array(payload, pos, "landmark_coordinate")?);
+                }
+                Ok::<_, ParamCodecError>(point)
+            };
+            let mut pairs = Vec::with_capacity(pair_count);
+            for _ in 0..pair_count {
+                pairs.push((read_point(payload, pos)?, read_point(payload, pos)?));
+            }
+            let mut midline = Vec::with_capacity(midline_count);
+            for _ in 0..midline_count {
+                midline.push(read_point(payload, pos)?);
+            }
+            LandmarkSet::new(space_id, dimensions, pairs, midline)
+                .map(ParamValue::LandmarkSet)
                 .map_err(|_| ParamCodecError::InvalidTypedValue)
         }
         other => Err(ParamCodecError::UnknownTag(other)),
@@ -503,6 +568,40 @@ mod typed_value_tests {
         let (sql, decoded) = decode_query_with_params(&encoded).expect("decode");
         assert_eq!(sql, "SELECT $1");
         assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn landmark_parameter_tag_capability_and_round_trip_are_stable() {
+        let landmarks = LandmarkSet::new(
+            [0x66; 16],
+            2,
+            vec![
+                ([-1.0, 1.0, 0.0], [1.0, 1.0, 0.0]),
+                ([-2.0, -1.0, 0.0], [2.0, -1.0, 0.0]),
+            ],
+            vec![[0.0, 2.0, 0.0]],
+        )
+        .expect("valid landmarks");
+        let values = vec![ParamValue::LandmarkSet(landmarks)];
+        let encoded = encode_query_with_params("", &values).expect("encode");
+
+        assert_eq!(FEATURE_LANDMARK_PARAMS, 0x0000_0010);
+        assert_eq!(encoded[8], 0x0f);
+        assert_eq!(
+            decode_query_with_params(&encoded),
+            Ok((String::new(), values))
+        );
+
+        for end in 0..encoded.len() {
+            assert!(
+                decode_query_with_params(&encoded[..end]).is_err(),
+                "truncated RedWire landmark decoded at byte {end}"
+            );
+        }
+
+        let mut excessive = encoded;
+        excessive[26..30].copy_from_slice(&2_049_u32.to_le_bytes());
+        assert!(decode_query_with_params(&excessive).is_err());
     }
 
     #[test]

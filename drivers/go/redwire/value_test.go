@@ -518,3 +518,28 @@ func TestEncodeValueRejectsBiometricModalityMismatch(t *testing.T) {
 		t.Fatal("expected modality mismatch")
 	}
 }
+
+func TestEncodeValueLandmarkSet(t *testing.T) {
+	space := UUID{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+		0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
+	encoded, err := EncodeValue(LandmarkSet{
+		SpaceID: space, Dimensions: 2,
+		Pairs: []LandmarkPair{
+			{Left: []float32{-1, 1}, Right: []float32{1, 1}},
+			{Left: []float32{-2, -1}, Right: []float32{2, -1}},
+		},
+		Midline: [][]float32{{0, 2}},
+	})
+	if err != nil {
+		t.Fatalf("EncodeValue(landmarks): %v", err)
+	}
+	if encoded[0] != byte(TagLandmarkSet) || encoded[17] != 2 {
+		t.Fatalf("unexpected landmark prefix: %x", encoded[:18])
+	}
+	if got := binary.LittleEndian.Uint32(encoded[18:22]); got != 2 {
+		t.Fatalf("pair count = %d, want 2", got)
+	}
+	if got := binary.LittleEndian.Uint32(encoded[22:26]); got != 1 {
+		t.Fatalf("midline count = %d, want 1", got)
+	}
+}

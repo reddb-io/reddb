@@ -825,7 +825,8 @@ impl RedDB {
             | Value::Face(_)
             | Value::Iris(_)
             | Value::FeatureVector(_)
-            | Value::BitSignature(_) => None,
+            | Value::BitSignature(_)
+            | Value::LandmarkSet(_) => None,
         }
     }
 

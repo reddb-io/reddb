@@ -7,7 +7,7 @@ use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use reddb_types::{
-    value_codec, BiometricFormat, BiometricSample, BitSignature, FeatureVector, Value,
+    value_codec, BiometricFormat, BiometricSample, BitSignature, FeatureVector, LandmarkSet, Value,
 };
 
 const SPACE: [u8; 16] = [0x44; 16];
@@ -41,10 +41,12 @@ fn bench_decode(c: &mut Criterion) {
             .expect("valid benchmark fingerprint");
     let feature = FeatureVector::new(SPACE, vec![0.25; 512]).expect("valid feature vector");
     let signature = BitSignature::new(SPACE, vec![0xaa; 512], None).expect("valid signature");
+    let landmarks = benchmark_landmarks(128);
     let cases = [
         ("fingerprint_32_minutiae", Value::Fingerprint(fingerprint)),
         ("feature_512", Value::FeatureVector(feature)),
         ("bits_512_bytes", Value::BitSignature(signature)),
+        ("landmarks_128_pairs", Value::LandmarkSet(landmarks)),
     ];
     let mut group = c.benchmark_group("biometric_value_decode");
     for (name, value) in cases {
@@ -65,6 +67,7 @@ fn bench_compare(c: &mut Criterion) {
     let feature_right = FeatureVector::new(SPACE, feature_values).expect("valid feature vector");
     let bits_left = BitSignature::new(SPACE, vec![0xaa; 512], None).expect("valid signature");
     let bits_right = BitSignature::new(SPACE, vec![0xa8; 512], None).expect("valid signature");
+    let landmarks = benchmark_landmarks(128);
 
     let mut group = c.benchmark_group("biometric_artifact_compare_1_to_1");
     group.throughput(Throughput::Elements(512));
@@ -79,7 +82,21 @@ fn bench_compare(c: &mut Criterion) {
             black_box(bits_left.compare(black_box(&bits_right))).expect("compatible bit signatures")
         })
     });
+    group.throughput(Throughput::Elements(landmarks.point_count() as u64));
+    group.bench_function("landmark_symmetry_128_pairs", |b| {
+        b.iter(|| black_box(landmarks.symmetry_score()).expect("valid landmark geometry"))
+    });
     group.finish();
+}
+
+fn benchmark_landmarks(pair_count: usize) -> LandmarkSet {
+    let pairs = (0..pair_count)
+        .map(|index| {
+            let y = index as f32;
+            ([-10.0, y, 0.0], [10.0, y + 0.01, 0.0])
+        })
+        .collect();
+    LandmarkSet::new(SPACE, 2, pairs, vec![[0.0, 0.0, 0.0]]).expect("valid benchmark landmarks")
 }
 
 criterion_group!(benches, bench_decode, bench_compare);

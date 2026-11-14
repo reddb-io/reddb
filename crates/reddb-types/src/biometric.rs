@@ -138,10 +138,21 @@ impl fmt::Display for BiometricFormat {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct BiometricSample {
     format: BiometricFormat,
     bytes: Vec<u8>,
+}
+
+impl fmt::Debug for BiometricSample {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BiometricSample")
+            .field("modality", &self.modality())
+            .field("format", &self.format)
+            .field("bytes", &self.bytes.len())
+            .finish()
+    }
 }
 
 impl BiometricSample {
@@ -219,6 +230,103 @@ impl BiometricSample {
             _ => Err(BiometricError::MinutiaeTemplateRequired),
         }
     }
+
+    /// Decode the 2D Landmark Point Block from an ISO/IEC 19794-5:2005
+    /// record. Coordinates are copied from the structured record; no image
+    /// processing or feature extraction is performed.
+    pub fn face_landmarks(&self) -> Result<crate::LandmarkSet, crate::LandmarkError> {
+        if self.format != BiometricFormat::FaceIso19794_5 {
+            return Err(crate::LandmarkError::UnsupportedFaceFormat);
+        }
+        decode_fac_2005_landmarks(&self.bytes)
+    }
+}
+
+fn decode_fac_2005_landmarks(bytes: &[u8]) -> Result<crate::LandmarkSet, crate::LandmarkError> {
+    const GENERAL_HEADER_LENGTH: usize = 14;
+    const FACE_INFORMATION_LENGTH: usize = 20;
+    const FEATURE_POINT_LENGTH: usize = 8;
+    // ISO/IEC 19794-5 feature-point type 1 uses the MPEG-4 A.B code
+    // packed as `(A << 4) | B`. This deliberately small topology contains
+    // only unambiguous bilateral points documented by the standard.
+    const BILATERAL_CODES: &[(u8, u8)] = &[
+        (0x37, 0x38), // inner eye corners
+        (0x3b, 0x3c), // outer eye corners
+        (0x91, 0x92), // paired nose points
+        (0xc1, 0xc2), // eye centres
+        (0xc3, 0xc4), // nostril centres
+    ];
+    const MIDLINE_CODES: &[u8] = &[0x9f];
+
+    if bytes.len() < GENERAL_HEADER_LENGTH || bytes.get(12..14) != Some(&1_u16.to_be_bytes()) {
+        return Err(crate::LandmarkError::AmbiguousFaceRecord);
+    }
+    let block_length = read_u32_be(bytes, GENERAL_HEADER_LENGTH)
+        .map_err(|_| crate::LandmarkError::TruncatedLandmarkBlock)? as usize;
+    let feature_count = read_u16_be(bytes, GENERAL_HEADER_LENGTH + 4)
+        .map_err(|_| crate::LandmarkError::TruncatedLandmarkBlock)?
+        as usize;
+    let feature_bytes = feature_count
+        .checked_mul(FEATURE_POINT_LENGTH)
+        .ok_or(crate::LandmarkError::TruncatedLandmarkBlock)?;
+    let points_start = GENERAL_HEADER_LENGTH
+        .checked_add(FACE_INFORMATION_LENGTH)
+        .ok_or(crate::LandmarkError::TruncatedLandmarkBlock)?;
+    let points_end = points_start
+        .checked_add(feature_bytes)
+        .ok_or(crate::LandmarkError::TruncatedLandmarkBlock)?;
+    let block_end = GENERAL_HEADER_LENGTH
+        .checked_add(block_length)
+        .ok_or(crate::LandmarkError::TruncatedLandmarkBlock)?;
+    if points_end > block_end || block_end > bytes.len() {
+        return Err(crate::LandmarkError::TruncatedLandmarkBlock);
+    }
+
+    let mut coordinates = [None; 256];
+    for point in bytes[points_start..points_end]
+        .as_chunks::<FEATURE_POINT_LENGTH>()
+        .0
+    {
+        if point[0] != 1 {
+            return Err(crate::LandmarkError::UnknownFeatureCode);
+        }
+        let code = point[1];
+        let known = BILATERAL_CODES
+            .iter()
+            .any(|(left, right)| code == *left || code == *right)
+            || MIDLINE_CODES.contains(&code);
+        if !known {
+            return Err(crate::LandmarkError::UnknownFeatureCode);
+        }
+        if coordinates[usize::from(code)].is_some() {
+            return Err(crate::LandmarkError::DuplicateFeatureCode);
+        }
+        coordinates[usize::from(code)] = Some([
+            f32::from(u16::from_be_bytes([point[2], point[3]])),
+            f32::from(u16::from_be_bytes([point[4], point[5]])),
+            0.0,
+        ]);
+    }
+
+    let mut pairs = Vec::new();
+    for (left_code, right_code) in BILATERAL_CODES {
+        match (
+            coordinates[usize::from(*left_code)],
+            coordinates[usize::from(*right_code)],
+        ) {
+            (Some(left), Some(right)) => pairs.push((left, right)),
+            (None, None) => {}
+            _ => return Err(crate::LandmarkError::IncompleteTopology),
+        }
+    }
+    if pairs.len() < 2 {
+        return Err(crate::LandmarkError::IncompleteTopology);
+    }
+    let midline = MIDLINE_CODES
+        .iter()
+        .filter_map(|code| coordinates[usize::from(*code)])
+        .collect();
+    crate::LandmarkSet::new(crate::ISO_19794_5_2005_LANDMARK_SPACE_ID, 2, pairs, midline)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1415,6 +1523,36 @@ mod tests {
         bytes
     }
 
+    fn fac_2005_landmarks(points: &[(u8, u16, u16)]) -> Vec<u8> {
+        let block_length = 20 + points.len() * 8 + 12;
+        let mut bytes = vec![0; 14 + block_length];
+        bytes[..8].copy_from_slice(b"FAC\0010\0");
+        let total = u32::try_from(bytes.len()).expect("bounded fixture");
+        bytes[8..12].copy_from_slice(&total.to_be_bytes());
+        bytes[12..14].copy_from_slice(&1_u16.to_be_bytes());
+        bytes[14..18].copy_from_slice(
+            &u32::try_from(block_length)
+                .expect("bounded fixture")
+                .to_be_bytes(),
+        );
+        bytes[18..20].copy_from_slice(
+            &u16::try_from(points.len())
+                .expect("bounded fixture")
+                .to_be_bytes(),
+        );
+        for (index, (code, x, y)) in points.iter().enumerate() {
+            let offset = 34 + index * 8;
+            bytes[offset] = 1;
+            bytes[offset + 1] = *code;
+            bytes[offset + 2..offset + 4].copy_from_slice(&x.to_be_bytes());
+            bytes[offset + 4..offset + 6].copy_from_slice(&y.to_be_bytes());
+        }
+        let image = 34 + points.len() * 8;
+        bytes[image + 2..image + 4].copy_from_slice(&1_u16.to_be_bytes());
+        bytes[image + 4..image + 6].copy_from_slice(&1_u16.to_be_bytes());
+        bytes
+    }
+
     fn iir_2005() -> Vec<u8> {
         let mut bytes = vec![0; 107];
         bytes[..8].copy_from_slice(b"IIR\0010\0");
@@ -1513,6 +1651,89 @@ mod tests {
                 BiometricFormat::IrisIso19794_6
             );
         }
+    }
+
+    #[test]
+    fn decodes_known_iso_face_landmarks_without_image_extraction() {
+        let bytes = fac_2005_landmarks(&[
+            (0xc1, 10, 20),
+            (0xc2, 30, 20),
+            (0xc3, 14, 30),
+            (0xc4, 26, 30),
+            (0x9f, 20, 36),
+        ]);
+        let sample =
+            BiometricSample::detect(BiometricModality::Face, bytes).expect("valid face record");
+        let landmarks = sample.face_landmarks().expect("known topology");
+        assert_eq!(
+            landmarks.space_id(),
+            crate::ISO_19794_5_2005_LANDMARK_SPACE_ID
+        );
+        assert_eq!(landmarks.dimensions(), 2);
+        assert_eq!(landmarks.pairs().len(), 2);
+        assert_eq!(landmarks.midline().len(), 1);
+        assert_eq!(landmarks.symmetry_score(), Ok(1.0));
+    }
+
+    #[test]
+    fn face_landmarks_reject_unknown_duplicate_and_incomplete_topology() {
+        for (points, error) in [
+            (
+                vec![
+                    (0xc1, 10, 20),
+                    (0xc2, 30, 20),
+                    (0xc3, 14, 30),
+                    (0xfe, 26, 30),
+                ],
+                crate::LandmarkError::UnknownFeatureCode,
+            ),
+            (
+                vec![
+                    (0xc1, 10, 20),
+                    (0xc1, 30, 20),
+                    (0xc3, 14, 30),
+                    (0xc4, 26, 30),
+                ],
+                crate::LandmarkError::DuplicateFeatureCode,
+            ),
+            (
+                vec![(0xc1, 10, 20), (0xc2, 30, 20), (0xc3, 14, 30)],
+                crate::LandmarkError::IncompleteTopology,
+            ),
+        ] {
+            let sample =
+                BiometricSample::detect(BiometricModality::Face, fac_2005_landmarks(&points))
+                    .expect("structurally valid face record");
+            assert_eq!(sample.face_landmarks(), Err(error));
+        }
+    }
+
+    #[test]
+    fn face_landmarks_reject_truncation_overflow_and_multiple_faces() {
+        let valid = fac_2005_landmarks(&[
+            (0xc1, 10, 20),
+            (0xc2, 30, 20),
+            (0xc3, 14, 30),
+            (0xc4, 26, 30),
+        ]);
+        assert_eq!(
+            decode_fac_2005_landmarks(&valid[..valid.len() - 1]),
+            Err(crate::LandmarkError::TruncatedLandmarkBlock)
+        );
+
+        let mut overflow = valid.clone();
+        overflow[14..18].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(
+            decode_fac_2005_landmarks(&overflow),
+            Err(crate::LandmarkError::TruncatedLandmarkBlock)
+        );
+
+        let mut multiple = valid;
+        multiple[12..14].copy_from_slice(&2_u16.to_be_bytes());
+        assert_eq!(
+            decode_fac_2005_landmarks(&multiple),
+            Err(crate::LandmarkError::AmbiguousFaceRecord)
+        );
     }
 
     #[test]
@@ -1703,6 +1924,18 @@ mod tests {
             BiometricSample::with_format(BiometricFormat::FaceIso39794_5, vec![0x02, 0x01, 0x01]),
             Err(BiometricError::InvalidRecord)
         );
+    }
+
+    #[test]
+    fn debug_output_does_not_expose_biometric_payloads() {
+        let sample = BiometricSample::with_format(
+            BiometricFormat::FaceIso39794_5,
+            vec![0x30, 0x03, 0x02, 0x01, 0x01],
+        )
+        .expect("valid record");
+        let debug = format!("{sample:?}");
+        assert!(debug.contains("bytes: 5"));
+        assert!(!debug.contains("48, 3, 2, 1, 1"));
     }
 
     proptest::proptest! {

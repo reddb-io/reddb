@@ -268,7 +268,8 @@ pub fn runtime_value_text(value: &Value) -> Option<String> {
         | Value::Face(_)
         | Value::Iris(_)
         | Value::FeatureVector(_)
-        | Value::BitSignature(_) => Some(value.display_string()),
+        | Value::BitSignature(_)
+        | Value::LandmarkSet(_) => Some(value.display_string()),
     }
 }
 

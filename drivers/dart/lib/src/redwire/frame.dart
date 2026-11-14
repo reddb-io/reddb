@@ -98,6 +98,7 @@ class MessageKind {
 /// Server feature bitmask: QueryWithParams frame support.
 const int FEATURE_PARAMS = 0x00000001;
 const int FEATURE_BIOMETRIC_PARAMS = 0x00000008;
+const int FEATURE_LANDMARK_PARAMS = 0x00000010;
 
 /// Bit values for the frame `flags` byte.
 class Flags {

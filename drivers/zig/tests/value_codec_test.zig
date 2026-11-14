@@ -110,6 +110,25 @@ test "value tag table is pinned" {
     try t.expectEqual(@as(u8, 0x0c), @intFromEnum(value_codec.ValueTag.iris));
     try t.expectEqual(@as(u8, 0x0d), @intFromEnum(value_codec.ValueTag.feature_vector));
     try t.expectEqual(@as(u8, 0x0e), @intFromEnum(value_codec.ValueTag.bit_signature));
+    try t.expectEqual(@as(u8, 0x0f), @intFromEnum(value_codec.ValueTag.landmark_set));
+}
+
+test "encodes landmark sets" {
+    const pairs = [_]value_codec.LandmarkPair{
+        .{ .left = &.{ -2.0, 1.0 }, .right = &.{ 2.0, 1.0 } },
+        .{ .left = &.{ -1.0, -1.0 }, .right = &.{ 1.0, -1.0 } },
+    };
+    const midline = [_][]const f32{&.{ 0.0, 2.0 }};
+    const encoded = try value_codec.encodeValue(t.allocator, .{ .landmark_set = .{
+        .space_id = [_]u8{0x33} ** 16,
+        .dimensions = 2,
+        .pairs = &pairs,
+        .midline = &midline,
+    } });
+    defer t.allocator.free(encoded);
+    try t.expectEqual(@as(u8, 0x0f), encoded[0]);
+    try t.expectEqual(@as(u8, 2), encoded[17]);
+    try t.expectEqual(@as(u32, 2), std.mem.readInt(u32, encoded[18..22], .little));
 }
 
 test "encodes biometric and caller supplied features" {

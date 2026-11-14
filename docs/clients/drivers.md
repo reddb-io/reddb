@@ -15,6 +15,8 @@ feature parameter envelopes only when the server advertises
 `FEATURE_BIOMETRIC_PARAMS`. The value contract is language-neutral; it does not
 expose cloud-provider adapters. See
 [Biometric Records and Comparison Artifacts](../types/biometrics.md).
+Caller-supplied landmark geometry is gated independently by
+`FEATURE_LANDMARK_PARAMS`; clients must not emit RedWire tag `0x0f` without it.
 
 ## Driver matrix
 

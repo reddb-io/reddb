@@ -44,3 +44,4 @@ export 'src/redwire/frame.dart'
         SUPPORTED_VERSION,
         FEATURE_PARAMS,
         FEATURE_BIOMETRIC_PARAMS;
+export 'src/redwire/frame.dart' show FEATURE_LANDMARK_PARAMS;

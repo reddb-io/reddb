@@ -49,6 +49,7 @@ pub mod index_hint;
 pub mod json;
 pub mod key_dictionary;
 pub mod knowledge;
+pub mod landmark;
 pub mod operator;
 pub mod operator_catalog;
 pub mod parametric;
@@ -71,6 +72,10 @@ pub use canonical_key::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily
 pub use feature::{
     BitSignature, FeatureError, FeatureVector, MAX_BIT_SIGNATURE_BYTES,
     MAX_FEATURE_VECTOR_DIMENSIONS,
+};
+pub use landmark::{
+    LandmarkCoordinates, LandmarkError, LandmarkPair, LandmarkSet,
+    ISO_19794_5_2005_LANDMARK_SPACE_ID, MAX_LANDMARK_POINTS,
 };
 pub use operator::BinOp;
 pub use table::{

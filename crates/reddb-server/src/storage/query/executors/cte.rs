@@ -569,6 +569,10 @@ where
                 61u8.hash(hasher);
                 signature.hash(hasher);
             }
+            Value::LandmarkSet(landmarks) => {
+                62u8.hash(hasher);
+                landmarks.hash(hasher);
+            }
         }
     }
 }

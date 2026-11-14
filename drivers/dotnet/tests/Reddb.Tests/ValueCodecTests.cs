@@ -29,6 +29,29 @@ public class ValueCodecTests
         Assert.Equal(0x0c, ValueCodec.TagIris);
         Assert.Equal(0x0d, ValueCodec.TagFeatureVector);
         Assert.Equal(0x0e, ValueCodec.TagBitSignature);
+        Assert.Equal(0x0f, ValueCodec.TagLandmarkSet);
+    }
+
+    [Fact]
+    public void EncodeLandmarkSetEnvelope()
+    {
+        byte[] landmarks = ValueCodec.EncodeValue(new Dictionary<string, object?>
+        {
+            ["$landmark_set"] = new Dictionary<string, object?>
+            {
+                ["space_id"] = "33333333333333333333333333333333",
+                ["dimensions"] = 2,
+                ["pairs"] = new object[]
+                {
+                    new Dictionary<string, object?> { ["left"] = new[] { -2.0, 1.0 }, ["right"] = new[] { 2.0, 1.0 } },
+                    new Dictionary<string, object?> { ["left"] = new[] { -1.0, -1.0 }, ["right"] = new[] { 1.0, -1.0 } },
+                },
+                ["midline"] = new object[] { new[] { 0.0, 2.0 } },
+            },
+        });
+        Assert.Equal(ValueCodec.TagLandmarkSet, landmarks[0]);
+        Assert.Equal(2, landmarks[17]);
+        Assert.Equal(2, BinaryPrimitives.ReadInt32LittleEndian(landmarks.AsSpan(18, 4)));
     }
 
     [Fact]

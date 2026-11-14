@@ -687,6 +687,11 @@ std::string RedWireConn::query(std::string_view sql, std::span<const reddb::Valu
         throw RedDBError(ErrorCode::ParamsUnsupported,
                          "server did not advertise FEATURE_BIOMETRIC_PARAMS");
     }
+    if ((server_features_ & FEATURE_LANDMARK_PARAMS) != FEATURE_LANDMARK_PARAMS &&
+        std::any_of(params.begin(), params.end(), requires_landmark_capability)) {
+        throw RedDBError(ErrorCode::ParamsUnsupported,
+                         "server did not advertise FEATURE_LANDMARK_PARAMS");
+    }
     std::lock_guard<std::mutex> g(io_);
     Frame req;
     req.kind = MessageKind::QueryWithParams;

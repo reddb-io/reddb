@@ -38,7 +38,23 @@ class ValueCodecTest {
         assertEquals(0x0c, ValueCodec.TAG_IRIS);
         assertEquals(0x0d, ValueCodec.TAG_FEATURE_VECTOR);
         assertEquals(0x0e, ValueCodec.TAG_BIT_SIGNATURE);
+        assertEquals(0x0f, ValueCodec.TAG_LANDMARK_SET);
         assertEquals(0x09, ValueCodec.TAG_UUID);
+    }
+
+    @Test
+    void encodesLandmarkSet() {
+        Map<String, Object> geometry = Map.of(
+            "space_id", "33333333333333333333333333333333",
+            "dimensions", 2,
+            "pairs", List.of(
+                Map.of("left", List.of(-2.0, 1.0), "right", List.of(2.0, 1.0)),
+                Map.of("left", List.of(-1.0, -1.0), "right", List.of(1.0, -1.0))),
+            "midline", List.of(List.of(0.0, 2.0)));
+        byte[] encoded = ValueCodec.encodeValue(Map.of("$landmark_set", geometry));
+        assertEquals(ValueCodec.TAG_LANDMARK_SET, encoded[0] & 0xff);
+        assertEquals(2, encoded[17]);
+        assertEquals(2, ByteBuffer.wrap(encoded, 18, 4).order(ByteOrder.LITTLE_ENDIAN).getInt());
     }
 
     @Test

@@ -35,11 +35,13 @@ public object ValueCodec {
     public const val TAG_IRIS: Int = 0x0c
     public const val TAG_FEATURE_VECTOR: Int = 0x0d
     public const val TAG_BIT_SIGNATURE: Int = 0x0e
+    public const val TAG_LANDMARK_SET: Int = 0x0f
 
     public const val MAX_PARAM_COUNT: Int = 65_536
     public const val MAX_VALUE_PAYLOAD_LEN: Int = Frame.MAX_FRAME_SIZE
     public const val MAX_FEATURE_VECTOR_DIMENSIONS: Int = 65_536
     public const val MAX_BIT_SIGNATURE_BYTES: Int = 1 shl 20
+    public const val MAX_LANDMARK_POINTS: Int = 4_096
 
     private val mapper: ObjectMapper = jacksonObjectMapper()
 
@@ -50,6 +52,11 @@ public object ValueCodec {
         val node = canonicalize(value)
         return node.isObject &&
             (node.has("\$biometric") || node.has("\$feature_vector") || node.has("\$bit_signature"))
+    }
+
+    public fun requiresLandmarkCapability(value: Any?): Boolean {
+        if (value !is JsonNode && value !is Map<*, *>) return false
+        return canonicalize(value).has("\$landmark_set")
     }
 
     public fun encodeQueryWithParams(sql: String, params: Array<out Any?>?): ByteArray {
@@ -211,6 +218,7 @@ public object ValueCodec {
             if (node.has("\$biometric")) return encodeBiometric(node.get("\$biometric"))
             if (node.has("\$feature_vector")) return encodeFeatureVector(node.get("\$feature_vector"))
             if (node.has("\$bit_signature")) return encodeBitSignature(node.get("\$bit_signature"))
+            if (node.has("\$landmark_set")) return encodeLandmarkSet(node.get("\$landmark_set"))
         }
         return encodeJson(value)
     }
@@ -292,6 +300,46 @@ public object ValueCodec {
             .put(bits)
             .put(mask)
             .array()
+    }
+
+    private fun encodeLandmarkSet(value: JsonNode?): ByteArray {
+        require(
+            value != null && value.isObject && value.size() == 4 &&
+                value.path("pairs").isArray && value.path("midline").isArray
+        ) { "\$landmark_set must be a canonical object" }
+        val pairs = value.get("pairs")
+        val midline = value.get("midline")
+        val dimensions = value.path("dimensions").asInt(0)
+        val pointCount = Math.addExact(Math.multiplyExact(pairs.size(), 2), midline.size())
+        require(
+            dimensions in 2..3 && pairs.size() >= 2 && pointCount <= MAX_LANDMARK_POINTS
+        ) { "invalid landmark geometry" }
+        val space = decodeSpaceId(requiredText(value, "space_id"))
+        val out = ByteBuffer.allocate(
+            1 + 16 + 1 + 4 + 4 + Math.multiplyExact(pointCount, dimensions * 4)
+        ).order(ByteOrder.LITTLE_ENDIAN)
+        out.put(TAG_LANDMARK_SET.toByte()).put(space).put(dimensions.toByte())
+            .putInt(pairs.size()).putInt(midline.size())
+        fun putPoint(point: JsonNode?) {
+            require(point != null && point.isArray && point.size() == dimensions) {
+                "invalid landmark geometry"
+            }
+            for (coordinateNode in point) {
+                require(coordinateNode.isNumber) { "invalid landmark geometry" }
+                val coordinate = coordinateNode.floatValue()
+                require(coordinate.isFinite()) { "invalid landmark geometry" }
+                out.putFloat(coordinate)
+            }
+        }
+        for (pair in pairs) {
+            require(pair.isObject && pair.size() == 2 && pair.has("left") && pair.has("right")) {
+                "invalid landmark geometry"
+            }
+            putPoint(pair.get("left"))
+            putPoint(pair.get("right"))
+        }
+        for (point in midline) putPoint(point)
+        return out.array()
     }
 
     private fun requiredText(value: JsonNode, field: String): String {

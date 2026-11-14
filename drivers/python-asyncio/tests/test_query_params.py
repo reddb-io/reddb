@@ -57,6 +57,28 @@ def test_redwire_encodes_biometric_feature_parameters() -> None:
     assert payload[-4:] == bytes.fromhex("aa55ff0f")
 
 
+def test_redwire_encodes_landmark_set_parameter() -> None:
+    payload = encode_query_with_params(
+        "SELECT $1",
+        [{
+            "$landmark_set": {
+                "space_id": "00112233445566778899aabbccddeeff",
+                "dimensions": 2,
+                "pairs": [
+                    {"left": [-1, 1], "right": [1, 1]},
+                    {"left": [-2, -1], "right": [2, -1]},
+                ],
+                "midline": [[0, 2]],
+            }
+        }],
+    )
+    pos = 4 + len("SELECT $1".encode()) + 4
+    assert payload[pos] == 0x0F
+    assert payload[pos + 17] == 2
+    assert payload[pos + 18:pos + 22] == (2).to_bytes(4, "little")
+    assert payload[pos + 22:pos + 26] == (1).to_bytes(4, "little")
+
+
 def test_redwire_rejects_biometric_modality_mismatch() -> None:
     with pytest.raises(RedDBError, match="invalid biometric modality or format"):
         encode_query_with_params(

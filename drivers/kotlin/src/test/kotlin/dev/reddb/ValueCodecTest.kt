@@ -36,7 +36,28 @@ class ValueCodecTest {
         assertEquals(0x0c, ValueCodec.TAG_IRIS)
         assertEquals(0x0d, ValueCodec.TAG_FEATURE_VECTOR)
         assertEquals(0x0e, ValueCodec.TAG_BIT_SIGNATURE)
+        assertEquals(0x0f, ValueCodec.TAG_LANDMARK_SET)
         assertEquals(0x09, ValueCodec.TAG_UUID)
+    }
+
+    @Test
+    fun encodesLandmarkSet() {
+        val geometry = mapOf(
+            "space_id" to "33333333333333333333333333333333",
+            "dimensions" to 2,
+            "pairs" to listOf(
+                mapOf("left" to listOf(-2.0, 1.0), "right" to listOf(2.0, 1.0)),
+                mapOf("left" to listOf(-1.0, -1.0), "right" to listOf(1.0, -1.0))
+            ),
+            "midline" to listOf(listOf(0.0, 2.0))
+        )
+        val encoded = ValueCodec.encodeValue(mapOf("\$landmark_set" to geometry))
+        assertEquals(ValueCodec.TAG_LANDMARK_SET, encoded[0].toInt() and 0xff)
+        assertEquals(2, encoded[17].toInt())
+        assertEquals(
+            2,
+            ByteBuffer.wrap(encoded, 18, 4).order(ByteOrder.LITTLE_ENDIAN).int
+        )
     }
 
     @Test

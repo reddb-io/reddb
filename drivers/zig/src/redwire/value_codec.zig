@@ -23,6 +23,7 @@ pub const ValueTag = enum(u8) {
     iris = 0x0c,
     feature_vector = 0x0d,
     bit_signature = 0x0e,
+    landmark_set = 0x0f,
 };
 
 pub const Biometric = struct {
@@ -41,6 +42,18 @@ pub const BitSignature = struct {
     mask: ?[]const u8 = null,
 };
 
+pub const LandmarkPair = struct {
+    left: []const f32,
+    right: []const f32,
+};
+
+pub const LandmarkSet = struct {
+    space_id: [16]u8,
+    dimensions: u8,
+    pairs: []const LandmarkPair,
+    midline: []const []const f32,
+};
+
 pub const Value = union(enum) {
     null: void,
     bool: bool,
@@ -57,6 +70,7 @@ pub const Value = union(enum) {
     iris: Biometric,
     feature_vector: FeatureVector,
     bit_signature: BitSignature,
+    landmark_set: LandmarkSet,
 
     pub fn uuidFromString(s: []const u8) !Value {
         return .{ .uuid = try parseUuid(s) };
@@ -66,6 +80,13 @@ pub const Value = union(enum) {
 pub fn requiresBiometricCapability(value: Value) bool {
     return switch (value) {
         .fingerprint, .face, .iris, .feature_vector, .bit_signature => true,
+        else => false,
+    };
+}
+
+pub fn requiresLandmarkCapability(value: Value) bool {
+    return switch (value) {
+        .landmark_set => true,
         else => false,
     };
 }
@@ -221,6 +242,32 @@ fn appendValue(out: *ByteList, value: Value) !void {
                 try out.appendNTimes(0xff, v.bits.len);
             }
         },
+        .landmark_set => |v| {
+            const pair_points = std.math.mul(usize, v.pairs.len, 2) catch
+                return error.InvalidLandmarkSet;
+            const point_count = std.math.add(usize, pair_points, v.midline.len) catch
+                return error.InvalidLandmarkSet;
+            if ((v.dimensions != 2 and v.dimensions != 3) or v.pairs.len < 2 or point_count > 4096)
+                return error.InvalidLandmarkSet;
+            try out.append(@intFromEnum(ValueTag.landmark_set));
+            try out.appendSlice(&v.space_id);
+            try out.append(v.dimensions);
+            try appendU32(out, @intCast(v.pairs.len));
+            try appendU32(out, @intCast(v.midline.len));
+            for (v.pairs) |pair| {
+                try appendLandmarkPoint(out, pair.left, v.dimensions);
+                try appendLandmarkPoint(out, pair.right, v.dimensions);
+            }
+            for (v.midline) |point| try appendLandmarkPoint(out, point, v.dimensions);
+        },
+    }
+}
+
+fn appendLandmarkPoint(out: *ByteList, point: []const f32, dimensions: u8) !void {
+    if (point.len != dimensions) return error.InvalidLandmarkSet;
+    for (point) |coordinate| {
+        if (!std.math.isFinite(coordinate)) return error.InvalidLandmarkSet;
+        try appendU32(out, @bitCast(coordinate));
     }
 }
 
@@ -308,7 +355,35 @@ fn appendHttpParamJson(out: *ByteList, value: Value) !void {
             }
             try out.appendSlice("}}");
         },
+        .landmark_set => |v| {
+            try out.appendSlice("{\"$landmark_set\":{\"space_id\":");
+            try appendHexJsonString(out, &v.space_id);
+            try out.writer().print(",\"dimensions\":{d},\"pairs\":[", .{v.dimensions});
+            for (v.pairs, 0..) |pair, index| {
+                if (index > 0) try out.append(',');
+                try out.appendSlice("{\"left\":");
+                try appendLandmarkPointJson(out, pair.left);
+                try out.appendSlice(",\"right\":");
+                try appendLandmarkPointJson(out, pair.right);
+                try out.append('}');
+            }
+            try out.appendSlice("],\"midline\":[");
+            for (v.midline, 0..) |point, index| {
+                if (index > 0) try out.append(',');
+                try appendLandmarkPointJson(out, point);
+            }
+            try out.appendSlice("]}}");
+        },
     }
+}
+
+fn appendLandmarkPointJson(out: *ByteList, point: []const f32) !void {
+    try out.append('[');
+    for (point, 0..) |coordinate, index| {
+        if (index > 0) try out.append(',');
+        try out.writer().print("{d}", .{coordinate});
+    }
+    try out.append(']');
 }
 
 fn appendBiometricJson(out: *ByteList, modality: []const u8, value: Biometric) !void {

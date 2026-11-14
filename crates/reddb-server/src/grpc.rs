@@ -442,6 +442,51 @@ fn grpc_query_value_to_param_value(value: QueryValue) -> Result<ParamValue, Stat
                 .map(ParamValue::BitSignature)
                 .map_err(|error| Status::invalid_argument(error.to_string()))
         }
+        Kind::LandmarkSetValue(value) => {
+            let space_id = grpc_space_id(value.space_id)?;
+            let dimensions = u8::try_from(value.dimensions)
+                .map_err(|_| Status::invalid_argument("invalid landmark dimensions"))?;
+            let point = |value: proto::QueryLandmarkPoint| {
+                if value.coordinates.len() != usize::from(dimensions) {
+                    return Err(Status::invalid_argument(
+                        "landmark coordinate count does not match dimensions",
+                    ));
+                }
+                let mut coordinates = [0.0_f32; 3];
+                coordinates[..usize::from(dimensions)].copy_from_slice(&value.coordinates);
+                Ok(coordinates)
+            };
+            let mut pairs =
+                Vec::with_capacity(value.pairs.len().min(reddb_types::MAX_LANDMARK_POINTS / 2));
+            for pair in value.pairs {
+                let left = pair
+                    .left
+                    .ok_or_else(|| Status::invalid_argument("missing left landmark point"))?;
+                let right = pair
+                    .right
+                    .ok_or_else(|| Status::invalid_argument("missing right landmark point"))?;
+                pairs.push((point(left)?, point(right)?));
+                if pairs.len() * 2 > reddb_types::MAX_LANDMARK_POINTS {
+                    return Err(Status::invalid_argument("too many landmark points"));
+                }
+            }
+            if pairs
+                .len()
+                .checked_mul(2)
+                .and_then(|count| count.checked_add(value.midline.len()))
+                .is_none_or(|count| count > reddb_types::MAX_LANDMARK_POINTS)
+            {
+                return Err(Status::invalid_argument("too many landmark points"));
+            }
+            let midline = value
+                .midline
+                .into_iter()
+                .map(point)
+                .collect::<Result<Vec<_>, _>>()?;
+            reddb_types::LandmarkSet::new(space_id, dimensions, pairs, midline)
+                .map(ParamValue::LandmarkSet)
+                .map_err(|error| Status::invalid_argument(error.to_string()))
+        }
     }
 }
 
@@ -858,6 +903,37 @@ mod grpc_query_value_tests {
             panic!("expected bit signature")
         };
         assert_eq!(signature.mask(), &[0xff, 0xff]);
+    }
+
+    #[test]
+    fn grpc_query_value_maps_landmark_field_sixteen() {
+        let point = |coordinates: Vec<f32>| proto::QueryLandmarkPoint { coordinates };
+        let input = QueryValue {
+            kind: Some(Kind::LandmarkSetValue(proto::QueryLandmarkSet {
+                space_id: vec![0x77; 16],
+                dimensions: 2,
+                pairs: vec![
+                    proto::QueryLandmarkPair {
+                        left: Some(point(vec![-1.0, 1.0])),
+                        right: Some(point(vec![1.0, 1.0])),
+                    },
+                    proto::QueryLandmarkPair {
+                        left: Some(point(vec![-2.0, -1.0])),
+                        right: Some(point(vec![2.0, -1.0])),
+                    },
+                ],
+                midline: vec![point(vec![0.0, 2.0])],
+            })),
+        };
+
+        let ParamValue::LandmarkSet(value) =
+            grpc_query_value_to_param_value(input).expect("valid landmarks")
+        else {
+            panic!("expected landmark set")
+        };
+        assert_eq!(value.space_id(), [0x77; 16]);
+        assert_eq!(value.dimensions(), 2);
+        assert_eq!(value.point_count(), 5);
     }
 
     #[test]

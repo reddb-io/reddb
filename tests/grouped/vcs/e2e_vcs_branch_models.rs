@@ -257,7 +257,7 @@ fn timeseries_and_mixed_branch_merges_preserve_history_after_recovery() {
 #[test]
 fn biometric_and_feature_values_survive_branch_merge_and_recovery() {
     use reddb::application::{MergeInput, MergeOpts};
-    use reddb_types::{BiometricFormat, BiometricSample, BitSignature, FeatureVector};
+    use reddb_types::{BiometricFormat, BiometricSample, BitSignature, FeatureVector, LandmarkSet};
 
     fn iso_fmr() -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -313,6 +313,18 @@ fn biometric_and_feature_values_survive_branch_merge_and_recovery() {
             Value::Fingerprint(fingerprint.clone()),
             Value::FeatureVector(FeatureVector::new(space, vec![x, 1.0]).expect("feature vector")),
             Value::BitSignature(BitSignature::new(space, vec![bits], None).expect("bit signature")),
+            Value::LandmarkSet(
+                LandmarkSet::new(
+                    space,
+                    2,
+                    vec![
+                        ([-x, 1.0, 0.0], [x, 1.0, 0.0]),
+                        ([-x * 2.0, -1.0, 0.0], [x * 2.0, -1.0, 0.0]),
+                    ],
+                    vec![[0.0, x, 0.0]],
+                )
+                .expect("landmark set"),
+            ),
         ]
     };
 
@@ -321,7 +333,7 @@ fn biometric_and_feature_values_survive_branch_merge_and_recovery() {
         let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime");
         runtime
             .execute_query(
-                "CREATE TABLE identities (id INTEGER, print FINGERPRINT, face FEATURE_VECTOR, iris BIT_SIGNATURE)",
+                "CREATE TABLE identities (id INTEGER, print FINGERPRINT, face FEATURE_VECTOR, iris BIT_SIGNATURE, landmarks LANDMARK_SET)",
             )
             .expect("table");
         runtime
@@ -329,7 +341,7 @@ fn biometric_and_feature_values_survive_branch_merge_and_recovery() {
             .expect("versioned");
         runtime
             .execute_query_with_params(
-                "INSERT INTO identities (id,print,face,iris) VALUES ($1,$2,$3,$4)",
+                "INSERT INTO identities (id,print,face,iris,landmarks) VALUES ($1,$2,$3,$4,$5)",
                 &row(1, 1.0, 0b1010),
             )
             .expect("base row");
@@ -345,7 +357,7 @@ fn biometric_and_feature_values_survive_branch_merge_and_recovery() {
         checkout(&runtime, "biometric-source");
         runtime
             .execute_query_with_params(
-                "INSERT INTO identities (id,print,face,iris) VALUES ($1,$2,$3,$4)",
+                "INSERT INTO identities (id,print,face,iris,landmarks) VALUES ($1,$2,$3,$4,$5)",
                 &row(2, 2.0, 0b1110),
             )
             .expect("source row");
@@ -354,7 +366,7 @@ fn biometric_and_feature_values_survive_branch_merge_and_recovery() {
         checkout(&runtime, "main");
         runtime
             .execute_query_with_params(
-                "INSERT INTO identities (id,print,face,iris) VALUES ($1,$2,$3,$4)",
+                "INSERT INTO identities (id,print,face,iris,landmarks) VALUES ($1,$2,$3,$4,$5)",
                 &row(3, 3.0, 0b0010),
             )
             .expect("main row");
@@ -373,7 +385,7 @@ fn biometric_and_feature_values_survive_branch_merge_and_recovery() {
     let runtime = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("reopen");
     checkout(&runtime, "main");
     let result = runtime
-        .execute_query("SELECT id,print,face,iris FROM identities ORDER BY id")
+        .execute_query("SELECT id,print,face,iris,landmarks FROM identities ORDER BY id")
         .expect("merged values");
     assert_eq!(result.result.records.len(), 3);
     for (index, record) in result.result.records.iter().enumerate() {
@@ -381,6 +393,10 @@ fn biometric_and_feature_values_survive_branch_merge_and_recovery() {
         assert!(matches!(record.get("print"), Some(Value::Fingerprint(_))));
         assert!(matches!(record.get("face"), Some(Value::FeatureVector(_))));
         assert!(matches!(record.get("iris"), Some(Value::BitSignature(_))));
+        assert!(matches!(
+            record.get("landmarks"),
+            Some(Value::LandmarkSet(_))
+        ));
     }
     clear_current_connection_id();
 }

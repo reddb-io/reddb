@@ -944,6 +944,7 @@ fn mcp_client_param(value: &reddb::json::Value) -> Result<reddb_client::Value, S
         ParamValue::Iris(value) => Ok(Value::Iris(value)),
         ParamValue::FeatureVector(value) => Ok(Value::FeatureVector(value)),
         ParamValue::BitSignature(value) => Ok(Value::BitSignature(value)),
+        ParamValue::LandmarkSet(value) => Ok(Value::LandmarkSet(value)),
     }
 }
 

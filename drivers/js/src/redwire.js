@@ -48,13 +48,17 @@ export const MessageKind = Object.freeze({
   QueryWithParams: 0x28,
 })
 
-export const Features = Object.freeze({ PARAMS: 0x0000_0001, BIOMETRIC_PARAMS: 0x0000_0008 })
+export const Features = Object.freeze({
+  PARAMS: 0x0000_0001,
+  BIOMETRIC_PARAMS: 0x0000_0008,
+  LANDMARK_PARAMS: 0x0000_0010,
+})
 
 export const ValueTag = Object.freeze({
   Null: 0x00, Bool: 0x01, Int: 0x02, Float: 0x03, Text: 0x04,
   Bytes: 0x05, Vector: 0x06, Json: 0x07, Timestamp: 0x08, Uuid: 0x09,
   Fingerprint: 0x0a, Face: 0x0b, Iris: 0x0c,
-  FeatureVector: 0x0d, BitSignature: 0x0e,
+  FeatureVector: 0x0d, BitSignature: 0x0e, LandmarkSet: 0x0f,
 })
 
 const BIOMETRIC_FORMAT = Object.freeze({
@@ -264,6 +268,10 @@ export class RedWireClient {
     return (this.serverFeatures & Features.BIOMETRIC_PARAMS) === Features.BIOMETRIC_PARAMS
   }
 
+  supportsLandmarkParams() {
+    return (this.serverFeatures & Features.LANDMARK_PARAMS) === Features.LANDMARK_PARAMS
+  }
+
   async call(method, params = {}) {
     if (method === 'query') return this.#query(params.sql ?? '', params.params)
     if (method === 'insert') return this.#insert({ collection: params.collection, payload: params.payload })
@@ -370,6 +378,12 @@ export class RedWireClient {
         throw new RedDBError(
           'BIOMETRIC_PARAMS_UNSUPPORTED',
           'server did not advertise FEATURE_BIOMETRIC_PARAMS',
+        )
+      }
+      if (!this.supportsLandmarkParams() && params.some(requiresLandmarkCapability)) {
+        throw new RedDBError(
+          'LANDMARK_PARAMS_UNSUPPORTED',
+          'server did not advertise FEATURE_LANDMARK_PARAMS',
         )
       }
       kind = MessageKind.QueryWithParams
@@ -893,6 +907,7 @@ export function encodeValue(v) {
       if (k === '$biometric') return encodeBiometric(v.$biometric)
       if (k === '$feature_vector') return encodeFeatureVector(v.$feature_vector)
       if (k === '$bit_signature') return encodeBitSignature(v.$bit_signature)
+      if (k === '$landmark_set') return encodeLandmarkSet(v.$landmark_set)
     }
     return encodeLenPrefixed(ValueTag.Json, new TextEncoder().encode(canonicalJson(v)))
   }
@@ -902,6 +917,11 @@ export function encodeValue(v) {
 function requiresBiometricFeatureCapability(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   return '$biometric' in value || '$feature_vector' in value || '$bit_signature' in value
+}
+
+function requiresLandmarkCapability(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && '$landmark_set' in value
 }
 
 function encodeBiometric(value) {
@@ -980,6 +1000,55 @@ function encodeBitSignature(value) {
   view.setUint32(17, bits.length, true)
   out.set(bits, 21)
   out.set(mask, 21 + bits.length)
+  return out
+}
+
+function encodeLandmarkSet(value) {
+  if (value === null || typeof value !== 'object') {
+    throw new RedDBError('UNSUPPORTED_PARAM', '$landmark_set must be an object')
+  }
+  const dimensions = value.dimensions
+  if (dimensions !== 2 && dimensions !== 3) {
+    throw new RedDBError('UNSUPPORTED_PARAM', 'landmark dimensions must be 2 or 3')
+  }
+  if (!Array.isArray(value.pairs) || value.pairs.length < 2 || !Array.isArray(value.midline)) {
+    throw new RedDBError('UNSUPPORTED_PARAM', 'landmark topology is invalid')
+  }
+  const pointCount = value.pairs.length * 2 + value.midline.length
+  if (pointCount > 4_096) {
+    throw new RedDBError('UNSUPPORTED_PARAM', 'landmark set exceeds 4096 points')
+  }
+  const space = parseUuidBytes(value.space_id)
+  const out = new Uint8Array(1 + 16 + 1 + 4 + 4 + pointCount * dimensions * 4)
+  const view = new DataView(out.buffer)
+  out[0] = ValueTag.LandmarkSet
+  out.set(space, 1)
+  out[17] = dimensions
+  view.setUint32(18, value.pairs.length, true)
+  view.setUint32(22, value.midline.length, true)
+  let offset = 26
+  const writePoint = (point) => {
+    if (!Array.isArray(point) || point.length !== dimensions) {
+      throw new RedDBError('UNSUPPORTED_PARAM', 'landmark coordinate count is invalid')
+    }
+    point.forEach((coordinate) => {
+      const stored = Math.fround(coordinate)
+      if (typeof coordinate !== 'number' || !Number.isFinite(coordinate) || !Number.isFinite(stored)) {
+        throw new RedDBError('UNSUPPORTED_PARAM', 'landmark coordinates must be finite f32 values')
+      }
+      view.setFloat32(offset, stored, true)
+      offset += 4
+    })
+  }
+  value.pairs.forEach((pair) => {
+    if (pair === null || typeof pair !== 'object'
+      || Object.keys(pair).length !== 2 || !('left' in pair) || !('right' in pair)) {
+      throw new RedDBError('UNSUPPORTED_PARAM', 'landmark pair must contain left and right')
+    }
+    writePoint(pair.left)
+    writePoint(pair.right)
+  })
+  value.midline.forEach(writePoint)
   return out
 }
 

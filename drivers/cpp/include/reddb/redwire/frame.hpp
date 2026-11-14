@@ -46,6 +46,7 @@ enum class MessageKind : uint8_t {
 
 constexpr uint32_t FEATURE_PARAMS = 0x0000'0001;
 constexpr uint32_t FEATURE_BIOMETRIC_PARAMS = 0x0000'0008;
+constexpr uint32_t FEATURE_LANDMARK_PARAMS = 0x0000'0010;
 
 bool is_known_kind(uint8_t byte) noexcept;
 

@@ -210,11 +210,40 @@ std::string value_to_http_json(const Value& value) {
                 out += number_json(item.values[i]);
             }
             return out + "]}}";
-        } else {
+        } else if constexpr (std::is_same_v<T, Value::BitSignature>) {
             return "{\"$bit_signature\":{\"space_id\":" +
                    json_escape(hex_encode(item.space_id)) + ",\"bits\":" +
                    json_escape(hex_encode(item.bits)) + ",\"mask\":" +
                    json_escape(hex_encode(item.mask)) + "}}";
+        } else {
+            std::string out = "{\"$landmark_set\":{\"space_id\":" +
+                              json_escape(hex_encode(item.space_id)) + ",\"dimensions\":" +
+                              std::to_string(item.dimensions) + ",\"pairs\":[";
+            for (size_t i = 0; i < item.pairs.size(); ++i) {
+                if (i) out.push_back(',');
+                out += "{\"left\":[";
+                for (size_t axis = 0; axis < item.pairs[i].left.size(); ++axis) {
+                    if (axis) out.push_back(',');
+                    out += number_json(item.pairs[i].left[axis]);
+                }
+                out += "],\"right\":[";
+                for (size_t axis = 0; axis < item.pairs[i].right.size(); ++axis) {
+                    if (axis) out.push_back(',');
+                    out += number_json(item.pairs[i].right[axis]);
+                }
+                out += "]}";
+            }
+            out += "],\"midline\":[";
+            for (size_t i = 0; i < item.midline.size(); ++i) {
+                if (i) out.push_back(',');
+                out.push_back('[');
+                for (size_t axis = 0; axis < item.midline[i].size(); ++axis) {
+                    if (axis) out.push_back(',');
+                    out += number_json(item.midline[i][axis]);
+                }
+                out.push_back(']');
+            }
+            return out + "]}}";
         }
     }, value.storage());
 }
@@ -307,7 +336,7 @@ std::vector<uint8_t> encode_value(const Value& value) {
             }
             if (norm == 0) throw RedDBError(ErrorCode::Protocol, "feature vector norm must be non-zero");
             return out;
-        } else {
+        } else if constexpr (std::is_same_v<T, Value::BitSignature>) {
             if (item.bits.empty() || item.bits.size() > (1u << 20) ||
                 item.mask.size() != item.bits.size() ||
                 std::none_of(item.mask.begin(), item.mask.end(), [](std::byte byte) {
@@ -323,6 +352,38 @@ std::vector<uint8_t> encode_value(const Value& value) {
             for (std::byte byte : item.bits) out.push_back(std::to_integer<uint8_t>(byte));
             for (std::byte byte : item.mask) out.push_back(std::to_integer<uint8_t>(byte));
             return out;
+        } else {
+            const size_t point_count = item.pairs.size() * 2 + item.midline.size();
+            if ((item.dimensions != 2 && item.dimensions != 3) || item.pairs.size() < 2 ||
+                point_count > 4096) {
+                throw RedDBError(ErrorCode::Protocol, "invalid landmark geometry");
+            }
+            std::vector<uint8_t> out;
+            out.reserve(1 + 16 + 1 + 8 + point_count * item.dimensions * 4);
+            out.push_back(TAG_LANDMARK_SET);
+            for (std::byte byte : item.space_id) out.push_back(std::to_integer<uint8_t>(byte));
+            out.push_back(item.dimensions);
+            put_u32_le(out, static_cast<uint32_t>(item.pairs.size()));
+            put_u32_le(out, static_cast<uint32_t>(item.midline.size()));
+            const auto put_point = [&](const std::vector<float>& point) {
+                if (point.size() != item.dimensions) {
+                    throw RedDBError(ErrorCode::Protocol, "invalid landmark geometry");
+                }
+                for (float coordinate : point) {
+                    if (!std::isfinite(coordinate)) {
+                        throw RedDBError(ErrorCode::Protocol, "invalid landmark geometry");
+                    }
+                    uint32_t bits = 0;
+                    std::memcpy(&bits, &coordinate, sizeof(bits));
+                    put_u32_le(out, bits);
+                }
+            };
+            for (const auto& pair : item.pairs) {
+                put_point(pair.left);
+                put_point(pair.right);
+            }
+            for (const auto& point : item.midline) put_point(point);
+            return out;
         }
     }, value.storage());
 }
@@ -334,6 +395,10 @@ bool requires_biometric_capability(const Value& value) noexcept {
                std::is_same_v<T, Value::Iris> || std::is_same_v<T, Value::FeatureVector> ||
                std::is_same_v<T, Value::BitSignature>;
     }, value.storage());
+}
+
+bool requires_landmark_capability(const Value& value) noexcept {
+    return std::holds_alternative<Value::LandmarkSet>(value.storage());
 }
 
 std::vector<uint8_t> encode_query_with_params(std::string_view sql,

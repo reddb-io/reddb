@@ -271,6 +271,10 @@ pub const Conn = struct {
         return (self.server_features & frame.FEATURE_BIOMETRIC_PARAMS) == frame.FEATURE_BIOMETRIC_PARAMS;
     }
 
+    pub fn supportsLandmarkParams(self: *const Conn) bool {
+        return (self.server_features & frame.FEATURE_LANDMARK_PARAMS) == frame.FEATURE_LANDMARK_PARAMS;
+    }
+
     /// Run a SQL query with positional params. Empty param slices
     /// preserve the legacy Query frame path.
     pub fn queryWithParams(
@@ -282,10 +286,11 @@ pub const Conn = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (!self.supportsParams()) return error.ParamsUnsupported;
-        if (!self.supportsBiometricParams()) {
-            for (params) |param| {
-                if (value_codec.requiresBiometricCapability(param)) return error.ParamsUnsupported;
-            }
+        for (params) |param| {
+            if (!self.supportsBiometricParams() and value_codec.requiresBiometricCapability(param))
+                return error.ParamsUnsupported;
+            if (!self.supportsLandmarkParams() and value_codec.requiresLandmarkCapability(param))
+                return error.ParamsUnsupported;
         }
 
         const payload = try value_codec.encodeQueryWithParams(self.allocator, sql, params);

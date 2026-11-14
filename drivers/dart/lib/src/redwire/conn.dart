@@ -175,6 +175,9 @@ class RedwireConn implements Conn, TopologySource {
   bool get supportsBiometricParams =>
       (_serverFeatures & FEATURE_BIOMETRIC_PARAMS) == FEATURE_BIOMETRIC_PARAMS;
 
+  bool get supportsLandmarkParams =>
+      (_serverFeatures & FEATURE_LANDMARK_PARAMS) == FEATURE_LANDMARK_PARAMS;
+
   @override
   Future<Uint8List> query(String sql, {List<Object?>? params}) async {
     final queryParams = params ?? const <Object?>[];
@@ -191,9 +194,15 @@ class RedwireConn implements Conn, TopologySource {
         'server did not advertise FEATURE_BIOMETRIC_PARAMS',
       );
     }
-    final kind = supportsParams
-        ? MessageKind.queryWithParams
-        : MessageKind.query;
+    if (hasParams &&
+        !supportsLandmarkParams &&
+        queryParams.any(ValueCodec.requiresLandmarkCapability)) {
+      throw ParamsUnsupported(
+        'server did not advertise FEATURE_LANDMARK_PARAMS',
+      );
+    }
+    final kind =
+        supportsParams ? MessageKind.queryWithParams : MessageKind.query;
     final payload = supportsParams
         ? ValueCodec.encodeQueryWithParams(sql, queryParams)
         : Uint8List.fromList(utf8.encode(sql));

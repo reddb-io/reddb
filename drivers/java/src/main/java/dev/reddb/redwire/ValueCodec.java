@@ -39,11 +39,13 @@ public final class ValueCodec {
     public static final int TAG_IRIS = 0x0c;
     public static final int TAG_FEATURE_VECTOR = 0x0d;
     public static final int TAG_BIT_SIGNATURE = 0x0e;
+    public static final int TAG_LANDMARK_SET = 0x0f;
 
     public static final int MAX_PARAM_COUNT = 65_536;
     public static final int MAX_VALUE_PAYLOAD_LEN = Frame.MAX_FRAME_SIZE;
     public static final int MAX_FEATURE_VECTOR_DIMENSIONS = 65_536;
     public static final int MAX_BIT_SIGNATURE_BYTES = 1 << 20;
+    public static final int MAX_LANDMARK_POINTS = 4_096;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -55,6 +57,11 @@ public final class ValueCodec {
         JsonNode node = envelopeNode(value);
         return node != null && (node.has("$biometric") || node.has("$feature_vector")
             || node.has("$bit_signature"));
+    }
+
+    public static boolean requiresLandmarkCapability(Object value) {
+        JsonNode node = envelopeNode(value);
+        return node != null && node.has("$landmark_set");
     }
 
     public static byte[] encodeQueryWithParams(String sql, Object[] params) {
@@ -111,6 +118,7 @@ public final class ValueCodec {
                 if (node.has("$biometric")) return encodeBiometric(node.get("$biometric"));
                 if (node.has("$feature_vector")) return encodeFeatureVector(node.get("$feature_vector"));
                 if (node.has("$bit_signature")) return encodeBitSignature(node.get("$bit_signature"));
+                if (node.has("$landmark_set")) return encodeLandmarkSet(node.get("$landmark_set"));
             }
             byte[] json = canonicalJson(value).getBytes(StandardCharsets.UTF_8);
             return encodeLenPrefixed(TAG_JSON, json);
@@ -288,6 +296,52 @@ public final class ValueCodec {
             .order(ByteOrder.LITTLE_ENDIAN);
         out.put((byte) TAG_BIT_SIGNATURE).put(space).putInt(bits.length).put(bits).put(mask);
         return out.array();
+    }
+
+    private static byte[] encodeLandmarkSet(JsonNode value) {
+        if (value == null || !value.isObject() || value.size() != 4
+            || !value.path("pairs").isArray() || !value.path("midline").isArray()) {
+            throw new IllegalArgumentException("$landmark_set must be a canonical object");
+        }
+        JsonNode pairs = value.get("pairs");
+        JsonNode midline = value.get("midline");
+        int dimensions = value.path("dimensions").asInt(0);
+        int pointCount = Math.addExact(Math.multiplyExact(pairs.size(), 2), midline.size());
+        if ((dimensions != 2 && dimensions != 3) || pairs.size() < 2
+            || pointCount > MAX_LANDMARK_POINTS) {
+            throw new IllegalArgumentException("invalid landmark geometry");
+        }
+        byte[] space = decodeSpaceId(requiredText(value, "space_id"));
+        ByteBuffer out = ByteBuffer.allocate(
+            1 + 16 + 1 + 4 + 4 + Math.multiplyExact(pointCount, dimensions * 4))
+            .order(ByteOrder.LITTLE_ENDIAN);
+        out.put((byte) TAG_LANDMARK_SET).put(space).put((byte) dimensions)
+            .putInt(pairs.size()).putInt(midline.size());
+        for (JsonNode pair : pairs) {
+            if (!pair.isObject() || pair.size() != 2 || !pair.has("left") || !pair.has("right")) {
+                throw new IllegalArgumentException("invalid landmark geometry");
+            }
+            putLandmarkPoint(out, pair.get("left"), dimensions);
+            putLandmarkPoint(out, pair.get("right"), dimensions);
+        }
+        for (JsonNode point : midline) putLandmarkPoint(out, point, dimensions);
+        return out.array();
+    }
+
+    private static void putLandmarkPoint(ByteBuffer out, JsonNode point, int dimensions) {
+        if (point == null || !point.isArray() || point.size() != dimensions) {
+            throw new IllegalArgumentException("invalid landmark geometry");
+        }
+        for (JsonNode coordinateNode : point) {
+            if (!coordinateNode.isNumber()) {
+                throw new IllegalArgumentException("invalid landmark geometry");
+            }
+            float coordinate = coordinateNode.floatValue();
+            if (!Float.isFinite(coordinate)) {
+                throw new IllegalArgumentException("invalid landmark geometry");
+            }
+            out.putFloat(coordinate);
+        }
     }
 
     private static JsonNode envelopeNode(Object value) {

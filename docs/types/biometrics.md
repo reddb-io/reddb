@@ -4,7 +4,7 @@ RedDB stores standardized biometric records without extracting features from
 images. It does not run computer vision, liveness/PAD, quality assessment, or
 provider-specific models.
 
-The five native types are:
+The six native types are:
 
 | Type | Purpose | Comparison |
 |:--|:--|:--|
@@ -13,6 +13,7 @@ The five native types are:
 | `IRIS` | Standardized iris record | Storage only |
 | `FEATURE_VECTOR` | Caller-supplied features in an identified feature space | Normalized cosine score in `0..=1` |
 | `BIT_SIGNATURE` | Caller-supplied bits and optional validity mask in an identified feature space | Masked Hamming score in `0..=1` |
+| `LANDMARK_SET` | Caller-supplied 2D or 3D bilateral geometry in an identified coordinate space | Deterministic symmetry score in `0..=1` |
 
 Face and iris matching therefore uses a `FEATURE_VECTOR` or `BIT_SIGNATURE`
 produced by the application. RedDB never claims that those artifacts are ISO
@@ -71,6 +72,7 @@ IRIS($1)
 FEATURE_VECTOR($space_uuid, $vector)
 BIT_SIGNATURE($space_uuid, $bits)
 BIT_SIGNATURE($space_uuid, $bits, $mask)
+LANDMARK_SET($space_uuid, $geometry)
 ```
 
 `space_id` identifies the algorithm, version, preprocessing, and feature
@@ -78,6 +80,23 @@ semantics chosen by the caller. Changing any of those should use a new
 `space_id`. A feature vector must be finite, non-empty, and non-zero. A bit
 signature and mask must have the same non-zero length, and a mask must expose
 at least one valid bit.
+
+Landmark geometry is a canonical JSON object with `dimensions` equal to 2 or
+3, at least two `left`/`right` pairs, and an optional `midline` array. It has
+no weights: every bilateral pair and midline point contributes uniformly.
+Coordinates must be finite and representable as `f32`; RedDB performs the
+calculation in `f64`. A value may contain at most 4,096 points in total.
+
+```json
+{
+  "dimensions": 2,
+  "pairs": [
+    { "left": [10.0, 20.0], "right": [30.0, 20.0] },
+    { "left": [14.0, 30.0], "right": [26.0, 30.0] }
+  ],
+  "midline": [[20.0, 36.0]]
+}
+```
 
 Inspection returns metadata only:
 
@@ -111,6 +130,38 @@ stored but cannot be compared or added to a `MINUTIAE` index. The matcher
 normalizes coordinates to physical resolution, uses rotation/translation
 invariant local descriptors for candidate generation, performs deterministic
 alignment and one-to-one matching, and symmetrically normalizes the score.
+
+### Landmark symmetry
+
+```sql
+LANDMARK_SYMMETRY(landmarks)
+LANDMARK_IS_SYMMETRIC(landmarks, 0.95)
+FACE_LANDMARKS(face)
+```
+
+The symmetry function fits a line in 2D or a plane in 3D from the oriented
+bilateral vectors, pair midpoints, and midline points. It reflects each left
+point, computes the RMSE to the corresponding right point plus each midline
+distance, and normalizes the error by the RMS radius of the full set:
+
+```text
+score = clamp(1 - symmetry_rmse / landmark_scale, 0, 1)
+```
+
+The score is deterministic, equals `1` for exactly symmetric geometry, and is
+invariant to translation, rotation, uniform scale, and swapping every left and
+right point. Degenerate geometry, an undefined axis or plane, and a non-finite
+threshold outside `0..=1` are errors. This release intentionally has no
+`LANDMARK_COMPARE` function and no landmark index.
+
+`FACE_LANDMARKS` parses only type-1, 2D feature points in the Landmark Point
+Block of an ISO/IEC 19794-5:2005 record already stored as `FACE`. It recognizes
+the documented bilateral eye-corner, eye-centre, nose, and nostril codes plus
+the supported nose midline code. Unknown or duplicate codes, incomplete
+bilateral pairs, multiple face blocks, or fewer than two known pairs are
+rejected rather than guessed. The returned coordinate-space identifier is the
+stable UUID `19794520-0500-5000-8000-000000000002`. ISO/IEC 39794-5 remains
+structurally validated ASN.1 and is not decoded into landmarks in this release.
 
 ## Indexed search
 
@@ -169,9 +220,31 @@ remains available until the index is rebuilt.
 }
 ```
 
+```json
+{
+  "$landmark_set": {
+    "space_id": "00112233445566778899aabbccddeeff",
+    "dimensions": 2,
+    "pairs": [
+      { "left": [10.0, 20.0], "right": [30.0, 20.0] },
+      { "left": [14.0, 30.0], "right": [26.0, 30.0] }
+    ],
+    "midline": [[20.0, 36.0]]
+  }
+}
+```
+
 Binary fields use lowercase or uppercase hexadecimal on input. The mask is
 optional in SQL construction and typed HTTP/gRPC input, and defaults to all
 valid bits; typed transport output always includes the effective mask.
+
+The persisted and wire identifiers are compatibility contracts:
+`LANDMARK_SET` uses portable type tag `62`, native value tag `59`, file
+capability bit `1 << 8`, RedWire value tag `0x0f`, RedWire capability
+`0x00000010`, and gRPC `QueryValue` field `16`. PostgreSQL wire returns its
+typed JSON envelope as JSONB. Older file readers fail closed when the file
+requires the landmark capability, and RedWire clients negotiate the capability
+before emitting tag `0x0f`.
 
 ## Privacy and security boundary
 
@@ -180,6 +253,10 @@ encryption at rest, narrow column privileges, RLS, retention policies, and
 application-level consent/audit controls appropriate to the deployment.
 RedDB validates and stores records, but it does not decide whether collection
 or matching is legally permitted.
+
+Diagnostics report only bounded metadata and validation categories. They do
+not include coordinates, bilateral pairs, embeddings, bit signatures, or raw
+biometric payloads.
 
 <!-- contract-matrix:begin -->
 ## Public-surface support
@@ -190,7 +267,7 @@ or matching is legally permitted.
 
 | Promise | sql | http | redwire | grpc | driver_helpers |
 | --- | --- | --- | --- | --- | --- |
-| **PSC-015** — Standardized fingerprint, face, and iris records plus caller-supplied feature vectors and bit signatures are native typed values with deterministic comparison and indexed search. | ✅ supported | ⚠️ partial | ⚠️ partial | ⚠️ partial | ⚠️ partial |
+| **PSC-015** — Standardized fingerprint, face, and iris records plus caller-supplied feature vectors, bit signatures, and landmark sets are native typed values with deterministic comparison, symmetry scoring, and indexed search where applicable. | ✅ supported | ⚠️ partial | ⚠️ partial | ⚠️ partial | ⚠️ partial |
 
 _Status legend: ✅ supported · ⚠️ partial (known gaps) · ❌ unsupported._
 <!-- contract-matrix:end -->
