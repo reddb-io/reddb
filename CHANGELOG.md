@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.36.9
+
+### Patch Changes
+
+- [#2851](https://github.com/reddb-io/reddb/pull/2851) [`06fa3d5`](https://github.com/reddb-io/reddb/commit/06fa3d58ffb90a0b3f29a22d54d08d5ab01c6e26) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Cancel detached HTTP executions so disconnected clients cannot strand server capacity while readiness remains healthy.
+
 ## 1.36.8
 
 ### Patch Changes
