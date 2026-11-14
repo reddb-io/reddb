@@ -1,5 +1,11 @@
 # @reddb-io/client
 
+## 1.36.11
+
+### Patch Changes
+
+- [#2855](https://github.com/reddb-io/reddb/pull/2855) [`66ae92b`](https://github.com/reddb-io/reddb/commit/66ae92b949f03123a1b6b29521f45d2170f8bcf0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Use the native RedWire queue-wait frame for single-message `readWait` calls so idle consumers no longer occupy engine execution workers, and expose `readWaitEntries` for delivery metadata.
+
 ## 1.36.10
 
 ## 1.36.9
