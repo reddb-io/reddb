@@ -35,11 +35,17 @@ final readonly class ScopedQueue
     {
         $this->queue->nack($this->name, $deliveryId, $delay);
     }
+    public function extend(string $deliveryId): void
+    {
+        $this->queue->extend($this->name, $deliveryId);
+    }
 
     /**
      * @param array{consumer:string, waitMs?:int, group?:string, retryDelay?:string,
+     *   concurrency?:int, leaseHeartbeatMs?:int, handlerTimeoutMs?:int,
+     *   receiveBackoff?:array{initialMs?:int,maxMs?:int,multiplier?:float,jitter?:bool},
      *   onError?:(callable(\Throwable,?QueueMessage):void)} $opts
-     * @param callable(QueueMessage):void $handler
+     * @param callable(QueueMessage,QueueHandlerContext):void $handler
      */
     public function consumer(callable $handler, array $opts): QueueConsumer
     {

@@ -14,6 +14,7 @@ use Reddb\Helpers\Documents;
 use Reddb\Helpers\Helpers;
 use Reddb\Helpers\InvalidArgument;
 use Reddb\Helpers\NotFound;
+use Reddb\Helpers\QueueHandlerTimeout;
 use Reddb\Helpers\Querier;
 use Reddb\Helpers\Sql;
 
@@ -194,6 +195,51 @@ final class HelpersTest extends TestCase
         $this->assertSame('d1', $messages[0]->deliveryId);
         $queue->ack('d1');
         $this->assertStringStartsWith('QUEUE ACK jobs', $fq->calls[1]['sql']);
+    }
+
+    public function testScopedQueueExtendsDeliveryLease(): void
+    {
+        $fq = (new FakeQuerier())->reply(['affected' => 1]);
+        (new Helpers($fq))->queue('jobs')->extend('d1');
+        $this->assertSame(
+            "QUEUE EXTEND jobs WITH delivery_id = 'd1'",
+            $fq->calls[0]['sql'],
+        );
+    }
+
+    public function testQueueConsumerTimesOutAfterHandlerSettlesThenNacks(): void
+    {
+        $fq = (new FakeQuerier())
+            ->reply(['rows' => [[
+                'message_id' => 'm1',
+                'delivery_id' => 'd1',
+                'payload' => 'work',
+            ]]])
+            ->reply(['affected' => 1]);
+        $settled = false;
+        $seenError = null;
+        $consumer = null;
+        $consumer = (new Helpers($fq))->queue('jobs')->consumer(
+            function () use (&$settled): void {
+                usleep(2_000);
+                $settled = true;
+            },
+            [
+                'consumer' => 'worker',
+                'waitMs' => 1_000,
+                'handlerTimeoutMs' => 1,
+                'onError' => function (\Throwable $error) use (&$consumer, &$seenError, &$settled): void {
+                    $this->assertTrue($settled);
+                    $seenError = $error;
+                    $consumer->stop();
+                },
+            ],
+        );
+        $consumer->run();
+
+        $this->assertInstanceOf(QueueHandlerTimeout::class, $seenError);
+        $this->assertStringStartsWith('QUEUE NACK jobs', $fq->calls[1]['sql']);
+        $this->assertSame('stopped', $consumer->status()['state']);
     }
 
     public function testDocumentsInsertReturnsRidEnvelope(): void
