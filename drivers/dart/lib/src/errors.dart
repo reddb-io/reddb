@@ -90,6 +90,11 @@ class InvalidResponse extends RedDBError {
   InvalidResponse(String message) : super('INVALID_RESPONSE', message);
 }
 
+/// A queue handler exceeded its configured processing budget.
+class QueueHandlerTimeout extends RedDBError {
+  QueueHandlerTimeout(String message) : super('QUEUE_HANDLER_TIMEOUT', message);
+}
+
 /// Server returned no row for an operation that requires one
 /// (`documents.get`, `documents.patch`, etc).
 class NotFound extends RedDBError {

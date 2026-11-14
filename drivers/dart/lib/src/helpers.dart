@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:async';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'errors.dart';
@@ -538,6 +540,16 @@ class QueueClient {
       '${_kvTagLiteral(deliveryId)}$delayClause',
     );
   }
+
+  Future<void> extend(String queue, String deliveryId) async {
+    if (deliveryId.isEmpty) {
+      throw InvalidArgument('queue delivery_id must be non-empty');
+    }
+    await _q.query(
+      'QUEUE EXTEND ${_sqlIdentifier(queue)} WITH delivery_id = '
+      '${_kvTagLiteral(deliveryId)}',
+    );
+  }
 }
 
 class ScopedQueueClient {
@@ -568,35 +580,93 @@ class ScopedQueueClient {
   Future<void> ack(String deliveryId) => _queue.ack(name, deliveryId);
   Future<void> nack(String deliveryId, {String? delay}) =>
       _queue.nack(name, deliveryId, delay: delay);
+  Future<void> extend(String deliveryId) => _queue.extend(name, deliveryId);
   QueueConsumer consumer(QueueConsumerOptions options) =>
       QueueConsumer(this, options);
 }
 
 typedef QueueMessageHandler = Future<void> Function(QueueMessage message);
+typedef QueueContextMessageHandler = Future<void> Function(
+  QueueMessage message,
+  QueueHandlerContext context,
+);
 typedef QueueErrorHandler = Future<void> Function(
   Object error,
   QueueMessage? message,
 );
 
+class QueueReceiveBackoff {
+  const QueueReceiveBackoff({
+    this.initial = const Duration(milliseconds: 250),
+    this.max = const Duration(seconds: 30),
+    this.multiplier = 2,
+    this.jitter = true,
+  });
+
+  final Duration initial;
+  final Duration max;
+  final double multiplier;
+  final bool jitter;
+}
+
+class QueueHandlerContext {
+  QueueHandlerContext(this._extend);
+
+  final Future<void> Function() _extend;
+  bool _cancelled = false;
+
+  bool get isCancelled => _cancelled;
+  Future<void> extendLease() => _extend();
+  void _cancel() => _cancelled = true;
+}
+
 class QueueConsumerOptions {
   QueueConsumerOptions({
     required this.consumer,
-    required this.handler,
+    this.handler,
+    this.contextHandler,
     this.group,
     this.wait = const Duration(seconds: 30),
     this.retryDelay,
     this.onError,
+    this.concurrency = 1,
+    this.receiveBackoff = const QueueReceiveBackoff(),
+    this.leaseHeartbeat,
+    this.handlerTimeout,
   });
 
   final String consumer;
   final String? group;
   final Duration wait;
   final String? retryDelay;
-  final QueueMessageHandler handler;
+  final QueueMessageHandler? handler;
+  final QueueContextMessageHandler? contextHandler;
   final QueueErrorHandler? onError;
+  final int concurrency;
+  final QueueReceiveBackoff receiveBackoff;
+  final Duration? leaseHeartbeat;
+  final Duration? handlerTimeout;
 }
 
-/// Sequential at-least-once worker. Use one dedicated connection per worker.
+enum QueueConsumerState { idle, running, paused, stopping, stopped, failed }
+
+class QueueConsumerStatus {
+  const QueueConsumerStatus({
+    required this.state,
+    required this.isRunning,
+    required this.isPaused,
+    required this.inFlight,
+    required this.concurrency,
+  });
+
+  final QueueConsumerState state;
+  final bool isRunning;
+  final bool isPaused;
+  final int inFlight;
+  final int concurrency;
+}
+
+/// Managed at-least-once worker with bounded concurrency and renewable leases.
 class QueueConsumer {
   QueueConsumer(this._queue, this._options) {
     _assertIdentifier(_options.consumer, 'consumer name');
@@ -604,33 +674,118 @@ class QueueConsumer {
     if (group != null && group.isNotEmpty) {
       _assertIdentifier(group, 'group name');
     }
-    if (_options.wait.isNegative) {
-      throw InvalidArgument('queue consumer wait must be non-negative');
+    if (_options.wait <= Duration.zero) {
+      throw InvalidArgument('queue consumer wait must be greater than zero');
+    }
+    if (_options.handler == null && _options.contextHandler == null) {
+      throw InvalidArgument('queue consumer requires a handler');
+    }
+    if (_options.handler != null && _options.contextHandler != null) {
+      throw InvalidArgument('queue consumer accepts only one handler');
+    }
+    if (_options.concurrency < 1 || _options.concurrency > 128) {
+      throw InvalidArgument(
+          'queue consumer concurrency must be between 1 and 128');
+    }
+    final backoff = _options.receiveBackoff;
+    if (backoff.initial <= Duration.zero ||
+        backoff.max < backoff.initial ||
+        !backoff.multiplier.isFinite ||
+        backoff.multiplier < 1) {
+      throw InvalidArgument('invalid queue receive backoff');
+    }
+    if (_options.leaseHeartbeat != null &&
+        _options.leaseHeartbeat! <= Duration.zero) {
+      throw InvalidArgument('queue lease heartbeat must be greater than zero');
+    }
+    if (_options.handlerTimeout != null &&
+        _options.handlerTimeout! <= Duration.zero) {
+      throw InvalidArgument('queue handler timeout must be greater than zero');
     }
   }
 
   final ScopedQueueClient _queue;
   final QueueConsumerOptions _options;
   bool _stopping = false;
+  bool _aborted = false;
+  bool _paused = false;
+  int _inFlight = 0;
+  QueueConsumerState _state = QueueConsumerState.idle;
   Future<void>? _completion;
+  Completer<void> _changed = Completer<void>();
+  final Random _random = Random();
+
+  QueueConsumerStatus get status => QueueConsumerStatus(
+        state: _state,
+        isRunning: _state == QueueConsumerState.running ||
+            _state == QueueConsumerState.paused,
+        isPaused: _paused,
+        inFlight: _inFlight,
+        concurrency: _options.concurrency,
+      );
 
   QueueConsumer start() {
     if (_completion != null) {
       throw InvalidArgument('queue consumer already started');
     }
-    _completion = _run();
+    _state = QueueConsumerState.running;
+    _completion = _run().then(
+      (_) => _state = QueueConsumerState.stopped,
+      onError: (Object error, StackTrace stack) {
+        _state = QueueConsumerState.failed;
+        Error.throwWithStackTrace(error, stack);
+      },
+    );
     return this;
   }
 
   Future<void> stop() async {
-    _stopping = true;
+    requestStop();
     await _completion;
+  }
+
+  void requestStop() {
+    _stopping = true;
+    _paused = false;
+    if (_state != QueueConsumerState.idle &&
+        _state != QueueConsumerState.stopped &&
+        _state != QueueConsumerState.failed) {
+      _state = QueueConsumerState.stopping;
+    }
+    _signal();
+  }
+
+  void abort() {
+    _aborted = true;
+    requestStop();
+  }
+
+  void pause() {
+    if (_state == QueueConsumerState.running) {
+      _paused = true;
+      _state = QueueConsumerState.paused;
+    }
+  }
+
+  void resume() {
+    if (_state == QueueConsumerState.paused) {
+      _paused = false;
+      _state = QueueConsumerState.running;
+      _signal();
+    }
   }
 
   Future<void> get completion => _completion ?? Future.value();
 
   Future<void> _run() async {
+    await Future.wait(List.generate(_options.concurrency, (_) => _runLane()));
+  }
+
+  Future<void> _runLane() async {
+    var receiveFailures = 0;
     while (!_stopping) {
+      await _waitUntilReady();
+      if (_stopping) return;
       List<QueueMessage> messages;
       try {
         messages = await _queue.readWait(
@@ -643,32 +798,144 @@ class QueueConsumer {
         final onError = _options.onError;
         if (onError == null) rethrow;
         await onError(error, null);
+        receiveFailures++;
+        if (!await _backoff(receiveFailures)) return;
         continue;
       }
+      receiveFailures = 0;
       if (messages.isEmpty) continue;
-      final message = messages.first;
-      try {
-        if (message.deliveryId.isEmpty) {
-          throw InvalidResponse('queue delivery is missing delivery_id');
-        }
-        await _options.handler(message);
-      } catch (error) {
-        if (message.deliveryId.isNotEmpty) {
-          await _queue.nack(message.deliveryId, delay: _options.retryDelay);
-        }
-        final onError = _options.onError;
-        if (onError == null) rethrow;
-        await onError(error, message);
-        continue;
+      await _process(messages.first);
+    }
+  }
+
+  Future<void> _process(QueueMessage message) async {
+    if (message.deliveryId.isEmpty) {
+      await _report(
+        InvalidResponse('queue delivery is missing delivery_id'),
+        message,
+      );
+      return;
+    }
+    _inFlight++;
+    final context =
+        QueueHandlerContext(() => _queue.extend(message.deliveryId));
+    Object? handlerError;
+    Object? leaseError;
+    var timedOut = false;
+    var settled = false;
+    final timeout = _options.handlerTimeout == null
+        ? null
+        : Timer(_options.handlerTimeout!, () {
+            timedOut = true;
+            context._cancel();
+          });
+    final heartbeat = _heartbeat(message, context, () => settled, (error) {
+      leaseError = error;
+      context._cancel();
+    });
+    try {
+      final contextHandler = _options.contextHandler;
+      if (contextHandler != null) {
+        await contextHandler(message, context);
+      } else {
+        await _options.handler!(message);
       }
+    } catch (error) {
+      handlerError = error;
+    } finally {
+      settled = true;
+      timeout?.cancel();
+      await heartbeat;
+      _inFlight--;
+    }
+    if (_aborted) return;
+    if (leaseError != null) {
+      await _report(leaseError!, message);
+      return;
+    }
+    if (timedOut) {
+      final error = QueueHandlerTimeout(
+        'queue handler exceeded ${_options.handlerTimeout}',
+      );
       try {
-        await _queue.ack(message.deliveryId);
+        await _queue.nack(message.deliveryId, delay: _options.retryDelay);
+      } catch (nackError) {
+        await _report(nackError, message);
+        return;
+      }
+      await _report(error, message);
+      return;
+    }
+    if (handlerError != null) {
+      try {
+        await _queue.nack(message.deliveryId, delay: _options.retryDelay);
+      } catch (nackError) {
+        await _report(nackError, message);
+        return;
+      }
+      await _report(handlerError, message);
+      return;
+    }
+    try {
+      await _queue.ack(message.deliveryId);
+    } catch (error) {
+      // An ambiguous ACK must never be followed by a NACK.
+      await _report(error, message);
+    }
+  }
+
+  Future<void> _heartbeat(
+    QueueMessage message,
+    QueueHandlerContext context,
+    bool Function() settled,
+    void Function(Object error) failed,
+  ) async {
+    final period = _options.leaseHeartbeat;
+    if (period == null) return;
+    while (!settled()) {
+      await Future<void>.delayed(period);
+      if (settled()) return;
+      try {
+        await context.extendLease();
       } catch (error) {
-        final onError = _options.onError;
-        if (onError == null) rethrow;
-        await onError(error, message);
+        failed(error);
+        return;
       }
     }
+  }
+
+  Future<void> _report(Object error, QueueMessage? message) async {
+    final onError = _options.onError;
+    if (onError == null) throw error;
+    await onError(error, message);
+  }
+
+  Future<void> _waitUntilReady() async {
+    while (_paused && !_stopping) {
+      final changed = _changed.future;
+      if (!_paused || _stopping) return;
+      await changed;
+    }
+  }
+
+  Future<bool> _backoff(int failures) async {
+    final options = _options.receiveBackoff;
+    final factor = pow(options.multiplier, failures - 1).toDouble();
+    var milliseconds = min(
+      options.initial.inMilliseconds * factor,
+      options.max.inMilliseconds.toDouble(),
+    );
+    if (options.jitter) milliseconds *= _random.nextDouble();
+    final timer = Future<void>.delayed(
+      Duration(milliseconds: milliseconds.round()),
+    );
+    await Future.any([timer, _changed.future]);
+    return !_stopping;
+  }
+
+  void _signal() {
+    if (!_changed.isCompleted) _changed.complete();
+    _changed = Completer<void>();
   }
 }
 
