@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.36.6
+
+### Patch Changes
+
+- [#2844](https://github.com/reddb-io/reddb/pull/2844) [`f25f64d`](https://github.com/reddb-io/reddb/commit/f25f64d09a3bfe88b70343f33eb1a6d5dec335f4) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow canonical configuration recovery to replay pending WAL when a historical database contains only the populated `red_config` resume identity. Promote that single root to `red.config`, normalize its legacy keys, and preserve the source database and WAL unchanged.
+
 ## 1.36.5
 
 ### Patch Changes
