@@ -14,6 +14,7 @@ pub const HelperError = error{
     InvalidArgument,
     NotFound,
     InvalidResponse,
+    QueueHandlerTimeout,
     OutOfMemory,
     InvalidJson,
 };
@@ -647,6 +648,22 @@ pub const QueueClient = struct {
         const body = try self.q.query(self.allocator, sql, &.{});
         self.allocator.free(body);
     }
+
+    pub fn extend(self: QueueClient, queue_name: []const u8, delivery_id: []const u8) !void {
+        if (delivery_id.len == 0) return HelperError.InvalidArgument;
+        const qid = try identifier(self.allocator, queue_name);
+        defer self.allocator.free(qid);
+        const did = try kvTagLiteral(self.allocator, delivery_id);
+        defer self.allocator.free(did);
+        const sql = try std.fmt.allocPrint(
+            self.allocator,
+            "QUEUE EXTEND {s} WITH delivery_id = {s}",
+            .{ qid, did },
+        );
+        defer self.allocator.free(sql);
+        const body = try self.q.query(self.allocator, sql, &.{});
+        self.allocator.free(body);
+    }
 };
 
 pub const ScopedQueueClient = struct {
@@ -674,18 +691,39 @@ pub const ScopedQueueClient = struct {
         return self.queue.nack(self.name, delivery_id, delay);
     }
 
+    pub fn extend(self: ScopedQueueClient, delivery_id: []const u8) !void {
+        return self.queue.extend(self.name, delivery_id);
+    }
+
     pub const ConsumerOptions = struct {
         consumer: []const u8,
         group: ?[]const u8 = null,
         wait_ms: i64 = 30_000,
         retry_delay: ?[]const u8 = null,
         stop: *const std.atomic.Value(bool),
+        handler_cancelled: ?*std.atomic.Value(bool) = null,
+        lease_heartbeat_ms: u64 = 0,
+        handler_timeout_ms: u64 = 0,
         context: *anyopaque,
         handler: *const fn (*anyopaque, *const QueueMessage) anyerror!void,
     };
 
-    /// Sequential at-least-once loop. Run in a dedicated Zig thread for
-    /// background processing; setting `stop` exits after the active wait/handler.
+    const HandlerRun = struct {
+        options: *const ConsumerOptions,
+        message: *const QueueMessage,
+        done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+        handler_error: ?anyerror = null,
+    };
+
+    fn runHandler(run: *HandlerRun) void {
+        run.options.handler(run.options.context, run.message) catch |err| {
+            run.handler_error = err;
+        };
+        run.done.store(true, .release);
+    }
+
+    /// At-least-once loop with automatic lease renewal and safe handler
+    /// timeout. Run one consumer per Zig thread for parallel lanes.
     pub fn consume(self: ScopedQueueClient, options: ConsumerOptions) !void {
         try assertIdentifier(options.consumer, "consumer name");
         if (options.group) |group| try assertIdentifier(group, "group name");
@@ -700,10 +738,46 @@ pub const ScopedQueueClient = struct {
             }
             if (messages.len == 0) continue;
             const message = &messages[0];
-            options.handler(options.context, message) catch |handler_error| {
+            if (message.delivery_id.len == 0) return HelperError.InvalidResponse;
+            if (options.handler_cancelled) |cancelled| cancelled.store(false, .release);
+            var run = HandlerRun{ .options = &options, .message = message };
+            var handler_thread = try std.Thread.spawn(.{}, runHandler, .{&run});
+            const started = std.time.milliTimestamp();
+            var next_heartbeat = started + @as(i64, @intCast(options.lease_heartbeat_ms));
+            var timed_out = false;
+            var lease_error: ?anyerror = null;
+            while (!run.done.load(.acquire)) {
+                std.Thread.sleep(std.time.ns_per_ms);
+                const now = std.time.milliTimestamp();
+                if (options.handler_timeout_ms > 0 and
+                    now - started >= @as(i64, @intCast(options.handler_timeout_ms)))
+                {
+                    timed_out = true;
+                    if (options.handler_cancelled) |cancelled| cancelled.store(true, .release);
+                    break;
+                }
+                if (options.lease_heartbeat_ms > 0 and now >= next_heartbeat) {
+                    self.extend(message.delivery_id) catch |err| {
+                        lease_error = err;
+                        if (options.handler_cancelled) |cancelled| cancelled.store(true, .release);
+                        break;
+                    };
+                    next_heartbeat = now + @as(i64, @intCast(options.lease_heartbeat_ms));
+                }
+            }
+            handler_thread.join();
+            if (lease_error) |err| {
+                // Ownership is uncertain after EXTEND fails: never ACK or NACK.
+                return err;
+            }
+            if (timed_out) {
+                try self.nack(message.delivery_id, options.retry_delay);
+                return HelperError.QueueHandlerTimeout;
+            }
+            if (run.handler_error) |handler_error| {
                 try self.nack(message.delivery_id, options.retry_delay);
                 return handler_error;
-            };
+            }
             try self.ack(message.delivery_id);
         }
     }

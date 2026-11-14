@@ -284,6 +284,48 @@ test "scoped queue preserves delivery id and acks" {
     try testing.expect(std.mem.startsWith(u8, fq.calls.items[1].sql, "QUEUE ACK jobs"));
 }
 
+test "scoped queue extends delivery lease" {
+    const a = testing.allocator;
+    var fq = FakeQuerier.init(a);
+    defer fq.deinit();
+    try fq.replies.append("{}");
+    const h = helpers.Helpers.init(a, fq.querier());
+    const queue = try h.queueNamed("jobs");
+    try queue.extend("d1");
+    try testing.expectEqualStrings(
+        "QUEUE EXTEND jobs WITH delivery_id = 'd1'",
+        fq.calls.items[0].sql,
+    );
+}
+
+test "queue consumer waits for timed out handler then nacks" {
+    const SlowHandler = struct {
+        fn run(_: *anyopaque, _: *const helpers.QueueMessage) anyerror!void {
+            std.Thread.sleep(5 * std.time.ns_per_ms);
+        }
+    };
+    const a = testing.allocator;
+    var fq = FakeQuerier.init(a);
+    defer fq.deinit();
+    try fq.replies.append(
+        \\{"rows":[{"message_id":"m1","delivery_id":"d1","payload":"work"}]}
+    );
+    try fq.replies.append("{}");
+    const h = helpers.Helpers.init(a, fq.querier());
+    const queue = try h.queueNamed("jobs");
+    var stop = std.atomic.Value(bool).init(false);
+    var context: u8 = 0;
+    try testing.expectError(helpers.HelperError.QueueHandlerTimeout, queue.consume(.{
+        .consumer = "worker",
+        .wait_ms = 1000,
+        .stop = &stop,
+        .handler_timeout_ms = 1,
+        .context = &context,
+        .handler = SlowHandler.run,
+    }));
+    try testing.expect(std.mem.startsWith(u8, fq.calls.items[1].sql, "QUEUE NACK jobs"));
+}
+
 test "secrets bind operations to explicit collection" {
     const a = testing.allocator;
     var fq = FakeQuerier.init(a);
