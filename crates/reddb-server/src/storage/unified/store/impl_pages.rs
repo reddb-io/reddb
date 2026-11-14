@@ -4782,12 +4782,14 @@ mod checkpoint_work_tests {
             .path()
             .join("recovered-single-legacy-config");
 
-        crate::storage::compact::recover_paged_wal_canonical_system_config(
+        let report = crate::storage::compact::recover_paged_wal_canonical_system_config(
             &fixture.path,
             &destination,
         )
         .expect("recover pending WAL and promote the legacy config root");
 
+        assert_eq!(report.reconciled_system_collections, 1);
+        assert_eq!(report.imported_system_records, 1);
         assert_eq!(std::fs::read(&fixture.path).unwrap(), original);
         assert_eq!(std::fs::read(&wal).unwrap(), original_wal);
         for _ in 0..2 {
