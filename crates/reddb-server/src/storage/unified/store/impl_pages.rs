@@ -4520,6 +4520,33 @@ mod checkpoint_work_tests {
         .is_none());
     }
 
+    fn remove_fixture_catalog_resume_and_proofs(fixture: &DuplicateSystemCatalogFixture) {
+        let pager = Pager::open(
+            &fixture.path,
+            PagerConfig {
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
+        )
+        .expect("fixture pager");
+        let mut metadata = read_meta_payload(&pager).unwrap().unwrap();
+        assert!(reddb_file::native_resume::decode_catalog_resume(&metadata)
+            .unwrap()
+            .is_some());
+        let proofs = metadata
+            .windows(4)
+            .rposition(|bytes| bytes == b"RDTP")
+            .expect("prepared fixture tree proofs");
+        metadata.truncate(proofs);
+        publish_paged_metadata(&pager, &metadata).unwrap();
+        pager.sync().unwrap();
+        assert!(reddb_file::native_resume::decode_catalog_resume(
+            &read_meta_payload(&pager).unwrap().unwrap()
+        )
+        .unwrap()
+        .is_none());
+    }
+
     #[test]
     fn no_resume_catalog_keeps_populated_config_beside_zero_root_alias() {
         for (legacy_populated, canonical_populated) in
@@ -4735,12 +4762,56 @@ mod checkpoint_work_tests {
         );
     }
 
-    #[test]
-    fn explicit_compaction_promotes_populated_legacy_system_config() {
+    fn assert_explicit_compaction_promotes_populated_legacy_system_config(without_resume: bool) {
         let reported_keys = super::super::config_keys::tests::REPORTED_DATABASE_KEYS;
         let fixture =
             duplicate_system_catalog_fixture_with_keys(true, false, false, false, reported_keys);
-        let destination = fixture._directory.path().join("canonical-system-config");
+        if without_resume {
+            remove_fixture_catalog_resume_and_proofs(&fixture);
+            let pager = Pager::open(
+                &fixture.path,
+                PagerConfig {
+                    disk_residency: true,
+                    ..PagerConfig::default()
+                },
+            )
+            .expect("inspect no-resume source");
+            assert!(pager.header().unwrap().requires_disk_residency());
+            assert!(reddb_file::native_resume::decode_catalog_resume(
+                &read_meta_payload(&pager).unwrap().unwrap()
+            )
+            .unwrap()
+            .is_none());
+        }
+        let source_manifest =
+            crate::storage::operational_manifest::OperationalManifest::for_db_path(&fixture.path);
+        source_manifest
+            .create_collection("red_config")
+            .expect("legacy operational identity");
+        source_manifest
+            .create_collection("red.config")
+            .expect("canonical operational identity");
+        let legacy_artifact: &[u8] = if without_resume {
+            &[]
+        } else {
+            b"populated-legacy-operational-artifact"
+        };
+        let legacy_artifact_path = source_manifest.collection_path_for_test("red_config");
+        std::fs::create_dir_all(legacy_artifact_path.parent().unwrap())
+            .expect("operational artifact directory");
+        std::fs::write(&legacy_artifact_path, legacy_artifact)
+            .expect("legacy operational artifact");
+        std::fs::write(
+            source_manifest.collection_path_for_test("red.config"),
+            b"empty-canonical-operational-artifact",
+        )
+        .expect("canonical operational artifact");
+        let original = std::fs::read(&fixture.path).expect("source bytes");
+        let destination = fixture._directory.path().join(if without_resume {
+            "canonical-system-config-no-resume"
+        } else {
+            "canonical-system-config-prepared"
+        });
 
         let report = crate::storage::compact::compact_paged_canonical_system_config(
             &fixture.path,
@@ -4750,8 +4821,35 @@ mod checkpoint_work_tests {
         assert!(report.records > 0);
         assert_eq!(report.reconciled_system_collections, 1);
         assert_eq!(report.imported_system_records, reported_keys.len());
+        assert_eq!(std::fs::read(&fixture.path).unwrap(), original);
 
         let rewritten_path = destination.join("data.rdb");
+        let rewritten_manifest =
+            crate::storage::operational_manifest::OperationalManifest::for_db_path(&rewritten_path);
+        assert_eq!(
+            std::fs::read(rewritten_manifest.collection_path_for_test("red_config")).unwrap(),
+            legacy_artifact,
+            "the populated legacy operational artifact must survive under the canonical identity"
+        );
+        assert!(!rewritten_manifest
+            .collection_path_for_test("red.config")
+            .exists());
+        if without_resume {
+            let pager = Pager::open(
+                &rewritten_path,
+                PagerConfig {
+                    disk_residency: true,
+                    ..PagerConfig::default()
+                },
+            )
+            .expect("inspect prepared rewrite");
+            assert!(pager.header().unwrap().requires_disk_residency());
+            assert!(reddb_file::native_resume::decode_catalog_resume(
+                &read_meta_payload(&pager).unwrap().unwrap()
+            )
+            .unwrap()
+            .is_some());
+        }
         let rewritten = UnifiedStore::open_with_config(&rewritten_path, fixture.config.clone())
             .expect("open canonical rewrite");
         assert_eq!(rewritten.list_collections(), vec!["red.config".to_string()]);
@@ -4769,25 +4867,28 @@ mod checkpoint_work_tests {
         assert_eq!(rewritten.legacy_red_config_key_count().unwrap(), 0);
         drop(rewritten);
 
-        let cold = UnifiedStore::open_with_config(&rewritten_path, fixture.config)
-            .expect("cold reopen canonical rewrite");
-        assert_eq!(cold.list_collections(), vec!["red.config".to_string()]);
-        assert!(
-            cold.get_collection("red.config")
-                .expect("canonical collection")
-                .count()
-                >= reported_keys.len()
-        );
-        for (offset, legacy) in reported_keys.iter().enumerate() {
-            let canonical = legacy
-                .strip_prefix("red.config.")
-                .or_else(|| legacy.strip_prefix("red."))
-                .unwrap_or(legacy);
-            assert_eq!(
-                cold.get_config(canonical),
-                Some(Value::Integer(i64::try_from(offset).unwrap() + 1)),
-                "cold reopen lost {canonical}"
+        for _ in 0..2 {
+            let cold = UnifiedStore::open_with_config(&rewritten_path, fixture.config.clone())
+                .expect("cold reopen canonical rewrite");
+            assert_eq!(cold.list_collections(), vec!["red.config".to_string()]);
+            assert!(
+                cold.get_collection("red.config")
+                    .expect("canonical collection")
+                    .count()
+                    >= reported_keys.len()
             );
+            for (offset, legacy) in reported_keys.iter().enumerate() {
+                let canonical = legacy
+                    .strip_prefix("red.config.")
+                    .or_else(|| legacy.strip_prefix("red."))
+                    .unwrap_or(legacy);
+                assert_eq!(
+                    cold.get_config(canonical),
+                    Some(Value::Integer(i64::try_from(offset).unwrap() + 1)),
+                    "cold reopen lost {canonical}"
+                );
+            }
+            assert_eq!(cold.legacy_red_config_key_count().unwrap(), 0);
         }
         assert!(
             crate::storage::operational_manifest::OperationalManifest::for_db_path(&rewritten_path)
@@ -4795,6 +4896,16 @@ mod checkpoint_work_tests {
                 .expect("canonical operational manifest")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn explicit_compaction_promotes_populated_legacy_system_config() {
+        assert_explicit_compaction_promotes_populated_legacy_system_config(false);
+    }
+
+    #[test]
+    fn explicit_compaction_promotes_no_resume_legacy_system_config() {
+        assert_explicit_compaction_promotes_populated_legacy_system_config(true);
     }
 
     #[test]
@@ -4809,6 +4920,27 @@ mod checkpoint_work_tests {
         .expect_err("two populated config trees must not be discarded");
         assert!(error.to_string().contains("refusing lossy migration"));
         assert!(!destination.exists());
+    }
+
+    #[test]
+    fn explicit_compaction_without_resume_refuses_two_populated_config_trees() {
+        let fixture = duplicate_system_catalog_fixture(true, true, false);
+        remove_fixture_catalog_resume_and_proofs(&fixture);
+        let original = std::fs::read(&fixture.path).expect("source bytes");
+        let destination = fixture
+            ._directory
+            .path()
+            .join("ambiguous-no-resume-system-config");
+
+        let error = crate::storage::compact::compact_paged_canonical_system_config(
+            &fixture.path,
+            &destination,
+        )
+        .expect_err("two populated no-resume config trees must not be discarded");
+
+        assert!(error.to_string().contains("refusing lossy migration"));
+        assert_eq!(std::fs::read(&fixture.path).unwrap(), original);
+        assert!(!destination.join("data.rdb").exists());
     }
 
     #[test]
