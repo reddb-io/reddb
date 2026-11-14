@@ -731,6 +731,24 @@ impl<'a> ScopedQueueClient<'a> {
             .await
     }
 
+    /// Refresh the visibility deadline using the queue's current lock policy.
+    pub async fn extend(&self, delivery_id: &str) -> Result<QueryResult> {
+        if delivery_id.is_empty() {
+            return Err(ClientError::new(
+                ErrorCode::InvalidArgument,
+                "queue delivery_id must be non-empty",
+            ));
+        }
+        self.queue
+            .db
+            .query(&format!(
+                "QUEUE EXTEND {} WITH delivery_id = {}",
+                self.name,
+                sql_string_literal(delivery_id)
+            ))
+            .await
+    }
+
     /// Run a sequential at-least-once consumer until `stopping` becomes true.
     ///
     /// The caller should dedicate this connection to the consumer. A successful

@@ -281,6 +281,16 @@ pub(crate) trait QueueStore {
     /// mutating pending state.
     fn read_pending_attempt(&self, delivery_id: &str) -> Result<BumpedAttempt>;
 
+    /// Refresh the visibility deadline for an existing pending delivery.
+    /// Returns `UnknownDelivery` when the handle is stale so a worker never
+    /// mistakes a lost lease for a successful heartbeat.
+    fn refresh_pending_deadline(
+        &self,
+        txn: &QueueTxn,
+        delivery_id: &str,
+        deadline: Instant,
+    ) -> Result<()>;
+
     /// Per-message retry budget — the value the lifecycle compares the
     /// `bump_attempt` return against to decide retire-vs-requeue. Sourced
     /// from the row data on `Primary`/`Replica` (the same field
@@ -755,6 +765,21 @@ impl QueueStore for InMemoryQueueStore {
             group: entry.group.clone(),
             consumer: entry.consumer.clone(),
         })
+    }
+
+    fn refresh_pending_deadline(
+        &self,
+        _txn: &QueueTxn,
+        delivery_id: &str,
+        deadline: Instant,
+    ) -> Result<()> {
+        let mut state = self.state.lock().expect("state poisoned");
+        let pending = state
+            .pending
+            .get_mut(delivery_id)
+            .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
+        pending.deadline = deadline;
+        Ok(())
     }
 
     fn read_max_attempts(&self, queue: &str, message_id: MessageId) -> u32 {

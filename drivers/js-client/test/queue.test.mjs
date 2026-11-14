@@ -200,12 +200,14 @@ test('scoped queue binds the queue name once', async () => {
   assert.equal(await jobs.len(), 2)
   await jobs.ack("delivery'1")
   await jobs.nack('delivery-2', { delay: '5s' })
+  await jobs.extend('delivery-3')
 
   assert.deepEqual(calls.map((call) => call.params.sql), [
     'QUEUE PUSH jobs {"task":"ship"}',
     'QUEUE LEN jobs',
     "QUEUE ACK jobs WITH delivery_id = 'delivery''1'",
     "QUEUE NACK jobs WITH delivery_id = 'delivery-2' WITH DELAY 5s",
+    "QUEUE EXTEND jobs WITH delivery_id = 'delivery-3'",
   ])
 })
 
@@ -340,4 +342,244 @@ test('queue consumer reports ACK failure without issuing NACK', async () => {
 
   assert.deepEqual(errors, ['ACK response lost'])
   assert.equal(calls.some((call) => call.params?.sql?.startsWith('QUEUE NACK')), false)
+})
+
+test('queue consumer backs off after receive failures instead of hot-looping', async () => {
+  const attempts = []
+  const errors = []
+  let worker
+  const queue = new QueueClient({
+    nativeQueueWait: true,
+    async call(method) {
+      if (method !== 'queue_wait') return { rows: [] }
+      attempts.push(Date.now())
+      if (attempts.length === 1) throw new Error('receive failed')
+      void worker.stop()
+      return { rows: [] }
+    },
+  }).scope('jobs')
+  worker = queue.consumer({
+    consumer: 'worker1',
+    waitMs: 1000,
+    receiveBackoff: { initialMs: 20, maxMs: 20, jitter: false },
+    async handleMessage() {},
+    async onError(error) {
+      errors.push(error.message)
+    },
+  })
+
+  worker.start()
+  await worker.finished()
+
+  assert.deepEqual(errors, ['receive failed'])
+  assert.equal(attempts.length, 2)
+  assert.ok(attempts[1] - attempts[0] >= 15)
+})
+
+test('queue consumer pause waits before starting another receive', async () => {
+  let releaseFirst
+  const firstReceive = new Promise((resolve) => { releaseFirst = resolve })
+  let receives = 0
+  let worker
+  const queue = new QueueClient({
+    nativeQueueWait: true,
+    async call(method) {
+      if (method !== 'queue_wait') return { rows: [] }
+      receives += 1
+      if (receives === 1) await firstReceive
+      if (receives === 2) void worker.stop()
+      return { rows: [] }
+    },
+  }).scope('jobs')
+  worker = queue.consumer({
+    consumer: 'worker1',
+    waitMs: 1000,
+    async handleMessage() {},
+  })
+
+  worker.start()
+  worker.pause()
+  releaseFirst()
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(receives, 1)
+  assert.deepEqual(worker.status, {
+    state: 'paused', isRunning: true, isPaused: true, inFlight: 0, concurrency: 1,
+  })
+
+  worker.resume()
+  await worker.finished()
+  assert.equal(receives, 2)
+})
+
+test('queue consumer extends the lease while a handler is active', async () => {
+  const calls = []
+  let releaseHandler
+  const handlerDone = new Promise((resolve) => { releaseHandler = resolve })
+  let waits = 0
+  let worker
+  const queue = new QueueClient({
+    nativeQueueWait: true,
+    async call(method, params) {
+      calls.push({ method, params })
+      if (method === 'queue_wait') {
+        waits += 1
+        return waits === 1 ? { rows: [{ delivery_id: 'd1', payload: 'work' }] } : { rows: [] }
+      }
+      if (params.sql.startsWith('QUEUE EXTEND')) releaseHandler()
+      return { rows: [] }
+    },
+  }).scope('jobs')
+  worker = queue.consumer({
+    consumer: 'worker1',
+    waitMs: 1000,
+    leaseHeartbeatMs: 5,
+    async handleMessage(_message, context) {
+      assert.equal(context.deliveryId, 'd1')
+      assert.equal(context.signal.aborted, false)
+      await handlerDone
+      void worker.stop()
+    },
+  })
+
+  worker.start()
+  await worker.finished()
+
+  assert.equal(
+    calls.some((call) => call.params?.sql === "QUEUE EXTEND jobs WITH delivery_id = 'd1'"),
+    true,
+  )
+  assert.equal(
+    calls.some((call) => call.params?.sql === "QUEUE ACK jobs WITH delivery_id = 'd1'"),
+    true,
+  )
+})
+
+test('queue consumer never ACKs or NACKs after losing the delivery lease', async () => {
+  const calls = []
+  const errors = []
+  let waits = 0
+  let worker
+  const queue = new QueueClient({
+    nativeQueueWait: true,
+    async call(method, params) {
+      calls.push({ method, params })
+      if (method === 'queue_wait') {
+        waits += 1
+        return waits === 1 ? { rows: [{ delivery_id: 'd1', payload: 'work' }] } : { rows: [] }
+      }
+      if (params.sql.startsWith('QUEUE EXTEND')) throw new Error('lease lost')
+      return { rows: [] }
+    },
+  }).scope('jobs')
+  worker = queue.consumer({
+    consumer: 'worker1',
+    waitMs: 1000,
+    leaseHeartbeatMs: 5,
+    async handleMessage(_message, context) {
+      await new Promise((resolve) => {
+        context.signal.addEventListener('abort', resolve, { once: true })
+      })
+    },
+    async onError(error) {
+      errors.push(error.message)
+      void worker.stop()
+    },
+  })
+
+  worker.start()
+  await worker.finished()
+
+  assert.deepEqual(errors, ['lease lost'])
+  assert.equal(calls.some((call) => call.params?.sql?.startsWith('QUEUE ACK')), false)
+  assert.equal(calls.some((call) => call.params?.sql?.startsWith('QUEUE NACK')), false)
+})
+
+test('queue consumer timeout aborts cooperatively before NACK', async () => {
+  const calls = []
+  const errors = []
+  let waits = 0
+  let worker
+  const queue = new QueueClient({
+    nativeQueueWait: true,
+    async call(method, params) {
+      calls.push({ method, params })
+      if (method === 'queue_wait') {
+        waits += 1
+        return waits === 1 ? { rows: [{ delivery_id: 'd1', payload: 'work' }] } : { rows: [] }
+      }
+      return { rows: [] }
+    },
+  }).scope('jobs')
+  worker = queue.consumer({
+    consumer: 'worker1',
+    waitMs: 1000,
+    handlerTimeoutMs: 5,
+    async handleMessage(_message, context) {
+      await new Promise((resolve) => {
+        context.signal.addEventListener('abort', resolve, { once: true })
+      })
+    },
+    async onError(error) {
+      errors.push({ code: error.code, abortedBeforeReport: true })
+      void worker.stop()
+    },
+  })
+
+  worker.start()
+  await worker.finished()
+
+  assert.deepEqual(errors, [{ code: 'QUEUE_HANDLER_TIMEOUT', abortedBeforeReport: true }])
+  assert.equal(
+    calls.some((call) => call.params?.sql === "QUEUE NACK jobs WITH delivery_id = 'd1'"),
+    true,
+  )
+})
+
+test('queue consumer processes up to the configured concurrency', async () => {
+  let nextDelivery = 1
+  let active = 0
+  let maxActive = 0
+  let handled = 0
+  let releaseHandlers
+  let releaseReceives
+  const handlersDone = new Promise((resolve) => { releaseHandlers = resolve })
+  const receivesDone = new Promise((resolve) => { releaseReceives = resolve })
+  let worker
+  const queue = new QueueClient({
+    nativeQueueWait: true,
+    async call(method) {
+      if (method !== 'queue_wait') return { rows: [] }
+      if (nextDelivery <= 2) {
+        const deliveryId = `d${nextDelivery}`
+        nextDelivery += 1
+        return { rows: [{ delivery_id: deliveryId, payload: deliveryId }] }
+      }
+      await receivesDone
+      return { rows: [] }
+    },
+  }).scope('jobs')
+  worker = queue.consumer({
+    consumer: 'worker1',
+    waitMs: 1000,
+    concurrency: 2,
+    async handleMessage() {
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      if (active === 2) releaseHandlers()
+      await handlersDone
+      active -= 1
+      handled += 1
+      if (handled === 2) {
+        void worker.stop()
+        releaseReceives()
+      }
+    },
+  })
+
+  worker.start()
+  await worker.finished()
+
+  assert.equal(maxActive, 2)
+  assert.equal(handled, 2)
+  assert.equal(worker.status.concurrency, 2)
 })

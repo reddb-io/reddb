@@ -1006,6 +1006,7 @@ impl RedDBRuntime {
             | QueueCommand::Claim { queue, .. }
             | QueueCommand::Ack { queue, .. }
             | QueueCommand::AckBatch { queue, .. }
+            | QueueCommand::Extend { queue, .. }
             | QueueCommand::Nack { queue, .. } => vec![queue.as_str()],
         };
         // READ owns a separate scope per probe, releasing its publication lock
@@ -1641,6 +1642,31 @@ impl RedDBRuntime {
                 Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     "messages acknowledged",
+                    "update",
+                ))
+            }
+            QueueCommand::Extend { queue, delivery_id } => {
+                let store = self.inner.db.store();
+                ensure_queue_exists(store.as_ref(), queue)?;
+                let config = load_queue_config(store.as_ref(), queue);
+                let (lifecycle, pending_store, txn) = runtime_lifecycle(self, queue);
+                let pending = pending_store
+                    .read_pending_attempt(delivery_id)
+                    .map_err(map_qse)?;
+                if pending.queue != *queue {
+                    return Err(RedDBError::NotFound(format!(
+                        "delivery_id does not belong to queue '{queue}'"
+                    )));
+                }
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_millis(config.lock_deadline_ms);
+                lifecycle
+                    .extend(&txn, delivery_id, deadline)
+                    .map_err(map_qse)?;
+
+                Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    "delivery lease extended",
                     "update",
                 ))
             }

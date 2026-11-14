@@ -409,6 +409,18 @@ fn queue_claim_full_shape_parses() {
 }
 
 #[test]
+fn queue_extend_delivery_lease_parses() {
+    let query = parse_query("QUEUE EXTEND tasks WITH delivery_id = 'opaque-delivery'");
+    match query {
+        QueryExpr::QueueCommand(QueueCommand::Extend { queue, delivery_id }) => {
+            assert_eq!(queue, "tasks");
+            assert_eq!(delivery_id, "opaque-delivery");
+        }
+        other => panic!("expected Extend, got {other:?}"),
+    }
+}
+
+#[test]
 fn drop_queue_if_exists_parses() {
     let q = parse_query("DROP QUEUE IF EXISTS tasks");
     match q {

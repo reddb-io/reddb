@@ -152,6 +152,8 @@ test('scoped queue preserves delivery metadata and ACKs', async () => {
   assert.equal(message.delivery_id, 'd1')
   await scoped.ack('d1')
   assert.match(calls.at(-1).params.sql, /^QUEUE ACK jobs/)
+  await scoped.extend('d1')
+  assert.equal(calls.at(-1).params.sql, "QUEUE EXTEND jobs WITH delivery_id = 'd1'")
 })
 
 test('queue consumer ACKs success and NACKs handler failure', async () => {
@@ -173,4 +175,42 @@ test('queue consumer ACKs success and NACKs handler failure', async () => {
   consumer.start()
   await consumer.finished()
   assert.ok(calls.some((call) => call.params.sql?.startsWith('QUEUE ACK jobs')))
+})
+
+test('embedded queue consumer exposes v2 lifecycle and lease heartbeat', async () => {
+  const calls = []
+  let releaseHandler
+  const handlerDone = new Promise((resolve) => { releaseHandler = resolve })
+  let reads = 0
+  let consumer
+  const queue = new QueueClient({
+    async call(method, params) {
+      calls.push({ method, params })
+      if (params.sql.startsWith('QUEUE READ')) {
+        reads += 1
+        return reads === 1 ? { rows: [{ delivery_id: 'd1', payload: 'work' }] } : { rows: [] }
+      }
+      if (params.sql.startsWith('QUEUE EXTEND')) releaseHandler()
+      return { affected: 1 }
+    },
+  }).scope('jobs')
+  consumer = queue.consumer({
+    consumer: 'worker',
+    waitMs: 1,
+    leaseHeartbeatMs: 5,
+    async handleMessage(_message, context) {
+      assert.equal(context.signal.aborted, false)
+      await handlerDone
+      void consumer.stop()
+    },
+  })
+
+  consumer.start()
+  consumer.pause()
+  assert.equal(consumer.status.state, 'paused')
+  consumer.resume()
+  await consumer.finished()
+
+  assert.ok(calls.some((call) => call.params.sql === "QUEUE EXTEND jobs WITH delivery_id = 'd1'"))
+  assert.ok(calls.some((call) => call.params.sql === "QUEUE ACK jobs WITH delivery_id = 'd1'"))
 })

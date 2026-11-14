@@ -379,8 +379,36 @@ export interface QueueConsumerOptions {
   group?: string
   waitMs?: number
   retryDelay?: string
-  handleMessage(message: QueueMessage): void | Promise<void>
+  concurrency?: number
+  receiveBackoff?: QueueReceiveBackoffOptions
+  leaseHeartbeatMs?: number
+  /** Cooperative timeout: aborts `context.signal`, then waits for the handler to settle before NACK. */
+  handlerTimeoutMs?: number
+  handleMessage(message: QueueMessage, context: QueueConsumerContext): void | Promise<void>
   onError?(error: unknown, message: QueueMessage | null): void | Promise<void>
+}
+
+export interface QueueReceiveBackoffOptions {
+  initialMs?: number
+  maxMs?: number
+  multiplier?: number
+  jitter?: boolean
+}
+
+export interface QueueConsumerContext {
+  readonly signal: AbortSignal
+  readonly deliveryId: string
+  extendLease(): Promise<QueryResult>
+}
+
+export type QueueConsumerState = 'idle' | 'running' | 'paused' | 'stopping' | 'stopped' | 'failed'
+
+export interface QueueConsumerStatus {
+  readonly state: QueueConsumerState
+  readonly isRunning: boolean
+  readonly isPaused: boolean
+  readonly inFlight: number
+  readonly concurrency: number
 }
 
 export class ScopedQueueClient {
@@ -395,13 +423,17 @@ export class ScopedQueueClient {
   readWaitEntries(consumer: string, options: { waitMs: number; group?: string; count?: number }): Promise<QueueMessage[]>
   ack(deliveryId: string): Promise<QueryResult>
   nack(deliveryId: string, options?: { delay?: string }): Promise<QueryResult>
+  /** Refreshes the delivery visibility deadline using the queue's current lock policy. */
+  extend(deliveryId: string): Promise<QueryResult>
   consumer(options: QueueConsumerOptions): QueueConsumer
 }
 
 export class QueueConsumer {
-  readonly status: { isRunning: boolean }
+  readonly status: QueueConsumerStatus
   start(): this
   stop(): Promise<void>
+  pause(): this
+  resume(): this
   finished(): Promise<void>
 }
 

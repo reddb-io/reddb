@@ -26,7 +26,9 @@ a Kafka consumer, RabbitMQ consumer, or `sqs-consumer`:
 2. invoke the application handler;
 3. `ACK` the opaque `delivery_id` only after the handler succeeds;
 4. `NACK` the delivery when the handler fails, optionally with a retry delay;
-5. repeat until stopped.
+5. back off transport/read failures instead of retrying in a hot loop;
+6. optionally renew the active delivery lease while the handler runs;
+7. repeat until paused or stopped.
 
 This is not interval polling. `WAIT` parks the request in RedDB until a
 message is available or the bounded wait expires. The JavaScript remote
@@ -40,10 +42,21 @@ is opaque and must be returned unchanged. Do not acknowledge a message when it
 is received and do not derive an ACK handle from the payload or message ID.
 
 Workers process one delivery at a time by default. Run one worker per pod on a
-connection dedicated to that worker. Two pods therefore provide two-way
-parallelism without concurrent handlers inside either process. Add more worker
-instances only when the handler and its downstream dependencies can sustain
-the extra concurrency.
+logical client dedicated to that worker. Two pods therefore already provide
+two-way parallelism. The optional bounded `concurrency` setting creates
+additional delivery lanes inside one process; increase it only when the handler
+and downstream dependencies can sustain the extra load.
+
+Long handlers can enable lease heartbeat. Each heartbeat runs `QUEUE EXTEND`
+with the opaque `delivery_id`; the server derives the new deadline from the
+queue's current `LOCK_DEADLINE_MS`. Set the heartbeat comfortably below that
+deadline. If renewal fails, the worker signals cooperative cancellation to the
+handler and sends neither ACK nor NACK because ownership is no longer certain.
+
+Handler timeout follows the same ownership rule. The timeout signals the
+handler's cancellation token/abort signal, then waits for the handler to settle
+before NACKing. This means a handler that ignores cancellation can delay
+shutdown, but RedDB never deliberately overlaps it with a redelivery.
 
 Graceful stop finishes the active handler and its ACK/NACK before returning.
 An idle worker can take up to its configured wait duration to observe the stop
@@ -121,8 +134,12 @@ const worker = db.queue('emails').consumer({
   group: 'mailers',
   waitMs: 30_000,
   retryDelay: '5s',
-  async handleMessage(message) {
-    await sendEmail(message.payload)
+  concurrency: 1,
+  leaseHeartbeatMs: 10_000,
+  handlerTimeoutMs: 120_000,
+  receiveBackoff: { initialMs: 250, maxMs: 30_000, jitter: true },
+  async handleMessage(message, { signal }) {
+    await sendEmail(message.payload, { signal })
   },
   async onError(error, message) {
     console.error('queue handler failed', { error, deliveryId: message?.delivery_id })

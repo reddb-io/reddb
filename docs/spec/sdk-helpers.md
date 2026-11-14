@@ -1,6 +1,7 @@
-# SDK Helper Spec (v1.0)
+# SDK Helper Spec (v1.1 draft)
 
-Status: stable v1.0 helper contract. Source of truth for every official RedDB
+Status: v1.1 implementation draft; v1.0 remains the advertised conformance
+level until every official driver passes the new cases. Source of truth for RedDB
 driver — Rust (`reddb-client`), JavaScript, Python, Go, PHP, Dart — and any
 third-party driver that wants to advertise spec-conformant rich helpers.
 
@@ -317,7 +318,7 @@ Out-of-scope for v1.0:
   group via raw SQL until v1.x.
 - Dead-letter routing — **out-of-scope**: deferred to v1.x.
 
-### 6.7 Application-scoped queue and consumer extension (additive v1.x)
+### 6.7 Application-scoped queue and consumer extension (v1.1)
 
 Official drivers MAY bind a queue name once and expose a long-running worker.
 The scoped handle MUST preserve the queue name for every read, ACK, NACK, and
@@ -327,14 +328,26 @@ push. The worker contract is:
 - pass the complete delivery, including opaque `delivery_id`, to the handler;
 - ACK only after successful handler completion;
 - NACK after handler failure, optionally with a validated retry delay;
-- process sequentially unless the caller creates multiple workers;
+- process sequentially by default; an explicit bounded concurrency option may
+  run multiple independent delivery lanes;
+- exponentially back off receive errors, with bounded jitter, rather than
+  immediately retrying a failed receive;
+- expose pause/resume and observable lifecycle state;
+- optionally refresh an active delivery with `QUEUE EXTEND` while its handler
+  runs;
+- on lease-refresh failure, signal cooperative handler cancellation and never
+  ACK or NACK that delivery;
+- treat handler timeout as cooperative cancellation: signal the handler, wait
+  for it to settle, then NACK. A worker must not overlap a timed-out handler
+  with a redelivery of the same work;
 - stop gracefully after the active delivery reaches ACK/NACK.
 
-This extension is at-least-once. It does not promise exactly-once effects,
-lease extension, or concurrent callbacks inside one worker. Drivers SHOULD
-recommend a dedicated connection per worker and horizontal concurrency through
-multiple workers or pods. The cross-language API map and transport details are
-documented in [Application clients and queue workers](../clients/application-clients.md).
+This extension is at-least-once. It does not promise exactly-once effects.
+Concurrency defaults to one because applications commonly scale horizontally;
+for example, two pods already provide two processing lanes. Drivers SHOULD
+recommend a dedicated logical client per worker. The cross-language API map and
+transport details are documented in
+[Application clients and queue workers](../clients/application-clients.md).
 
 The extension also defines explicit KV and Vault/secret scope handles. Legacy
 default namespaces remain wire-compatible, but new application code SHOULD
