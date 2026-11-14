@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <cmath>
+#include <random>
 #include <regex>
 #include <sstream>
 
@@ -902,6 +904,15 @@ void QueueClient::nack(const std::string& queue, const std::string& delivery_id,
               + sql::kv_tag_literal(delivery_id) + delay_clause, {});
 }
 
+void QueueClient::extend(const std::string& queue, const std::string& delivery_id) {
+    if (delivery_id.empty()) {
+        throw HelperError(HelperError::Code::InvalidArgument,
+                          "queue delivery_id must be non-empty");
+    }
+    q_->query("QUEUE EXTEND " + sql::identifier(queue) + " WITH delivery_id = "
+              + sql::kv_tag_literal(delivery_id), {});
+}
+
 QueuePushResult ScopedQueueClient::push(const JsonValue& value,
                                          const QueueClient::PushOptions& opts) {
     return queue_.push(name_, value, opts);
@@ -925,85 +936,243 @@ void ScopedQueueClient::ack(const std::string& delivery_id) {
 void ScopedQueueClient::nack(const std::string& delivery_id, const std::string& delay) {
     queue_.nack(name_, delivery_id, delay);
 }
+void ScopedQueueClient::extend(const std::string& delivery_id) {
+    queue_.extend(name_, delivery_id);
+}
 
 QueueConsumer::QueueConsumer(ScopedQueueClient queue, Options options)
     : queue_(std::move(queue)), options_(std::move(options)) {
     sql::assert_identifier(options_.consumer, "consumer name");
     if (!options_.group.empty()) sql::assert_identifier(options_.group, "group name");
-    if (options_.wait_ms < 0) {
+    if (options_.wait_ms <= 0) {
         throw HelperError(HelperError::Code::InvalidArgument,
-                          "queue consumer wait_ms must be non-negative");
+                          "queue consumer wait_ms must be greater than zero");
     }
-    if (!options_.handler) {
+    if (static_cast<bool>(options_.handler) == static_cast<bool>(options_.context_handler)) {
         throw HelperError(HelperError::Code::InvalidArgument,
-                          "queue consumer requires a handler");
+                          "queue consumer requires exactly one handler");
+    }
+    if (options_.concurrency < 1 || options_.concurrency > 128) {
+        throw HelperError(HelperError::Code::InvalidArgument,
+                          "queue consumer concurrency must be between 1 and 128");
+    }
+    const auto& backoff = options_.receive_backoff;
+    if (backoff.initial_ms <= 0 || backoff.max_ms < backoff.initial_ms
+        || !std::isfinite(backoff.multiplier) || backoff.multiplier < 1.0) {
+        throw HelperError(HelperError::Code::InvalidArgument,
+                          "invalid queue receive backoff");
+    }
+    if (options_.lease_heartbeat_ms < 0 || options_.handler_timeout_ms < 0) {
+        throw HelperError(HelperError::Code::InvalidArgument,
+                          "queue heartbeat and timeout must be non-negative");
     }
 }
 
 QueueConsumer::~QueueConsumer() {
     abort();
-    if (thread_.joinable()) thread_.join();
+    for (auto& thread : threads_) {
+        if (thread.joinable()) thread.join();
+    }
 }
 
 QueueConsumer& QueueConsumer::start() {
-    if (thread_.joinable()) {
+    if (state_.load() != State::Idle) {
         throw HelperError(HelperError::Code::InvalidArgument,
                           "queue consumer already started");
     }
-    thread_ = std::thread([this] { run(); });
+    state_.store(State::Running);
+    threads_.reserve(static_cast<size_t>(options_.concurrency));
+    for (int i = 0; i < options_.concurrency; ++i) {
+        threads_.emplace_back([this] { run_lane(); });
+    }
     return *this;
 }
 
-void QueueConsumer::stop() { stopping_.store(true); }
-void QueueConsumer::abort() { stopping_.store(true); }
+void QueueConsumer::stop() {
+    stopping_.store(true);
+    paused_.store(false);
+    const auto state = state_.load();
+    if (state != State::Idle && state != State::Stopped && state != State::Failed) {
+        state_.store(State::Stopping);
+    }
+    changed_.notify_all();
+}
+void QueueConsumer::abort() {
+    aborted_.store(true);
+    stop();
+}
+void QueueConsumer::pause() {
+    if (state_.load() == State::Running) {
+        paused_.store(true);
+        state_.store(State::Paused);
+    }
+}
+void QueueConsumer::resume() {
+    if (state_.load() == State::Paused) {
+        paused_.store(false);
+        state_.store(State::Running);
+        changed_.notify_all();
+    }
+}
 void QueueConsumer::wait() {
-    if (!thread_.joinable()) {
+    if (threads_.empty()) {
         throw HelperError(HelperError::Code::InvalidArgument,
                           "queue consumer has not started");
     }
-    thread_.join();
+    for (auto& thread : threads_) {
+        if (thread.joinable()) thread.join();
+    }
+    state_.store(failure_ ? State::Failed : State::Stopped);
     if (failure_) std::rethrow_exception(failure_);
 }
 
-void QueueConsumer::run() {
+QueueConsumer::Status QueueConsumer::status() const {
+    const auto state = state_.load();
+    return Status{
+        state,
+        state == State::Running || state == State::Paused,
+        paused_.load(),
+        in_flight_.load(),
+        options_.concurrency,
+    };
+}
+
+void QueueConsumer::run_lane() {
     QueueClient::ReadWaitOptions read_options;
     if (!options_.group.empty()) read_options.group = options_.group;
     read_options.count = 1;
+    int receive_failures = 0;
     try {
-        while (!stopping_.load()) {
+        while (wait_until_ready()) {
             std::vector<QueueMessage> messages;
             try {
                 messages = queue_.read_wait(
                     options_.consumer, options_.wait_ms, read_options);
             } catch (...) {
                 report(std::current_exception(), nullptr);
+                ++receive_failures;
+                if (!backoff(receive_failures)) return;
                 continue;
             }
+            receive_failures = 0;
             if (messages.empty()) continue;
-            QueueMessage& message = messages.front();
-            try {
-                if (message.delivery_id.empty()) {
-                    throw HelperError(HelperError::Code::InvalidResponse,
-                                      "queue delivery is missing delivery_id");
-                }
-                options_.handler(message);
-            } catch (...) {
-                auto error = std::current_exception();
-                if (!message.delivery_id.empty()) {
-                    queue_.nack(message.delivery_id, options_.retry_delay);
-                }
-                report(error, &message);
-                continue;
-            }
-            try {
-                queue_.ack(message.delivery_id);
-            } catch (...) {
-                report(std::current_exception(), &message);
-            }
+            process(messages.front());
         }
     } catch (...) {
-        failure_ = std::current_exception();
+        {
+            std::lock_guard lock(mutex_);
+            if (!failure_) failure_ = std::current_exception();
+        }
+        stop();
     }
+}
+
+void QueueConsumer::process(const QueueMessage& message) {
+    if (message.delivery_id.empty()) {
+        report(std::make_exception_ptr(HelperError(
+                   HelperError::Code::InvalidResponse,
+                   "queue delivery is missing delivery_id")), &message);
+        return;
+    }
+    in_flight_.fetch_add(1);
+    struct InFlightGuard {
+        std::atomic<int>& value;
+        ~InFlightGuard() { value.fetch_sub(1); }
+    } guard{in_flight_};
+
+    auto cancelled = std::make_shared<std::atomic<bool>>(false);
+    HandlerContext context(cancelled, [this, delivery_id = message.delivery_id] {
+        queue_.extend(delivery_id);
+    });
+    auto handler = std::async(std::launch::async, [this, &message, context] {
+        if (options_.context_handler) options_.context_handler(message, context);
+        else options_.handler(message);
+    });
+    const auto started = std::chrono::steady_clock::now();
+    auto next_heartbeat = options_.lease_heartbeat_ms > 0
+        ? started + std::chrono::milliseconds(options_.lease_heartbeat_ms)
+        : std::chrono::steady_clock::time_point::max();
+    std::exception_ptr lease_error;
+    bool timed_out = false;
+    bool was_aborted = false;
+    while (handler.wait_for(std::chrono::milliseconds(5)) != std::future_status::ready) {
+        const auto now = std::chrono::steady_clock::now();
+        if (aborted_.load()) {
+            cancelled->store(true);
+            was_aborted = true;
+            break;
+        }
+        if (options_.handler_timeout_ms > 0
+            && now - started >= std::chrono::milliseconds(options_.handler_timeout_ms)) {
+            cancelled->store(true);
+            timed_out = true;
+            break;
+        }
+        if (options_.lease_heartbeat_ms > 0 && now >= next_heartbeat) {
+            try {
+                queue_.extend(message.delivery_id);
+                next_heartbeat = now + std::chrono::milliseconds(options_.lease_heartbeat_ms);
+            } catch (...) {
+                cancelled->store(true);
+                lease_error = std::current_exception();
+                break;
+            }
+        }
+    }
+    handler.wait();
+    std::exception_ptr handler_error;
+    try {
+        handler.get();
+    } catch (...) {
+        handler_error = std::current_exception();
+    }
+
+    if (was_aborted) return;
+    if (lease_error) {
+        // Ownership is uncertain after an EXTEND failure: never ACK or NACK.
+        report(lease_error, &message);
+        return;
+    }
+    if (timed_out) {
+        auto timeout_error = std::make_exception_ptr(HelperError(
+            HelperError::Code::QueueHandlerTimeout,
+            "queue handler exceeded " + std::to_string(options_.handler_timeout_ms) + "ms"));
+        queue_.nack(message.delivery_id, options_.retry_delay);
+        report(timeout_error, &message);
+        return;
+    }
+    if (handler_error) {
+        queue_.nack(message.delivery_id, options_.retry_delay);
+        report(handler_error, &message);
+        return;
+    }
+    try {
+        queue_.ack(message.delivery_id);
+    } catch (...) {
+        // An ambiguous ACK must never be followed by a NACK.
+        report(std::current_exception(), &message);
+    }
+}
+
+bool QueueConsumer::wait_until_ready() {
+    std::unique_lock lock(mutex_);
+    changed_.wait(lock, [this] { return stopping_.load() || !paused_.load(); });
+    return !stopping_.load();
+}
+
+bool QueueConsumer::backoff(int failures) {
+    const auto& options = options_.receive_backoff;
+    double delay = static_cast<double>(options.initial_ms)
+        * std::pow(options.multiplier, static_cast<double>(failures - 1));
+    delay = std::min(delay, static_cast<double>(options.max_ms));
+    if (options.jitter) {
+        thread_local std::mt19937 generator(std::random_device{}());
+        delay *= std::uniform_real_distribution<double>(0.0, 1.0)(generator);
+    }
+    std::unique_lock lock(mutex_);
+    changed_.wait_for(lock, std::chrono::milliseconds(static_cast<int64_t>(delay)),
+                      [this] { return stopping_.load(); });
+    return !stopping_.load();
 }
 
 void QueueConsumer::report(std::exception_ptr error, const QueueMessage* message) {

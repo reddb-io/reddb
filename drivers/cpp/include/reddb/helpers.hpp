@@ -13,11 +13,15 @@
 #include "reddb/reddb.hpp"
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -30,7 +34,7 @@ namespace reddb::helpers {
 
 class HelperError : public std::runtime_error {
 public:
-    enum class Code { InvalidArgument, NotFound, InvalidResponse };
+    enum class Code { InvalidArgument, NotFound, InvalidResponse, QueueHandlerTimeout };
     HelperError(Code code, std::string message)
         : std::runtime_error(std::move(message)), code_(code) {}
     Code code() const noexcept { return code_; }
@@ -258,6 +262,7 @@ public:
     void ack(const std::string& queue, const std::string& delivery_id);
     void nack(const std::string& queue, const std::string& delivery_id,
               const std::string& delay = "");
+    void extend(const std::string& queue, const std::string& delivery_id);
 
 private:
     std::vector<JsonValue> fetch(const char* verb, const std::string& queue,
@@ -283,6 +288,7 @@ public:
         const QueueClient::ReadWaitOptions& opts = QueueClient::ReadWaitOptions{});
     void ack(const std::string& delivery_id);
     void nack(const std::string& delivery_id, const std::string& delay = "");
+    void extend(const std::string& delivery_id);
 
 private:
     QueueClient queue_;
@@ -291,13 +297,48 @@ private:
 
 class QueueConsumer {
 public:
+    struct ReceiveBackoff {
+        int64_t initial_ms = 250;
+        int64_t max_ms = 30000;
+        double multiplier = 2.0;
+        bool jitter = true;
+    };
+
+    class HandlerContext {
+    public:
+        bool cancelled() const noexcept { return cancelled_->load(); }
+        void extend_lease() const { extend_(); }
+
+    private:
+        friend class QueueConsumer;
+        HandlerContext(std::shared_ptr<std::atomic<bool>> cancelled,
+                       std::function<void()> extend)
+            : cancelled_(std::move(cancelled)), extend_(std::move(extend)) {}
+        std::shared_ptr<std::atomic<bool>> cancelled_;
+        std::function<void()> extend_;
+    };
+
     struct Options {
         std::string consumer;
         std::string group;
         int64_t wait_ms = 30000;
         std::string retry_delay;
         std::function<void(const QueueMessage&)> handler;
+        std::function<void(const QueueMessage&, const HandlerContext&)> context_handler;
         std::function<void(std::exception_ptr, const QueueMessage*)> on_error;
+        int concurrency = 1;
+        ReceiveBackoff receive_backoff;
+        int64_t lease_heartbeat_ms = 0;
+        int64_t handler_timeout_ms = 0;
+    };
+
+    enum class State { Idle, Running, Paused, Stopping, Stopped, Failed };
+    struct Status {
+        State state;
+        bool is_running;
+        bool is_paused;
+        int in_flight;
+        int concurrency;
     };
 
     QueueConsumer(ScopedQueueClient queue, Options options);
@@ -308,16 +349,28 @@ public:
     QueueConsumer& start();
     void stop();
     void abort();
+    void pause();
+    void resume();
     void wait();
+    Status status() const;
 
 private:
-    void run();
+    void run_lane();
+    void process(const QueueMessage& message);
+    bool wait_until_ready();
+    bool backoff(int failures);
     void report(std::exception_ptr error, const QueueMessage* message);
 
     ScopedQueueClient queue_;
     Options options_;
     std::atomic<bool> stopping_{false};
-    std::thread thread_;
+    std::atomic<bool> aborted_{false};
+    std::atomic<bool> paused_{false};
+    std::atomic<int> in_flight_{0};
+    std::atomic<State> state_{State::Idle};
+    std::vector<std::thread> threads_;
+    mutable std::mutex mutex_;
+    std::condition_variable changed_;
     std::exception_ptr failure_;
 };
 
