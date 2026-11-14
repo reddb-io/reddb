@@ -3,6 +3,7 @@
 //! Mirrors the JS and Rust drivers. Same connection-string contract,
 //! same method names, same error semantics. See `PLAN_DRIVERS.md`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pyo3::exceptions::PyValueError;
@@ -657,6 +658,25 @@ impl RedDb {
         self.queues()
     }
 
+    /// Vault helper bound to one explicit collection.
+    fn secrets(&self, collection: &str) -> PyResult<SecretsClient> {
+        self.ensure_open()?;
+        validate_vault_part(collection, "vault collection")?;
+        match self.backend() {
+            #[cfg(feature = "embedded")]
+            Backend::Embedded(rt) => Ok(SecretsClient {
+                backend: HelperBackend::Embedded(rt.clone()),
+                collection: collection.to_owned(),
+            }),
+            Backend::Grpc(_) => Ok(SecretsClient {
+                backend: HelperBackend::Unsupported(
+                    "secrets helpers are not available over grpc:// yet; use query()",
+                ),
+                collection: collection.to_owned(),
+            }),
+        }
+    }
+
     /// Transaction helpers (`tx.*` in the SDK Helper Spec). Imperative
     /// `begin`/`commit`/`rollback` plus a `run(callback)` convenience.
     #[getter]
@@ -741,6 +761,7 @@ impl RedDb {
     }
 }
 
+#[derive(Clone)]
 enum HelperBackend {
     #[cfg(feature = "embedded")]
     Embedded(EmbeddedRuntime),
@@ -1038,6 +1059,19 @@ pub struct QueueClient {
 
 #[pymethods]
 impl QueueClient {
+    /// Bind all operations to one queue name.
+    fn __call__(&self, name: &str) -> PyResult<ScopedQueueClient> {
+        self.scope(name)
+    }
+
+    fn scope(&self, name: &str) -> PyResult<ScopedQueueClient> {
+        let name = sql_identifier(name)?;
+        Ok(ScopedQueueClient {
+            backend: self.backend.clone(),
+            name,
+        })
+    }
+
     /// Create the queue if it does not exist (idempotent).
     fn create<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyDict>> {
         let rt = self.embedded()?;
@@ -1166,12 +1200,318 @@ impl QueueClient {
         let sql = format!(
             "QUEUE READ {queue}{group_clause} CONSUMER {consumer_id}{count_clause} WAIT {wait_ms}ms"
         );
-        let qr = rt.query(&sql).map_err(|e| err("QUERY_ERROR", e))?;
+        let qr = py
+            .detach(|| rt.query(&sql))
+            .map_err(|e| err("QUERY_ERROR", e))?;
         let out = PyDict::new(py);
         out.set_item("items", rows_to_pylist(py, &qr.rows)?)?;
         out.set_item("affected", qr.affected)?;
         Ok(out)
     }
+}
+
+/// Queue helper bound to one explicit queue name.
+#[pyclass]
+pub struct ScopedQueueClient {
+    backend: HelperBackend,
+    name: String,
+}
+
+#[pymethods]
+impl ScopedQueueClient {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn push<'py>(
+        &self,
+        py: Python<'py>,
+        payload: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let rt = self.embedded()?;
+        let value = sql_value_literal(py, payload)?;
+        let qr = rt
+            .query(&format!("QUEUE PUSH {} {value}", self.name))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        let out = PyDict::new(py);
+        out.set_item("affected", if qr.affected == 0 { 1 } else { qr.affected })?;
+        Ok(out)
+    }
+
+    #[pyo3(signature = (consumer, wait_ms, *, group=None, count=None))]
+    fn read_wait<'py>(
+        &self,
+        py: Python<'py>,
+        consumer: &str,
+        wait_ms: i64,
+        group: Option<&str>,
+        count: Option<usize>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let sql = self.read_sql(consumer, wait_ms, group, count)?;
+        let rt = self.embedded()?;
+        let qr = py
+            .detach(|| rt.query(&sql))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        let out = PyDict::new(py);
+        out.set_item("items", rows_to_pylist(py, &qr.rows)?)?;
+        out.set_item("affected", qr.affected)?;
+        Ok(out)
+    }
+
+    fn ack(&self, delivery_id: &str) -> PyResult<()> {
+        self.delivery_command("ACK", delivery_id, None)
+    }
+
+    #[pyo3(signature = (delivery_id, *, delay=None))]
+    fn nack(&self, delivery_id: &str, delay: Option<&str>) -> PyResult<()> {
+        self.delivery_command("NACK", delivery_id, delay)
+    }
+
+    #[pyo3(signature = (consumer, *, wait_ms=30_000, group=None, retry_delay=None))]
+    fn consumer(
+        &self,
+        consumer: &str,
+        wait_ms: i64,
+        group: Option<&str>,
+        retry_delay: Option<&str>,
+    ) -> PyResult<QueueConsumer> {
+        let _ = self.read_sql(consumer, wait_ms, group, Some(1))?;
+        validate_queue_delay(retry_delay)?;
+        Ok(QueueConsumer {
+            queue: ScopedQueueClient {
+                backend: self.backend.clone(),
+                name: self.name.clone(),
+            },
+            consumer: consumer.to_owned(),
+            wait_ms,
+            group: group.map(str::to_owned),
+            retry_delay: retry_delay.map(str::to_owned),
+            stopping: Arc::new(AtomicBool::new(false)),
+        })
+    }
+}
+
+impl ScopedQueueClient {
+    #[cfg(feature = "embedded")]
+    fn embedded(&self) -> PyResult<&EmbeddedRuntime> {
+        match &self.backend {
+            HelperBackend::Embedded(rt) => Ok(rt),
+            HelperBackend::Unsupported(message) => Err(err("NOT_SUPPORTED", *message)),
+        }
+    }
+
+    fn read_sql(
+        &self,
+        consumer: &str,
+        wait_ms: i64,
+        group: Option<&str>,
+        count: Option<usize>,
+    ) -> PyResult<String> {
+        if wait_ms < 0 {
+            return Err(err(
+                "INVALID_ARGUMENT",
+                "queue wait_ms must be non-negative",
+            ));
+        }
+        let consumer = sql_identifier(consumer)?;
+        let group_clause = match group {
+            Some(group) => format!(" GROUP {}", sql_identifier(group)?),
+            None => String::new(),
+        };
+        let count_clause = match count {
+            Some(0) => return Err(err("INVALID_ARGUMENT", "queue count must be positive")),
+            Some(count) => format!(" COUNT {count}"),
+            None => String::new(),
+        };
+        Ok(format!(
+            "QUEUE READ {}{group_clause} CONSUMER {consumer}{count_clause} WAIT {wait_ms}ms",
+            self.name
+        ))
+    }
+
+    fn delivery_command(&self, verb: &str, delivery_id: &str, delay: Option<&str>) -> PyResult<()> {
+        if delivery_id.is_empty() {
+            return Err(err(
+                "INVALID_ARGUMENT",
+                "queue delivery_id must be non-empty",
+            ));
+        }
+        validate_queue_delay(delay)?;
+        let delay_clause = delay
+            .map(|value| format!(" WITH DELAY {value}"))
+            .unwrap_or_default();
+        self.embedded()?
+            .query(&format!(
+                "QUEUE {verb} {} WITH delivery_id = {}{delay_clause}",
+                self.name,
+                sql_string_literal(delivery_id)
+            ))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        Ok(())
+    }
+}
+
+/// Sequential at-least-once worker. Call `run()` in a Python thread or via
+/// `asyncio.to_thread`; `stop()` is graceful and waits for the active delivery.
+#[pyclass]
+pub struct QueueConsumer {
+    queue: ScopedQueueClient,
+    consumer: String,
+    wait_ms: i64,
+    group: Option<String>,
+    retry_delay: Option<String>,
+    stopping: Arc<AtomicBool>,
+}
+
+#[pymethods]
+impl QueueConsumer {
+    fn stop(&self) {
+        self.stopping.store(true, Ordering::Release);
+    }
+
+    fn run(&self, py: Python<'_>, handler: Py<PyAny>) -> PyResult<()> {
+        let read_sql =
+            self.queue
+                .read_sql(&self.consumer, self.wait_ms, self.group.as_deref(), Some(1))?;
+        while !self.stopping.load(Ordering::Acquire) {
+            let rt = self.queue.embedded()?;
+            let qr = py
+                .detach(|| rt.query(&read_sql))
+                .map_err(|e| err("QUERY_ERROR", e))?;
+            let Some(row) = qr.rows.first() else {
+                continue;
+            };
+            let delivery_id = row
+                .iter()
+                .find_map(|(name, value)| {
+                    (name == "delivery_id").then(|| match value {
+                        ScalarOut::Text(value) | ScalarOut::Json(value) => value.clone(),
+                        ScalarOut::Int(value) => value.to_string(),
+                        _ => String::new(),
+                    })
+                })
+                .unwrap_or_default();
+            if delivery_id.is_empty() {
+                return Err(err(
+                    "INVALID_RESPONSE",
+                    "queue delivery is missing delivery_id",
+                ));
+            }
+            let message = row_to_pydict(py, row)?;
+            match handler.call1(py, (message,)) {
+                Ok(_) => self.queue.ack(&delivery_id)?,
+                Err(handler_error) => {
+                    self.queue.nack(&delivery_id, self.retry_delay.as_deref())?;
+                    return Err(handler_error);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_queue_delay(delay: Option<&str>) -> PyResult<()> {
+    let Some(delay) = delay else {
+        return Ok(());
+    };
+    let mut chars = delay.chars().peekable();
+    let mut digits = 0usize;
+    let mut dot = false;
+    while let Some(ch) = chars.peek().copied() {
+        if ch.is_ascii_digit() {
+            digits += 1;
+            chars.next();
+        } else if ch == '.' && !dot {
+            dot = true;
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    let suffix: String = chars.collect();
+    if digits == 0
+        || ![
+            "", "ms", "s", "sec", "secs", "m", "min", "mins", "h", "hr", "hrs", "d", "day", "days",
+        ]
+        .contains(&suffix.as_str())
+    {
+        return Err(err("INVALID_ARGUMENT", "invalid queue retry delay"));
+    }
+    Ok(())
+}
+
+#[pyclass]
+pub struct SecretsClient {
+    backend: HelperBackend,
+    collection: String,
+}
+
+#[pymethods]
+impl SecretsClient {
+    #[getter]
+    fn collection(&self) -> &str {
+        &self.collection
+    }
+
+    fn put<'py>(&self, py: Python<'py>, key: &str, value: &Bound<'py, PyAny>) -> PyResult<()> {
+        let path = self.path(key)?;
+        let literal = sql_value_literal(py, value)?;
+        self.embedded()?
+            .query(&format!("VAULT PUT {path} = {literal}"))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        Ok(())
+    }
+
+    fn get<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Option<Bound<'py, PyDict>>> {
+        self.read(py, "GET", key)
+    }
+
+    fn reveal<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Option<Bound<'py, PyDict>>> {
+        self.read(py, "REVEAL", key)
+    }
+}
+
+impl SecretsClient {
+    #[cfg(feature = "embedded")]
+    fn embedded(&self) -> PyResult<&EmbeddedRuntime> {
+        match &self.backend {
+            HelperBackend::Embedded(rt) => Ok(rt),
+            HelperBackend::Unsupported(message) => Err(err("NOT_SUPPORTED", *message)),
+        }
+    }
+
+    fn path(&self, key: &str) -> PyResult<String> {
+        validate_vault_part(key, "vault key")?;
+        Ok(format!("{}.{}", self.collection, key))
+    }
+
+    fn read<'py>(
+        &self,
+        py: Python<'py>,
+        verb: &str,
+        key: &str,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let qr = self
+            .embedded()?
+            .query(&format!("VAULT {verb} {}", self.path(key)?))
+            .map_err(|e| err("QUERY_ERROR", e))?;
+        qr.rows
+            .first()
+            .map(|row| row_to_pydict(py, row))
+            .transpose()
+    }
+}
+
+fn validate_vault_part(value: &str, label: &str) -> PyResult<()> {
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'.')
+    {
+        return Err(err("INVALID_ARGUMENT", format!("invalid {label}")));
+    }
+    Ok(())
 }
 
 impl QueueClient {

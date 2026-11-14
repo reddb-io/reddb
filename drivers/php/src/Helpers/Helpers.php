@@ -36,13 +36,21 @@ final class Helpers
 
     public function kv(string $collection = 'kv_default'): Kv { return new Kv($this->q, $collection); }
 
-    public function queue(): Queue { return new Queue($this->q); }
+    public function secrets(string $collection): Secrets { return new Secrets($this->q, $collection); }
+
+    public function queue(?string $name = null): Queue|ScopedQueue
+    {
+        $queue = new Queue($this->q);
+        return $name === null ? $queue : $queue->scope($name);
+    }
+
+    public function queueNamed(string $name): ScopedQueue { return (new Queue($this->q))->scope($name); }
 
     /**
      * Spec-canonical plural alias of {@see queue()}. The namespace name in
      * the spec is `queues.*`; both forms call into the same client.
      */
-    public function queues(): Queue { return $this->queue(); }
+    public function queues(): Queue { return new Queue($this->q); }
 
     public function tx(): TxClient { return new TxClient($this->q); }
 

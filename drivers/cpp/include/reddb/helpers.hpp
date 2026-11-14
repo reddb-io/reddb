@@ -12,12 +12,16 @@
 #include "reddb/errors.hpp"
 #include "reddb/reddb.hpp"
 
+#include <atomic>
 #include <cstdint>
+#include <exception>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -115,6 +119,16 @@ struct QueuePushResult {
     int64_t affected = 0;
     std::optional<std::string> rid;
 };
+struct QueueMessage {
+    std::string message_id;
+    std::string delivery_id;
+    JsonValue payload;
+    std::string consumer;
+    int64_t delivery_count = 0;
+    JsonObject raw;
+};
+
+class ScopedQueueClient;
 
 // --- Querier ----------------------------------------------------------------
 
@@ -190,11 +204,28 @@ private:
     std::string collection_;
 };
 
+class SecretsClient {
+public:
+    SecretsClient(std::shared_ptr<IQuerier> q, std::string collection);
+    const std::string& collection() const noexcept { return collection_; }
+    void put(const std::string& key, const JsonValue& value);
+    std::optional<JsonObject> get(const std::string& key);
+    std::optional<JsonObject> reveal(const std::string& key);
+
+private:
+    std::string path(const std::string& key) const;
+    std::optional<JsonObject> read(const char* verb, const std::string& key);
+    std::shared_ptr<IQuerier> q_;
+    std::string collection_;
+};
+
 class QueueClient {
 public:
     struct PushOptions { std::optional<int> priority; };
 
     explicit QueueClient(std::shared_ptr<IQuerier> q) : q_(std::move(q)) {}
+
+    ScopedQueueClient scope(const std::string& name);
 
     QueuePushResult push(const std::string& queue, const JsonValue& value,
                          const PushOptions& opts = PushOptions{});
@@ -219,11 +250,75 @@ public:
                                      const std::string& consumer,
                                      int64_t wait_ms,
                                      const ReadWaitOptions& opts = ReadWaitOptions{});
+    std::vector<QueueMessage> read_wait_entries(
+        const std::string& queue,
+        const std::string& consumer,
+        int64_t wait_ms,
+        const ReadWaitOptions& opts = ReadWaitOptions{});
+    void ack(const std::string& queue, const std::string& delivery_id);
+    void nack(const std::string& queue, const std::string& delivery_id,
+              const std::string& delay = "");
 
 private:
     std::vector<JsonValue> fetch(const char* verb, const std::string& queue,
                                  std::optional<int> count);
     std::shared_ptr<IQuerier> q_;
+};
+
+class ScopedQueueClient {
+public:
+    ScopedQueueClient(QueueClient queue, std::string name)
+        : queue_(std::move(queue)), name_(std::move(name)) {}
+
+    const std::string& name() const noexcept { return name_; }
+    QueuePushResult push(const JsonValue& value,
+                         const QueueClient::PushOptions& opts = QueueClient::PushOptions{});
+    std::vector<JsonValue> pop(std::optional<int> count = std::nullopt);
+    std::vector<JsonValue> peek(std::optional<int> count = std::nullopt);
+    int64_t len();
+    DeleteResult purge();
+    std::vector<QueueMessage> read_wait(
+        const std::string& consumer,
+        int64_t wait_ms,
+        const QueueClient::ReadWaitOptions& opts = QueueClient::ReadWaitOptions{});
+    void ack(const std::string& delivery_id);
+    void nack(const std::string& delivery_id, const std::string& delay = "");
+
+private:
+    QueueClient queue_;
+    std::string name_;
+};
+
+class QueueConsumer {
+public:
+    struct Options {
+        std::string consumer;
+        std::string group;
+        int64_t wait_ms = 30000;
+        std::string retry_delay;
+        std::function<void(const QueueMessage&)> handler;
+        std::function<void(std::exception_ptr, const QueueMessage*)> on_error;
+    };
+
+    QueueConsumer(ScopedQueueClient queue, Options options);
+    ~QueueConsumer();
+    QueueConsumer(const QueueConsumer&) = delete;
+    QueueConsumer& operator=(const QueueConsumer&) = delete;
+
+    QueueConsumer& start();
+    void stop();
+    void abort();
+    void wait();
+
+private:
+    void run();
+    void report(std::exception_ptr error, const QueueMessage* message);
+
+    ScopedQueueClient queue_;
+    Options options_;
+    std::atomic<bool> stopping_{false};
+    std::thread thread_;
+    std::exception_ptr failure_;
 };
 
 class Helpers {
@@ -236,6 +331,12 @@ public:
         return KvClient(q_, collection);
     }
     QueueClient    queue() const { return QueueClient(q_); }
+    ScopedQueueClient queue(const std::string& name) const {
+        return QueueClient(q_).scope(name);
+    }
+    SecretsClient secrets(const std::string& collection) const {
+        return SecretsClient(q_, collection);
+    }
 
 private:
     std::shared_ptr<IQuerier> q_;

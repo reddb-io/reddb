@@ -90,8 +90,7 @@ test "kvPath preserves dots and slashes" {
 
 test "kvPath rejects bad collection" {
     const a = testing.allocator;
-    try testing.expectError(helpers.HelperError.InvalidArgument,
-        helpers.kvPath(a, "bad-name!", "k"));
+    try testing.expectError(helpers.HelperError.InvalidArgument, helpers.kvPath(a, "bad-name!", "k"));
 }
 
 test "kvValueLiteral cases" {
@@ -193,8 +192,7 @@ test "kv list rejects negative limit" {
     var fq = FakeQuerier.init(a);
     defer fq.deinit();
     const h = helpers.Helpers.init(a, fq.querier());
-    try testing.expectError(helpers.HelperError.InvalidArgument,
-        h.kv(null).list(.{ .limit = -1 }));
+    try testing.expectError(helpers.HelperError.InvalidArgument, h.kv(null).list(.{ .limit = -1 }));
 }
 
 // ---------------------------------------------------------------- Queue
@@ -253,8 +251,7 @@ test "queue pop rejects negative count" {
     var fq = FakeQuerier.init(a);
     defer fq.deinit();
     const h = helpers.Helpers.init(a, fq.querier());
-    try testing.expectError(helpers.HelperError.InvalidArgument,
-        h.queue().pop("jobs", -1));
+    try testing.expectError(helpers.HelperError.InvalidArgument, h.queue().pop("jobs", -1));
 }
 
 test "queue push rejects invalid identifier" {
@@ -262,8 +259,48 @@ test "queue push rejects invalid identifier" {
     var fq = FakeQuerier.init(a);
     defer fq.deinit();
     const h = helpers.Helpers.init(a, fq.querier());
-    try testing.expectError(helpers.HelperError.InvalidArgument,
-        h.queue().push("bad-name!", .{ .string = "x" }, .{}));
+    try testing.expectError(helpers.HelperError.InvalidArgument, h.queue().push("bad-name!", .{ .string = "x" }, .{}));
+}
+
+test "scoped queue preserves delivery id and acks" {
+    const a = testing.allocator;
+    var fq = FakeQuerier.init(a);
+    defer fq.deinit();
+    try fq.replies.append(
+        \\{"rows":[{"message_id":"m1","delivery_id":"d1","payload":"work"}]}
+    );
+    try fq.replies.append(
+        \\{"affected":1}
+    );
+    const h = helpers.Helpers.init(a, fq.querier());
+    const queue = try h.queueNamed("jobs");
+    const messages = try queue.readWait("worker", 1000, .{});
+    defer {
+        for (messages) |*message| message.deinit(a);
+        a.free(messages);
+    }
+    try testing.expectEqualStrings("d1", messages[0].delivery_id);
+    try queue.ack("d1");
+    try testing.expect(std.mem.startsWith(u8, fq.calls.items[1].sql, "QUEUE ACK jobs"));
+}
+
+test "secrets bind operations to explicit collection" {
+    const a = testing.allocator;
+    var fq = FakeQuerier.init(a);
+    defer fq.deinit();
+    try fq.replies.append(
+        \\{"affected":1}
+    );
+    try fq.replies.append(
+        \\{"rows":[{"key":"token"}]}
+    );
+    const h = helpers.Helpers.init(a, fq.querier());
+    const secrets = try h.secrets("app.prod");
+    try secrets.put("token", .{ .string = "secret" });
+    const row = try secrets.get("token");
+    if (row) |value| freeCloned(a, value);
+    try testing.expect(std.mem.startsWith(u8, fq.calls.items[0].sql, "VAULT PUT app.prod.token"));
+    try testing.expectEqualStrings("VAULT GET app.prod.token", fq.calls.items[1].sql);
 }
 
 // ---------------------------------------------------------------- Documents
@@ -301,8 +338,7 @@ test "documents get raises not found on missing" {
         \\{"rows":[]}
     );
     const h = helpers.Helpers.init(a, fq.querier());
-    try testing.expectError(helpers.HelperError.NotFound,
-        h.documents().get("people", "doc-1"));
+    try testing.expectError(helpers.HelperError.NotFound, h.documents().get("people", "doc-1"));
 }
 
 test "documents patch rejects json pointer paths" {
@@ -313,8 +349,7 @@ test "documents patch rejects json pointer paths" {
     var patch = json.ObjectMap.init(a);
     defer patch.deinit();
     try patch.put("a/b", .{ .integer = 1 });
-    try testing.expectError(helpers.HelperError.InvalidArgument,
-        h.documents().patch("people", "doc-1", patch));
+    try testing.expectError(helpers.HelperError.InvalidArgument, h.documents().patch("people", "doc-1", patch));
 }
 
 test "documents list orders by rid by default" {

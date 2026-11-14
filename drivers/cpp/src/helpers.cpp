@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <regex>
 #include <sstream>
 
 namespace reddb::helpers {
@@ -690,8 +691,54 @@ ListResult KvClient::list(const ListOpts& opts) {
 }
 
 // =========================================================================
+// Secrets client
+// =========================================================================
+
+namespace {
+void assert_vault_part(const std::string& value, const char* label) {
+    if (!std::regex_match(value, std::regex("^[A-Za-z0-9_.]+$"))) {
+        throw HelperError(HelperError::Code::InvalidArgument,
+                          std::string("invalid ") + label);
+    }
+}
+} // namespace
+
+SecretsClient::SecretsClient(std::shared_ptr<IQuerier> q, std::string collection)
+    : q_(std::move(q)), collection_(std::move(collection)) {
+    assert_vault_part(collection_, "vault collection");
+}
+
+void SecretsClient::put(const std::string& key, const JsonValue& value) {
+    q_->query("VAULT PUT " + path(key) + " = " + sql::kv_value_literal(value), {});
+}
+
+std::optional<JsonObject> SecretsClient::get(const std::string& key) {
+    return read("GET", key);
+}
+
+std::optional<JsonObject> SecretsClient::reveal(const std::string& key) {
+    return read("REVEAL", key);
+}
+
+std::optional<JsonObject> SecretsClient::read(const char* verb, const std::string& key) {
+    auto [row, _] = sql::first_row(q_->query(
+        std::string("VAULT ") + verb + " " + path(key), {}));
+    return row;
+}
+
+std::string SecretsClient::path(const std::string& key) const {
+    assert_vault_part(key, "vault key");
+    return collection_ + "." + key;
+}
+
+// =========================================================================
 // Queue client
 // =========================================================================
+
+ScopedQueueClient QueueClient::scope(const std::string& name) {
+    sql::assert_identifier(name, "queue name");
+    return ScopedQueueClient(*this, name);
+}
 
 QueuePushResult QueueClient::push(const std::string& queue, const JsonValue& value,
                                   const PushOptions& opts) {
@@ -770,6 +817,18 @@ std::vector<JsonValue> QueueClient::read_wait(const std::string& queue,
                                               const std::string& consumer,
                                               int64_t wait_ms,
                                               const ReadWaitOptions& opts) {
+    auto messages = read_wait_entries(queue, consumer, wait_ms, opts);
+    std::vector<JsonValue> out;
+    out.reserve(messages.size());
+    for (auto& message : messages) out.push_back(std::move(message.payload));
+    return out;
+}
+
+std::vector<QueueMessage> QueueClient::read_wait_entries(
+        const std::string& queue,
+        const std::string& consumer,
+        int64_t wait_ms,
+        const ReadWaitOptions& opts) {
     sql::assert_identifier(queue, "queue name");
     sql::assert_identifier(consumer, "consumer name");
     if (wait_ms < 0) {
@@ -794,13 +853,162 @@ std::vector<JsonValue> QueueClient::read_wait(const std::string& queue,
         + " WAIT " + std::to_string(wait_ms) + "ms";
     std::string body = q_->query(stmt, {});
     auto rows = sql::all_rows(body);
-    std::vector<JsonValue> out;
+    std::vector<QueueMessage> out;
     out.reserve(rows.size());
     for (auto& r : rows) {
-        auto it = r.find("payload");
-        out.push_back(it != r.end() ? it->second : JsonValue{});
+        QueueMessage message;
+        auto value = r.find("message_id");
+        if (value != r.end() && value->second.is_string()) message.message_id = value->second.as_string();
+        value = r.find("delivery_id");
+        if (value != r.end() && value->second.is_string()) message.delivery_id = value->second.as_string();
+        value = r.find("payload");
+        if (value != r.end()) message.payload = value->second;
+        value = r.find("consumer");
+        if (value != r.end() && value->second.is_string()) message.consumer = value->second.as_string();
+        value = r.find("delivery_count");
+        if (value != r.end() && value->second.is_number()) message.delivery_count = value->second.as_int();
+        message.raw = std::move(r);
+        out.push_back(std::move(message));
     }
     return out;
+}
+
+void QueueClient::ack(const std::string& queue, const std::string& delivery_id) {
+    if (delivery_id.empty()) {
+        throw HelperError(HelperError::Code::InvalidArgument,
+                          "queue delivery_id must be non-empty");
+    }
+    q_->query("QUEUE ACK " + sql::identifier(queue) + " WITH delivery_id = "
+              + sql::kv_tag_literal(delivery_id), {});
+}
+
+void QueueClient::nack(const std::string& queue, const std::string& delivery_id,
+                       const std::string& delay) {
+    if (delivery_id.empty()) {
+        throw HelperError(HelperError::Code::InvalidArgument,
+                          "queue delivery_id must be non-empty");
+    }
+    std::string delay_clause;
+    if (!delay.empty()) {
+        const std::regex allowed(
+            R"(^\d+(?:\.\d+)?(?:ms|s|sec|secs|m|min|mins|h|hr|hrs|d|day|days)?$)");
+        if (!std::regex_match(delay, allowed)) {
+            throw HelperError(HelperError::Code::InvalidArgument,
+                              "invalid queue retry delay");
+        }
+        delay_clause = " WITH DELAY " + delay;
+    }
+    q_->query("QUEUE NACK " + sql::identifier(queue) + " WITH delivery_id = "
+              + sql::kv_tag_literal(delivery_id) + delay_clause, {});
+}
+
+QueuePushResult ScopedQueueClient::push(const JsonValue& value,
+                                         const QueueClient::PushOptions& opts) {
+    return queue_.push(name_, value, opts);
+}
+std::vector<JsonValue> ScopedQueueClient::pop(std::optional<int> count) {
+    return queue_.pop(name_, count);
+}
+std::vector<JsonValue> ScopedQueueClient::peek(std::optional<int> count) {
+    return queue_.peek(name_, count);
+}
+int64_t ScopedQueueClient::len() { return queue_.len(name_); }
+DeleteResult ScopedQueueClient::purge() { return queue_.purge(name_); }
+std::vector<QueueMessage> ScopedQueueClient::read_wait(
+        const std::string& consumer, int64_t wait_ms,
+        const QueueClient::ReadWaitOptions& opts) {
+    return queue_.read_wait_entries(name_, consumer, wait_ms, opts);
+}
+void ScopedQueueClient::ack(const std::string& delivery_id) {
+    queue_.ack(name_, delivery_id);
+}
+void ScopedQueueClient::nack(const std::string& delivery_id, const std::string& delay) {
+    queue_.nack(name_, delivery_id, delay);
+}
+
+QueueConsumer::QueueConsumer(ScopedQueueClient queue, Options options)
+    : queue_(std::move(queue)), options_(std::move(options)) {
+    sql::assert_identifier(options_.consumer, "consumer name");
+    if (!options_.group.empty()) sql::assert_identifier(options_.group, "group name");
+    if (options_.wait_ms < 0) {
+        throw HelperError(HelperError::Code::InvalidArgument,
+                          "queue consumer wait_ms must be non-negative");
+    }
+    if (!options_.handler) {
+        throw HelperError(HelperError::Code::InvalidArgument,
+                          "queue consumer requires a handler");
+    }
+}
+
+QueueConsumer::~QueueConsumer() {
+    abort();
+    if (thread_.joinable()) thread_.join();
+}
+
+QueueConsumer& QueueConsumer::start() {
+    if (thread_.joinable()) {
+        throw HelperError(HelperError::Code::InvalidArgument,
+                          "queue consumer already started");
+    }
+    thread_ = std::thread([this] { run(); });
+    return *this;
+}
+
+void QueueConsumer::stop() { stopping_.store(true); }
+void QueueConsumer::abort() { stopping_.store(true); }
+void QueueConsumer::wait() {
+    if (!thread_.joinable()) {
+        throw HelperError(HelperError::Code::InvalidArgument,
+                          "queue consumer has not started");
+    }
+    thread_.join();
+    if (failure_) std::rethrow_exception(failure_);
+}
+
+void QueueConsumer::run() {
+    QueueClient::ReadWaitOptions read_options;
+    if (!options_.group.empty()) read_options.group = options_.group;
+    read_options.count = 1;
+    try {
+        while (!stopping_.load()) {
+            std::vector<QueueMessage> messages;
+            try {
+                messages = queue_.read_wait(
+                    options_.consumer, options_.wait_ms, read_options);
+            } catch (...) {
+                report(std::current_exception(), nullptr);
+                continue;
+            }
+            if (messages.empty()) continue;
+            QueueMessage& message = messages.front();
+            try {
+                if (message.delivery_id.empty()) {
+                    throw HelperError(HelperError::Code::InvalidResponse,
+                                      "queue delivery is missing delivery_id");
+                }
+                options_.handler(message);
+            } catch (...) {
+                auto error = std::current_exception();
+                if (!message.delivery_id.empty()) {
+                    queue_.nack(message.delivery_id, options_.retry_delay);
+                }
+                report(error, &message);
+                continue;
+            }
+            try {
+                queue_.ack(message.delivery_id);
+            } catch (...) {
+                report(std::current_exception(), &message);
+            }
+        }
+    } catch (...) {
+        failure_ = std::current_exception();
+    }
+}
+
+void QueueConsumer::report(std::exception_ptr error, const QueueMessage* message) {
+    if (!options_.on_error) std::rethrow_exception(error);
+    options_.on_error(error, message);
 }
 
 } // namespace reddb::helpers

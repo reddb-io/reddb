@@ -353,6 +353,21 @@ QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 1 WAIT 30s
 QUEUE READ notifications CONSUMER mobile_push COUNT 5 WAIT 500ms
 ```
 
+Each delivered row contains `message_id`, the opaque server-issued
+`delivery_id`, `payload`, `consumer`, `delivery_count`, and `attempts`. ACK or
+NACK with `delivery_id`; do not substitute `message_id` or reconstruct the
+handle:
+
+```sql
+QUEUE ACK tasks WITH delivery_id = '<delivery_id>'
+QUEUE NACK tasks WITH delivery_id = '<delivery_id>' WITH DELAY 5s
+```
+
+`delivery_id` is the same string on HTTP, RedWire, gRPC, Postgres-wire, and
+embedded execution. Adding it to the read projection is wire-compatible with
+legacy consumers that still use `(queue, group, message_id)` during the
+deprecation window.
+
 #### Duration grammar
 
 A `WAIT` duration is a number followed by an optional unit:

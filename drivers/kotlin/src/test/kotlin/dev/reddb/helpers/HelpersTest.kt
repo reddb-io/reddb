@@ -107,6 +107,18 @@ class HelpersTest {
         }
     }
 
+    @Test fun secretsAreBoundToExplicitCollection() = runBlocking {
+        val fq = FakeQuerier(ArrayDeque(listOf(
+            reply(mapOf("affected" to 1)),
+            reply(mapOf("rows" to listOf(mapOf("key" to "token")))),
+        )))
+        val secrets = Helpers(fq).secrets("app.prod")
+        secrets.put("token", "secret")
+        secrets.get("token")
+        assertTrue(fq.calls[0].first.startsWith("VAULT PUT app.prod.token"))
+        assertEquals("VAULT GET app.prod.token", fq.calls[1].first)
+    }
+
     // Queue -----------------------------------------------------------------
 
     @Test fun queuePushEmitsPriorityAndPayload() = runBlocking {
@@ -144,6 +156,22 @@ class HelpersTest {
         assertThrows(HelperException.InvalidArgument::class.java) {
             runBlocking { q.push("bad-name!", "x") }
         }
+    }
+
+    @Test fun scopedQueuePreservesDeliveryIdAndAcks() = runBlocking {
+        val fq = FakeQuerier(ArrayDeque(listOf(
+            reply(mapOf("rows" to listOf(mapOf(
+                "message_id" to "m1",
+                "delivery_id" to "d1",
+                "payload" to "work",
+            )))),
+            reply(mapOf("affected" to 1)),
+        )))
+        val queue = Helpers(fq).queue("jobs")
+        val messages = queue.readWait("worker", kotlin.time.Duration.parse("1s"))
+        assertEquals("d1", messages.single().deliveryId)
+        queue.ack("d1")
+        assertTrue(fq.calls[1].first.startsWith("QUEUE ACK jobs"))
     }
 
     // Documents -------------------------------------------------------------

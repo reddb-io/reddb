@@ -29,8 +29,7 @@ class _FakeQuerier implements Querier {
   }
 }
 
-Uint8List _reply(Object? v) =>
-    Uint8List.fromList(utf8.encode(jsonEncode(v)));
+Uint8List _reply(Object? v) => Uint8List.fromList(utf8.encode(jsonEncode(v)));
 
 void main() {
   group('kvPath', () {
@@ -50,6 +49,12 @@ void main() {
   });
 
   group('KV', () {
+    test('binds an explicit collection', () async {
+      final q = _FakeQuerier(replies: [<String, Object?>{}]);
+      await Helpers(q).kvNamed('runtime_config').set('feature', true);
+      expect(q.calls.first.sql, contains('runtime_config.feature'));
+    });
+
     test('set emits exact key path and value literal', () async {
       final q = _FakeQuerier(replies: [<String, Object?>{}]);
       await Helpers(q).kv.set('characters:hansel', 'ok');
@@ -116,6 +121,24 @@ void main() {
     });
   });
 
+  group('Secrets', () {
+    test('binds every operation to an explicit collection', () async {
+      final q = _FakeQuerier(replies: [
+        {'affected': 1},
+        {
+          'rows': [
+            {'key': 'token'},
+          ],
+        },
+      ]);
+      final secrets = Helpers(q).secrets('app.prod');
+      await secrets.put('token', 'secret');
+      await secrets.get('token');
+      expect(q.calls[0].sql, startsWith('VAULT PUT app.prod.token'));
+      expect(q.calls[1].sql, 'VAULT GET app.prod.token');
+    });
+  });
+
   group('Queue', () {
     test('push emits priority and JSON payload', () async {
       final q = _FakeQuerier(replies: [
@@ -164,6 +187,29 @@ void main() {
         () => Helpers(_FakeQuerier()).queue.push('bad-name!', 'x'),
         throwsA(isA<InvalidArgument>()),
       );
+    });
+
+    test('scoped queue preserves delivery id and acks', () async {
+      final q = _FakeQuerier(replies: [
+        {
+          'rows': [
+            {
+              'message_id': 'm1',
+              'delivery_id': 'd1',
+              'payload': 'work',
+            },
+          ],
+        },
+        {'affected': 1},
+      ]);
+      final queue = Helpers(q).queueNamed('jobs');
+      final messages = await queue.readWait(
+        'worker',
+        wait: const Duration(seconds: 1),
+      );
+      expect(messages.single.deliveryId, 'd1');
+      await queue.ack('d1');
+      expect(q.calls[1].sql, startsWith('QUEUE ACK jobs'));
     });
   });
 
@@ -347,14 +393,18 @@ void main() {
 
     test('tx.begin / commit / rollback emit BEGIN / COMMIT / ROLLBACK',
         () async {
-      final q = _FakeQuerier(
-          replies: [<String, Object?>{}, <String, Object?>{}, <String, Object?>{}]);
+      final q = _FakeQuerier(replies: [
+        <String, Object?>{},
+        <String, Object?>{},
+        <String, Object?>{}
+      ]);
       final tx = Helpers(q).tx();
       await tx.begin();
       await tx.commit();
       await tx.begin();
       await tx.rollback();
-      expect(q.calls.map((c) => c.sql), ['BEGIN', 'COMMIT', 'BEGIN', 'ROLLBACK']);
+      expect(
+          q.calls.map((c) => c.sql), ['BEGIN', 'COMMIT', 'BEGIN', 'ROLLBACK']);
     });
 
     test('tx.run commits on success', () async {
@@ -372,7 +422,11 @@ void main() {
 
     test('tx.run rolls back and re-throws on error', () async {
       final q = _FakeQuerier(
-        replies: [<String, Object?>{}, <String, Object?>{}, <String, Object?>{}],
+        replies: [
+          <String, Object?>{},
+          <String, Object?>{},
+          <String, Object?>{}
+        ],
         errors: [null, Exception('boom'), null],
       );
       final tx = Helpers(q).tx();

@@ -1417,6 +1417,7 @@ impl RedDBRuntime {
 
                 let mut result = UnifiedResult::with_columns(vec![
                     "message_id".into(),
+                    "delivery_id".into(),
                     "payload".into(),
                     "consumer".into(),
                     "delivery_count".into(),
@@ -1429,6 +1430,7 @@ impl RedDBRuntime {
                         "message_id",
                         Value::text(message_id_string(EntityId::new(message.message_id))),
                     );
+                    record.set("delivery_id", Value::text(message.delivery_id));
                     record.set("payload", message.payload);
                     record.set("consumer", Value::text(message.consumer));
                     record.set(
@@ -3620,8 +3622,8 @@ fn message_id_string(message_id: EntityId) -> String {
 
 /// Issue #917 — render a delivered queue message as the JSON object the
 /// RedWire `QueueEventPush` frame carries. Mirrors the column shape the
-/// SQL `QUEUE READ` projection emits (`message_id` / `payload` /
-/// `consumer` / `delivery_count`) so the wire push and the pull path
+/// SQL `QUEUE READ` projection emits (`message_id` / `delivery_id` /
+/// `payload` / `consumer` / `delivery_count`) so the wire push and the pull path
 /// stay client-compatible.
 fn delivered_message_json(
     message: crate::runtime::queue_lifecycle::DeliveredMessage,
@@ -3631,6 +3633,10 @@ fn delivered_message_json(
     obj.insert(
         "message_id".to_string(),
         JsonValue::String(message_id_string(EntityId::new(message.message_id))),
+    );
+    obj.insert(
+        "delivery_id".to_string(),
+        JsonValue::String(message.delivery_id),
     );
     obj.insert("payload".to_string(), message.payload.to_json());
     obj.insert("consumer".to_string(), JsonValue::String(message.consumer));
@@ -3978,6 +3984,39 @@ mod presence_integration_tests {
             counts[&("tasks".to_string(), "workers".to_string())],
             1,
             "active count reflects the live consumer"
+        );
+    }
+
+    #[test]
+    fn queue_read_returns_opaque_delivery_id() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE QUEUE tasks").unwrap();
+        rt.execute_query("QUEUE PUSH tasks 'job'").unwrap();
+
+        let read = rt
+            .execute_query("QUEUE READ tasks CONSUMER w1 COUNT 1 WAIT 1ms")
+            .unwrap();
+        let row = &read.result.records[0];
+        assert!(matches!(
+            row.get("delivery_id"),
+            Some(Value::Text(delivery_id)) if !delivery_id.is_empty()
+        ));
+    }
+
+    #[test]
+    fn redwire_queue_wait_push_returns_opaque_delivery_id() {
+        let message = crate::runtime::queue_lifecycle::DeliveredMessage {
+            delivery_id: "opaque-delivery".to_string(),
+            message_id: 7,
+            payload: Value::text("job"),
+            consumer: "w1".to_string(),
+            delivery_count: 1,
+        };
+        let json = delivered_message_json(message);
+        assert_eq!(
+            json.get("delivery_id")
+                .and_then(crate::serde_json::Value::as_str),
+            Some("opaque-delivery")
         );
     }
 

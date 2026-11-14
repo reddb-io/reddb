@@ -233,12 +233,12 @@ impl<S: QueueStore> QueueLifecycle<S> {
 
     /// Reserve up to `count` available messages for `(group, consumer)`,
     /// bump each one's `delivery_count`, and return the legacy `GROUP READ`
-    /// projection (`message_id, payload, consumer, delivery_count`).
+    /// projection (`message_id, delivery_id, payload, consumer, delivery_count`).
     ///
     /// This is the delivering counterpart to [`deliver`]: same
     /// lazy-reclaim-then-reserve flow, but it additionally increments the
     /// per-message attempt counter (WORK) and surfaces the entity
-    /// `message_id`, echoed `consumer`, and `delivery_count` columns
+    /// `message_id`, opaque `delivery_id`, echoed `consumer`, and `delivery_count` columns
     /// clients see today, so the eventual call-site flip preserves the
     /// wire shape exactly. Matches the pre-lifecycle `QUEUE READ` shape:
     ///

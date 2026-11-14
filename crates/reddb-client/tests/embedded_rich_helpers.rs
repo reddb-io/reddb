@@ -1,6 +1,8 @@
 #![cfg(feature = "embedded")]
 
-use reddb_client::{ErrorCode, JsonValue, ListOptions, QueuePushOptions, Reddb, ValueOut};
+use reddb_client::{
+    ErrorCode, JsonValue, ListOptions, QueueConsumerOptions, QueuePushOptions, Reddb, ValueOut,
+};
 
 fn field<'a>(row: &'a [(String, ValueOut)], name: &str) -> &'a ValueOut {
     row.iter()
@@ -154,4 +156,38 @@ async fn queue_and_transaction_helpers_use_engine_contracts() {
         .await
         .expect("select tx rows");
     assert!(rows.rows.is_empty());
+}
+
+#[tokio::test]
+async fn scoped_queue_consumer_handles_and_acks() {
+    let db = Reddb::connect("memory://").await.expect("connect");
+    let queue = db.queue_scope("worker_tasks").expect("queue scope");
+    db.queue()
+        .create("worker_tasks")
+        .await
+        .expect("create queue");
+    queue
+        .push(&JsonValue::string("work"), QueuePushOptions::new())
+        .await
+        .expect("push");
+
+    let stopping = std::sync::atomic::AtomicBool::new(false);
+    queue
+        .consume(
+            QueueConsumerOptions {
+                consumer: "worker1",
+                group: None,
+                wait: std::time::Duration::from_secs(1),
+                retry_delay: Some("1s"),
+            },
+            &stopping,
+            |_| async {
+                stopping.store(true, std::sync::atomic::Ordering::Release);
+                Ok(())
+            },
+        )
+        .await
+        .expect("consume");
+
+    assert_eq!(queue.len().await.expect("queue len"), 0);
 }

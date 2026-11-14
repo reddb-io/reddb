@@ -14,6 +14,11 @@ import { RedDBError } from './protocol.js'
 const UNSUPPORTED_TRANSPORTS = new Set(['embedded'])
 
 export class CacheClient {
+  static [Symbol.hasInstance](value) {
+    const candidate = value?.__reddbClientInstance ?? value
+    return this.prototype.isPrototypeOf(candidate)
+  }
+
   /**
    * @param {{ call: Function }} client
    * @param {string} [transport] Underlying transport label (e.g. 'http',
@@ -23,6 +28,13 @@ export class CacheClient {
   constructor(client, transport) {
     this._client = client
     this._transport = transport ?? null
+  }
+
+  scope(namespace) {
+    if (typeof namespace !== 'string' || namespace.length === 0) {
+      throw new TypeError('cache(namespace) requires a non-empty namespace')
+    }
+    return new ScopedCacheClient(this, namespace)
   }
 
   _guard(method) {
@@ -127,6 +139,20 @@ export class CacheClient {
     this._guard('flushNamespace')
     await this._client.call('cache.flush_namespace', { namespace })
   }
+}
+
+export class ScopedCacheClient {
+  constructor(cacheClient, namespace) {
+    this.cacheClient = cacheClient
+    this.namespace = namespace
+  }
+  get(key) { return this.cacheClient.get(this.namespace, key) }
+  put(key, value, options = {}) { return this.cacheClient.put(this.namespace, key, value, options) }
+  exists(key) { return this.cacheClient.exists(this.namespace, key) }
+  invalidate(key) { return this.cacheClient.invalidate(this.namespace, key) }
+  invalidatePrefix(prefix) { return this.cacheClient.invalidatePrefix(this.namespace, prefix) }
+  invalidateTags(tags) { return this.cacheClient.invalidateTags(this.namespace, tags) }
+  flush() { return this.cacheClient.flushNamespace(this.namespace) }
 }
 
 // ---------------------------------------------------------------------------

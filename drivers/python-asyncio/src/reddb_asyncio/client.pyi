@@ -3,6 +3,7 @@ from typing import Any, Awaitable, Callable
 from .documents import DocumentClient
 from .kv import KvClient
 from .queue import QueueClient
+from .secrets import SecretsClient
 
 class Reddb:
     async def query_with_options(self, sql: str, options: dict[str, Any],
@@ -10,6 +11,7 @@ class Reddb:
     kv: KvClient
     documents: DocumentClient
     queue: QueueClient
+    def secrets(self, collection: str) -> SecretsClient: ...
     def __init__(self, transport: Any) -> None: ...
     async def __aenter__(self) -> Reddb: ...
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None: ...

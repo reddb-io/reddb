@@ -76,6 +76,16 @@ pub const QueuePushResult = struct {
     }
 };
 
+pub const QueueMessage = struct {
+    delivery_id: []u8,
+    payload: json.Value,
+
+    pub fn deinit(self: *QueueMessage, allocator: Allocator) void {
+        allocator.free(self.delivery_id);
+        freeClonedJson(allocator, self.payload);
+    }
+};
+
 // --- Helper bundle ----------------------------------------------------------
 
 pub const Helpers = struct {
@@ -98,10 +108,71 @@ pub const Helpers = struct {
         };
     }
 
+    pub fn secrets(self: Helpers, collection: []const u8) !SecretsClient {
+        try assertVaultPart(collection);
+        return .{ .q = self.q, .allocator = self.allocator, .collection = collection };
+    }
+
     pub fn queue(self: Helpers) QueueClient {
         return .{ .q = self.q, .allocator = self.allocator };
     }
+
+    pub fn queueNamed(self: Helpers, name: []const u8) !ScopedQueueClient {
+        try assertIdentifier(name, "queue name");
+        return .{ .queue = self.queue(), .name = name };
+    }
 };
+
+pub const SecretsClient = struct {
+    q: Querier,
+    allocator: Allocator,
+    collection: []const u8,
+
+    pub fn put(self: SecretsClient, key: []const u8, value: json.Value) !void {
+        const vault_path = try self.path(key);
+        defer self.allocator.free(vault_path);
+        const literal = try kvValueLiteral(self.allocator, value);
+        defer self.allocator.free(literal);
+        const sql = try std.fmt.allocPrint(
+            self.allocator,
+            "VAULT PUT {s} = {s}",
+            .{ vault_path, literal },
+        );
+        defer self.allocator.free(sql);
+        const body = try self.q.query(self.allocator, sql, &.{});
+        self.allocator.free(body);
+    }
+
+    pub fn get(self: SecretsClient, key: []const u8) !?json.Value {
+        return self.read("GET", key);
+    }
+
+    pub fn reveal(self: SecretsClient, key: []const u8) !?json.Value {
+        return self.read("REVEAL", key);
+    }
+
+    fn read(self: SecretsClient, verb: []const u8, key: []const u8) !?json.Value {
+        const vault_path = try self.path(key);
+        defer self.allocator.free(vault_path);
+        const sql = try std.fmt.allocPrint(self.allocator, "VAULT {s} {s}", .{ verb, vault_path });
+        defer self.allocator.free(sql);
+        const body = try self.q.query(self.allocator, sql, &.{});
+        defer self.allocator.free(body);
+        return (try firstRow(self.allocator, body)).row;
+    }
+
+    fn path(self: SecretsClient, key: []const u8) ![]u8 {
+        try assertVaultPart(key);
+        return std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ self.collection, key });
+    }
+};
+
+fn assertVaultPart(value: []const u8) !void {
+    if (value.len == 0) return HelperError.InvalidArgument;
+    for (value) |ch| {
+        if (!isIdentChar(ch) and ch != '.') return HelperError.InvalidArgument;
+    }
+}
 
 // --- Documents --------------------------------------------------------------
 
@@ -121,9 +192,7 @@ pub const DocumentClient = struct {
         defer self.allocator.free(lit);
         const id_path = try identifierPath(self.allocator, collection);
         defer self.allocator.free(id_path);
-        const sql = try std.fmt.allocPrint(self.allocator,
-            "INSERT INTO {s} DOCUMENT VALUES ({s}) RETURNING *",
-            .{ id_path, lit });
+        const sql = try std.fmt.allocPrint(self.allocator, "INSERT INTO {s} DOCUMENT VALUES ({s}) RETURNING *", .{ id_path, lit });
         defer self.allocator.free(sql);
         const body = try self.q.query(self.allocator, sql, &.{});
         defer self.allocator.free(body);
@@ -139,8 +208,7 @@ pub const DocumentClient = struct {
     pub fn get(self: DocumentClient, collection: []const u8, rid: []const u8) !json.Value {
         const id_path = try identifierPath(self.allocator, collection);
         defer self.allocator.free(id_path);
-        const sql = try std.fmt.allocPrint(self.allocator,
-            "SELECT * FROM {s} WHERE rid = $1 LIMIT 1", .{id_path});
+        const sql = try std.fmt.allocPrint(self.allocator, "SELECT * FROM {s} WHERE rid = $1 LIMIT 1", .{id_path});
         defer self.allocator.free(sql);
         const params = [_][]const u8{rid};
         const body = try self.q.query(self.allocator, sql, &params);
@@ -155,13 +223,9 @@ pub const DocumentClient = struct {
         const id_path = try identifierPath(self.allocator, collection);
         defer self.allocator.free(id_path);
         const sql = if (opts.filter) |f|
-            try std.fmt.allocPrint(self.allocator,
-                "SELECT * FROM {s} WHERE {s} ORDER BY {s} LIMIT {d}",
-                .{ id_path, f, order, limit })
+            try std.fmt.allocPrint(self.allocator, "SELECT * FROM {s} WHERE {s} ORDER BY {s} LIMIT {d}", .{ id_path, f, order, limit })
         else
-            try std.fmt.allocPrint(self.allocator,
-                "SELECT * FROM {s} ORDER BY {s} LIMIT {d}",
-                .{ id_path, order, limit });
+            try std.fmt.allocPrint(self.allocator, "SELECT * FROM {s} ORDER BY {s} LIMIT {d}", .{ id_path, order, limit });
         defer self.allocator.free(sql);
         const body = try self.q.query(self.allocator, sql, &.{});
         defer self.allocator.free(body);
@@ -188,9 +252,7 @@ pub const DocumentClient = struct {
         }
         const id_path = try identifierPath(self.allocator, collection);
         defer self.allocator.free(id_path);
-        const sql = try std.fmt.allocPrint(self.allocator,
-            "UPDATE {s} SET {s} WHERE rid = $1 RETURNING *",
-            .{ id_path, parts.items });
+        const sql = try std.fmt.allocPrint(self.allocator, "UPDATE {s} SET {s} WHERE rid = $1 RETURNING *", .{ id_path, parts.items });
         defer self.allocator.free(sql);
         const params = [_][]const u8{rid};
         const body = try self.q.query(self.allocator, sql, &params);
@@ -202,8 +264,7 @@ pub const DocumentClient = struct {
     pub fn delete(self: DocumentClient, collection: []const u8, rid: []const u8) !DeleteResult {
         const id_path = try identifierPath(self.allocator, collection);
         defer self.allocator.free(id_path);
-        const sql = try std.fmt.allocPrint(self.allocator,
-            "DELETE FROM {s} WHERE rid = $1", .{id_path});
+        const sql = try std.fmt.allocPrint(self.allocator, "DELETE FROM {s} WHERE rid = $1", .{id_path});
         defer self.allocator.free(sql);
         const params = [_][]const u8{rid};
         const body = try self.q.query(self.allocator, sql, &params);
@@ -318,9 +379,7 @@ pub const KvClient = struct {
         const limit = try normalizeLimit(opts.limit);
         const id = try identifier(self.allocator, coll);
         defer self.allocator.free(id);
-        const sql = try std.fmt.allocPrint(self.allocator,
-            "SELECT key, value FROM {s} ORDER BY key ASC LIMIT {d}",
-            .{ id, limit });
+        const sql = try std.fmt.allocPrint(self.allocator, "SELECT key, value FROM {s} ORDER BY key ASC LIMIT {d}", .{ id, limit });
         defer self.allocator.free(sql);
         const body = try self.q.query(self.allocator, sql, &.{});
         defer self.allocator.free(body);
@@ -469,6 +528,23 @@ pub const QueueClient = struct {
         wait_ms: i64,
         opts: ReadWaitOptions,
     ) ![]json.Value {
+        const messages = try self.readWaitEntries(queue_name, consumer, wait_ms, opts);
+        defer {
+            for (messages) |*message| self.allocator.free(message.delivery_id);
+            self.allocator.free(messages);
+        }
+        const out = try self.allocator.alloc(json.Value, messages.len);
+        for (messages, 0..) |message, i| out[i] = message.payload;
+        return out;
+    }
+
+    pub fn readWaitEntries(
+        self: QueueClient,
+        queue_name: []const u8,
+        consumer: []const u8,
+        wait_ms: i64,
+        opts: ReadWaitOptions,
+    ) ![]QueueMessage {
         try assertIdentifier(queue_name, "queue name");
         try assertIdentifier(consumer, "consumer name");
         if (wait_ms < 0) return HelperError.InvalidArgument;
@@ -506,20 +582,166 @@ pub const QueueClient = struct {
         const body = try self.q.query(self.allocator, sql, &.{});
         defer self.allocator.free(body);
         const rows = try allRows(self.allocator, body);
-        defer self.allocator.free(rows);
-        var out = try self.allocator.alloc(json.Value, rows.len);
+        defer {
+            for (rows) |row| freeClonedJson(self.allocator, row);
+            self.allocator.free(rows);
+        }
+        const out = try self.allocator.alloc(QueueMessage, rows.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (out[0..initialized]) |*message| message.deinit(self.allocator);
+            self.allocator.free(out);
+        }
         for (rows, 0..) |row, i| {
-            out[i] = row.object.get("payload") orelse json.Value{ .null = {} };
+            const delivery = row.object.get("delivery_id") orelse return HelperError.InvalidResponse;
+            if (delivery != .string or delivery.string.len == 0) return HelperError.InvalidResponse;
+            const payload = row.object.get("payload") orelse json.Value{ .null = {} };
+            out[i] = .{
+                .delivery_id = try self.allocator.dupe(u8, delivery.string),
+                .payload = try cloneJson(self.allocator, payload),
+            };
+            initialized += 1;
         }
         return out;
     }
+
+    pub fn ack(self: QueueClient, queue_name: []const u8, delivery_id: []const u8) !void {
+        if (delivery_id.len == 0) return HelperError.InvalidArgument;
+        const qid = try identifier(self.allocator, queue_name);
+        defer self.allocator.free(qid);
+        const did = try kvTagLiteral(self.allocator, delivery_id);
+        defer self.allocator.free(did);
+        const sql = try std.fmt.allocPrint(
+            self.allocator,
+            "QUEUE ACK {s} WITH delivery_id = {s}",
+            .{ qid, did },
+        );
+        defer self.allocator.free(sql);
+        const body = try self.q.query(self.allocator, sql, &.{});
+        self.allocator.free(body);
+    }
+
+    pub fn nack(
+        self: QueueClient,
+        queue_name: []const u8,
+        delivery_id: []const u8,
+        delay: ?[]const u8,
+    ) !void {
+        if (delivery_id.len == 0) return HelperError.InvalidArgument;
+        if (delay) |value| if (!validQueueDelay(value)) return HelperError.InvalidArgument;
+        const qid = try identifier(self.allocator, queue_name);
+        defer self.allocator.free(qid);
+        const did = try kvTagLiteral(self.allocator, delivery_id);
+        defer self.allocator.free(did);
+        const delay_clause = if (delay) |value|
+            try std.fmt.allocPrint(self.allocator, " WITH DELAY {s}", .{value})
+        else
+            try self.allocator.dupe(u8, "");
+        defer self.allocator.free(delay_clause);
+        const sql = try std.fmt.allocPrint(
+            self.allocator,
+            "QUEUE NACK {s} WITH delivery_id = {s}{s}",
+            .{ qid, did, delay_clause },
+        );
+        defer self.allocator.free(sql);
+        const body = try self.q.query(self.allocator, sql, &.{});
+        self.allocator.free(body);
+    }
 };
+
+pub const ScopedQueueClient = struct {
+    queue: QueueClient,
+    name: []const u8,
+
+    pub fn push(self: ScopedQueueClient, value: json.Value, opts: QueueClient.PushOptions) !QueuePushResult {
+        return self.queue.push(self.name, value, opts);
+    }
+
+    pub fn readWait(
+        self: ScopedQueueClient,
+        consumer: []const u8,
+        wait_ms: i64,
+        opts: QueueClient.ReadWaitOptions,
+    ) ![]QueueMessage {
+        return self.queue.readWaitEntries(self.name, consumer, wait_ms, opts);
+    }
+
+    pub fn ack(self: ScopedQueueClient, delivery_id: []const u8) !void {
+        return self.queue.ack(self.name, delivery_id);
+    }
+
+    pub fn nack(self: ScopedQueueClient, delivery_id: []const u8, delay: ?[]const u8) !void {
+        return self.queue.nack(self.name, delivery_id, delay);
+    }
+
+    pub const ConsumerOptions = struct {
+        consumer: []const u8,
+        group: ?[]const u8 = null,
+        wait_ms: i64 = 30_000,
+        retry_delay: ?[]const u8 = null,
+        stop: *const std.atomic.Value(bool),
+        context: *anyopaque,
+        handler: *const fn (*anyopaque, *const QueueMessage) anyerror!void,
+    };
+
+    /// Sequential at-least-once loop. Run in a dedicated Zig thread for
+    /// background processing; setting `stop` exits after the active wait/handler.
+    pub fn consume(self: ScopedQueueClient, options: ConsumerOptions) !void {
+        try assertIdentifier(options.consumer, "consumer name");
+        if (options.group) |group| try assertIdentifier(group, "group name");
+        if (options.wait_ms < 0) return HelperError.InvalidArgument;
+        if (options.retry_delay) |delay| if (!validQueueDelay(delay)) return HelperError.InvalidArgument;
+        const read_options = QueueClient.ReadWaitOptions{ .group = options.group, .count = 1 };
+        while (!options.stop.load(.acquire)) {
+            const messages = try self.readWait(options.consumer, options.wait_ms, read_options);
+            defer {
+                for (messages) |*message| message.deinit(self.queue.allocator);
+                self.queue.allocator.free(messages);
+            }
+            if (messages.len == 0) continue;
+            const message = &messages[0];
+            options.handler(options.context, message) catch |handler_error| {
+                try self.nack(message.delivery_id, options.retry_delay);
+                return handler_error;
+            };
+            try self.ack(message.delivery_id);
+        }
+    }
+};
+
+fn validQueueDelay(value: []const u8) bool {
+    if (value.len == 0) return false;
+    var index: usize = 0;
+    var saw_digit = false;
+    var saw_dot = false;
+    while (index < value.len) : (index += 1) {
+        const ch = value[index];
+        if (ch >= '0' and ch <= '9') {
+            saw_digit = true;
+            continue;
+        }
+        if (ch == '.' and !saw_dot) {
+            saw_dot = true;
+            continue;
+        }
+        break;
+    }
+    if (!saw_digit) return false;
+    const suffix = value[index..];
+    const allowed = [_][]const u8{
+        "",  "ms", "s",   "sec", "secs", "m",    "min", "mins",
+        "h", "hr", "hrs", "d",   "day",  "days",
+    };
+    for (allowed) |candidate| {
+        if (std.mem.eql(u8, suffix, candidate)) return true;
+    }
+    return false;
+}
 
 // --- pure SQL helpers (unit-testable) ---------------------------------------
 
 pub fn isIdentChar(c: u8) bool {
-    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z')
-        or (c >= '0' and c <= '9') or c == '_';
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
 }
 
 pub fn allIdentChars(s: []const u8) bool {

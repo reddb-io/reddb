@@ -131,6 +131,7 @@ export interface CachePutEntry extends CachePutOptions {
 }
 
 export class CacheClient {
+  scope(namespace: string): ScopedCacheClient
   get(namespace: string, key: string): Promise<Uint8Array | null>
   getEntry(namespace: string, key: string): Promise<CacheHitResult | null>
   getMany(namespace: string, keys: string[]): Promise<CacheEntryResult[]>
@@ -149,6 +150,23 @@ export class CacheClient {
   invalidatePrefix(namespace: string, prefix: string): Promise<number>
   invalidateTags(namespace: string, tags: string[]): Promise<number>
   flushNamespace(namespace: string): Promise<void>
+}
+
+export class ScopedCacheClient {
+  readonly namespace: string
+  get(key: string): Promise<Uint8Array | null>
+  getEntry(key: string): Promise<CacheEntry | null>
+  getMany(keys: string[]): Promise<Array<CacheEntry & { value: Uint8Array | null }>>
+  put(key: string, value: Uint8Array | string, options?: CachePutOptions): Promise<void>
+  putMany(entries: CachePutEntry[]): Promise<number>
+  exists(key: string): Promise<'present' | 'absent' | 'maybe'>
+  expire(key: string, ttlMs: number): Promise<boolean>
+  expireAt(key: string, expiresAtUnixMs: number): Promise<boolean>
+  persist(key: string): Promise<boolean>
+  invalidate(key: string): Promise<void>
+  invalidatePrefix(prefix: string): Promise<number>
+  invalidateTags(tags: string[]): Promise<number>
+  flush(): Promise<void>
 }
 
 export interface KvWatchEvent {
@@ -213,6 +231,7 @@ export class DocumentClient {
 }
 
 export class QueueClient {
+  scope(queue: string): ScopedQueueClient
   push(
     queue: string,
     value: unknown,
@@ -233,7 +252,7 @@ export class QueueClient {
     consumer: string,
     options: { waitMs: number; group?: string; count?: number },
   ): Promise<unknown[]>
-  /** Like readWait(), but preserves message_id, consumer and delivery_count. */
+  /** Like readWait(), but preserves delivery_id and the complete delivery metadata. */
   readWaitEntries<T = unknown>(
     queue: string,
     consumer: string,
@@ -241,8 +260,49 @@ export class QueueClient {
   ): Promise<Array<QueueWaitEntry<T>>>
 }
 
+export class ScopedQueueClient {
+  readonly name: string
+  push(
+    value: unknown,
+    options?: { priority?: number; key?: string; dedup?: string; delay?: string; at?: number },
+  ): Promise<QueryResult>
+  pop(count?: number): Promise<unknown[]>
+  peek(count?: number): Promise<unknown[]>
+  len(): Promise<number>
+  purge(): Promise<QueryResult>
+  readWait<T = unknown>(
+    consumer: string,
+    options: { waitMs: number; group?: string; count?: number },
+  ): Promise<T[]>
+  readWaitEntries<T = unknown>(
+    consumer: string,
+    options: { waitMs: number; group?: string; count?: number },
+  ): Promise<Array<QueueWaitEntry<T>>>
+  ack(deliveryId: string | number): Promise<QueryResult>
+  nack(deliveryId: string | number, options?: { delay?: string }): Promise<QueryResult>
+  consumer<T = unknown>(options: QueueConsumerOptions<T>): QueueConsumer<T>
+}
+
+export interface QueueConsumerOptions<T = unknown> {
+  consumer: string
+  group?: string
+  waitMs?: number
+  retryDelay?: string
+  handleMessage(message: QueueWaitEntry<T>): void | Promise<void>
+  onError?(error: unknown, message: QueueWaitEntry<T> | null): void | Promise<void>
+}
+
+export class QueueConsumer<T = unknown> {
+  constructor(queue: ScopedQueueClient, options: QueueConsumerOptions<T>)
+  readonly status: { isRunning: boolean }
+  start(): this
+  stop(): Promise<void>
+  finished(): Promise<void>
+}
+
 export interface QueueWaitEntry<T = unknown> {
   message_id: string | number
+  delivery_id: string | number
   payload: T
   consumer: string
   delivery_count: number
@@ -420,12 +480,14 @@ export type ReadOptions = { consistency: 'strong' | 'local' }
 export class RedDB {
   queryWithOptions(sql: string, options: ReadOptions, params: QueryParam[]): Promise<QueryResult>
   queryWithOptions(sql: string, options: ReadOptions, ...params: QueryParam[]): Promise<QueryResult>
-  readonly cache: CacheClient
-  readonly queue: QueueClient
+  readonly cache: CacheClient & ((namespace: string) => ScopedCacheClient)
+  readonly queue: QueueClient & ((queue: string) => ScopedQueueClient)
+  readonly queues: QueueClient & ((queue: string) => ScopedQueueClient)
   readonly documents: DocumentClient
-  readonly kv: KvClient & ((collection?: string) => KvClient)
+  readonly kv: KvClient & ((collection: string) => KvClient)
   readonly config: (collection?: string) => ConfigClient
   readonly vault: (collection?: string) => VaultClient
+  readonly secrets: (collection: string) => VaultClient
 
   query(sql: string): Promise<QueryResult>
   query(sql: string, params: QueryParam[]): Promise<QueryResult>
