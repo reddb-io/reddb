@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.36.10
+
+### Patch Changes
+
+- [#2853](https://github.com/reddb-io/reddb/pull/2853) [`95037f4`](https://github.com/reddb-io/reddb/commit/95037f4cef0677f5738d247c880f9f0837d098b6) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Prepare legacy no-resume catalogs on the isolated compaction output before canonical config migration.
+
 ## 1.36.9
 
 ### Patch Changes
