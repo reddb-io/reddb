@@ -26,11 +26,36 @@ public static class ValueCodec
     public const byte TagJson = 0x07;
     public const byte TagTimestamp = 0x08;
     public const byte TagUuid = 0x09;
+    public const byte TagFingerprint = 0x0a;
+    public const byte TagFace = 0x0b;
+    public const byte TagIris = 0x0c;
+    public const byte TagFeatureVector = 0x0d;
+    public const byte TagBitSignature = 0x0e;
+    public const byte TagLandmarkSet = 0x0f;
 
     public const int MaxParamCount = 65_536;
     public const int MaxValuePayloadLen = Frame.MaxFrameSize;
+    public const int MaxFeatureVectorDimensions = 65_536;
+    public const int MaxBitSignatureBytes = 1 << 20;
+    public const int MaxLandmarkPoints = 4_096;
 
     public readonly record struct Timestamp(long Seconds);
+
+    public static bool RequiresBiometricCapability(object? value)
+    {
+        if (!IsJsonParam(value ?? string.Empty)) return false;
+        JsonObject? envelope = Canonicalize(value) as JsonObject;
+        return envelope is not null &&
+            (envelope.ContainsKey("$biometric") || envelope.ContainsKey("$feature_vector")
+             || envelope.ContainsKey("$bit_signature"));
+    }
+
+    public static bool RequiresLandmarkCapability(object? value)
+    {
+        if (!IsJsonParam(value ?? string.Empty)) return false;
+        JsonObject? envelope = Canonicalize(value) as JsonObject;
+        return envelope is not null && envelope.ContainsKey("$landmark_set");
+    }
 
     public static byte[] EncodeQueryWithParams(string sql, object?[]? parameters)
     {
@@ -89,6 +114,18 @@ public static class ValueCodec
         if (value is Guid guid) return EncodeUuid(guid);
         if (IsJsonParam(value))
         {
+            JsonObject? envelope = Canonicalize(value) as JsonObject;
+            if (envelope is not null && envelope.Count == 1)
+            {
+                if (envelope.TryGetPropertyValue("$biometric", out JsonNode? biometric))
+                    return EncodeBiometric(biometric);
+                if (envelope.TryGetPropertyValue("$feature_vector", out JsonNode? feature))
+                    return EncodeFeatureVector(feature);
+                if (envelope.TryGetPropertyValue("$bit_signature", out JsonNode? bits))
+                    return EncodeBitSignature(bits);
+                if (envelope.TryGetPropertyValue("$landmark_set", out JsonNode? landmarks))
+                    return EncodeLandmarkSet(landmarks);
+            }
             byte[] json = Encoding.UTF8.GetBytes(CanonicalJson(value));
             return EncodeLenPrefixed(TagJson, json);
         }
@@ -198,6 +235,182 @@ public static class ValueCodec
         WriteUuidBytes(guid, output.AsSpan(1));
         return output;
     }
+
+    private static byte[] EncodeBiometric(JsonNode? node)
+    {
+        if (node is not JsonObject value)
+            throw new ArgumentException("$biometric must be an object");
+        string modality = RequiredText(value, "modality");
+        int format = BiometricFormat(RequiredText(value, "format"));
+        int expected = modality switch { "fingerprint" => 1, "face" => 2, "iris" => 3, _ => 0 };
+        if (format == 0 || expected == 0 || (format >> 8) != expected)
+            throw new ArgumentException("invalid biometric modality or format");
+        byte[] data = DecodeHex(RequiredText(value, "data"), "biometric data");
+        if (data.Length == 0 || data.Length > MaxValuePayloadLen)
+            throw new ArgumentException("invalid biometric payload length");
+        byte tag = modality switch
+        {
+            "fingerprint" => TagFingerprint,
+            "face" => TagFace,
+            "iris" => TagIris,
+            _ => throw new ArgumentException("invalid biometric modality"),
+        };
+        byte[] output = new byte[1 + 2 + 4 + data.Length];
+        output[0] = tag;
+        BinaryPrimitives.WriteUInt16LittleEndian(output.AsSpan(1, 2), (ushort)format);
+        BinaryPrimitives.WriteInt32LittleEndian(output.AsSpan(3, 4), data.Length);
+        data.CopyTo(output.AsSpan(7));
+        return output;
+    }
+
+    private static byte[] EncodeFeatureVector(JsonNode? node)
+    {
+        if (node is not JsonObject value || value["values"] is not JsonArray values)
+            throw new ArgumentException("$feature_vector must contain values");
+        if (values.Count == 0 || values.Count > MaxFeatureVectorDimensions)
+            throw new ArgumentException("invalid feature vector dimension");
+        byte[] space = DecodeSpaceId(RequiredText(value, "space_id"));
+        byte[] output = new byte[1 + 16 + 4 + values.Count * 4];
+        output[0] = TagFeatureVector;
+        space.CopyTo(output.AsSpan(1));
+        BinaryPrimitives.WriteInt32LittleEndian(output.AsSpan(17, 4), values.Count);
+        double norm = 0;
+        for (int index = 0; index < values.Count; index++)
+        {
+            float coordinate;
+            try { coordinate = values[index]!.GetValue<float>(); }
+            catch (Exception ex) { throw new ArgumentException("feature vector coordinates must be numeric", ex); }
+            if (!float.IsFinite(coordinate))
+                throw new ArgumentException("feature vector coordinates must be finite");
+            norm += (double)coordinate * coordinate;
+            BinaryPrimitives.WriteInt32LittleEndian(
+                output.AsSpan(21 + index * 4, 4), BitConverter.SingleToInt32Bits(coordinate));
+        }
+        if (norm == 0) throw new ArgumentException("feature vector norm must be non-zero");
+        return output;
+    }
+
+    private static byte[] EncodeBitSignature(JsonNode? node)
+    {
+        if (node is not JsonObject value)
+            throw new ArgumentException("$bit_signature must be an object");
+        byte[] space = DecodeSpaceId(RequiredText(value, "space_id"));
+        byte[] bits = DecodeHex(RequiredText(value, "bits"), "bit signature bits");
+        byte[] mask = value.ContainsKey("mask")
+            ? DecodeHex(RequiredText(value, "mask"), "bit signature mask")
+            : Enumerable.Repeat((byte)0xff, bits.Length).ToArray();
+        if (bits.Length == 0 || bits.Length > MaxBitSignatureBytes || mask.Length != bits.Length
+            || !mask.Any(item => item != 0))
+            throw new ArgumentException("invalid bit signature length or mask");
+        byte[] output = new byte[1 + 16 + 4 + bits.Length * 2];
+        output[0] = TagBitSignature;
+        space.CopyTo(output.AsSpan(1));
+        BinaryPrimitives.WriteInt32LittleEndian(output.AsSpan(17, 4), bits.Length);
+        bits.CopyTo(output.AsSpan(21));
+        mask.CopyTo(output.AsSpan(21 + bits.Length));
+        return output;
+    }
+
+    private static byte[] EncodeLandmarkSet(JsonNode? node)
+    {
+        if (node is not JsonObject value || value.Count != 4
+            || value["pairs"] is not JsonArray pairs
+            || value["midline"] is not JsonArray midline)
+            throw new ArgumentException("$landmark_set must be a canonical object");
+        byte[] space = DecodeSpaceId(RequiredText(value, "space_id"));
+        int dimensions;
+        try { dimensions = value["dimensions"]!.GetValue<int>(); }
+        catch (Exception ex) { throw new ArgumentException("invalid landmark geometry", ex); }
+        int pointCount = checked(pairs.Count * 2 + midline.Count);
+        if ((dimensions != 2 && dimensions != 3) || pairs.Count < 2
+            || pointCount > MaxLandmarkPoints)
+            throw new ArgumentException("invalid landmark geometry");
+        byte[] output = new byte[1 + 16 + 1 + 4 + 4 + checked(pointCount * dimensions * 4)];
+        output[0] = TagLandmarkSet;
+        space.CopyTo(output.AsSpan(1));
+        output[17] = (byte)dimensions;
+        BinaryPrimitives.WriteInt32LittleEndian(output.AsSpan(18, 4), pairs.Count);
+        BinaryPrimitives.WriteInt32LittleEndian(output.AsSpan(22, 4), midline.Count);
+        int offset = 26;
+        void WritePoint(JsonNode? pointNode)
+        {
+            if (pointNode is not JsonArray point || point.Count != dimensions)
+                throw new ArgumentException("invalid landmark geometry");
+            foreach (JsonNode? coordinateNode in point)
+            {
+                float coordinate;
+                try { coordinate = coordinateNode!.GetValue<float>(); }
+                catch (Exception ex) { throw new ArgumentException("invalid landmark geometry", ex); }
+                if (!float.IsFinite(coordinate))
+                    throw new ArgumentException("invalid landmark geometry");
+                BinaryPrimitives.WriteInt32LittleEndian(
+                    output.AsSpan(offset, 4), BitConverter.SingleToInt32Bits(coordinate));
+                offset += 4;
+            }
+        }
+        foreach (JsonNode? pairNode in pairs)
+        {
+            if (pairNode is not JsonObject pair || pair.Count != 2
+                || !pair.ContainsKey("left") || !pair.ContainsKey("right"))
+                throw new ArgumentException("invalid landmark geometry");
+            WritePoint(pair["left"]);
+            WritePoint(pair["right"]);
+        }
+        foreach (JsonNode? point in midline) WritePoint(point);
+        return output;
+    }
+
+    private static string RequiredText(JsonObject value, string field)
+    {
+        if (value[field] is not JsonValue node || !node.TryGetValue(out string? text) || text is null)
+            throw new ArgumentException($"typed parameter field '{field}' must be text");
+        return text;
+    }
+
+    private static byte[] DecodeSpaceId(string value)
+    {
+        byte[] bytes = DecodeHex(value.Replace("-", string.Empty, StringComparison.Ordinal), "space_id");
+        if (bytes.Length != 16) throw new ArgumentException("space_id must contain 16 bytes");
+        return bytes;
+    }
+
+    private static byte[] DecodeHex(string value, string field)
+    {
+        if ((value.Length & 1) != 0)
+            throw new ArgumentException($"{field} must be even-length hexadecimal text");
+        byte[] output = new byte[value.Length / 2];
+        for (int index = 0; index < output.Length; index++)
+        {
+            if (!byte.TryParse(value.AsSpan(index * 2, 2),
+                    System.Globalization.NumberStyles.HexNumber,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out output[index]))
+                throw new ArgumentException($"{field} must be hexadecimal text");
+        }
+        return output;
+    }
+
+    private static int BiometricFormat(string name) => name.ToLowerInvariant() switch
+    {
+        "iso/iec 39794-2" => 0x0101,
+        "iso/iec 39794-4" => 0x0102,
+        "iso/iec 19794-2" => 0x0103,
+        "iso/iec 19794-4" => 0x0104,
+        "ansi incits 378" => 0x0105,
+        "ansi incits 381" => 0x0106,
+        "ansi/nist-itl type-4" => 0x0107,
+        "ansi/nist-itl type-9" => 0x0108,
+        "cbeff fingerprint" => 0x0109,
+        "iso/iec 39794-5" => 0x0201,
+        "iso/iec 19794-5" => 0x0202,
+        "ansi/nist-itl type-10" => 0x0203,
+        "cbeff face" => 0x0204,
+        "iso/iec 39794-6" => 0x0301,
+        "iso/iec 19794-6" => 0x0302,
+        "ansi/nist-itl type-17" => 0x0303,
+        "cbeff iris" => 0x0304,
+        _ => 0,
+    };
 
     private static long DateTimeToUnixSeconds(DateTime value)
     {

@@ -308,12 +308,9 @@ impl Catalog {
             .ok_or("canonical config migration requires the red.config resume identity")?;
 
         match (legacy.entities > 0, canonical.entities > 0) {
-            (true, true) => {
-                return Err(
-                    "both red_config and red.config contain records; refusing lossy migration"
-                        .into(),
-                )
-            }
+            (true, true) => Err(
+                "both red_config and red.config contain records; refusing lossy migration".into(),
+            ),
             (true, false) => {
                 let legacy = resume
                     .collections

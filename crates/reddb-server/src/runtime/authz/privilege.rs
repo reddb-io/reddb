@@ -567,7 +567,10 @@ impl RedDBRuntime {
                     // so a single toolbar grant is sufficient.
                     let collection = match cmd {
                         SearchCommand::Similar { collection, .. }
-                        | SearchCommand::Hybrid { collection, .. } => Some(collection.as_str()),
+                        | SearchCommand::Hybrid { collection, .. }
+                        | SearchCommand::TypedSimilarity { collection, .. } => {
+                            Some(collection.as_str())
+                        }
                         _ => None,
                     };
                     if let Some(c) = collection {

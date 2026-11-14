@@ -360,5 +360,31 @@ pub fn summarize_value(value: &Value) -> String {
         Value::Secret(bytes) => format!("secret({} bytes)", bytes.len()),
         Value::Password(_) => "password(***)".to_string(),
         Value::Temperature(value) => format!("CAST('{value}' AS TEMPERATURE)"),
+        Value::Fingerprint(value) => format!(
+            "fingerprint(format={},bytes={})",
+            value.format(),
+            value.bytes().len()
+        ),
+        Value::Face(value) => format!(
+            "face(format={},bytes={})",
+            value.format(),
+            value.bytes().len()
+        ),
+        Value::Iris(value) => format!(
+            "iris(format={},bytes={})",
+            value.format(),
+            value.bytes().len()
+        ),
+        Value::FeatureVector(value) => {
+            format!("feature_vector(dimensions={})", value.dimensions())
+        }
+        Value::BitSignature(value) => {
+            format!("bit_signature(bytes={})", value.len_bytes())
+        }
+        Value::LandmarkSet(value) => format!(
+            "landmark_set(dimensions={},points={})",
+            value.dimensions(),
+            value.point_count()
+        ),
     }
 }

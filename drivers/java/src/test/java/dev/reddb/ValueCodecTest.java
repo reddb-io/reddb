@@ -33,7 +33,48 @@ class ValueCodecTest {
         assertEquals(0x06, ValueCodec.TAG_VECTOR);
         assertEquals(0x07, ValueCodec.TAG_JSON);
         assertEquals(0x08, ValueCodec.TAG_TIMESTAMP);
+        assertEquals(0x0a, ValueCodec.TAG_FINGERPRINT);
+        assertEquals(0x0b, ValueCodec.TAG_FACE);
+        assertEquals(0x0c, ValueCodec.TAG_IRIS);
+        assertEquals(0x0d, ValueCodec.TAG_FEATURE_VECTOR);
+        assertEquals(0x0e, ValueCodec.TAG_BIT_SIGNATURE);
+        assertEquals(0x0f, ValueCodec.TAG_LANDMARK_SET);
         assertEquals(0x09, ValueCodec.TAG_UUID);
+    }
+
+    @Test
+    void encodesLandmarkSet() {
+        Map<String, Object> geometry = Map.of(
+            "space_id", "33333333333333333333333333333333",
+            "dimensions", 2,
+            "pairs", List.of(
+                Map.of("left", List.of(-2.0, 1.0), "right", List.of(2.0, 1.0)),
+                Map.of("left", List.of(-1.0, -1.0), "right", List.of(1.0, -1.0))),
+            "midline", List.of(List.of(0.0, 2.0)));
+        byte[] encoded = ValueCodec.encodeValue(Map.of("$landmark_set", geometry));
+        assertEquals(ValueCodec.TAG_LANDMARK_SET, encoded[0] & 0xff);
+        assertEquals(2, encoded[17]);
+        assertEquals(2, ByteBuffer.wrap(encoded, 18, 4).order(ByteOrder.LITTLE_ENDIAN).getInt());
+    }
+
+    @Test
+    void encodesBiometricFeatureAndBitEnvelopes() {
+        String space = "00112233445566778899aabbccddeeff";
+        byte[] feature = ValueCodec.encodeValue(Map.of(
+            "$feature_vector", Map.of("space_id", space, "values", List.of(1.0, -2.0))));
+        assertEquals(ValueCodec.TAG_FEATURE_VECTOR, feature[0] & 0xff);
+        assertEquals(2, ByteBuffer.wrap(feature, 17, 4).order(ByteOrder.LITTLE_ENDIAN).getInt());
+
+        byte[] bits = ValueCodec.encodeValue(Map.of(
+            "$bit_signature", Map.of("space_id", space, "bits", "aa55", "mask", "ff0f")));
+        assertEquals(ValueCodec.TAG_BIT_SIGNATURE, bits[0] & 0xff);
+        assertArrayEquals(new byte[]{(byte) 0xaa, 0x55, (byte) 0xff, 0x0f},
+            java.util.Arrays.copyOfRange(bits, 21, bits.length));
+
+        byte[] face = ValueCodec.encodeValue(Map.of(
+            "$biometric", Map.of("modality", "face", "format", "ISO/IEC 19794-5", "data", "46414300")));
+        assertEquals(ValueCodec.TAG_FACE, face[0] & 0xff);
+        assertEquals(0x0202, ByteBuffer.wrap(face, 1, 2).order(ByteOrder.LITTLE_ENDIAN).getShort() & 0xffff);
     }
 
     @Test

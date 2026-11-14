@@ -317,6 +317,18 @@ pub enum DataType {
     DecimalText = 55,
     /// Exact measured temperature with explicit C/F/K unit.
     Temperature = 56,
+    /// Standardized fingerprint record in a versioned RedDB envelope.
+    Fingerprint = 57,
+    /// Standardized face record in a versioned RedDB envelope.
+    Face = 58,
+    /// Standardized iris record in a versioned RedDB envelope.
+    Iris = 59,
+    /// Caller-supplied feature vector scoped by extractor space UUID.
+    FeatureVector = 60,
+    /// Caller-supplied bit signature and validity mask scoped by space UUID.
+    BitSignature = 61,
+    /// Caller-supplied bilateral landmark geometry scoped by space UUID.
+    LandmarkSet = 62,
 }
 
 /// Type categories used by the Fase 3 coercion resolver. Mirrors
@@ -371,6 +383,10 @@ pub enum TypeCategory {
     Vector,
     /// Embedded JSON blob.
     Json,
+    /// Standardized biometric records; no implicit coercion is permitted.
+    Biometric,
+    /// Caller-supplied comparison artifacts; no implicit coercion is permitted.
+    Feature,
     /// Null / unknown — used as the sentinel for untyped literals
     /// before the analyzer resolves a concrete type.
     Unknown,
@@ -422,6 +438,10 @@ impl DataType {
             | DataType::Enum => TypeCategory::Domain,
             DataType::Uuid => TypeCategory::Uuid,
             DataType::Secret | DataType::Password => TypeCategory::Opaque,
+            DataType::Fingerprint | DataType::Face | DataType::Iris => TypeCategory::Biometric,
+            DataType::FeatureVector | DataType::BitSignature | DataType::LandmarkSet => {
+                TypeCategory::Feature
+            }
             DataType::NodeRef
             | DataType::EdgeRef
             | DataType::VectorRef
@@ -532,6 +552,12 @@ impl DataType {
             54 => Some(DataType::Money),
             55 => Some(DataType::DecimalText),
             56 => Some(DataType::Temperature),
+            57 => Some(DataType::Fingerprint),
+            58 => Some(DataType::Face),
+            59 => Some(DataType::Iris),
+            60 => Some(DataType::FeatureVector),
+            61 => Some(DataType::BitSignature),
+            62 => Some(DataType::LandmarkSet),
             _ => None,
         }
     }
@@ -594,6 +620,12 @@ impl DataType {
             "ASSETCODE" | "ASSET_CODE" | "ASSET" => DataType::AssetCode,
             "MONEY" => DataType::Money,
             "TEMPERATURE" => DataType::Temperature,
+            "FINGERPRINT" => DataType::Fingerprint,
+            "FACE" => DataType::Face,
+            "IRIS" => DataType::Iris,
+            "FEATURE_VECTOR" | "FEATUREVECTOR" => DataType::FeatureVector,
+            "BIT_SIGNATURE" | "BITSIGNATURE" => DataType::BitSignature,
+            "LANDMARK_SET" | "LANDMARKSET" => DataType::LandmarkSet,
             "DECIMAL_TEXT" | "DECIMALTEXT" => DataType::DecimalText,
             "ENUM" => DataType::Enum,
             "ARRAY" => DataType::Array,
@@ -661,15 +693,21 @@ impl DataType {
             DataType::BigInt => Some(8),       // i64
             DataType::AssetCode => None,       // variable-length normalized code
             DataType::Temperature => Some(10), // unit + scale + i64 minor units
-            DataType::Money => None,           // variable-length asset + scale + i64
-            DataType::KeyRef => None,          // variable-length (collection + key)
-            DataType::DocRef => None,          // variable-length (collection + u64)
-            DataType::TableRef => None,        // variable-length (table name)
-            DataType::PageRef => Some(4),      // u32
-            DataType::Secret => None,          // variable-length ciphertext
-            DataType::Password => None,        // variable-length hash string
-            DataType::TextZstd => None,        // variable-length compressed text
-            DataType::BlobZstd => None,        // variable-length compressed blob
+            DataType::Fingerprint
+            | DataType::Face
+            | DataType::Iris
+            | DataType::FeatureVector
+            | DataType::BitSignature
+            | DataType::LandmarkSet => None,
+            DataType::Money => None,  // variable-length asset + scale + i64
+            DataType::KeyRef => None, // variable-length (collection + key)
+            DataType::DocRef => None, // variable-length (collection + u64)
+            DataType::TableRef => None, // variable-length (table name)
+            DataType::PageRef => Some(4), // u32
+            DataType::Secret => None, // variable-length ciphertext
+            DataType::Password => None, // variable-length hash string
+            DataType::TextZstd => None, // variable-length compressed text
+            DataType::BlobZstd => None, // variable-length compressed blob
         }
     }
 
@@ -792,6 +830,12 @@ impl fmt::Display for DataType {
             DataType::AssetCode => write!(f, "ASSET_CODE"),
             DataType::Money => write!(f, "MONEY"),
             DataType::Temperature => write!(f, "TEMPERATURE"),
+            DataType::Fingerprint => write!(f, "FINGERPRINT"),
+            DataType::Face => write!(f, "FACE"),
+            DataType::Iris => write!(f, "IRIS"),
+            DataType::FeatureVector => write!(f, "FEATURE_VECTOR"),
+            DataType::BitSignature => write!(f, "BIT_SIGNATURE"),
+            DataType::LandmarkSet => write!(f, "LANDMARK_SET"),
             DataType::DecimalText => write!(f, "DECIMAL_TEXT"),
             DataType::ColorAlpha => write!(f, "COLOR_ALPHA"),
             DataType::BigInt => write!(f, "BIGINT"),
@@ -922,6 +966,18 @@ pub enum Value {
     Secret(Vec<u8>),
     /// Argon2id password hash string
     Password(String),
+    /// Standardized fingerprint record.
+    Fingerprint(crate::BiometricSample),
+    /// Standardized face record.
+    Face(crate::BiometricSample),
+    /// Standardized iris record.
+    Iris(crate::BiometricSample),
+    /// Caller-supplied vector scoped by an extractor space UUID.
+    FeatureVector(crate::FeatureVector),
+    /// Caller-supplied bit signature scoped by an extractor space UUID.
+    BitSignature(crate::BitSignature),
+    /// Caller-supplied bilateral landmark geometry scoped by a space UUID.
+    LandmarkSet(crate::LandmarkSet),
 }
 
 /// Manual `Eq` impl: consistent with the manual `Hash` impl below.
@@ -1032,6 +1088,10 @@ impl std::hash::Hash for Value {
             Value::PageRef(v) => v.hash(state),
             Value::Secret(v) => v.hash(state),
             Value::Password(v) => v.hash(state),
+            Value::Fingerprint(v) | Value::Face(v) | Value::Iris(v) => v.hash(state),
+            Value::FeatureVector(v) => v.hash(state),
+            Value::BitSignature(v) => v.hash(state),
+            Value::LandmarkSet(v) => v.hash(state),
         }
     }
 }
@@ -1103,6 +1163,12 @@ impl Value {
             Value::PageRef(..) => DataType::PageRef,
             Value::Secret(..) => DataType::Secret,
             Value::Password(..) => DataType::Password,
+            Value::Fingerprint(..) => DataType::Fingerprint,
+            Value::Face(..) => DataType::Face,
+            Value::Iris(..) => DataType::Iris,
+            Value::FeatureVector(..) => DataType::FeatureVector,
+            Value::BitSignature(..) => DataType::BitSignature,
+            Value::LandmarkSet(..) => DataType::LandmarkSet,
         }
     }
 
@@ -1546,6 +1612,36 @@ impl fmt::Display for Value {
             Value::PageRef(p) => write!(f, "page_ref:{}", p),
             Value::Secret(_) => write!(f, "***"),
             Value::Password(_) => write!(f, "***"),
+            Value::Fingerprint(value) => write!(
+                f,
+                "<fingerprint format={} bytes={}>",
+                value.format(),
+                value.bytes().len()
+            ),
+            Value::Face(value) => write!(
+                f,
+                "<face format={} bytes={}>",
+                value.format(),
+                value.bytes().len()
+            ),
+            Value::Iris(value) => write!(
+                f,
+                "<iris format={} bytes={}>",
+                value.format(),
+                value.bytes().len()
+            ),
+            Value::FeatureVector(value) => {
+                write!(f, "<feature_vector dimensions={}>", value.dimensions())
+            }
+            Value::BitSignature(value) => {
+                write!(f, "<bit_signature bytes={}>", value.len_bytes())
+            }
+            Value::LandmarkSet(value) => write!(
+                f,
+                "<landmark_set dimensions={} points={}>",
+                value.dimensions(),
+                value.point_count()
+            ),
         }
     }
 }
@@ -3015,7 +3111,8 @@ mod tests {
         assert_eq!(DataType::from_sql_name("definitely_not_a_type"), None);
         assert_eq!(DataType::from_byte(0), None);
         assert_eq!(DataType::from_byte(56), Some(DataType::Temperature));
-        assert_eq!(DataType::from_byte(57), None);
+        assert_eq!(DataType::from_byte(57), Some(DataType::Fingerprint));
+        assert_eq!(DataType::from_byte(62), None);
     }
 
     #[test]

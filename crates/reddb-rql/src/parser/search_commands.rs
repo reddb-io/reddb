@@ -2,7 +2,7 @@
 
 use super::error::ParseError;
 use super::Parser;
-use crate::ast::{QueryExpr, SearchCommand};
+use crate::ast::{QueryExpr, SearchCommand, TypedSearchKind};
 use crate::lexer::Token;
 use reddb_types::types::Value;
 
@@ -24,6 +24,13 @@ impl<'a> Parser<'a> {
             Token::Ident(name) if name.eq_ignore_ascii_case("SPATIAL") => {
                 self.parse_search_spatial()
             }
+            Token::Ident(name)
+                if name.eq_ignore_ascii_case("FEATURE")
+                    || name.eq_ignore_ascii_case("BITS")
+                    || name.eq_ignore_ascii_case("FINGERPRINT") =>
+            {
+                self.parse_search_typed_similarity()
+            }
             _ => Err(ParseError::expected(
                 vec![
                     "SIMILAR",
@@ -33,11 +40,87 @@ impl<'a> Parser<'a> {
                     "INDEX",
                     "CONTEXT",
                     "SPATIAL",
+                    "FEATURE",
+                    "BITS",
+                    "FINGERPRINT",
                 ],
                 self.peek(),
                 self.position(),
             )),
         }
+    }
+
+    fn parse_search_typed_similarity(&mut self) -> Result<QueryExpr, ParseError> {
+        let kind = match self.peek().clone() {
+            Token::Ident(name) if name.eq_ignore_ascii_case("FEATURE") => TypedSearchKind::Feature,
+            Token::Ident(name) if name.eq_ignore_ascii_case("BITS") => TypedSearchKind::Bits,
+            Token::Ident(name) if name.eq_ignore_ascii_case("FINGERPRINT") => {
+                TypedSearchKind::Fingerprint
+            }
+            other => {
+                return Err(ParseError::expected(
+                    vec!["FEATURE", "BITS", "FINGERPRINT"],
+                    &other,
+                    self.position(),
+                ))
+            }
+        };
+        self.advance()?;
+        if !matches!(self.peek(), Token::Dollar | Token::Question) {
+            return Err(ParseError::expected(
+                vec!["typed parameter"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        let value_param = self.parse_param_slot("typed search value")?;
+        self.expect(Token::In)?;
+        let collection = self.parse_collection_name()?;
+        self.expect(Token::Column)?;
+        let column = self.expect_ident()?;
+
+        let mut limit = 10_usize;
+        let mut min_score = None;
+        let mut exact = false;
+        loop {
+            if self.consume(&Token::Limit)? {
+                let parsed = self.parse_integer()?;
+                if parsed <= 0 {
+                    return Err(ParseError::new("LIMIT must be positive", self.position()));
+                }
+                limit = usize::try_from(parsed)
+                    .map_err(|_| ParseError::new("LIMIT is too large", self.position()))?;
+            } else if self.consume(&Token::MinScore)? {
+                let parsed = self.parse_float()?;
+                if !parsed.is_finite() || !(0.0..=1.0).contains(&parsed) {
+                    return Err(ParseError::new(
+                        "MIN_SCORE must be finite and between 0 and 1",
+                        self.position(),
+                    ));
+                }
+                min_score = Some(parsed);
+            } else if self.consume_search_ident("EXACT")? {
+                exact = true;
+            } else {
+                break;
+            }
+        }
+        let min_score = min_score.ok_or_else(|| {
+            ParseError::new(
+                "typed biometric searches require an explicit MIN_SCORE",
+                self.position(),
+            )
+        })?;
+        Ok(QueryExpr::SearchCommand(SearchCommand::TypedSimilarity {
+            kind,
+            value: None,
+            value_param: Some(value_param),
+            collection,
+            column,
+            limit,
+            min_score,
+            exact,
+        }))
     }
 
     /// Parse: SEARCH SIMILAR ([v1, v2] | TEXT 'query') COLLECTION col [LIMIT n] [MIN_SCORE f] [USING provider]
@@ -739,6 +822,54 @@ mod tests {
 
     fn assert_parse_err(input: &str) {
         assert!(crate::parser::parse(input).is_err(), "{input}");
+    }
+
+    #[test]
+    fn parses_typed_similarity_searches_with_explicit_thresholds() {
+        let query = parse_query(
+            "SEARCH FEATURE $1 IN identities COLUMN face_features LIMIT 10 MIN_SCORE 0.8 EXACT",
+        );
+        let QueryExpr::SearchCommand(SearchCommand::TypedSimilarity {
+            kind,
+            value_param,
+            collection,
+            column,
+            limit,
+            min_score,
+            exact,
+            ..
+        }) = query
+        else {
+            panic!("expected typed similarity search");
+        };
+        assert_eq!(kind, TypedSearchKind::Feature);
+        assert_eq!(value_param, Some(0));
+        assert_eq!(collection, "identities");
+        assert_eq!(column, "face_features");
+        assert_eq!(limit, 10);
+        assert_eq!(min_score, 0.8);
+        assert!(exact);
+
+        assert!(matches!(
+            parse_query("SEARCH BITS $1 IN identities COLUMN iris MIN_SCORE 1"),
+            QueryExpr::SearchCommand(SearchCommand::TypedSimilarity {
+                kind: TypedSearchKind::Bits,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_query("SEARCH FINGERPRINT $1 IN identities COLUMN print MIN_SCORE 0"),
+            QueryExpr::SearchCommand(SearchCommand::TypedSimilarity {
+                kind: TypedSearchKind::Fingerprint,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn typed_similarity_requires_valid_explicit_threshold() {
+        assert_parse_err("SEARCH FEATURE $1 IN identities COLUMN face_features");
+        assert_parse_err("SEARCH FEATURE $1 IN identities COLUMN face_features MIN_SCORE 1.1");
     }
 
     #[test]

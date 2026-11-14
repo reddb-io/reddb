@@ -31,7 +31,61 @@ class ValueCodecTest {
         assertEquals(0x06, ValueCodec.TAG_VECTOR)
         assertEquals(0x07, ValueCodec.TAG_JSON)
         assertEquals(0x08, ValueCodec.TAG_TIMESTAMP)
+        assertEquals(0x0a, ValueCodec.TAG_FINGERPRINT)
+        assertEquals(0x0b, ValueCodec.TAG_FACE)
+        assertEquals(0x0c, ValueCodec.TAG_IRIS)
+        assertEquals(0x0d, ValueCodec.TAG_FEATURE_VECTOR)
+        assertEquals(0x0e, ValueCodec.TAG_BIT_SIGNATURE)
+        assertEquals(0x0f, ValueCodec.TAG_LANDMARK_SET)
         assertEquals(0x09, ValueCodec.TAG_UUID)
+    }
+
+    @Test
+    fun encodesLandmarkSet() {
+        val geometry = mapOf(
+            "space_id" to "33333333333333333333333333333333",
+            "dimensions" to 2,
+            "pairs" to listOf(
+                mapOf("left" to listOf(-2.0, 1.0), "right" to listOf(2.0, 1.0)),
+                mapOf("left" to listOf(-1.0, -1.0), "right" to listOf(1.0, -1.0))
+            ),
+            "midline" to listOf(listOf(0.0, 2.0))
+        )
+        val encoded = ValueCodec.encodeValue(mapOf("\$landmark_set" to geometry))
+        assertEquals(ValueCodec.TAG_LANDMARK_SET, encoded[0].toInt() and 0xff)
+        assertEquals(2, encoded[17].toInt())
+        assertEquals(
+            2,
+            ByteBuffer.wrap(encoded, 18, 4).order(ByteOrder.LITTLE_ENDIAN).int
+        )
+    }
+
+    @Test
+    fun encodesBiometricFeatureAndBitEnvelopes() {
+        val space = "00112233445566778899aabbccddeeff"
+        val feature = ValueCodec.encodeValue(
+            mapOf("\$feature_vector" to mapOf("space_id" to space, "values" to listOf(1.0, -2.0)))
+        )
+        assertEquals(ValueCodec.TAG_FEATURE_VECTOR, feature[0].toInt() and 0xff)
+        assertEquals(2, ByteBuffer.wrap(feature, 17, 4).order(ByteOrder.LITTLE_ENDIAN).int)
+
+        val bits = ValueCodec.encodeValue(
+            mapOf("\$bit_signature" to mapOf("space_id" to space, "bits" to "aa55", "mask" to "ff0f"))
+        )
+        assertEquals(ValueCodec.TAG_BIT_SIGNATURE, bits[0].toInt() and 0xff)
+        assertArrayEquals(byteArrayOf(0xaa.toByte(), 0x55, 0xff.toByte(), 0x0f), bits.copyOfRange(21, bits.size))
+
+        val face = ValueCodec.encodeValue(
+            mapOf(
+                "\$biometric" to mapOf(
+                    "modality" to "face",
+                    "format" to "ISO/IEC 19794-5",
+                    "data" to "46414300"
+                )
+            )
+        )
+        assertEquals(ValueCodec.TAG_FACE, face[0].toInt() and 0xff)
+        assertEquals(0x0202, ByteBuffer.wrap(face, 1, 2).order(ByteOrder.LITTLE_ENDIAN).short.toInt() and 0xffff)
     }
 
     @Test

@@ -25,9 +25,32 @@ final class ValueCodec
     public const TAG_JSON = 0x07;
     public const TAG_TIMESTAMP = 0x08;
     public const TAG_UUID = 0x09;
+    public const TAG_FINGERPRINT = 0x0A;
+    public const TAG_FACE = 0x0B;
+    public const TAG_IRIS = 0x0C;
+    public const TAG_FEATURE_VECTOR = 0x0D;
+    public const TAG_BIT_SIGNATURE = 0x0E;
+    public const TAG_LANDMARK_SET = 0x0F;
 
     public const MAX_PARAM_COUNT = 65_536;
     public const MAX_VALUE_PAYLOAD_LEN = Frame::MAX_FRAME_SIZE;
+    public const MAX_FEATURE_VECTOR_DIMENSIONS = 65_536;
+    public const MAX_BIT_SIGNATURE_BYTES = 1 << 20;
+    public const MAX_LANDMARK_POINTS = 4_096;
+
+    public static function requiresBiometricCapability(mixed $value): bool
+    {
+        return is_array($value) && (
+            array_key_exists('$biometric', $value)
+            || array_key_exists('$feature_vector', $value)
+            || array_key_exists('$bit_signature', $value)
+        );
+    }
+
+    public static function requiresLandmarkCapability(mixed $value): bool
+    {
+        return is_array($value) && array_key_exists('$landmark_set', $value);
+    }
 
     public static function encodeQueryWithParams(string $sql, array $params): string
     {
@@ -82,6 +105,18 @@ final class ValueCodec
             return chr(self::TAG_TIMESTAMP) . self::packI64($value->getTimestamp());
         }
         if (is_array($value)) {
+            if (count($value) === 1 && array_key_exists('$biometric', $value)) {
+                return self::encodeBiometric($value['$biometric']);
+            }
+            if (count($value) === 1 && array_key_exists('$feature_vector', $value)) {
+                return self::encodeFeatureVector($value['$feature_vector']);
+            }
+            if (count($value) === 1 && array_key_exists('$bit_signature', $value)) {
+                return self::encodeBitSignature($value['$bit_signature']);
+            }
+            if (count($value) === 1 && array_key_exists('$landmark_set', $value)) {
+                return self::encodeLandmarkSet($value['$landmark_set']);
+            }
             if (self::isNumericList($value)) {
                 return self::encodeVector($value);
             }
@@ -183,6 +218,164 @@ final class ValueCodec
             $out .= chr(($value >> ($i * 8)) & 0xff);
         }
         return $out;
+    }
+
+    private static function encodeBiometric(mixed $value): string
+    {
+        if (!is_array($value)) {
+            throw new \InvalidArgumentException('$biometric must be an object');
+        }
+        $modality = self::requiredText($value, 'modality');
+        $format = self::biometricFormat(self::requiredText($value, 'format'));
+        $expected = ['fingerprint' => 1, 'face' => 2, 'iris' => 3][$modality] ?? 0;
+        if ($format === 0 || $expected === 0 || ($format >> 8) !== $expected) {
+            throw new \InvalidArgumentException('invalid biometric modality or format');
+        }
+        $data = self::decodeHex(self::requiredText($value, 'data'), 'biometric data');
+        if ($data === '' || strlen($data) > self::MAX_VALUE_PAYLOAD_LEN) {
+            throw new \InvalidArgumentException('invalid biometric payload length');
+        }
+        $tag = [
+            'fingerprint' => self::TAG_FINGERPRINT,
+            'face' => self::TAG_FACE,
+            'iris' => self::TAG_IRIS,
+        ][$modality];
+        return chr($tag) . pack('vV', $format, strlen($data)) . $data;
+    }
+
+    private static function encodeFeatureVector(mixed $value): string
+    {
+        if (!is_array($value) || !isset($value['values']) || !is_array($value['values'])) {
+            throw new \InvalidArgumentException('$feature_vector must contain values');
+        }
+        $values = $value['values'];
+        if (!array_is_list($values) || count($values) < 1 || count($values) > self::MAX_FEATURE_VECTOR_DIMENSIONS) {
+            throw new \InvalidArgumentException('invalid feature vector dimension');
+        }
+        $space = self::parseUuid(self::requiredText($value, 'space_id'));
+        $out = chr(self::TAG_FEATURE_VECTOR) . $space . pack('V', count($values));
+        $norm = 0.0;
+        foreach ($values as $coordinate) {
+            if ((!is_int($coordinate) && !is_float($coordinate)) || !is_finite((float) $coordinate)) {
+                throw new \InvalidArgumentException('feature vector coordinates must be finite numbers');
+            }
+            $number = (float) $coordinate;
+            $norm += $number * $number;
+            $out .= pack('g', $number);
+        }
+        if ($norm === 0.0) {
+            throw new \InvalidArgumentException('feature vector norm must be non-zero');
+        }
+        return $out;
+    }
+
+    private static function encodeBitSignature(mixed $value): string
+    {
+        if (!is_array($value)) {
+            throw new \InvalidArgumentException('$bit_signature must be an object');
+        }
+        $space = self::parseUuid(self::requiredText($value, 'space_id'));
+        $bits = self::decodeHex(self::requiredText($value, 'bits'), 'bit signature bits');
+        $mask = array_key_exists('mask', $value)
+            ? self::decodeHex(self::requiredText($value, 'mask'), 'bit signature mask')
+            : str_repeat(chr(0xff), strlen($bits));
+        if ($bits === '' || strlen($bits) > self::MAX_BIT_SIGNATURE_BYTES
+            || strlen($mask) !== strlen($bits) || trim($mask, "\0") === '') {
+            throw new \InvalidArgumentException('invalid bit signature length or mask');
+        }
+        return chr(self::TAG_BIT_SIGNATURE) . $space . pack('V', strlen($bits)) . $bits . $mask;
+    }
+
+    private static function encodeLandmarkSet(mixed $value): string
+    {
+        if (!is_array($value) || count($value) !== 4
+            || !isset($value['pairs'], $value['midline'])
+            || !is_array($value['pairs']) || !array_is_list($value['pairs'])
+            || !is_array($value['midline']) || !array_is_list($value['midline'])) {
+            throw new \InvalidArgumentException('$landmark_set must be a canonical object');
+        }
+        $dimensions = $value['dimensions'] ?? null;
+        $pairs = $value['pairs'];
+        $midline = $value['midline'];
+        $pointCount = count($pairs) * 2 + count($midline);
+        if (!is_int($dimensions) || ($dimensions !== 2 && $dimensions !== 3)
+            || count($pairs) < 2 || $pointCount > self::MAX_LANDMARK_POINTS) {
+            throw new \InvalidArgumentException('invalid landmark geometry');
+        }
+        $out = chr(self::TAG_LANDMARK_SET)
+            . self::parseUuid(self::requiredText($value, 'space_id'))
+            . chr($dimensions)
+            . pack('V2', count($pairs), count($midline));
+        $putPoint = static function (mixed $point) use ($dimensions): string {
+            if (!is_array($point) || !array_is_list($point) || count($point) !== $dimensions) {
+                throw new \InvalidArgumentException('invalid landmark geometry');
+            }
+            $bytes = '';
+            foreach ($point as $coordinate) {
+                if ((!is_int($coordinate) && !is_float($coordinate))
+                    || !is_finite((float) $coordinate)) {
+                    throw new \InvalidArgumentException('invalid landmark geometry');
+                }
+                $bytes .= pack('g', (float) $coordinate);
+            }
+            return $bytes;
+        };
+        foreach ($pairs as $pair) {
+            if (!is_array($pair) || count($pair) !== 2
+                || !array_key_exists('left', $pair) || !array_key_exists('right', $pair)) {
+                throw new \InvalidArgumentException('invalid landmark geometry');
+            }
+            $out .= $putPoint($pair['left']) . $putPoint($pair['right']);
+        }
+        foreach ($midline as $point) {
+            $out .= $putPoint($point);
+        }
+        return $out;
+    }
+
+    /** @param array<string,mixed> $value */
+    private static function requiredText(array $value, string $field): string
+    {
+        if (!isset($value[$field]) || !is_string($value[$field])) {
+            throw new \InvalidArgumentException("typed parameter field '{$field}' must be text");
+        }
+        return $value[$field];
+    }
+
+    private static function decodeHex(string $value, string $field): string
+    {
+        if (strlen($value) % 2 !== 0 || ($value !== '' && !ctype_xdigit($value))) {
+            throw new \InvalidArgumentException("{$field} must be even-length hexadecimal text");
+        }
+        $bytes = hex2bin($value);
+        if ($bytes === false) {
+            throw new \InvalidArgumentException("{$field} must be hexadecimal text");
+        }
+        return $bytes;
+    }
+
+    private static function biometricFormat(string $name): int
+    {
+        return match (strtolower($name)) {
+            'iso/iec 39794-2' => 0x0101,
+            'iso/iec 39794-4' => 0x0102,
+            'iso/iec 19794-2' => 0x0103,
+            'iso/iec 19794-4' => 0x0104,
+            'ansi incits 378' => 0x0105,
+            'ansi incits 381' => 0x0106,
+            'ansi/nist-itl type-4' => 0x0107,
+            'ansi/nist-itl type-9' => 0x0108,
+            'cbeff fingerprint' => 0x0109,
+            'iso/iec 39794-5' => 0x0201,
+            'iso/iec 19794-5' => 0x0202,
+            'ansi/nist-itl type-10' => 0x0203,
+            'cbeff face' => 0x0204,
+            'iso/iec 39794-6' => 0x0301,
+            'iso/iec 19794-6' => 0x0302,
+            'ansi/nist-itl type-17' => 0x0303,
+            'cbeff iris' => 0x0304,
+            default => 0,
+        };
     }
 
     private static function parseUuid(string $uuid): string

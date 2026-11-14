@@ -838,7 +838,7 @@ fn paged_count_moderation_positional_schema_overlay_delete_and_reopen() {
 #[test]
 fn paged_count_multiple_leaves_faults_and_missing_generation() {
     use crate::storage::engine::{Page, PageType};
-    let (_directory, store) = fixture();
+    let (directory, store) = fixture();
     for id in 1..=1301 {
         store
             .insert(
@@ -870,6 +870,10 @@ fn paged_count_multiple_leaves_faults_and_missing_generation() {
         "unreadable index must not return a partial/zero count"
     );
     pager.write_page(root, original).expect("repair fixture");
+    drop(native);
+    drop(store);
+    let store = UnifiedStore::open_with_config(directory.path().join("count.rdb"), config())
+        .expect("reopen repaired pager");
     compare(&store, None, 1301);
     store.unregister_secondary_index("rows", NAME);
     assert_eq!(

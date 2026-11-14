@@ -149,6 +149,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         QueryExpr::SearchCommand(query) => match query {
             SearchCommand::Similar { collection, .. }
             | SearchCommand::Hybrid { collection, .. }
+            | SearchCommand::TypedSimilarity { collection, .. }
             | SearchCommand::SpatialRadius { collection, .. }
             | SearchCommand::SpatialBbox { collection, .. }
             | SearchCommand::SpatialWithinPolygon { collection, .. }

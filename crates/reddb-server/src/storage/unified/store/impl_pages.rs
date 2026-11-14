@@ -758,14 +758,12 @@ impl UnifiedStore {
                     .seal_page_proofs()
                     .map_err(|error| page_integrity(tree.root_page_id(), None, error.to_string()))?
                 {
-                    if root != 0 {
-                        if proofs.insert(root, proof).is_some_and(|old| old != proof) {
-                            return Err(page_integrity(
-                                root,
-                                None,
-                                "conflicting tree generation proofs",
-                            ));
-                        }
+                    if root != 0 && proofs.insert(root, proof).is_some_and(|old| old != proof) {
+                        return Err(page_integrity(
+                            root,
+                            None,
+                            "conflicting tree generation proofs",
+                        ));
                     }
                 }
             }
@@ -4397,7 +4395,6 @@ mod checkpoint_work_tests {
             let mut metadata = read_meta_payload(&pager)
                 .expect("read catalog payload")
                 .expect("published catalog payload");
-            let bytes = metadata.as_mut_slice();
             let mut names = vec![("cfg_legacy", "red_config")];
             if canonical_identity {
                 names.push(("cfg.canon_", "red.config"));
@@ -4420,18 +4417,15 @@ mod checkpoint_work_tests {
             for (source, destination) in names {
                 let (source, destination) = (source.as_bytes(), destination.as_bytes());
                 let mut replacements = 0;
-                for offset in 0..=bytes.len() - source.len() {
-                    if &bytes[offset..offset + source.len()] == source {
-                        bytes[offset..offset + destination.len()].copy_from_slice(destination);
+                for offset in 0..=metadata.len() - source.len() {
+                    if &metadata[offset..offset + source.len()] == source {
+                        metadata[offset..offset + destination.len()].copy_from_slice(destination);
                         replacements += 1;
                     }
                 }
                 assert!(replacements >= 1, "catalog must contain the source name");
             }
-            publish_paged_metadata(&pager, &metadata).expect("write duplicate catalog");
-            pager.sync().expect("sync duplicate catalog");
             if alias_case.is_some() {
-                let mut metadata = read_meta_payload(&pager).unwrap().unwrap();
                 let resume = reddb_file::native_resume::decode_catalog_resume(&metadata)
                     .unwrap()
                     .unwrap();
@@ -4441,9 +4435,9 @@ mod checkpoint_work_tests {
                     .unwrap();
                 metadata.truncate(trailer);
                 reddb_file::native_resume::encode_catalog_resume(&mut metadata, &resume).unwrap();
-                publish_paged_metadata(&pager, &metadata).unwrap();
-                pager.sync().unwrap();
             }
+            publish_paged_metadata(&pager, &metadata).expect("publish duplicate catalog");
+            pager.sync().expect("sync duplicate catalog");
         }
         let mut config_names = vec![("cfg_legacy", "red_config")];
         if canonical_identity {
@@ -5378,6 +5372,36 @@ mod checkpoint_work_tests {
                     .unwrap();
                 file.seek(SeekFrom::Start(3 * PAGE_SIZE as u64)).unwrap();
                 file.write_all(&frame).unwrap();
+                let selected =
+                    reddb_file::select_paged_superblock(&bytes).expect("valid fixture superblock");
+                let start = selected.copy_index * reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
+                let mut image = [0; reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE];
+                image
+                    .copy_from_slice(&bytes[start..start + reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE]);
+                reddb_file::file_format::set_database_header_dwb_publication(
+                    &mut image,
+                    Some(reddb_file::file_format::DwbPublication {
+                        phase: reddb_file::file_format::DwbPhase::Ready,
+                        frame_bytes: u32::try_from(frame.len()).expect("bounded DWB fixture"),
+                        digest: reddb_file::file_format::dwb_frame_digest(&frame),
+                    }),
+                )
+                .expect("authorize fixture DWB");
+                for step in 1..=reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+                    let copy =
+                        (selected.copy_index + step) % reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT;
+                    reddb_file::seal_paged_superblock_slot(
+                        &mut image,
+                        copy,
+                        selected.generation + step as u64,
+                    )
+                    .expect("seal fixture authority");
+                    file.seek(SeekFrom::Start(reddb_file::paged_superblock_slot_offset(
+                        copy,
+                    )))
+                    .unwrap();
+                    file.write_all(&image).unwrap();
+                }
                 // Make raw-source identity inspection impossible: only the staged
                 // DWB replay can restore the legacy configuration leaf.
                 file.seek(SeekFrom::Start(offset as u64)).unwrap();

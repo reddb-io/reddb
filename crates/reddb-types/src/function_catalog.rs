@@ -131,6 +131,35 @@ const ARGS_TEMPERATURE: &[DataType] = &[DataType::Temperature];
 const ARGS_TEMPERATURE_VALUE: &[DataType] = &[DataType::Temperature, DataType::Text];
 const ARGS_ONE_TEXT: &[DataType] = &[DataType::Text];
 const ARGS_TWO_TEXT_ANY: &[DataType] = &[DataType::Text, DataType::Text];
+const ARGS_BLOB: &[DataType] = &[DataType::Blob];
+const ARGS_UUID_VECTOR: &[DataType] = &[DataType::Uuid, DataType::Vector];
+const ARGS_UUID_BLOB: &[DataType] = &[DataType::Uuid, DataType::Blob];
+const ARGS_UUID_TWO_BLOBS: &[DataType] = &[DataType::Uuid, DataType::Blob, DataType::Blob];
+const ARGS_TWO_FEATURES: &[DataType] = &[DataType::FeatureVector, DataType::FeatureVector];
+const ARGS_FEATURE_MATCH: &[DataType] = &[
+    DataType::FeatureVector,
+    DataType::FeatureVector,
+    DataType::Float,
+];
+const ARGS_TWO_BIT_SIGNATURES: &[DataType] = &[DataType::BitSignature, DataType::BitSignature];
+const ARGS_BIT_SIGNATURE_MATCH: &[DataType] = &[
+    DataType::BitSignature,
+    DataType::BitSignature,
+    DataType::Float,
+];
+const ARGS_TWO_FINGERPRINTS: &[DataType] = &[DataType::Fingerprint, DataType::Fingerprint];
+const ARGS_FINGERPRINT_MATCH: &[DataType] = &[
+    DataType::Fingerprint,
+    DataType::Fingerprint,
+    DataType::Float,
+];
+const ARGS_FINGERPRINT: &[DataType] = &[DataType::Fingerprint];
+const ARGS_FACE: &[DataType] = &[DataType::Face];
+const ARGS_IRIS: &[DataType] = &[DataType::Iris];
+const ARGS_ANSI_NIST_RECORD: &[DataType] = &[DataType::Blob, DataType::Integer, DataType::Integer];
+const ARGS_UUID_JSON: &[DataType] = &[DataType::Uuid, DataType::Json];
+const ARGS_LANDMARK_SET: &[DataType] = &[DataType::LandmarkSet];
+const ARGS_LANDMARK_MATCH: &[DataType] = &[DataType::LandmarkSet, DataType::Float];
 
 // JSON function signatures (Phase 1.4 PG parity).
 //
@@ -884,6 +913,167 @@ pub const FUNCTION_CATALOG: &[FunctionEntry] = &[
         "TEMPERATURE_VALUE",
         ARGS_TEMPERATURE_VALUE,
         DataType::Float,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "FINGERPRINT",
+        ARGS_BLOB,
+        DataType::Fingerprint,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "FACE",
+        ARGS_BLOB,
+        DataType::Face,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "IRIS",
+        ARGS_BLOB,
+        DataType::Iris,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "FEATURE_VECTOR",
+        ARGS_UUID_VECTOR,
+        DataType::FeatureVector,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "BIT_SIGNATURE",
+        ARGS_UUID_BLOB,
+        DataType::BitSignature,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "BIT_SIGNATURE",
+        ARGS_UUID_TWO_BLOBS,
+        DataType::BitSignature,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "FEATURE_COMPARE",
+        ARGS_TWO_FEATURES,
+        DataType::Float,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "FEATURE_MATCH",
+        ARGS_FEATURE_MATCH,
+        DataType::Boolean,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "BIT_SIGNATURE_COMPARE",
+        ARGS_TWO_BIT_SIGNATURES,
+        DataType::Float,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "BIT_SIGNATURE_MATCH",
+        ARGS_BIT_SIGNATURE_MATCH,
+        DataType::Boolean,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "FINGERPRINT_COMPARE",
+        ARGS_TWO_FINGERPRINTS,
+        DataType::Float,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "FINGERPRINT_MATCH",
+        ARGS_FINGERPRINT_MATCH,
+        DataType::Boolean,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "BIOMETRIC_FORMAT",
+        ARGS_FINGERPRINT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "BIOMETRIC_FORMAT",
+        ARGS_FACE,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "BIOMETRIC_FORMAT",
+        ARGS_IRIS,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "BIOMETRIC_INFO",
+        ARGS_FINGERPRINT,
+        DataType::Json,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "BIOMETRIC_INFO",
+        ARGS_FACE,
+        DataType::Json,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "BIOMETRIC_INFO",
+        ARGS_IRIS,
+        DataType::Json,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "ANSI_NIST_RECORD",
+        ARGS_ANSI_NIST_RECORD,
+        DataType::Unknown,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "LANDMARK_SET",
+        ARGS_UUID_JSON,
+        DataType::LandmarkSet,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "LANDMARK_SYMMETRY",
+        ARGS_LANDMARK_SET,
+        DataType::Float,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "LANDMARK_IS_SYMMETRIC",
+        ARGS_LANDMARK_MATCH,
+        DataType::Boolean,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "FACE_LANDMARKS",
+        ARGS_FACE,
+        DataType::LandmarkSet,
         FunctionKind::Scalar,
         false,
     ),

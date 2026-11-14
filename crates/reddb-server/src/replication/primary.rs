@@ -764,7 +764,7 @@ impl PrimaryReplication {
         let stored_catalog = super::metadata::read(&store, super::metadata::SLOTS)?;
         if let Some(bytes) = &stored_catalog {
             let catalog =
-                reddb_file::ReplicationSlotCatalog::decode(&bytes).map_err(io::Error::other)?;
+                reddb_file::ReplicationSlotCatalog::decode(bytes).map_err(io::Error::other)?;
             primary.slots = RwLock::new(
                 catalog
                     .slots

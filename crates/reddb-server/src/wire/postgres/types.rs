@@ -90,6 +90,12 @@ impl PgOid {
             Value::Timestamp(_) => PgOid::TimestampTz,
             Value::TimestampMs(_) => PgOid::TimestampTz,
             Value::Vector(_) => PgOid::Vector,
+            Value::Fingerprint(_)
+            | Value::Face(_)
+            | Value::Iris(_)
+            | Value::FeatureVector(_)
+            | Value::BitSignature(_)
+            | Value::LandmarkSet(_) => PgOid::Jsonb,
             // Domain / richer types collapse to TEXT so psql can render them.
             _ => PgOid::Text,
         }
@@ -128,7 +134,7 @@ fn pg_text_param_to_value(oid: PgOid, bytes: &[u8]) -> Result<ParamValue, String
             .map(ParamValue::Float64)
             .map_err(|e| format!("invalid float parameter {text:?}: {e}")),
         PgOid::Bytea => parse_bytea_text(text).map(ParamValue::Bytes),
-        PgOid::Json | PgOid::Jsonb => Ok(ParamValue::Json(bytes.to_vec())),
+        PgOid::Json | PgOid::Jsonb => decode_json_param(bytes),
         PgOid::Timestamp | PgOid::TimestampTz => text
             .parse::<i64>()
             .map(ParamValue::Timestamp)
@@ -169,7 +175,9 @@ fn pg_binary_param_to_value(oid: PgOid, bytes: &[u8]) -> Result<ParamValue, Stri
             .map(|text| ParamValue::Text(text.to_owned()))
             .map_err(|_| "invalid UTF-8 binary text parameter".to_string()),
         PgOid::Bytea => Ok(ParamValue::Bytes(bytes.to_vec())),
-        PgOid::Json | PgOid::Jsonb => Ok(ParamValue::Json(bytes.to_vec())),
+        PgOid::Json => decode_json_param(bytes),
+        PgOid::Jsonb if bytes.first() == Some(&1) => decode_json_param(&bytes[1..]),
+        PgOid::Jsonb => decode_json_param(bytes),
         PgOid::Uuid if bytes.len() == 16 => {
             let mut out = [0u8; 16];
             out.copy_from_slice(bytes);
@@ -298,11 +306,23 @@ pub fn value_to_pg_wire_bytes(value: &Value) -> Option<Vec<u8>> {
             Some(out)
         }
         Value::Json(bytes) => Some(bytes.clone()),
+        Value::Fingerprint(_)
+        | Value::Face(_)
+        | Value::Iris(_)
+        | Value::FeatureVector(_)
+        | Value::BitSignature(_)
+        | Value::LandmarkSet(_) => Some(value.to_json().to_string_compact().into_bytes()),
         // Everything else renders via Display — catches Uuid, Date,
         // Timestamp, Email, Phone, Money, GeoPoint, etc. PG clients see
         // these as TEXT columns (OID 25) and can render them verbatim.
         other => Some(other.to_string().into_bytes()),
     }
+}
+
+fn decode_json_param(bytes: &[u8]) -> Result<ParamValue, String> {
+    let json = crate::json::from_slice::<crate::json::Value>(bytes)
+        .map_err(|error| format!("invalid JSON parameter: {error}"))?;
+    ParamValue::decode_json(&json)
 }
 
 #[cfg(test)]
@@ -400,5 +420,81 @@ mod tests {
             pg_param_to_param_value(PgOid::Vector.as_u32(), 0, Some(b"[1.0, -0.5]")).unwrap(),
             ParamValue::Vector(vec![1.0, -0.5])
         );
+    }
+
+    #[test]
+    fn pg_jsonb_carries_all_typed_biometric_parameter_envelopes() {
+        for (modality, format) in [
+            ("fingerprint", "ISO/IEC 39794-2"),
+            ("face", "ISO/IEC 39794-5"),
+            ("iris", "ISO/IEC 39794-6"),
+        ] {
+            let json = format!(
+                r#"{{"$biometric":{{"modality":"{modality}","format":"{format}","data":"3003020101"}}}}"#
+            );
+            let decoded = pg_param_to_param_value(PgOid::Jsonb.as_u32(), 0, Some(json.as_bytes()))
+                .expect("typed text JSONB");
+            assert!(matches!(
+                (modality, decoded),
+                ("fingerprint", ParamValue::Fingerprint(_))
+                    | ("face", ParamValue::Face(_))
+                    | ("iris", ParamValue::Iris(_))
+            ));
+        }
+
+        let feature = br#"{"$feature_vector":{"space_id":"11111111111111111111111111111111","values":[1.0,-0.5]}}"#;
+        assert!(matches!(
+            decode_json_param(feature),
+            Ok(ParamValue::FeatureVector(_))
+        ));
+        let bits = br#"{"$bit_signature":{"space_id":"22222222222222222222222222222222","bits":"aa","mask":"0f"}}"#;
+        assert!(matches!(
+            decode_json_param(bits),
+            Ok(ParamValue::BitSignature(_))
+        ));
+        let landmarks = br#"{"$landmark_set":{"space_id":"33333333333333333333333333333333","dimensions":2,"pairs":[{"left":[-2.0,1.0],"right":[2.0,1.0]},{"left":[-1.0,-1.0],"right":[1.0,-1.0]}],"midline":[[0.0,2.0]]}}"#;
+        assert!(matches!(
+            decode_json_param(landmarks),
+            Ok(ParamValue::LandmarkSet(_))
+        ));
+
+        let mut binary_jsonb = vec![1];
+        binary_jsonb.extend_from_slice(feature);
+        assert!(matches!(
+            pg_param_to_param_value(PgOid::Jsonb.as_u32(), 1, Some(&binary_jsonb)),
+            Ok(ParamValue::FeatureVector(_))
+        ));
+    }
+
+    #[test]
+    fn pg_biometric_results_use_typed_jsonb_envelopes() {
+        let sample = reddb_types::BiometricSample::with_format(
+            reddb_types::BiometricFormat::FaceIso39794_5,
+            vec![0x30, 0x03, 0x02, 0x01, 0x01],
+        )
+        .expect("valid typed face");
+        let value = Value::Face(sample);
+        assert_eq!(PgOid::from_value(&value), PgOid::Jsonb);
+        let encoded = value_to_pg_wire_bytes(&value).expect("JSONB payload");
+        let text = std::str::from_utf8(&encoded).expect("JSON text");
+        assert!(text.contains("$biometric"));
+        assert!(text.contains("3003020101"));
+
+        let landmarks = reddb_types::LandmarkSet::new(
+            [0x33; 16],
+            2,
+            vec![
+                ([-2.0, 1.0, 0.0], [2.0, 1.0, 0.0]),
+                ([-1.0, -1.0, 0.0], [1.0, -1.0, 0.0]),
+            ],
+            vec![[0.0, 2.0, 0.0]],
+        )
+        .expect("valid landmarks");
+        let value = Value::LandmarkSet(landmarks);
+        assert_eq!(PgOid::from_value(&value), PgOid::Jsonb);
+        let encoded = value_to_pg_wire_bytes(&value).expect("JSONB payload");
+        let text = std::str::from_utf8(&encoded).expect("JSON text");
+        assert!(text.contains("$landmark_set"));
+        assert!(text.contains("33333333333333333333333333333333"));
     }
 }

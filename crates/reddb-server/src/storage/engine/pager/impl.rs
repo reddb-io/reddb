@@ -241,7 +241,10 @@ impl Pager {
                 config.double_write = true;
             }
         }
-        let dwb_enabled = config.double_write && !config.read_only && !fold_dwb;
+        // WAL full-page images are an additional recovery tier. They do not
+        // replace the independently published in-file DWB authority required
+        // by paged writers.
+        let dwb_enabled = config.double_write && !config.read_only;
 
         let core = SharedPager::open_owned(
             file,

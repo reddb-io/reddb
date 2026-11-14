@@ -162,6 +162,16 @@ impl RedDBRuntime {
         query: &DropTimeSeriesQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        self.with_exclusive_collection_topology(&query.name, || {
+            self.execute_drop_timeseries_exclusive(raw_query, query)
+        })
+    }
+
+    fn execute_drop_timeseries_exclusive(
+        &self,
+        raw_query: &str,
+        query: &DropTimeSeriesQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
         let _publication = store.vault_publication_lock.lock();
         self.vcs_reject_destructive_ddl(&query.name)?;

@@ -49,4 +49,6 @@ export 'src/redwire/frame.dart'
         KNOWN_FLAGS,
         MAGIC,
         SUPPORTED_VERSION,
-        FEATURE_PARAMS;
+        FEATURE_PARAMS,
+        FEATURE_BIOMETRIC_PARAMS;
+export 'src/redwire/frame.dart' show FEATURE_LANDMARK_PARAMS;

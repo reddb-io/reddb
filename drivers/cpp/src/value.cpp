@@ -81,4 +81,49 @@ Value Value::uuid(std::string_view value) {
     return Value(std::move(out));
 }
 
+Value Value::fingerprint(uint16_t format, std::span<const std::byte> data) {
+    if ((format >> 8) != 1 || data.empty()) throw std::invalid_argument("invalid fingerprint format or payload");
+    Fingerprint value{format, {}};
+    value.data.assign(data.begin(), data.end());
+    return Value(std::move(value));
+}
+
+Value Value::face(uint16_t format, std::span<const std::byte> data) {
+    if ((format >> 8) != 2 || data.empty()) throw std::invalid_argument("invalid face format or payload");
+    Face value{format, {}};
+    value.data.assign(data.begin(), data.end());
+    return Value(std::move(value));
+}
+
+Value Value::iris(uint16_t format, std::span<const std::byte> data) {
+    if ((format >> 8) != 3 || data.empty()) throw std::invalid_argument("invalid iris format or payload");
+    Iris value{format, {}};
+    value.data.assign(data.begin(), data.end());
+    return Value(std::move(value));
+}
+
+Value Value::feature_vector(std::array<std::byte, 16> space_id,
+                            std::span<const float> values) {
+    FeatureVector value{space_id, {}};
+    value.values.assign(values.begin(), values.end());
+    return Value(std::move(value));
+}
+
+Value Value::bit_signature(std::array<std::byte, 16> space_id,
+                           std::span<const std::byte> bits,
+                           std::span<const std::byte> mask) {
+    BitSignature value{space_id, {}, {}};
+    value.bits.assign(bits.begin(), bits.end());
+    value.mask.assign(mask.begin(), mask.end());
+    if (value.mask.empty()) value.mask.assign(value.bits.size(), std::byte{0xff});
+    return Value(std::move(value));
+}
+
+Value Value::landmark_set(std::array<std::byte, 16> space_id,
+                          uint8_t dimensions,
+                          std::vector<LandmarkPair> pairs,
+                          std::vector<std::vector<float>> midline) {
+    return Value(LandmarkSet{space_id, dimensions, std::move(pairs), std::move(midline)});
+}
+
 } // namespace reddb

@@ -7,7 +7,7 @@
 //! type checker, which runs on the substituted literals downstream.
 
 use crate::query::planning::shape::bind_user_param_query;
-use reddb_rql::ast::{Expr, QueryExpr, SearchCommand, Span};
+use reddb_rql::ast::{Expr, QueryExpr, SearchCommand, Span, TypedSearchKind};
 use reddb_rql::sql_lowering::{expr_to_filter, fold_expr_to_value};
 use reddb_types::Value;
 
@@ -292,6 +292,11 @@ fn collect_non_expr_indices(expr: &QueryExpr, out: &mut Vec<usize>) {
                 out.push(*idx);
             }
         }
+        QueryExpr::SearchCommand(SearchCommand::TypedSimilarity { value_param, .. }) => {
+            if let Some(idx) = value_param {
+                out.push(*idx);
+            }
+        }
         QueryExpr::SearchCommand(SearchCommand::Hybrid { limit_param, .. }) => {
             if let Some(idx) = limit_param {
                 out.push(*idx);
@@ -443,6 +448,50 @@ fn bind_validated_parameters(
     // SEARCH SIMILAR $N has its parameter slot outside the `Expr`
     // tree — handle it here rather than threading the binds through
     // the planner's shape binder, which only knows about `Expr` slots.
+    if let QueryExpr::SearchCommand(SearchCommand::TypedSimilarity {
+        kind,
+        value,
+        value_param,
+        collection,
+        column,
+        limit,
+        min_score,
+        exact,
+    }) = expr
+    {
+        let bound_value = if let Some(index) = value_param {
+            let value = params.get(*index).ok_or(UserParamError::Arity {
+                expected: index + 1,
+                got: params.len(),
+            })?;
+            let compatible = matches!(
+                (kind, value),
+                (TypedSearchKind::Feature, Value::FeatureVector(_))
+                    | (TypedSearchKind::Bits, Value::BitSignature(_))
+                    | (TypedSearchKind::Fingerprint, Value::Fingerprint(_))
+            );
+            if !compatible {
+                return Err(UserParamError::TypeMismatch {
+                    slot: "typed search value parameter",
+                    got: value_variant_name(value),
+                });
+            }
+            Some(value.clone())
+        } else {
+            value.clone()
+        };
+        return Ok(QueryExpr::SearchCommand(SearchCommand::TypedSimilarity {
+            kind: *kind,
+            value: bound_value,
+            value_param: None,
+            collection: collection.clone(),
+            column: column.clone(),
+            limit: *limit,
+            min_score: *min_score,
+            exact: *exact,
+        }));
+    }
+
     if let QueryExpr::SearchCommand(SearchCommand::Similar {
         vector,
         text,
@@ -1136,6 +1185,11 @@ fn value_variant_name(value: &Value) -> &'static str {
         Value::Vector(_) => "vector",
         Value::Json(_) => "json",
         Value::Blob(_) => "bytes",
+        Value::Fingerprint(_) => "fingerprint",
+        Value::Face(_) => "face",
+        Value::Iris(_) => "iris",
+        Value::FeatureVector(_) => "feature vector",
+        Value::BitSignature(_) => "bit signature",
         _ => "other",
     }
 }
@@ -1347,6 +1401,29 @@ mod tests {
         let mut ix = collect_indices(&q);
         ix.sort();
         assert_eq!(ix, vec![0, 1]);
+    }
+
+    #[test]
+    fn binds_typed_similarity_value_and_rejects_wrong_artifact() {
+        let query =
+            parse("SEARCH FEATURE $1 IN identities COLUMN face_features LIMIT 5 MIN_SCORE 0.8");
+        let feature = Value::FeatureVector(
+            reddb_types::FeatureVector::new([9; 16], vec![1.0, 2.0]).expect("valid feature vector"),
+        );
+        let bound = bind(&query, std::slice::from_ref(&feature)).expect("typed bind");
+        assert!(matches!(
+            bound,
+            QueryExpr::SearchCommand(SearchCommand::TypedSimilarity {
+                kind: TypedSearchKind::Feature,
+                value: Some(value),
+                value_param: None,
+                ..
+            }) if value == feature
+        ));
+        assert!(matches!(
+            bind(&query, &[Value::Blob(vec![1])]),
+            Err(UserParamError::TypeMismatch { .. })
+        ));
     }
 
     #[test]

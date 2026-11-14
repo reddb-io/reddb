@@ -27,6 +27,8 @@ logical `.rdb` must remain readable by the canonical engine.
 - Bits 2 and 4 bind copy-on-write catalogs and tree-image proofs respectively.
   Bit 3 keeps recovery output with unknown identity floors read-only. Bit 5
   requires independent DWB frame publication ([ADR 0084](0084-independent-dwb-frame-publication.md)).
+  Bit 6 declares native biometric records and caller-supplied feature
+  artifacts ([ADR 0086](0086-native-biometric-records-and-matching.md)).
 - A writer durably publishes a new required capability to both recoverable
   superblock copies before it publishes a schema or value that depends on the
   capability. If either fence write fails, further writes remain fenced until

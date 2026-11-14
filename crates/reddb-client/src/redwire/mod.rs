@@ -31,7 +31,8 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use reddb_wire::query_with_params::{
-    encode_query_with_params, ParamValue as RedWireParamValue, FEATURE_PARAMS,
+    encode_query_with_params, ParamValue as RedWireParamValue, FEATURE_BIOMETRIC_PARAMS,
+    FEATURE_LANDMARK_PARAMS, FEATURE_PARAMS,
 };
 
 /// Boxed read+write trait object. Lets `RedWireClient` carry
@@ -371,6 +372,22 @@ impl RedWireClient {
         sql: &str,
         params: &[crate::params::Value],
     ) -> Result<serde_json::Value> {
+        if params.iter().any(is_biometric_param)
+            && self.server_features & FEATURE_BIOMETRIC_PARAMS == 0
+        {
+            return Err(ClientError::new(
+                ErrorCode::ParamsUnsupported,
+                "server did not advertise RedWire biometric parameter support",
+            ));
+        }
+        if params.iter().any(is_landmark_param)
+            && self.server_features & FEATURE_LANDMARK_PARAMS == 0
+        {
+            return Err(ClientError::new(
+                ErrorCode::ParamsUnsupported,
+                "server did not advertise RedWire landmark parameter support",
+            ));
+        }
         let wire_params = params.iter().map(param_to_redwire).collect::<Vec<_>>();
         let payload = encode_query_with_params(sql, &wire_params)
             .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("encode params: {e}")))?;
@@ -565,6 +582,21 @@ impl RedWireClient {
     }
 }
 
+fn is_biometric_param(value: &crate::params::Value) -> bool {
+    matches!(
+        value,
+        crate::params::Value::Fingerprint(_)
+            | crate::params::Value::Face(_)
+            | crate::params::Value::Iris(_)
+            | crate::params::Value::FeatureVector(_)
+            | crate::params::Value::BitSignature(_)
+    )
+}
+
+fn is_landmark_param(value: &crate::params::Value) -> bool {
+    matches!(value, crate::params::Value::LandmarkSet(_))
+}
+
 fn param_to_redwire(value: &crate::params::Value) -> RedWireParamValue {
     match value {
         crate::params::Value::Null => RedWireParamValue::Null,
@@ -579,6 +611,14 @@ fn param_to_redwire(value: &crate::params::Value) -> RedWireParamValue {
         }
         crate::params::Value::Timestamp(value) => RedWireParamValue::Timestamp(*value),
         crate::params::Value::Uuid(value) => RedWireParamValue::Uuid(*value),
+        crate::params::Value::Fingerprint(value) => RedWireParamValue::Fingerprint(value.clone()),
+        crate::params::Value::Face(value) => RedWireParamValue::Face(value.clone()),
+        crate::params::Value::Iris(value) => RedWireParamValue::Iris(value.clone()),
+        crate::params::Value::FeatureVector(value) => {
+            RedWireParamValue::FeatureVector(value.clone())
+        }
+        crate::params::Value::BitSignature(value) => RedWireParamValue::BitSignature(value.clone()),
+        crate::params::Value::LandmarkSet(value) => RedWireParamValue::LandmarkSet(value.clone()),
     }
 }
 

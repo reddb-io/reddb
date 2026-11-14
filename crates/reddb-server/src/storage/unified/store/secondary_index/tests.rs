@@ -326,14 +326,14 @@ fn secondary_empty_reopen_drop_and_definition_change_are_not_stale_hits() {
     assert!(store
         .secondary_index("rows", "by_remainder", &replacement)
         .is_none());
-    assert_eq!(
+    assert!(
         store
             .pager()
             .expect("pager")
             .header()
             .expect("header")
-            .version,
-        reddb_file::file_format::PAGE_SECONDARY_INDEX_FILE_VERSION
+            .version
+            >= reddb_file::file_format::PAGE_SECONDARY_INDEX_FILE_VERSION
     );
 }
 

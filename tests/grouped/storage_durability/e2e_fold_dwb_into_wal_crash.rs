@@ -76,6 +76,7 @@ fn corrupt_live_page(path: &Path, stage_recovery_image: bool) -> u32 {
     assert_eq!(page.page_id(), page_id);
     if stage_recovery_image {
         let frame = reddb_file::encode_paged_dwb_frame([(page_id, page.as_bytes())]);
+        publish_fixture_dwb_authority(path, &frame);
         file.seek(SeekFrom::Start(dwb_zone_offset()))
             .expect("seek DWB");
         file.write_all(&frame).expect("stage recovery image");
@@ -87,6 +88,48 @@ fn corrupt_live_page(path: &Path, stage_recovery_image: bool) -> u32 {
         .expect("tear home page");
     file.sync_all().expect("sync torn page");
     page_id
+}
+
+fn publish_fixture_dwb_authority(path: &Path, frame: &[u8]) {
+    use reddb_file::{file_format as f, PAGED_SUPERBLOCK_SLOT_SIZE};
+
+    let bytes = std::fs::read(path).expect("fixture headers");
+    let mut selected = reddb_file::select_paged_superblock(&bytes).expect("fixture superblock");
+    let start = selected.copy_index * PAGED_SUPERBLOCK_SLOT_SIZE;
+    let mut image = [0; PAGED_SUPERBLOCK_SLOT_SIZE];
+    image.copy_from_slice(&bytes[start..start + PAGED_SUPERBLOCK_SLOT_SIZE]);
+    f::set_database_header_dwb_publication(
+        &mut image,
+        Some(f::DwbPublication {
+            phase: f::DwbPhase::Ready,
+            frame_bytes: u32::try_from(frame.len()).expect("bounded DWB frame"),
+            digest: f::dwb_frame_digest(frame),
+        }),
+    )
+    .expect("fixture DWB authority");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("fixture header writer");
+    for _ in 0..reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+        let copy = reddb_file::paged_superblock_next_copy(Some(selected));
+        let generation = selected
+            .generation
+            .checked_add(1)
+            .expect("fixture generation");
+        reddb_file::seal_paged_superblock_slot(&mut image, copy, generation)
+            .expect("fixture header seal");
+        file.seek(SeekFrom::Start(reddb_file::paged_superblock_slot_offset(
+            copy,
+        )))
+        .expect("fixture header offset");
+        file.write_all(&image).expect("fixture authority write");
+        file.sync_all().expect("fixture authority durable");
+        selected = reddb_file::PagedSuperblockSelection {
+            copy_index: copy,
+            generation,
+        };
+    }
 }
 
 fn reopen_and_verify(path: &Path) {

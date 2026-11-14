@@ -157,6 +157,12 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
         // Value::Text before serialization.
         Value::Secret(_) => JsonValue::String("***".to_string()),
         Value::Password(_) => JsonValue::String("***".to_string()),
+        Value::Fingerprint(_)
+        | Value::Face(_)
+        | Value::Iris(_)
+        | Value::FeatureVector(_)
+        | Value::BitSignature(_)
+        | Value::LandmarkSet(_) => value.to_json(),
     }
 }
 

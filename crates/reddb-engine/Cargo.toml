@@ -34,6 +34,7 @@ rayon = { version = "1.12", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 proptest = "1"
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [lints]
 workspace = true
@@ -41,3 +42,7 @@ workspace = true
 [[example]]
 name = "browser_conformance"
 crate-type = ["cdylib"]
+
+[[bench]]
+name = "fingerprint_matcher_bench"
+harness = false

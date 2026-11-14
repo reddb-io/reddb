@@ -24,6 +24,74 @@ public class ValueCodecTests
         Assert.Equal(0x07, ValueCodec.TagJson);
         Assert.Equal(0x08, ValueCodec.TagTimestamp);
         Assert.Equal(0x09, ValueCodec.TagUuid);
+        Assert.Equal(0x0a, ValueCodec.TagFingerprint);
+        Assert.Equal(0x0b, ValueCodec.TagFace);
+        Assert.Equal(0x0c, ValueCodec.TagIris);
+        Assert.Equal(0x0d, ValueCodec.TagFeatureVector);
+        Assert.Equal(0x0e, ValueCodec.TagBitSignature);
+        Assert.Equal(0x0f, ValueCodec.TagLandmarkSet);
+    }
+
+    [Fact]
+    public void EncodeLandmarkSetEnvelope()
+    {
+        byte[] landmarks = ValueCodec.EncodeValue(new Dictionary<string, object?>
+        {
+            ["$landmark_set"] = new Dictionary<string, object?>
+            {
+                ["space_id"] = "33333333333333333333333333333333",
+                ["dimensions"] = 2,
+                ["pairs"] = new object[]
+                {
+                    new Dictionary<string, object?> { ["left"] = new[] { -2.0, 1.0 }, ["right"] = new[] { 2.0, 1.0 } },
+                    new Dictionary<string, object?> { ["left"] = new[] { -1.0, -1.0 }, ["right"] = new[] { 1.0, -1.0 } },
+                },
+                ["midline"] = new object[] { new[] { 0.0, 2.0 } },
+            },
+        });
+        Assert.Equal(ValueCodec.TagLandmarkSet, landmarks[0]);
+        Assert.Equal(2, landmarks[17]);
+        Assert.Equal(2, BinaryPrimitives.ReadInt32LittleEndian(landmarks.AsSpan(18, 4)));
+    }
+
+    [Fact]
+    public void EncodeBiometricFeatureAndBitEnvelopes()
+    {
+        const string space = "00112233445566778899aabbccddeeff";
+        byte[] feature = ValueCodec.EncodeValue(new Dictionary<string, object?>
+        {
+            ["$feature_vector"] = new Dictionary<string, object?>
+            {
+                ["space_id"] = space,
+                ["values"] = new[] { 1.0, -2.0 },
+            },
+        });
+        Assert.Equal(ValueCodec.TagFeatureVector, feature[0]);
+        Assert.Equal(2, BinaryPrimitives.ReadInt32LittleEndian(feature.AsSpan(17, 4)));
+
+        byte[] bits = ValueCodec.EncodeValue(new Dictionary<string, object?>
+        {
+            ["$bit_signature"] = new Dictionary<string, object?>
+            {
+                ["space_id"] = space,
+                ["bits"] = "aa55",
+                ["mask"] = "ff0f",
+            },
+        });
+        Assert.Equal(ValueCodec.TagBitSignature, bits[0]);
+        Assert.Equal(new byte[] { 0xaa, 0x55, 0xff, 0x0f }, bits[21..]);
+
+        byte[] face = ValueCodec.EncodeValue(new Dictionary<string, object?>
+        {
+            ["$biometric"] = new Dictionary<string, object?>
+            {
+                ["modality"] = "face",
+                ["format"] = "ISO/IEC 19794-5",
+                ["data"] = "46414300",
+            },
+        });
+        Assert.Equal(ValueCodec.TagFace, face[0]);
+        Assert.Equal(0x0202, BinaryPrimitives.ReadUInt16LittleEndian(face.AsSpan(1, 2)));
     }
 
     [Fact]

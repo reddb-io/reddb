@@ -34,6 +34,67 @@ def test_redwire_query_with_params_kind_is_pinned() -> None:
     assert Kind.QueryWithParams == 0x28
 
 
+def test_redwire_encodes_biometric_feature_parameters() -> None:
+    space_id = "00112233445566778899aabbccddeeff"
+    sql = "SELECT $1, $2"
+    payload = encode_query_with_params(
+        sql,
+        [
+            {"$feature_vector": {"space_id": space_id, "values": [1, -2]}},
+            {
+                "$bit_signature": {
+                    "space_id": space_id,
+                    "bits": "aa55",
+                    "mask": "ff0f",
+                }
+            },
+        ],
+    )
+    pos = 4 + len(sql.encode()) + 4
+    assert payload[pos] == ValueTag.FeatureVector
+    pos += 1 + 16 + 4 + 8
+    assert payload[pos] == ValueTag.BitSignature
+    assert payload[-4:] == bytes.fromhex("aa55ff0f")
+
+
+def test_redwire_encodes_landmark_set_parameter() -> None:
+    payload = encode_query_with_params(
+        "SELECT $1",
+        [{
+            "$landmark_set": {
+                "space_id": "00112233445566778899aabbccddeeff",
+                "dimensions": 2,
+                "pairs": [
+                    {"left": [-1, 1], "right": [1, 1]},
+                    {"left": [-2, -1], "right": [2, -1]},
+                ],
+                "midline": [[0, 2]],
+            }
+        }],
+    )
+    pos = 4 + len("SELECT $1".encode()) + 4
+    assert payload[pos] == 0x0F
+    assert payload[pos + 17] == 2
+    assert payload[pos + 18:pos + 22] == (2).to_bytes(4, "little")
+    assert payload[pos + 22:pos + 26] == (1).to_bytes(4, "little")
+
+
+def test_redwire_rejects_biometric_modality_mismatch() -> None:
+    with pytest.raises(RedDBError, match="invalid biometric modality or format"):
+        encode_query_with_params(
+            "SELECT $1",
+            [
+                {
+                    "$biometric": {
+                        "modality": "face",
+                        "format": "ISO/IEC 19794-2",
+                        "data": "464d5200",
+                    }
+                }
+            ],
+        )
+
+
 async def test_http_query_sends_params_array() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/query"

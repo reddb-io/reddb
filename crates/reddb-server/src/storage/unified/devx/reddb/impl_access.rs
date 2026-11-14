@@ -821,6 +821,12 @@ impl RedDB {
             Value::TableRef(name) => Some(name.clone()),
             Value::PageRef(page_id) => Some(format!("page:{}", page_id)),
             Value::Secret(_) | Value::Password(_) => None,
+            Value::Fingerprint(_)
+            | Value::Face(_)
+            | Value::Iris(_)
+            | Value::FeatureVector(_)
+            | Value::BitSignature(_)
+            | Value::LandmarkSet(_) => None,
         }
     }
 

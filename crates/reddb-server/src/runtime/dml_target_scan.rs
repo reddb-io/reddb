@@ -94,8 +94,8 @@ impl<'a> DmlTargetScan<'a> {
     }
 
     pub(super) fn with_live_table_rows(mut self) -> Self {
-        self.live_table_rows = !crate::runtime::impl_core::capture_current_snapshot()
-            .is_some_and(|context| context.branch.is_some());
+        self.live_table_rows = crate::runtime::impl_core::capture_current_snapshot()
+            .is_none_or(|context| context.branch.is_none());
         self
     }
 

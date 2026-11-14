@@ -149,6 +149,18 @@ func (c *Conn) SupportsParams() bool {
 	return c.features&FeatureParams == FeatureParams
 }
 
+// SupportsBiometricParams reports whether typed biometric and feature
+// parameters can be emitted on this connection.
+func (c *Conn) SupportsBiometricParams() bool {
+	return c.features&FeatureBiometricParams == FeatureBiometricParams
+}
+
+// SupportsLandmarkParams reports whether caller-supplied landmark geometry
+// can be emitted on this connection.
+func (c *Conn) SupportsLandmarkParams() bool {
+	return c.features&FeatureLandmarkParams == FeatureLandmarkParams
+}
+
 // SupportsTypedMutations reports whether TypedInsert frames are safe to send.
 func (c *Conn) SupportsTypedMutations() bool {
 	return c.features&FeatureTypedMutations == FeatureTypedMutations
@@ -578,6 +590,20 @@ func (c *Conn) Query(ctx context.Context, sql string, params ...any) ([]byte, er
 		if !c.SupportsParams() {
 			return nil, ErrParamsUnsupported
 		}
+		if !c.SupportsBiometricParams() {
+			for _, param := range params {
+				if requiresBiometricFeatureCapability(param) {
+					return nil, ErrBiometricParamsUnsupported
+				}
+			}
+		}
+		if !c.SupportsLandmarkParams() {
+			for _, param := range params {
+				if requiresLandmarkCapability(param) {
+					return nil, ErrLandmarkParamsUnsupported
+				}
+			}
+		}
 		payload, err := EncodeQueryWithParams(sql, params)
 		if err != nil {
 			return nil, err
@@ -606,6 +632,14 @@ func (c *Conn) Query(ctx context.Context, sql string, params ...any) ([]byte, er
 var ErrParamsUnsupported = errors.New(
 	"redwire: server did not advertise FEATURE_PARAMS — upgrade the server " +
 		"to one that supports parameterized queries",
+)
+
+var ErrBiometricParamsUnsupported = errors.New(
+	"redwire: server did not advertise FEATURE_BIOMETRIC_PARAMS",
+)
+
+var ErrLandmarkParamsUnsupported = errors.New(
+	"redwire: server did not advertise FEATURE_LANDMARK_PARAMS",
 )
 
 // Insert delivers a single row into the named collection.
