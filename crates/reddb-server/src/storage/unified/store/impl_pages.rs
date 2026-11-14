@@ -257,7 +257,7 @@ fn publish_paged_metadata(pager: &Pager, meta_data: &[u8]) -> Result<(), PagerEr
     }
     // Publish only after all children, data pages and proof paths are durable.
     pager.sync()?;
-    #[cfg(test)]
+    #[cfg(any(test, debug_assertions))]
     if std::env::var_os("REDDB_TEST_EXIT_BEFORE_CATALOG_ROOT_PUBLICATION").is_some() {
         std::process::exit(197);
     }
@@ -265,7 +265,7 @@ fn publish_paged_metadata(pager: &Pager, meta_data: &[u8]) -> Result<(), PagerEr
         page_id: root,
         digest,
     })?;
-    #[cfg(test)]
+    #[cfg(any(test, debug_assertions))]
     if std::env::var_os("REDDB_TEST_EXIT_AFTER_CATALOG_ROOT_PUBLICATION").is_some() {
         std::process::exit(198);
     }
