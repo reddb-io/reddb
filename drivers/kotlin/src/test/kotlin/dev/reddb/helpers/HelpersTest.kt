@@ -2,6 +2,7 @@ package dev.reddb.helpers
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
@@ -166,12 +167,56 @@ class HelpersTest {
                 "payload" to "work",
             )))),
             reply(mapOf("affected" to 1)),
+            reply(mapOf("affected" to 1)),
         )))
         val queue = Helpers(fq).queue("jobs")
         val messages = queue.readWait("worker", kotlin.time.Duration.parse("1s"))
         assertEquals("d1", messages.single().deliveryId)
         queue.ack("d1")
         assertTrue(fq.calls[1].first.startsWith("QUEUE ACK jobs"))
+        queue.extend("d1")
+        assertEquals("QUEUE EXTEND jobs WITH delivery_id = 'd1'", fq.calls[2].first)
+    }
+
+    @Test fun queueConsumerHeartbeatsAndExposesLifecycle() = runBlocking {
+        val extended = CompletableDeferred<Unit>()
+        val calls = mutableListOf<String>()
+        var delivered = false
+        val querier = Querier { sql, _ ->
+            calls += sql
+            when {
+                sql.startsWith("QUEUE READ") && !delivered -> {
+                    delivered = true
+                    reply(mapOf("rows" to listOf(mapOf(
+                        "delivery_id" to "d1", "payload" to "work"))))
+                }
+                sql.startsWith("QUEUE EXTEND") -> {
+                    extended.complete(Unit)
+                    reply(mapOf("rows" to emptyList<Any>()))
+                }
+                else -> reply(mapOf("rows" to emptyList<Any>()))
+            }
+        }
+        lateinit var consumer: QueueConsumer
+        consumer = Helpers(querier).queue("jobs").consumer(QueueConsumer.Options(
+            consumer = "worker",
+            wait = kotlin.time.Duration.parse("1s"),
+            leaseHeartbeat = kotlin.time.Duration.parse("1ms"),
+            handler = {
+                extended.await()
+                consumer.requestStop()
+            },
+        ))
+
+        val job = consumer.start(this)
+        consumer.pause()
+        assertTrue(consumer.status().isPaused)
+        consumer.resume()
+        job.join()
+
+        assertTrue("QUEUE EXTEND jobs WITH delivery_id = 'd1'" in calls)
+        assertTrue("QUEUE ACK jobs WITH delivery_id = 'd1'" in calls)
+        assertEquals("stopped", consumer.status().state)
     }
 
     // Documents -------------------------------------------------------------

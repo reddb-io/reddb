@@ -35,6 +35,10 @@ public class HelperException : Exception
     {
         public InvalidResponse(string message) : base(message) { }
     }
+    public sealed class QueueHandlerTimeout : HelperException
+    {
+        public QueueHandlerTimeout(string message) : base(message) { }
+    }
 }
 
 public sealed record InsertResult(long Affected, string Rid, IReadOnlyDictionary<string, object?>? Item);
@@ -570,6 +574,16 @@ public sealed class QueueClient
             Array.Empty<object?>(), ct).ConfigureAwait(false);
     }
 
+    internal async ValueTask ExtendAsync(
+        string queue, string deliveryId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(deliveryId))
+            throw new HelperException.InvalidArgument("queue delivery_id must be non-empty");
+        await _q.QueryAsync(
+            $"QUEUE EXTEND {Sql.Identifier(queue)} WITH delivery_id = {Sql.KvTagLiteral(deliveryId)}",
+            Array.Empty<object?>(), ct).ConfigureAwait(false);
+    }
+
     private static long ToInt64(object? value) => value switch
     {
         long v => v,
@@ -623,6 +637,9 @@ public sealed class ScopedQueueClient
         string deliveryId, string? delay = null, CancellationToken ct = default)
         => _queue.NackAsync(Name, deliveryId, delay, ct);
 
+    public ValueTask ExtendAsync(string deliveryId, CancellationToken ct = default)
+        => _queue.ExtendAsync(Name, deliveryId, ct);
+
     public QueueConsumer Consumer(QueueConsumerOptions options) => new(this, options);
 }
 
@@ -632,16 +649,35 @@ public sealed class QueueConsumerOptions
     public string? Group { get; init; }
     public TimeSpan Wait { get; init; } = TimeSpan.FromSeconds(30);
     public string? RetryDelay { get; init; }
+    public int Concurrency { get; init; } = 1;
+    public QueueReceiveBackoffOptions ReceiveBackoff { get; init; } = new();
+    public TimeSpan? LeaseHeartbeat { get; init; }
+    public TimeSpan? HandlerTimeout { get; init; }
     public required Func<QueueMessage, CancellationToken, ValueTask> Handler { get; init; }
     public Func<Exception, QueueMessage?, CancellationToken, ValueTask>? OnError { get; init; }
 }
+
+public sealed class QueueReceiveBackoffOptions
+{
+    public TimeSpan Initial { get; init; } = TimeSpan.FromMilliseconds(250);
+    public TimeSpan Max { get; init; } = TimeSpan.FromSeconds(30);
+    public double Multiplier { get; init; } = 2;
+    public bool Jitter { get; init; } = true;
+}
+
+public sealed record QueueConsumerStatus(
+    string State, bool IsRunning, bool IsPaused, int InFlight, int Concurrency);
 
 public sealed class QueueConsumer : IAsyncDisposable
 {
     private readonly ScopedQueueClient _queue;
     private readonly QueueConsumerOptions _options;
     private readonly CancellationTokenSource _abort = new();
+    private readonly SemaphoreSlim _pauseGate = new(1, 1);
     private volatile bool _stopping;
+    private volatile bool _paused;
+    private volatile string _state = "idle";
+    private int _inFlight;
     private Task? _run;
 
     internal QueueConsumer(ScopedQueueClient queue, QueueConsumerOptions options)
@@ -651,6 +687,16 @@ public sealed class QueueConsumer : IAsyncDisposable
             Sql.AssertIdentifier(options.Group!, "group name");
         if (options.Wait < TimeSpan.Zero)
             throw new HelperException.InvalidArgument("queue consumer wait must be non-negative");
+        if (options.Concurrency is < 1 or > 128)
+            throw new HelperException.InvalidArgument(
+                "queue consumer concurrency must be between 1 and 128");
+        if (options.ReceiveBackoff.Initial < TimeSpan.Zero ||
+            options.ReceiveBackoff.Max < options.ReceiveBackoff.Initial ||
+            options.ReceiveBackoff.Multiplier < 1)
+            throw new HelperException.InvalidArgument("invalid queue receive backoff");
+        if (options.LeaseHeartbeat < TimeSpan.Zero || options.HandlerTimeout < TimeSpan.Zero)
+            throw new HelperException.InvalidArgument(
+                "queue consumer heartbeat and timeout must be non-negative");
         _queue = queue;
         _options = options;
     }
@@ -659,6 +705,7 @@ public sealed class QueueConsumer : IAsyncDisposable
     {
         if (_run is not null)
             throw new HelperException.InvalidArgument("queue consumer already started");
+        _state = "running";
         _run = RunAsync(ct);
         return Task.CompletedTask;
     }
@@ -666,24 +713,81 @@ public sealed class QueueConsumer : IAsyncDisposable
     public async Task StopAsync()
     {
         _stopping = true;
+        _state = "stopping";
+        Resume();
         if (_run is not null) await _run.ConfigureAwait(false);
+    }
+
+    public void Pause()
+    {
+        if (_state != "running") return;
+        _pauseGate.Wait();
+        _paused = true;
+        _state = "paused";
+    }
+
+    public void Resume()
+    {
+        if (!_paused) return;
+        _paused = false;
+        if (_state == "paused") _state = "running";
+        _pauseGate.Release();
     }
 
     public void Abort()
     {
         _stopping = true;
+        _state = "stopping";
+        Resume();
         _abort.Cancel();
     }
 
     public Task Completion => _run ?? Task.CompletedTask;
 
+    public QueueConsumerStatus Status => new(
+        _state,
+        _state is "running" or "paused",
+        _paused,
+        Volatile.Read(ref _inFlight),
+        _options.Concurrency);
+
     private async Task RunAsync(CancellationToken external)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(external, _abort.Token);
         var ct = linked.Token;
+        try
+        {
+            async Task RunLaneAndCancelOnFailure()
+            {
+                try { await RunLaneAsync(ct).ConfigureAwait(false); }
+                catch
+                {
+                    linked.Cancel();
+                    throw;
+                }
+            }
+            var lanes = Enumerable.Range(0, _options.Concurrency)
+                .Select(_ => RunLaneAndCancelOnFailure());
+            await Task.WhenAll(lanes).ConfigureAwait(false);
+            _state = "stopped";
+        }
+        catch
+        {
+            _state = "failed";
+            linked.Cancel();
+            throw;
+        }
+    }
+
+    private async Task RunLaneAsync(CancellationToken ct)
+    {
         var readOptions = new QueueClient.ReadWaitOptions { Group = _options.Group, Count = 1 };
+        var receiveFailures = 0;
         while (!_stopping && !ct.IsCancellationRequested)
         {
+            await _pauseGate.WaitAsync(ct).ConfigureAwait(false);
+            _pauseGate.Release();
+            if (_stopping) return;
             IReadOnlyList<QueueMessage> messages;
             try
             {
@@ -698,36 +802,137 @@ public sealed class QueueConsumer : IAsyncDisposable
             {
                 if (_options.OnError is null) throw;
                 await _options.OnError(error, null, ct).ConfigureAwait(false);
+                receiveFailures++;
+                await ReceiveBackoffAsync(receiveFailures, ct).ConfigureAwait(false);
                 continue;
             }
+            receiveFailures = 0;
             if (messages.Count == 0) continue;
-            var message = messages[0];
+            await ProcessMessageAsync(messages[0], ct).ConfigureAwait(false);
+        }
+    }
+
+    private async Task ProcessMessageAsync(QueueMessage message, CancellationToken workerToken)
+    {
+        if (string.IsNullOrEmpty(message.DeliveryId))
+        {
+            var error = new HelperException.InvalidResponse(
+                "queue delivery is missing delivery_id");
+            if (_options.OnError is null) throw error;
+            await _options.OnError(error, message, workerToken).ConfigureAwait(false);
+            return;
+        }
+        Interlocked.Increment(ref _inFlight);
+        using var handlerAbort = CancellationTokenSource.CreateLinkedTokenSource(workerToken);
+        using var heartbeatDone = new CancellationTokenSource();
+        try
+        {
+            var handler = _options.Handler(message, handlerAbort.Token).AsTask();
+            var heartbeat = _options.LeaseHeartbeat is { } interval && interval > TimeSpan.Zero
+                ? HeartbeatAsync(message.DeliveryId, interval, heartbeatDone.Token, workerToken)
+                : Task.Delay(Timeout.InfiniteTimeSpan, heartbeatDone.Token);
+            var timeout = _options.HandlerTimeout is { } duration && duration > TimeSpan.Zero
+                ? Task.Delay(duration, workerToken)
+                : Task.Delay(Timeout.InfiniteTimeSpan, workerToken);
+            var completed = await Task.WhenAny(handler, heartbeat, timeout).ConfigureAwait(false);
+            if (workerToken.IsCancellationRequested)
+            {
+                handlerAbort.Cancel();
+                try { await handler.ConfigureAwait(false); }
+                catch { }
+                return;
+            }
+            if (completed == heartbeat)
+            {
+                Exception leaseError;
+                try
+                {
+                    await heartbeat.ConfigureAwait(false);
+                    return;
+                }
+                catch (Exception error)
+                {
+                    leaseError = error;
+                }
+                handlerAbort.Cancel();
+                try { await handler.ConfigureAwait(false); } catch { }
+                if (_options.OnError is null) throw leaseError;
+                await _options.OnError(leaseError, message, workerToken).ConfigureAwait(false);
+                return;
+            }
+            if (completed == timeout)
+            {
+                handlerAbort.Cancel();
+                try { await handler.ConfigureAwait(false); } catch { }
+                var error = new HelperException.QueueHandlerTimeout(
+                    $"queue handler exceeded {_options.HandlerTimeout}");
+                await _queue.NackAsync(message.DeliveryId, _options.RetryDelay, workerToken)
+                    .ConfigureAwait(false);
+                if (_options.OnError is null) throw error;
+                await _options.OnError(error, message, workerToken).ConfigureAwait(false);
+                return;
+            }
+
+            heartbeatDone.Cancel();
+            try { await heartbeat.ConfigureAwait(false); }
+            catch (OperationCanceledException) when (heartbeatDone.IsCancellationRequested) { }
+            catch (Exception leaseError)
+            {
+                if (_options.OnError is null) throw;
+                await _options.OnError(leaseError, message, workerToken).ConfigureAwait(false);
+                return;
+            }
             try
             {
-                if (string.IsNullOrEmpty(message.DeliveryId))
-                    throw new HelperException.InvalidResponse(
-                        "queue delivery is missing delivery_id");
-                await _options.Handler(message, ct).ConfigureAwait(false);
+                await handler.ConfigureAwait(false);
             }
             catch (Exception error)
             {
-                if (!string.IsNullOrEmpty(message.DeliveryId))
-                    await _queue.NackAsync(message.DeliveryId, _options.RetryDelay, ct)
-                        .ConfigureAwait(false);
+                await _queue.NackAsync(message.DeliveryId, _options.RetryDelay, workerToken)
+                    .ConfigureAwait(false);
                 if (_options.OnError is null) throw;
-                await _options.OnError(error, message, ct).ConfigureAwait(false);
-                continue;
+                await _options.OnError(error, message, workerToken).ConfigureAwait(false);
+                return;
             }
             try
             {
-                await _queue.AckAsync(message.DeliveryId, ct).ConfigureAwait(false);
+                await _queue.AckAsync(message.DeliveryId, workerToken).ConfigureAwait(false);
             }
             catch (Exception error)
             {
                 if (_options.OnError is null) throw;
-                await _options.OnError(error, message, ct).ConfigureAwait(false);
+                await _options.OnError(error, message, workerToken).ConfigureAwait(false);
             }
         }
+        finally
+        {
+            heartbeatDone.Cancel();
+            Interlocked.Decrement(ref _inFlight);
+        }
+    }
+
+    private async Task HeartbeatAsync(
+        string deliveryId,
+        TimeSpan interval,
+        CancellationToken done,
+        CancellationToken workerToken)
+    {
+        while (true)
+        {
+            await Task.Delay(interval, done).ConfigureAwait(false);
+            await _queue.ExtendAsync(deliveryId, workerToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task ReceiveBackoffAsync(int failures, CancellationToken ct)
+    {
+        var options = _options.ReceiveBackoff;
+        var milliseconds = Math.Min(
+            options.Max.TotalMilliseconds,
+            options.Initial.TotalMilliseconds * Math.Pow(options.Multiplier, failures - 1));
+        if (options.Jitter) milliseconds *= Random.Shared.NextDouble();
+        if (milliseconds > 0)
+            await Task.Delay(TimeSpan.FromMilliseconds(milliseconds), ct).ConfigureAwait(false);
     }
 
     public async ValueTask DisposeAsync()

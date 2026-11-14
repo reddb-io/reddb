@@ -5,11 +5,21 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import dev.reddb.Conn
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.random.Random
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -30,6 +40,7 @@ public sealed class HelperException(message: String) : RuntimeException(message)
     public class InvalidArgument(message: String) : HelperException(message)
     public class NotFound(message: String) : HelperException(message)
     public class InvalidResponse(message: String) : HelperException(message)
+    public class QueueHandlerTimeout(message: String) : HelperException(message)
 }
 
 // --- Envelopes --------------------------------------------------------------
@@ -376,6 +387,16 @@ public class QueueClient internal constructor(private val q: Querier) {
         )
     }
 
+    internal suspend fun extend(queue: String, deliveryId: String) {
+        if (deliveryId.isEmpty()) {
+            throw HelperException.InvalidArgument("queue delivery_id must be non-empty")
+        }
+        q.query(
+            "QUEUE EXTEND ${Sql.identifier(queue)} WITH delivery_id = " +
+                Sql.kvTagLiteral(deliveryId)
+        )
+    }
+
     private companion object {
         val QUEUE_DELAY = Regex(
             "^\\d+(?:\\.\\d+)?(?:ms|s|sec|secs|m|min|mins|h|hr|hrs|d|day|days)?$"
@@ -410,10 +431,11 @@ public class ScopedQueueClient internal constructor(
     public suspend fun ack(deliveryId: String): Unit = queue.ack(name, deliveryId)
     public suspend fun nack(deliveryId: String, delay: String? = null): Unit =
         queue.nack(name, deliveryId, delay)
+    public suspend fun extend(deliveryId: String): Unit = queue.extend(name, deliveryId)
     public fun consumer(options: QueueConsumer.Options): QueueConsumer = QueueConsumer(this, options)
 }
 
-/** Sequential at-least-once worker. Use one dedicated connection per consumer. */
+/** At-least-once worker with bounded concurrency and renewable delivery leases. */
 public class QueueConsumer internal constructor(
     private val queue: ScopedQueueClient,
     private val options: Options,
@@ -423,11 +445,30 @@ public class QueueConsumer internal constructor(
         val group: String? = null,
         val wait: kotlin.time.Duration = 30.seconds,
         val retryDelay: String? = null,
+        val concurrency: Int = 1,
+        val receiveBackoffInitial: kotlin.time.Duration = 250.milliseconds,
+        val receiveBackoffMax: kotlin.time.Duration = 30.seconds,
+        val receiveBackoffMultiplier: Double = 2.0,
+        val receiveBackoffJitter: Boolean = true,
+        val leaseHeartbeat: kotlin.time.Duration? = null,
+        val handlerTimeout: kotlin.time.Duration? = null,
         val handler: suspend (QueueMessage) -> Unit,
         val onError: (suspend (Throwable, QueueMessage?) -> Unit)? = null,
     )
 
-    private var stopping: Boolean = false
+    public data class Status(
+        val state: String,
+        val isRunning: Boolean,
+        val isPaused: Boolean,
+        val inFlight: Int,
+        val concurrency: Int,
+    )
+
+    @Volatile private var stopping: Boolean = false
+    @Volatile private var paused: Boolean = false
+    @Volatile private var state: String = "idle"
+    @Volatile private var pauseGate: CompletableDeferred<Unit> = completedGate()
+    private val inFlight: AtomicInteger = AtomicInteger()
     private var job: Job? = null
 
     init {
@@ -436,63 +477,203 @@ public class QueueConsumer internal constructor(
         if (options.wait.isNegative()) {
             throw HelperException.InvalidArgument("queue consumer wait must be non-negative")
         }
+        if (options.concurrency !in 1..128) {
+            throw HelperException.InvalidArgument(
+                "queue consumer concurrency must be between 1 and 128")
+        }
+        if (options.receiveBackoffInitial.isNegative() ||
+            options.receiveBackoffMax < options.receiveBackoffInitial ||
+            options.receiveBackoffMultiplier < 1.0
+        ) {
+            throw HelperException.InvalidArgument("invalid queue receive backoff")
+        }
+        if (options.leaseHeartbeat?.isNegative() == true ||
+            options.handlerTimeout?.isNegative() == true
+        ) {
+            throw HelperException.InvalidArgument(
+                "queue consumer heartbeat and timeout must be non-negative")
+        }
     }
 
     public fun start(scope: CoroutineScope): Job {
         if (job != null) {
             throw HelperException.InvalidArgument("queue consumer already started")
         }
+        state = "running"
         job = scope.launch { run() }
         return job!!
     }
 
     public suspend fun stop() {
-        stopping = true
+        requestStop()
         job?.join()
     }
 
-    public suspend fun abort() {
+    public fun requestStop() {
         stopping = true
+        paused = false
+        state = "stopping"
+        pauseGate.complete(Unit)
+    }
+
+    public fun pause() {
+        if (state != "running") return
+        paused = true
+        state = "paused"
+        pauseGate = CompletableDeferred()
+    }
+
+    public fun resume() {
+        if (!paused) return
+        paused = false
+        if (state == "paused") state = "running"
+        pauseGate.complete(Unit)
+    }
+
+    public fun status(): Status = Status(
+        state = state,
+        isRunning = state == "running" || state == "paused",
+        isPaused = paused,
+        inFlight = inFlight.get(),
+        concurrency = options.concurrency,
+    )
+
+    public suspend fun abort() {
+        requestStop()
         job?.cancelAndJoin()
     }
 
-    private suspend fun run() {
+    private suspend fun run(): Unit = try {
+        coroutineScope {
+            List(options.concurrency) { async { runLane() } }.awaitAll()
+        }
+        state = "stopped"
+    } catch (error: Throwable) {
+        state = "failed"
+        throw error
+    }
+
+    private suspend fun runLane() {
         val readOptions = QueueClient.ReadWaitOptions(group = options.group, count = 1)
+        var receiveFailures = 0
         while (!stopping) {
             currentCoroutineContext().ensureActive()
+            pauseGate.await()
+            if (stopping) return
             val messages = try {
                 queue.readWait(options.consumer, options.wait, readOptions)
             } catch (error: Throwable) {
+                if (error is CancellationException) throw error
                 val onError = options.onError ?: throw error
                 onError(error, null)
+                receiveFailures++
+                receiveBackoff(receiveFailures)
                 continue
             }
+            receiveFailures = 0
             if (messages.isEmpty()) continue
-            val message = messages.first()
-            try {
-                if (message.deliveryId.isEmpty()) {
-                    throw HelperException.InvalidResponse("queue delivery is missing delivery_id")
+            process(messages.first())
+        }
+    }
+
+    private sealed interface Outcome {
+        data class Handler(val result: Result<Unit>) : Outcome
+        data class Lease(val error: Throwable) : Outcome
+        data object Timeout : Outcome
+    }
+
+    private suspend fun process(message: QueueMessage): Unit = coroutineScope {
+        if (message.deliveryId.isEmpty()) {
+            report(HelperException.InvalidResponse("queue delivery is missing delivery_id"), message)
+            return@coroutineScope
+        }
+        inFlight.incrementAndGet()
+        val leaseFailure = AtomicReference<Throwable?>(null)
+        val handler = async { runCatching { options.handler(message) } }
+        val heartbeat = options.leaseHeartbeat?.takeIf { it.isPositive() }?.let { interval ->
+            async {
+                while (true) {
+                    delay(interval)
+                    try {
+                        queue.extend(message.deliveryId)
+                    } catch (error: Throwable) {
+                        if (error is CancellationException) throw error
+                        leaseFailure.compareAndSet(null, error)
+                        return@async error
+                    }
                 }
-                options.handler(message)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (message.deliveryId.isNotEmpty()) {
-                    queue.nack(message.deliveryId, options.retryDelay)
-                }
-                val onError = options.onError ?: throw error
-                onError(error, message)
-                continue
-            }
-            try {
-                queue.ack(message.deliveryId)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                val onError = options.onError ?: throw error
-                onError(error, message)
+                @Suppress("UNREACHABLE_CODE")
+                error("unreachable")
             }
         }
+        val timeout = options.handlerTimeout?.takeIf { it.isPositive() }?.let { duration ->
+            async { delay(duration) }
+        }
+        try {
+            val outcome = select<Outcome> {
+                handler.onAwait { Outcome.Handler(it) }
+                heartbeat?.onAwait { Outcome.Lease(it) }
+                timeout?.onAwait { Outcome.Timeout }
+            }
+            when (outcome) {
+                is Outcome.Handler -> {
+                    heartbeat?.cancelAndJoin()
+                    timeout?.cancelAndJoin()
+                    leaseFailure.get()?.let {
+                        report(it, message)
+                        return@coroutineScope
+                    }
+                    val error = outcome.result.exceptionOrNull()
+                    if (error != null) {
+                        queue.nack(message.deliveryId, options.retryDelay)
+                        report(error, message)
+                    } else {
+                        try {
+                            queue.ack(message.deliveryId)
+                        } catch (error: Throwable) {
+                            if (error is CancellationException) throw error
+                            report(error, message)
+                        }
+                    }
+                }
+                is Outcome.Lease -> {
+                    handler.cancelAndJoin()
+                    timeout?.cancelAndJoin()
+                    report(outcome.error, message)
+                }
+                Outcome.Timeout -> {
+                    handler.cancelAndJoin()
+                    heartbeat?.cancelAndJoin()
+                    val error = HelperException.QueueHandlerTimeout(
+                        "queue handler exceeded ${options.handlerTimeout}")
+                    queue.nack(message.deliveryId, options.retryDelay)
+                    report(error, message)
+                }
+            }
+        } finally {
+            handler.cancel()
+            heartbeat?.cancel()
+            timeout?.cancel()
+            inFlight.decrementAndGet()
+        }
+    }
+
+    private suspend fun report(error: Throwable, message: QueueMessage?) {
+        val onError = options.onError ?: throw error
+        onError(error, message)
+    }
+
+    private suspend fun receiveBackoff(failures: Int) {
+        var milliseconds = options.receiveBackoffInitial.inWholeMilliseconds.toDouble() *
+            Math.pow(options.receiveBackoffMultiplier, (failures - 1).toDouble())
+        milliseconds = minOf(milliseconds, options.receiveBackoffMax.inWholeMilliseconds.toDouble())
+        if (options.receiveBackoffJitter) milliseconds *= Random.nextDouble()
+        if (milliseconds > 0) delay(milliseconds.toLong().milliseconds)
+    }
+
+    private companion object {
+        fun completedGate(): CompletableDeferred<Unit> =
+            CompletableDeferred<Unit>().also { it.complete(Unit) }
     }
 }
 
