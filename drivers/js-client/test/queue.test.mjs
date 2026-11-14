@@ -63,6 +63,98 @@ test('queue len normalizes scalar result and purge returns query result', async 
   ])
 })
 
+test('queue readWait uses the native live wait when the transport supports it', async () => {
+  const calls = []
+  const queue = new QueueClient({
+    nativeQueueWait: true,
+    async call(method, params) {
+      calls.push({ method, params })
+      return {
+        rows: [{
+          message_id: '42',
+          payload: { task: 'ship' },
+          consumer: 'worker1',
+          delivery_count: 1,
+        }],
+      }
+    },
+  })
+
+  assert.deepEqual(
+    await queue.readWait('jobs', 'worker1', { waitMs: 30000, group: 'workers' }),
+    [{ task: 'ship' }],
+  )
+  assert.deepEqual(calls, [{
+    method: 'queue_wait',
+    params: {
+      queue: 'jobs',
+      group: 'workers',
+      consumer: 'worker1',
+      count: 1,
+      waitMs: 30000,
+    },
+  }])
+})
+
+test('queue readWaitEntries preserves delivery metadata for ACK/NACK', async () => {
+  const message = {
+    message_id: '42',
+    payload: 'work',
+    consumer: 'worker1',
+    delivery_count: 2,
+  }
+  const { queue } = fakeQueue(() => ({ rows: [message] }))
+
+  assert.deepEqual(
+    await queue.readWaitEntries('jobs', 'worker1', { waitMs: 1000 }),
+    [message],
+  )
+})
+
+test('queue readWait keeps SQL fallback for transports without native wait and COUNT != 1', async () => {
+  const calls = []
+  const client = {
+    nativeQueueWait: true,
+    async call(method, params) {
+      calls.push({ method, params })
+      return { rows: [] }
+    },
+  }
+  const queue = new QueueClient(client)
+
+  await queue.readWait('jobs', 'worker1', { waitMs: 5000, count: 4 })
+  client.nativeQueueWait = false
+  await queue.readWait('jobs', 'worker1', { waitMs: 5000 })
+
+  assert.deepEqual(calls, [
+    {
+      method: 'query',
+      params: { sql: 'QUEUE READ jobs CONSUMER worker1 COUNT 4 WAIT 5000ms' },
+    },
+    {
+      method: 'query',
+      params: { sql: 'QUEUE READ jobs CONSUMER worker1 WAIT 5000ms' },
+    },
+  ])
+})
+
+test('queue readWait requires explicit non-negative integer waitMs', async () => {
+  const { queue, calls } = fakeQueue()
+  await assert.rejects(
+    () => queue.readWait('jobs', 'w', {}),
+    (err) => err instanceof RedDBError && err.code === 'INVALID_QUEUE_WAIT',
+  )
+  await assert.rejects(
+    () => queue.readWait('jobs', 'w', { waitMs: -1 }),
+    (err) => err instanceof RedDBError && err.code === 'INVALID_QUEUE_WAIT',
+  )
+  await assert.rejects(
+    () => queue.readWait('jobs', 'w', { waitMs: 1.5 }),
+    (err) => err instanceof RedDBError && err.code === 'INVALID_QUEUE_WAIT',
+  )
+  assert.equal(calls.length, 0)
+})
+
 test('queue rejects invalid names counts and priorities before query', async () => {
   const { queue, calls } = fakeQueue()
   assert.throws(() => queue.push('bad-name', 'x'), (err) => {

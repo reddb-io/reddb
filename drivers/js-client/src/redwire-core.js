@@ -59,6 +59,9 @@ export const MessageKind = Object.freeze({
   StreamChunk: 0x2B,
   StreamError: 0x2C,
   StreamCancel: 0x2D,
+  QueueWaitOpen: 0x2E,
+  QueueEventPush: 0x2F,
+  QueueWaitTimeout: 0x30,
 })
 
 export const Features = Object.freeze({ PARAMS: 0x0000_0001, TOPOLOGY: 0x0000_0002 })
@@ -238,6 +241,7 @@ export class RedWireClient {
     this.serverFeatures = serverFeatures >>> 0
     // RedWire consumes typed views directly; JSON transports use envelopes.
     this.binaryQueryParams = true
+    this.nativeQueueWait = true
     this.nextCorr = 1n
     this.nextStream = 1
     this.closed = false
@@ -267,6 +271,7 @@ export class RedWireClient {
       return decodeTopology(response.payload)
     }
     if (method === 'query') return this.#query(params.sql ?? '', params.params)
+    if (method === 'queue_wait') return this.#queueWait(params)
     if (method === 'insert') return this.#insert({ collection: params.collection, payload: params.payload })
     if (method === 'bulk_insert') return this.#insert({ collection: params.collection, payloads: params.payloads })
     if (method === 'bulk_insert_binary') {
@@ -397,6 +402,53 @@ export class RedWireClient {
     throw new RedDBError(
       'PROTOCOL',
       `expected Result/Error, got ${KIND_NAME[resp.kind] ?? resp.kind}`,
+    )
+  }
+
+  async #queueWait(params) {
+    if (params.count !== 1) {
+      throw new RedDBError(
+        'INVALID_QUEUE_WAIT_COUNT',
+        'native RedWire queue wait requires count=1',
+      )
+    }
+    const streamId = this.#stream()
+    const corr = this.#corr()
+    const payload = {
+      queue: params.queue,
+      consumer: params.consumer,
+      count: 1,
+      wait_ms: params.waitMs,
+    }
+    if (params.group != null) payload.group = params.group
+    await this.#writeStreamFrame(MessageKind.QueueWaitOpen, corr, jsonBytes(payload), streamId)
+
+    const response = await this.reader.next()
+    if (response.streamId !== streamId || response.correlationId !== corr) {
+      throw new RedDBError(
+        'QUEUE_WAIT_PROTOCOL',
+        `queue wait response did not match stream ${streamId} / correlation ${corr}`,
+      )
+    }
+    if (response.kind === MessageKind.QueueEventPush) {
+      const message = jsonOf(response.payload)
+      if (message == null || typeof message !== 'object' || Array.isArray(message)) {
+        throw new RedDBError('QUEUE_WAIT_PROTOCOL', 'QueueEventPush payload must be a JSON object')
+      }
+      return { rows: [message] }
+    }
+    if (response.kind === MessageKind.QueueWaitTimeout) return { rows: [] }
+    if (response.kind === MessageKind.StreamError || response.kind === MessageKind.Error) {
+      const error = jsonOf(response.payload) ?? {}
+      throw new RedDBError(
+        error.code || 'QUEUE_WAIT_ERROR',
+        error.message || new TextDecoder().decode(response.payload),
+        error,
+      )
+    }
+    throw new RedDBError(
+      'QUEUE_WAIT_PROTOCOL',
+      `expected QueueEventPush/QueueWaitTimeout/StreamError, got ${KIND_NAME[response.kind] ?? response.kind}`,
     )
   }
 
