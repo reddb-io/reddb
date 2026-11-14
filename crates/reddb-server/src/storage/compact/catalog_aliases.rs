@@ -33,6 +33,7 @@ struct Alias {
 #[derive(Default)]
 pub(crate) struct CanonicalCatalogPlan {
     aliases: Vec<Alias>,
+    single_legacy_config: bool,
     single_legacy_config_records: usize,
 }
 
@@ -125,6 +126,7 @@ impl CanonicalCatalogPlan {
             resume.collections.get("red_config"),
             resume.collections.get("red.config"),
         ) {
+            plan.single_legacy_config = true;
             plan.single_legacy_config_records = usize::try_from(legacy.entities)?;
         }
         let mut bytes_read = 0usize;
@@ -260,7 +262,7 @@ impl CanonicalCatalogPlan {
             .any(|a| a.legacy == legacy && a.canonical == canonical)
     }
     pub(super) fn reconciled_count(&self) -> usize {
-        self.aliases.len() + usize::from(self.single_legacy_config_records > 0)
+        self.aliases.len() + usize::from(self.single_legacy_config)
     }
     pub(super) fn imported_count(&self) -> usize {
         self.aliases.iter().map(|a| a.missing.len()).sum::<usize>()
