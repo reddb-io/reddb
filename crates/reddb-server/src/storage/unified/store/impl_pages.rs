@@ -1898,18 +1898,29 @@ impl UnifiedStore {
             };
             let mut outcome = CatalogLoadOutcome::default();
             let mut ignored_collections = std::collections::HashSet::new();
-            if retain_canonical_system_config
-                && !resume.as_ref().is_some_and(|resume| {
-                    resume.collections.contains_key("red_config")
-                        && resume.collections.contains_key("red.config")
-                })
-            {
-                return Err(page_integrity(
-                    1,
-                    None,
-                    "canonical config recovery requires both resume identities",
-                ));
-            }
+            let recovery_config_identities = if retain_canonical_system_config {
+                let Some(resume) = &resume else {
+                    return Err(page_integrity(
+                        1,
+                        None,
+                        "canonical config recovery requires a resume catalog",
+                    ));
+                };
+                let identities = [
+                    resume.collections.contains_key("red_config"),
+                    resume.collections.contains_key("red.config"),
+                ];
+                if identities == [false, false] {
+                    return Err(page_integrity(
+                        1,
+                        None,
+                        "canonical config recovery requires a config resume identity",
+                    ));
+                }
+                identities
+            } else {
+                [false, false]
+            };
             if let Some(resume) = &resume {
                 for &(legacy, canonical) in
                     reddb_engine::storage::system_collection_names::LEGACY_NAMES
@@ -2175,10 +2186,16 @@ impl UnifiedStore {
                         if let Some(index) = config_index {
                             recovery_config_roots[index] =
                                 recovery_config_roots[index].saturating_add(1);
-                            let state = resume
+                            let Some(state) = resume
                                 .as_ref()
                                 .and_then(|resume| resume.collections.get(&stored_name))
-                                .expect("both recovery identities were checked");
+                            else {
+                                return Err(page_integrity(
+                                    1,
+                                    None,
+                                    "config collection has no resume identity",
+                                ));
+                            };
                             if state.root_page != root_page {
                                 return Err(page_integrity(
                                     1,
@@ -2466,11 +2483,14 @@ impl UnifiedStore {
                     }
                 }
 
-                if retain_canonical_system_config && recovery_config_roots != [1, 1] {
+                if retain_canonical_system_config
+                    && recovery_config_roots
+                        != recovery_config_identities.map(|present| u8::from(present))
+                {
                     return Err(page_integrity(
                         1,
                         None,
-                        "canonical config recovery requires exactly one root for each identity",
+                        "canonical config recovery requires exactly one root for every resume identity",
                     ));
                 }
                 if retain_canonical_system_config
@@ -3963,6 +3983,122 @@ mod checkpoint_work_tests {
         )
     }
 
+    fn single_legacy_system_config_fixture() -> DuplicateSystemCatalogFixture {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let config = UnifiedStoreConfig {
+            page_cache_slots: Some(32),
+            resident_memory_bytes_max: Some(2 * 1024 * 1024),
+            ..UnifiedStoreConfig::default()
+        };
+        let index_identity = super::super::secondary_index::SecondaryIndexIdentity {
+            codec_version: 1,
+            definition: [73; 32],
+        };
+        let legacy_root;
+        {
+            let store = UnifiedStore::open_with_config(&path, config.clone()).expect("paged store");
+            store
+                .create_collection("cfg_legacy")
+                .expect("legacy source collection");
+            store
+                .insert_auto("cfg_legacy", config_recovery_row(1, "auth.require_auth", 1))
+                .expect("legacy config row");
+            store.persist().expect("checkpoint legacy config");
+            legacy_root = store.collection_root_page("cfg_legacy");
+        }
+
+        // Recreate the single-root pre-migration shape served by older engines.
+        // The spellings have equal byte length, so only the catalog identity
+        // changes; its root, resume counters and tree proof remain untouched.
+        {
+            let pager = Pager::open(
+                &path,
+                PagerConfig {
+                    disk_residency: true,
+                    ..PagerConfig::default()
+                },
+            )
+            .expect("open pager");
+            let mut metadata = read_meta_payload(&pager)
+                .expect("read catalog payload")
+                .expect("published catalog payload");
+            let source = b"cfg_legacy";
+            let destination = b"red_config";
+            let mut replacements = 0;
+            for offset in 0..=metadata.len() - source.len() {
+                if &metadata[offset..offset + source.len()] == source {
+                    metadata[offset..offset + destination.len()].copy_from_slice(destination);
+                    replacements += 1;
+                }
+            }
+            assert!(
+                replacements >= 2,
+                "root and resume identity must be renamed"
+            );
+            publish_paged_metadata(&pager, &metadata).expect("publish legacy catalog");
+            pager.sync().expect("sync legacy catalog");
+        }
+        crate::storage::operational_manifest::OperationalManifest::for_db_path(&path)
+            .rename_collections(&[("cfg_legacy", "red_config")])
+            .expect("publish legacy operational name");
+
+        let pages_before = Pager::open(
+            &path,
+            PagerConfig {
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
+        )
+        .expect("inspect pager")
+        .page_count()
+        .expect("page count");
+        DuplicateSystemCatalogFixture {
+            _directory: directory,
+            path,
+            config,
+            pages_before,
+            legacy_root,
+            legacy_key_root: None,
+            legacy_secondary_root: None,
+            index_identity,
+        }
+    }
+
+    fn single_canonical_system_config_fixture() -> DuplicateSystemCatalogFixture {
+        let fixture = single_legacy_system_config_fixture();
+        let pager = Pager::open(
+            &fixture.path,
+            PagerConfig {
+                disk_residency: true,
+                ..PagerConfig::default()
+            },
+        )
+        .expect("open legacy pager");
+        let mut metadata = read_meta_payload(&pager)
+            .expect("read legacy catalog")
+            .expect("published legacy catalog");
+        let source = b"red_config";
+        let destination = b"red.config";
+        let mut replacements = 0;
+        for offset in 0..=metadata.len() - source.len() {
+            if &metadata[offset..offset + source.len()] == source {
+                metadata[offset..offset + destination.len()].copy_from_slice(destination);
+                replacements += 1;
+            }
+        }
+        assert!(
+            replacements >= 2,
+            "root and resume identity must be canonicalized"
+        );
+        publish_paged_metadata(&pager, &metadata).expect("publish canonical catalog");
+        pager.sync().expect("sync canonical catalog");
+        crate::storage::operational_manifest::OperationalManifest::for_db_path(&fixture.path)
+            .rename_collections(&[("red_config", "red.config")])
+            .expect("publish canonical operational name");
+        fixture
+    }
+
     fn duplicate_system_catalog_fixture_with_ref(
         legacy_populated: bool,
         canonical_populated: bool,
@@ -4780,6 +4916,91 @@ mod checkpoint_work_tests {
             assert!(recovered.get("red.config", EntityId::new(2)).is_some());
             assert!(recovered.get("red.config", EntityId::new(3)).is_some());
         }
+    }
+
+    #[test]
+    fn canonical_system_config_recovery_promotes_single_legacy_root() {
+        use crate::storage::wal::{WalRecord, WalWriter};
+
+        let fixture = single_legacy_system_config_fixture();
+        let wal = reddb_file::unified_wal_path(&fixture.path);
+        let action = reddb_file::encode_store_wal_action_frame(
+            &reddb_file::StoreWalActionFrame::CreateCollection {
+                name: "pending_collection".into(),
+            },
+        )
+        .expect("encode pending action");
+        {
+            let mut writer = WalWriter::open(&wal).expect("open WAL");
+            writer
+                .append(&WalRecord::TxCommitBatch {
+                    tx_id: 999,
+                    actions: vec![action],
+                })
+                .expect("append committed WAL");
+            writer.sync().expect("sync WAL");
+        }
+        let original = std::fs::read(&fixture.path).expect("source bytes");
+        let original_wal = std::fs::read(&wal).expect("WAL bytes");
+        let destination = fixture._directory.path().join("single-root-recovered");
+
+        let report = crate::storage::compact::recover_paged_wal_canonical_system_config(
+            &fixture.path,
+            &destination,
+        )
+        .expect("recover pending WAL and promote the sole legacy config root");
+
+        assert_eq!(report.reconciled_system_collections, 1);
+        assert_eq!(report.imported_system_records, 1);
+        assert_eq!(std::fs::read(&fixture.path).unwrap(), original);
+        assert_eq!(std::fs::read(&wal).unwrap(), original_wal);
+        for _ in 0..2 {
+            let recovered = UnifiedStore::open_with_config(
+                destination.join("data.rdb"),
+                fixture.config.clone(),
+            )
+            .expect("open recovered store");
+            assert_eq!(recovered.list_collections().len(), 2);
+            assert!(recovered.get_collection("red.config").is_some());
+            assert!(recovered.get_collection("pending_collection").is_some());
+            assert_eq!(
+                recovered.get_config("auth.require_auth"),
+                Some(Value::Integer(1))
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_system_config_recovery_accepts_single_canonical_root() {
+        use crate::storage::wal::{WalRecord, WalWriter};
+
+        let fixture = single_canonical_system_config_fixture();
+        let wal = reddb_file::unified_wal_path(&fixture.path);
+        {
+            let mut writer = WalWriter::open(&wal).expect("open WAL");
+            writer
+                .append(&WalRecord::Begin { tx_id: 999 })
+                .expect("append pending WAL");
+            writer.sync().expect("sync WAL");
+        }
+        let destination = fixture._directory.path().join("canonical-root-recovered");
+
+        let report = crate::storage::compact::recover_paged_wal_canonical_system_config(
+            &fixture.path,
+            &destination,
+        )
+        .expect("recover pending WAL beside the sole canonical config root");
+
+        assert_eq!(report.reconciled_system_collections, 0);
+        assert_eq!(report.imported_system_records, 0);
+        let recovered =
+            UnifiedStore::open_with_config(destination.join("data.rdb"), fixture.config.clone())
+                .expect("open recovered store");
+        assert_eq!(recovered.list_collections(), vec!["red.config".to_string()]);
+        assert_eq!(
+            recovered.get_config("auth.require_auth"),
+            Some(Value::Integer(1))
+        );
     }
 
     #[test]

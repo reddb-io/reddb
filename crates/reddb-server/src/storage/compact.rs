@@ -264,6 +264,27 @@ fn recover_paged_wal_inner(
     } else {
         catalog_aliases::CanonicalCatalogPlan::default()
     };
+    let migrated_system_config_records = if retain_canonical_system_config {
+        let source = Arc::new(Source::open_for_wal_recovery(&staged_source)?);
+        let mut catalog = Catalog::read(&source)?;
+        let legacy_roots = catalog
+            .roots
+            .iter()
+            .filter(|root| root.collection == "red_config")
+            .count();
+        let canonical_roots = catalog
+            .roots
+            .iter()
+            .filter(|root| root.collection == "red.config")
+            .count();
+        if (legacy_roots, canonical_roots) == (1, 0) {
+            catalog.migrate_legacy_system_config()?
+        } else {
+            0
+        }
+    } else {
+        0
+    };
     let probabilistic_deltas;
     let mut has_vector_cache = false;
     {
@@ -377,8 +398,9 @@ fn recover_paged_wal_inner(
     let validated_dir = stage.join("validated");
     let mut report = compact_paged(&staged_source, &validated_dir)?;
     report.retired_boot_system_wal_actions = boot_wal.action_count();
-    report.reconciled_system_collections = catalog_plan.reconciled_count();
-    report.imported_system_records = catalog_plan.imported_count();
+    report.reconciled_system_collections =
+        catalog_plan.reconciled_count() + usize::from(migrated_system_config_records > 0);
+    report.imported_system_records = catalog_plan.imported_count() + migrated_system_config_records;
     let verified = scrub_paged(&validated_dir.join(name))?;
     ensure(
         verified.assets_verified
