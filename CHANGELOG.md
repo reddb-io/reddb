@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.36.7
+
+### Patch Changes
+
+- [#2847](https://github.com/reddb-io/reddb/pull/2847) [`b276f15`](https://github.com/reddb-io/reddb/commit/b276f15ca21ca5200c4ff2b8212c4935e3db51d0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Report the reconciled collection and preserved record count when canonical WAL recovery promotes a single historical `red_config` identity, so operators can verify that the physical migration retained its configuration inventory.
+
 ## 1.36.6
 
 ### Patch Changes
