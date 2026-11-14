@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.36.8
+
+### Patch Changes
+
+- [#2849](https://github.com/reddb-io/reddb/pull/2849) [`90d07ac`](https://github.com/reddb-io/reddb/commit/90d07ac6674b5fff00c78d0e8c782c2f96b01918) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve and report historical `red_config` recovery correctly when the single legacy root is empty, while proving that persisted legacy row identities reopen canonically as `red.config`.
+
 ## 1.36.7
 
 ### Patch Changes
