@@ -1898,16 +1898,19 @@ impl UnifiedStore {
             };
             let mut outcome = CatalogLoadOutcome::default();
             let mut ignored_collections = std::collections::HashSet::new();
+            let recovery_config_identities = resume.as_ref().map_or([false; 2], |resume| {
+                [
+                    resume.collections.contains_key("red_config"),
+                    resume.collections.contains_key("red.config"),
+                ]
+            });
             if retain_canonical_system_config
-                && !resume.as_ref().is_some_and(|resume| {
-                    resume.collections.contains_key("red_config")
-                        && resume.collections.contains_key("red.config")
-                })
+                && !recovery_config_identities.iter().any(|present| *present)
             {
                 return Err(page_integrity(
                     1,
                     None,
-                    "canonical config recovery requires both resume identities",
+                    "canonical config recovery requires a resume identity",
                 ));
             }
             if let Some(resume) = &resume {
@@ -2178,7 +2181,7 @@ impl UnifiedStore {
                             let state = resume
                                 .as_ref()
                                 .and_then(|resume| resume.collections.get(&stored_name))
-                                .expect("both recovery identities were checked");
+                                .expect("present recovery config identity was checked");
                             if state.root_page != root_page {
                                 return Err(page_integrity(
                                     1,
@@ -2466,11 +2469,13 @@ impl UnifiedStore {
                     }
                 }
 
-                if retain_canonical_system_config && recovery_config_roots != [1, 1] {
+                let expected_config_roots = recovery_config_identities.map(u8::from);
+                if retain_canonical_system_config && recovery_config_roots != expected_config_roots
+                {
                     return Err(page_integrity(
                         1,
                         None,
-                        "canonical config recovery requires exactly one root for each identity",
+                        "canonical config recovery requires exactly one root for each resume identity",
                     ));
                 }
                 if retain_canonical_system_config
@@ -4073,6 +4078,33 @@ mod checkpoint_work_tests {
         config_keys: &[&str],
         alias_case: Option<&str>,
     ) -> DuplicateSystemCatalogFixture {
+        system_catalog_fixture_with_aliases(
+            legacy_populated,
+            canonical_populated,
+            index_legacy,
+            cross_reference_legacy,
+            config_keys,
+            alias_case,
+            true,
+        )
+    }
+
+    fn single_legacy_system_catalog_fixture_with_keys(
+        config_keys: &[&str],
+    ) -> DuplicateSystemCatalogFixture {
+        system_catalog_fixture_with_aliases(true, false, false, false, config_keys, None, false)
+    }
+
+    fn system_catalog_fixture_with_aliases(
+        legacy_populated: bool,
+        canonical_populated: bool,
+        index_legacy: bool,
+        cross_reference_legacy: bool,
+        config_keys: &[&str],
+        alias_case: Option<&str>,
+        canonical_identity: bool,
+    ) -> DuplicateSystemCatalogFixture {
+        assert!(canonical_identity || !canonical_populated);
         let directory = tempfile::tempdir().expect("temporary store");
         let path = directory.path().join("data.rdb");
         let config = UnifiedStoreConfig {
@@ -4115,10 +4147,12 @@ mod checkpoint_work_tests {
                     }
                 }
             }
-            store
-                .create_collection("cfg.canon_")
-                .expect("canonical source collection");
-            if canonical_populated {
+            if canonical_identity {
+                store
+                    .create_collection("cfg.canon_")
+                    .expect("canonical source collection");
+            }
+            if canonical_identity && canonical_populated {
                 if config_keys.is_empty() {
                     store
                         .insert_auto(
@@ -4306,7 +4340,10 @@ mod checkpoint_work_tests {
                 .expect("read catalog payload")
                 .expect("published catalog payload");
             let bytes = metadata.as_mut_slice();
-            let mut names = vec![("cfg_legacy", "red_config"), ("cfg.canon_", "red.config")];
+            let mut names = vec![("cfg_legacy", "red_config")];
+            if canonical_identity {
+                names.push(("cfg.canon_", "red.config"));
+            }
             if alias_case.is_some() {
                 names.extend([
                     ("old_stats", "red_stats"),
@@ -4350,8 +4387,12 @@ mod checkpoint_work_tests {
                 pager.sync().unwrap();
             }
         }
+        let mut config_names = vec![("cfg_legacy", "red_config")];
+        if canonical_identity {
+            config_names.push(("cfg.canon_", "red.config"));
+        }
         crate::storage::operational_manifest::OperationalManifest::for_db_path(&path)
-            .rename_collections(&[("cfg_legacy", "red_config"), ("cfg.canon_", "red.config")])
+            .rename_collections(&config_names)
             .expect("publish duplicate operational names");
 
         if alias_case.is_some() {
@@ -4710,6 +4751,60 @@ mod checkpoint_work_tests {
         .expect_err("two populated config trees must not be discarded");
         assert!(error.to_string().contains("refusing lossy migration"));
         assert!(!destination.exists());
+    }
+
+    #[test]
+    fn canonical_system_config_recovery_promotes_single_legacy_root_with_pending_wal() {
+        use crate::storage::wal::{WalRecord, WalWriter};
+
+        let fixture = single_legacy_system_catalog_fixture_with_keys(&["red.auth.require_auth"]);
+        let wal = reddb_file::unified_wal_path(&fixture.path);
+        let action = reddb_file::encode_store_wal_action_frame(
+            &reddb_file::StoreWalActionFrame::CreateCollection {
+                name: "pending_collection".into(),
+            },
+        )
+        .expect("encode pending action");
+        {
+            let mut writer = WalWriter::open(&wal).expect("open WAL");
+            writer
+                .append(&WalRecord::TxCommitBatch {
+                    tx_id: 999,
+                    actions: vec![action],
+                })
+                .expect("append committed WAL");
+            writer.sync().expect("sync WAL");
+        }
+        let original = std::fs::read(&fixture.path).expect("source bytes");
+        let original_wal = std::fs::read(&wal).expect("WAL bytes");
+        let destination = fixture
+            ._directory
+            .path()
+            .join("recovered-single-legacy-config");
+
+        crate::storage::compact::recover_paged_wal_canonical_system_config(
+            &fixture.path,
+            &destination,
+        )
+        .expect("recover pending WAL and promote the legacy config root");
+
+        assert_eq!(std::fs::read(&fixture.path).unwrap(), original);
+        assert_eq!(std::fs::read(&wal).unwrap(), original_wal);
+        for _ in 0..2 {
+            let recovered = UnifiedStore::open_with_config(
+                destination.join("data.rdb"),
+                fixture.config.clone(),
+            )
+            .expect("open recovered store");
+            let mut collections = recovered.list_collections();
+            collections.sort();
+            assert_eq!(collections, ["pending_collection", "red.config"]);
+            assert_eq!(
+                recovered.get_config("auth.require_auth"),
+                Some(Value::Integer(1))
+            );
+            assert_eq!(recovered.legacy_red_config_key_count().unwrap(), 0);
+        }
     }
 
     #[test]
