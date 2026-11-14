@@ -59,6 +59,7 @@ export class RoutingClient {
     this.refreshing = null
     this.closed = false
     this.binaryQueryParams = client.binaryQueryParams === true
+    this.nativeQueueWait = client.nativeQueueWait === true
   }
 
   async initialize() {

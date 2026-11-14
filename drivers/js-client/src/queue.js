@@ -39,17 +39,27 @@ export class QueueClient {
     })
   }
 
-  // Live `QUEUE READ … WAIT <ms>` helper (PRD #718 / #725). Same
-  // contract as drivers/js: required `waitMs`, timeout returns empty
-  // array, cancellation/cap rejection surface as transport errors.
   async readWait(queue, consumer, options = {}) {
-    const sql = buildQueueReadWaitSql(queue, consumer, options)
-    const result = await this.client.call('query', { sql })
-    return queuePayloads(result)
+    return queuePayloads({ rows: await this.readWaitEntries(queue, consumer, options) })
+  }
+
+  // RedWire's QueueWaitOpen parks on the async wait registry instead of
+  // occupying an engine execution slot for the wait duration. The v1 frame
+  // has no terminal marker after a multi-message delivery, so COUNT != 1
+  // deliberately stays on the SQL compatibility path.
+  async readWaitEntries(queue, consumer, options = {}) {
+    const request = buildQueueReadWaitRequest(queue, consumer, options)
+    if (this.client.nativeQueueWait === true && request.count === 1) {
+      const { sql: _, ...params } = request
+      const result = await this.client.call('queue_wait', params)
+      return queueRows(result)
+    }
+    const result = await this.client.call('query', { sql: request.sql })
+    return queueRows(result)
   }
 }
 
-function buildQueueReadWaitSql(queue, consumer, options) {
+function buildQueueReadWaitRequest(queue, consumer, options) {
   const { waitMs, group = null, count = null } = options ?? {}
   if (!Number.isInteger(waitMs) || waitMs < 0) {
     throw new RedDBError(
@@ -61,7 +71,14 @@ function buildQueueReadWaitSql(queue, consumer, options) {
   const c = queueIdentifier(consumer)
   const g = group != null ? ` GROUP ${queueIdentifier(group)}` : ''
   const n = count != null ? queueCount(count) : ''
-  return `QUEUE READ ${q}${g} CONSUMER ${c}${n} WAIT ${waitMs}ms`
+  return {
+    queue: q,
+    group: group != null ? queueIdentifier(group) : null,
+    consumer: c,
+    count: count ?? 1,
+    waitMs,
+    sql: `QUEUE READ ${q}${g} CONSUMER ${c}${n} WAIT ${waitMs}ms`,
+  }
 }
 
 function queueIdentifier(value) {
@@ -118,5 +135,9 @@ function queueStringLiteral(value) {
 }
 
 function queuePayloads(result) {
-  return Array.isArray(result?.rows) ? result.rows.map((row) => row.payload) : []
+  return queueRows(result).map((row) => row.payload)
+}
+
+function queueRows(result) {
+  return Array.isArray(result?.rows) ? result.rows : []
 }

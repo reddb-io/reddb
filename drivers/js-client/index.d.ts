@@ -233,6 +233,20 @@ export class QueueClient {
     consumer: string,
     options: { waitMs: number; group?: string; count?: number },
   ): Promise<unknown[]>
+  /** Like readWait(), but preserves message_id, consumer and delivery_count. */
+  readWaitEntries<T = unknown>(
+    queue: string,
+    consumer: string,
+    options: { waitMs: number; group?: string; count?: number },
+  ): Promise<Array<QueueWaitEntry<T>>>
+}
+
+export interface QueueWaitEntry<T = unknown> {
+  message_id: string | number
+  payload: T
+  consumer: string
+  delivery_count: number
+  [key: string]: unknown
 }
 
 /**
