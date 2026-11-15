@@ -736,8 +736,8 @@ impl RedDB {
     fn native_value_text(value: &Value) -> Option<String> {
         match value {
             Value::Text(value) => Some(value.to_string()),
-            Value::Json(value) => String::from_utf8(value.clone()).ok(),
-            Value::Blob(value) => String::from_utf8(value.clone()).ok(),
+            Value::Json(value) => std::str::from_utf8(value).ok().map(str::to_owned),
+            Value::Blob(value) => std::str::from_utf8(value).ok().map(str::to_owned),
             Value::Integer(value) => Some(value.to_string()),
             Value::UnsignedInteger(value) => Some(value.to_string()),
             Value::Float(value) => Some(value.to_string()),

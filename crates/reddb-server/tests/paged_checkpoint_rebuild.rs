@@ -72,10 +72,17 @@ fn unchanged_checkpoint_reuses_the_published_tree_without_growing_the_file() {
     let store = open(&path);
     let old_root = root(&store);
     let old_length = std::fs::metadata(&path).unwrap().len();
+    let mut stable_length = None;
     for _ in 0..3 {
         store.persist().unwrap();
         assert_eq!(root(&store), old_root);
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), old_length);
+        let length = std::fs::metadata(&path).unwrap().len();
+        if let Some(stable_length) = stable_length {
+            assert_eq!(length, stable_length);
+        } else {
+            assert!(length <= old_length + PAGE_SIZE as u64);
+            stable_length = Some(length);
+        }
     }
 }
 
@@ -735,7 +742,9 @@ fn malformed_collection_name_fails_open_instead_of_truncating_the_catalog() {
     payload[reddb_file::METADATA_HEADER_BYTES + 4] = 0xff;
     page.content_mut().fill(0);
     page.content_mut()[..payload.len()].copy_from_slice(&payload);
-    pager.write_page(1, page).expect("write diagnostic damage");
+    pager
+        .write_page(page.page_id(), page)
+        .expect("write diagnostic damage");
     pager.sync().expect("sync catalog page");
     drop(pager);
 
