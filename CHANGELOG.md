@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.39.3
+
+### Patch Changes
+
+- [#2877](https://github.com/reddb-io/reddb/pull/2877) [`3049947`](https://github.com/reddb-io/reddb/commit/3049947ba5c1155a8911e16f8ccb47cafd1e3af5) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Preserve executable permissions for native platform binaries across npm registry packaging and installation.
+
 ## 1.39.2
 
 ### Patch Changes
