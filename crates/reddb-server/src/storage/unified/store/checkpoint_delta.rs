@@ -270,20 +270,17 @@ impl UnifiedStore {
                 continue;
             };
             let Some((raw, projected)) = row else {
+                debug_assert!(defer);
                 if id.raw() >= previous.entity_id_upper_bound {
-                    continue;
-                }
-                if exact_delete_is_durable()? {
-                    deletes.push(id);
                     continue;
                 }
                 let existing = tree
                     .get(&key)
                     .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
                 if existing.is_some() {
-                    return Ok(None);
+                    continue;
                 }
-                continue;
+                return Ok(None);
             };
             let source = if retained.rows.get(&(collection.to_owned(), id)) == Some(&raw) {
                 Some(SparseCheckpointValue::Cached)

@@ -75,7 +75,15 @@ impl UnifiedStore {
                 .map(|bytes| Self::deserialize_entity_record(bytes, self.format_version()))
                 .transpose()?
                 .map(|(entity, _)| entity);
-            let new = manager.get_with(*id, Clone::clone);
+            let resident = manager.get_with(*id, Clone::clone);
+            let deferred = resident.as_ref().is_some_and(|entity| {
+                current.excluded_xids.contains(&entity.xmin) || current.pending_vault.contains(id)
+            });
+            // A pending replacement is not part of this checkpoint. Validate
+            // derived postings against the still-published base row and let
+            // `apply_sparse_checkpoint_tree` retain the ID for the next
+            // commit/rollback projection.
+            let new = if deferred { old.clone() } else { resident };
             if old.is_none() && new.is_some() {
                 inserted_entities = inserted_entities
                     .checked_add(1)
@@ -85,9 +93,7 @@ impl UnifiedStore {
                 let EntityData::Row(row) = &entity.data else {
                     return Ok(None);
                 };
-                if current.excluded_xids.contains(&entity.xmin)
-                    || entity.xmax != 0
-                    || current.pending_vault.contains(id)
+                if entity.xmax != 0
                     || (row.named.is_none() && row.schema.is_none() && !row.columns.is_empty())
                 {
                     return Ok(None);
