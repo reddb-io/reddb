@@ -226,7 +226,7 @@ impl PhysicalIndexState {
 /// sidecar so the registry's routing spine survives a restart
 /// (issue #866). `start_ns` plus the owning hypertable name is the
 /// chunk's stable identity.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PhysicalHypertableChunk {
     pub start_ns: u64,
     pub end_ns_exclusive: u64,
@@ -250,7 +250,7 @@ pub struct PhysicalHypertableChunk {
 /// bounds / routing / TTL are recovered identically after a restart
 /// — the same durability path the rest of the catalog already uses,
 /// not a parallel one (issue #866).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PhysicalHypertable {
     pub name: String,
     pub time_column: String,

@@ -65,6 +65,7 @@ impl UnifiedStore {
         let mut derived_deletes = Vec::with_capacity(posting_count);
         let mut derived_inserts = Vec::with_capacity(posting_count);
         let mut appended_xid_high_water_mark = 0;
+        let mut inserted_entities = 0_u64;
         for id in &ids {
             let encoded = tree
                 .get(&id.raw().to_be_bytes())
@@ -75,6 +76,11 @@ impl UnifiedStore {
                 .transpose()?
                 .map(|(entity, _)| entity);
             let new = manager.get_with(*id, Clone::clone);
+            if old.is_none() && new.is_some() {
+                inserted_entities = inserted_entities
+                    .checked_add(1)
+                    .ok_or_else(|| StoreError::Internal("backing entity count overflow".into()))?;
+            }
             if let Some(entity) = new.as_ref() {
                 let EntityData::Row(row) = &entity.data else {
                     return Ok(None);
@@ -163,6 +169,15 @@ impl UnifiedStore {
         }
 
         let root_before = tree.root_page_id();
+        let backing_entities = manager.backing_count_at_root(root_before).ok_or_else(|| {
+            StoreError::Internal("cold checkpoint lost its backing entity count".into())
+        })?;
+        let removed_entities = u64::try_from(removed.len())
+            .map_err(|_| StoreError::Internal("backing removal count exceeds u64".into()))?;
+        let published_entities = backing_entities
+            .checked_add(inserted_entities)
+            .and_then(|count| count.checked_sub(removed_entities))
+            .ok_or_else(|| StoreError::Internal("invalid backing entity count delta".into()))?;
         manager
             .try_with_unshared_backing_changes(root_before, &removed, || {
                 let result = (|| {
@@ -199,7 +214,7 @@ impl UnifiedStore {
                             summary.roots.insert(collection.to_owned(), root);
                         }
                     }
-                    Some((root, manager.count() as u64))
+                    Some((root, published_entities))
                 } else {
                     None
                 };

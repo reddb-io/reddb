@@ -54,11 +54,44 @@ fn catalog_state(path: &Path) -> reddb_file::native_resume::CollectionResume {
         },
     )
     .expect("read catalog");
-    let catalog = pager.read_page(1).expect("catalog page");
-    let resume = reddb_file::native_resume::decode_catalog_resume(catalog.content())
+    let catalog = catalog_payload(&pager);
+    let resume = reddb_file::native_resume::decode_catalog_resume(&catalog)
         .expect("decode catalog")
         .expect("resume catalog");
     resume.collections["records"].clone()
+}
+
+fn catalog_payload(pager: &Pager) -> Vec<u8> {
+    let catalog = pager.read_manifest_page().expect("catalog page");
+    let content = catalog.content();
+    let Some(header) = reddb_file::decode_native_metadata_overflow_header(content)
+        .expect("decode catalog overflow header")
+    else {
+        return content.to_vec();
+    };
+    let total = header.total_payload_bytes as usize;
+    let mut payload = Vec::with_capacity(total);
+    let first = &content[reddb_file::METADATA_OVERFLOW_HEADER_BYTES..];
+    payload.extend_from_slice(&first[..first.len().min(total)]);
+    let mut next = header.next_overflow_page_id;
+    while payload.len() < total {
+        assert_ne!(next, 0, "truncated catalog overflow chain");
+        let page = pager.read_page(next).expect("catalog overflow page");
+        let content = page.content();
+        let continuation = reddb_file::decode_native_metadata_overflow_continuation_header(content)
+            .expect("decode catalog overflow continuation");
+        let chunk_bytes = continuation.chunk_bytes as usize;
+        let chunk = &content[reddb_file::METADATA_OVERFLOW_CONTINUATION_HEADER_BYTES..];
+        assert!(
+            chunk_bytes <= chunk.len(),
+            "catalog overflow chunk exceeds page"
+        );
+        let take = chunk_bytes.min(total - payload.len());
+        payload.extend_from_slice(&chunk[..take]);
+        next = continuation.next_overflow_page_id;
+    }
+    assert_eq!(next, 0, "catalog overflow chain has trailing pages");
+    payload
 }
 
 fn damage_page(path: &Path, root: u32) {
@@ -152,11 +185,11 @@ fn checksum_damaged_index_pages_are_detected_and_rebuilt_without_row_loss() {
         assert_eq!(std::fs::read(&source).expect("preserved source"), damaged);
         let recovered = destination.join("source.rdb");
         verify_rows(&recovered, method);
-        assert!(scrub_paged(&recovered)
+        let findings = scrub_paged(&recovered)
             .expect("repaired scrub")
             .trees
-            .findings
-            .is_empty());
+            .findings;
+        assert!(findings.is_empty(), "repaired findings: {findings:#?}");
     }
 }
 

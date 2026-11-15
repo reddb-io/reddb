@@ -573,6 +573,10 @@ impl RedDB {
         // chunk bounds / routing / TTL) onto the same metadata path as
         // collection contracts so a restart recovers it identically.
         metadata.hypertables = self.hypertable_registry_snapshot();
+        let persist_record = persist_record
+            || previous
+                .as_ref()
+                .is_none_or(|previous| previous.hypertables != metadata.hypertables);
         #[cfg(test)]
         metadata_qualification_phase(&qualification_started, "metadata-assembled");
         self.persist_native_physical_header_inner(&metadata, persist_record)?;

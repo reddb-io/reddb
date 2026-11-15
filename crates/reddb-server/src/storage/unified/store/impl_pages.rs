@@ -1728,7 +1728,7 @@ impl UnifiedStore {
                     let mut current = CheckpointVersion {
                         manager: Arc::downgrade(manager),
                         segments: manager.checkpoint_revisions(),
-                        entity_id_upper_bound: manager.sequence_id_next(),
+                        entity_id_upper_bound: manager.identity_counters().0,
                         visibility_revision: 0,
                         untracked_visibility_revision: 0,
                         excluded_xids: Arc::default(),
@@ -1817,7 +1817,7 @@ impl UnifiedStore {
                     CheckpointVersion {
                         manager: Arc::downgrade(manager),
                         segments: manager.checkpoint_revisions(),
-                        entity_id_upper_bound: manager.sequence_id_next(),
+                        entity_id_upper_bound: manager.identity_counters().0,
                         visibility_revision: 0,
                         untracked_visibility_revision: 0,
                         excluded_xids: Arc::default(),
@@ -2534,7 +2534,7 @@ impl UnifiedStore {
                                     CheckpointVersion {
                                         manager: Arc::downgrade(manager),
                                         segments: manager.checkpoint_revisions(),
-                                        entity_id_upper_bound: manager.sequence_id_next(),
+                                        entity_id_upper_bound: manager.identity_counters().0,
                                         visibility_revision: 0,
                                         untracked_visibility_revision: 0,
                                         excluded_xids: Arc::default(),
@@ -2892,7 +2892,7 @@ impl UnifiedStore {
             let mut version = CheckpointVersion {
                 manager: Arc::downgrade(manager),
                 segments: manager.checkpoint_revisions(),
-                entity_id_upper_bound: manager.sequence_id_next(),
+                entity_id_upper_bound: manager.identity_counters().0,
                 visibility_revision,
                 untracked_visibility_revision,
                 excluded_xids: Arc::clone(&excluded),
@@ -2910,6 +2910,7 @@ impl UnifiedStore {
                 if hidden_graph_ids.is_empty()
                     && previous.manager.ptr_eq(&version.manager)
                     && previous.segments == version.segments
+                    && previous.entity_id_upper_bound == version.entity_id_upper_bound
                     && previous.format_version == version.format_version
                     && !previous.has_unprojected_rows
                     && (manager.count() == 0
@@ -3074,6 +3075,24 @@ impl UnifiedStore {
             std::process::exit(196);
         }
         self.publish_reclaimable_trees(pager, &mut meta_data, &rebuilt_indices, &rebuilt_keys)?;
+        let published_entity_counts = if self.config.resident_memory_bytes_max.is_some() {
+            let resume = reddb_file::native_resume::decode_catalog_resume(&meta_data)
+                .map_err(|error| StoreError::Serialization(error.to_string()))?
+                .ok_or_else(|| {
+                    StoreError::Serialization(
+                        "disk-resident checkpoint omitted its resume catalog".into(),
+                    )
+                })?;
+            Some(
+                resume
+                    .collections
+                    .into_iter()
+                    .map(|(name, state)| (name, state.entities))
+                    .collect::<HashMap<_, _>>(),
+            )
+        } else {
+            None
+        };
 
         #[cfg(test)]
         if std::env::var_os("REDDB_TEST_EXIT_AFTER_UNDO_CATALOG_PUBLICATION").is_some() {
@@ -3110,25 +3129,17 @@ impl UnifiedStore {
                     .is_some_and(|version| !version.has_unprojected_rows)
                 {
                     if let Some(tree) = btree_indices.get(name) {
-                        let mut persisted_entities = manager.count() as u64;
-                        if (persisted_entities == 0 || persisted_entities > i64::MAX as u64)
-                            && tree.root_page_id() > 0
-                        {
-                            persisted_entities = u64::try_from(tree.count().map_err(|error| {
+                        let persisted_entities = published_entity_counts
+                            .as_ref()
+                            .and_then(|counts| counts.get(name))
+                            .copied()
+                            .ok_or_else(|| {
                                 page_integrity(
                                     tree.root_page_id(),
                                     Some(name.clone()),
-                                    error.to_string(),
-                                )
-                            })?)
-                            .map_err(|_| {
-                                page_integrity(
-                                    tree.root_page_id(),
-                                    Some(name.clone()),
-                                    "collection entity count exceeds u64",
+                                    "published resume catalog omitted collection count",
                                 )
                             })?;
-                        }
                         manager.install_backing(
                             Arc::new(
                                 {
