@@ -507,3 +507,9 @@ line: the ref is exactly `v<workspace version>`, the workspace major/minor is
 the same commit is the current remote `release/1.36` HEAD. Any missing or
 divergent condition fails before build or publication; the global guard remains
 unchanged for every other branch and tag.
+
+Maintenance publication also preserves global aliases. npm packages use the
+`maintenance-1.36` dist-tag, while GHCR publishes only the immutable `vX.Y.Z`
+and `X.Y.Z` tags plus the moving `1.36` minor-line tag. Neither npm/GHCR
+`latest` nor the GHCR `1` major tag may move during a 1.36 maintenance release,
+and GitHub must not mark it as the repository's latest release.
