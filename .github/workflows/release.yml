@@ -39,6 +39,9 @@ env:
   CARGO_BUILD_JOBS: 2
   CARGO_INCREMENTAL: 0
   BINARY_NAME: red
+  # Maintenance releases are opt-in by exact tag line. check-version-drift.sh
+  # still requires v<workspace-version> and the exact remote release/1.36 HEAD.
+  REDDB_MAINTENANCE_RELEASE_BRANCH: ${{ startsWith(github.ref, 'refs/tags/v1.36.') && 'release/1.36' || '' }}
 
   ENABLE_LINUX_X64: ${{ vars.ENABLE_LINUX_X64 || 'true' }}
   ENABLE_LINUX_ARM64: ${{ vars.ENABLE_LINUX_ARM64 || 'true' }}
