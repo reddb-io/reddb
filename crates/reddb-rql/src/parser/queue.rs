@@ -401,6 +401,30 @@ impl<'a> Parser<'a> {
                     delivery_id,
                 }))
             }
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("EXTEND") => {
+                self.advance()?;
+                let queue = self.parse_collection_name()?;
+                self.expect(Token::With)?;
+                if !self.consume_ident_ci("delivery_id")? {
+                    return Err(ParseError::expected(
+                        vec!["delivery_id"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                self.expect(Token::Eq)?;
+                let delivery_id = self.parse_string()?;
+                if delivery_id.is_empty() {
+                    return Err(ParseError::new(
+                        "QUEUE EXTEND delivery_id must be non-empty".to_string(),
+                        self.position(),
+                    ));
+                }
+                Ok(QueryExpr::QueueCommand(QueueCommand::Extend {
+                    queue,
+                    delivery_id,
+                }))
+            }
             Token::Nack => {
                 self.advance()?;
                 let queue = self.parse_collection_name()?;
@@ -417,7 +441,7 @@ impl<'a> Parser<'a> {
             _ => Err(ParseError::expected(
                 vec![
                     "PUSH", "POP", "PEEK", "LEN", "PURGE", "GROUP", "READ", "ACK", "NACK", "LPUSH",
-                    "RPUSH", "LPOP", "RPOP", "PENDING", "CLAIM", "MOVE",
+                    "RPUSH", "LPOP", "RPOP", "PENDING", "CLAIM", "MOVE", "EXTEND",
                 ],
                 self.peek(),
                 self.position(),

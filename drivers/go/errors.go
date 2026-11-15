@@ -47,6 +47,8 @@ const (
 	// CodeInvalidResponse — server returned a payload the helper cannot
 	// reconcile with the SDK Helper Spec envelopes.
 	CodeInvalidResponse ErrorCode = "INVALID_RESPONSE"
+	// CodeQueueHandlerTimeout — a queue handler exceeded its cooperative deadline.
+	CodeQueueHandlerTimeout ErrorCode = "QUEUE_HANDLER_TIMEOUT"
 )
 
 // Error is the typed error returned across the driver surface.

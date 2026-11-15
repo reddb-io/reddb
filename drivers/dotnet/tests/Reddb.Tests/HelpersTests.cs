@@ -42,6 +42,36 @@ public class HelpersTests
         public FakeQuerier Err(Exception e) { Errs.Enqueue(e); return this; }
     }
 
+    private sealed class QueueHeartbeatQuerier : IQuerier
+    {
+        private readonly object _gate = new();
+        private bool _delivered;
+        public readonly List<string> Sqls = new();
+        public readonly TaskCompletionSource Extended = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask<ReadOnlyMemory<byte>> QueryAsync(
+            string sql, object?[] args, CancellationToken ct = default)
+        {
+            lock (_gate)
+            {
+                Sqls.Add(sql);
+                if (sql.StartsWith("QUEUE READ") && !_delivered)
+                {
+                    _delivered = true;
+                    var body = JsonSerializer.SerializeToUtf8Bytes(new
+                    {
+                        rows = new[] { new { delivery_id = "d1", payload = "work" } },
+                    });
+                    return new ValueTask<ReadOnlyMemory<byte>>(body);
+                }
+            }
+            if (sql.StartsWith("QUEUE EXTEND")) Extended.TrySetResult();
+            return new ValueTask<ReadOnlyMemory<byte>>(
+                JsonSerializer.SerializeToUtf8Bytes(new { rows = Array.Empty<object>() }));
+        }
+    }
+
     private static Dictionary<string, object?> M(params (string, object?)[] kvs)
     {
         var m = new Dictionary<string, object?>();
@@ -202,6 +232,35 @@ public class HelpersTests
         Assert.Equal("d1", Assert.Single(messages).DeliveryId);
         await queue.AckAsync("d1");
         Assert.Contains("QUEUE ACK jobs", fq.Sqls[1]);
+        await queue.ExtendAsync("d1");
+        Assert.Equal("QUEUE EXTEND jobs WITH delivery_id = 'd1'", fq.Sqls[2]);
+    }
+
+    [Fact] public async Task QueueConsumer_HeartbeatsAndExposesLifecycle()
+    {
+        var fq = new QueueHeartbeatQuerier();
+        var queue = new Helpers.Helpers(fq).Queue("jobs");
+        var consumer = queue.Consumer(new QueueConsumerOptions
+        {
+            Consumer = "worker",
+            Wait = TimeSpan.FromSeconds(1),
+            LeaseHeartbeat = TimeSpan.FromMilliseconds(1),
+            Handler = async (_, ct) =>
+            {
+                await fq.Extended.Task.WaitAsync(ct);
+            },
+        });
+
+        await consumer.StartAsync();
+        consumer.Pause();
+        Assert.Equal("paused", consumer.Status.State);
+        consumer.Resume();
+        await fq.Extended.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        await consumer.StopAsync();
+
+        Assert.Contains("QUEUE EXTEND jobs WITH delivery_id = 'd1'", fq.Sqls);
+        Assert.Contains("QUEUE ACK jobs WITH delivery_id = 'd1'", fq.Sqls);
+        Assert.Equal("stopped", consumer.Status.State);
     }
 
     // --- Documents ---------------------------------------------------

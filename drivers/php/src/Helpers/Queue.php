@@ -202,4 +202,16 @@ final class Queue
             $delayClause,
         ));
     }
+
+    public function extend(string $queue, string $deliveryId): void
+    {
+        if ($deliveryId === '') {
+            throw new InvalidArgument('queue delivery_id must be non-empty');
+        }
+        $this->q->query(sprintf(
+            'QUEUE EXTEND %s WITH delivery_id = %s',
+            Sql::identifier($queue),
+            Sql::kvTagLiteral($deliveryId),
+        ));
+    }
 }

@@ -6,6 +6,7 @@
 
 import { RoutingClient } from '@reddb-io/client/routing'
 import { decodeTopology } from '@reddb-io/client/topology'
+import { QueueClient, type ScopedQueueClient } from '@reddb-io/client/bun'
 
 export type ReadOptions = { consistency: 'local' | 'strong' | 'bounded_staleness'; maxLagMs?: number }
 
@@ -81,6 +82,7 @@ export class RedDBConnection {
   private nextCorr = 1n
   private serverFeatures = 0
   private routing?: RoutingClient
+  private queueClient?: QueueClient
 
   constructor(socket: any) {
     this.socket = socket
@@ -223,6 +225,27 @@ export class RedDBConnection {
 
   supportsParams(): boolean {
     return (this.serverFeatures & FEATURE_PARAMS) === FEATURE_PARAMS
+  }
+
+  /** Rich queue helpers, including managed async consumers. */
+  queue(): QueueClient
+  queue(name: string): ScopedQueueClient
+  queue(name?: string): QueueClient | ScopedQueueClient {
+    if (!this.queueClient) {
+      const QueueClientConstructor = QueueClient as unknown as new (client: unknown) => QueueClient
+      this.queueClient = new QueueClientConstructor({
+        nativeQueueWait: false,
+        call: async (method: string, params: { sql?: string; params?: QueryParam[] } = {}) => {
+          if (method !== 'query' || typeof params.sql !== 'string') {
+            throw new RedDBError('UNSUPPORTED_OPERATION', method)
+          }
+          const raw = await this.query(params.sql, ...(params.params ?? []))
+          try { return JSON.parse(raw) }
+          catch { return { raw } }
+        },
+      })
+    }
+    return name === undefined ? this.queueClient : this.queueClient.scope(name)
   }
 
   async queryWithOptions(sql: string, options: ReadOptions, ...params: QueryParam[]): Promise<string> {

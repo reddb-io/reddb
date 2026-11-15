@@ -280,7 +280,22 @@ export class ScopedQueueClient {
   ): Promise<Array<QueueWaitEntry<T>>>
   ack(deliveryId: string | number): Promise<QueryResult>
   nack(deliveryId: string | number, options?: { delay?: string }): Promise<QueryResult>
+  /** Refreshes the delivery visibility deadline using the queue's current lock policy. */
+  extend(deliveryId: string | number): Promise<QueryResult>
   consumer<T = unknown>(options: QueueConsumerOptions<T>): QueueConsumer<T>
+}
+
+export interface QueueReceiveBackoffOptions {
+  initialMs?: number
+  maxMs?: number
+  multiplier?: number
+  jitter?: boolean
+}
+
+export interface QueueConsumerContext {
+  readonly signal: AbortSignal
+  readonly deliveryId: string
+  extendLease(): Promise<QueryResult>
 }
 
 export interface QueueConsumerOptions<T = unknown> {
@@ -288,15 +303,34 @@ export interface QueueConsumerOptions<T = unknown> {
   group?: string
   waitMs?: number
   retryDelay?: string
-  handleMessage(message: QueueWaitEntry<T>): void | Promise<void>
+  concurrency?: number
+  receiveBackoff?: QueueReceiveBackoffOptions
+  leaseHeartbeatMs?: number
+  /** Cooperative timeout: aborts `context.signal`, then waits for the handler to settle before NACK. */
+  handlerTimeoutMs?: number
+  handleMessage(message: QueueWaitEntry<T>, context: QueueConsumerContext): void | Promise<void>
   onError?(error: unknown, message: QueueWaitEntry<T> | null): void | Promise<void>
+}
+
+export type QueueConsumerState = 'idle' | 'running' | 'paused' | 'stopping' | 'stopped' | 'failed'
+
+export interface QueueConsumerStatus {
+  readonly state: QueueConsumerState
+  readonly isRunning: boolean
+  readonly isPaused: boolean
+  readonly inFlight: number
+  readonly concurrency: number
 }
 
 export class QueueConsumer<T = unknown> {
   constructor(queue: ScopedQueueClient, options: QueueConsumerOptions<T>)
-  readonly status: { isRunning: boolean }
+  readonly status: QueueConsumerStatus
   start(): this
   stop(): Promise<void>
+  /** Request graceful stop without awaiting completion; safe inside the handler. */
+  requestStop(): this
+  pause(): this
+  resume(): this
   finished(): Promise<void>
 }
 

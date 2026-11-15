@@ -123,6 +123,7 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
             | QueueCommand::Claim { queue, .. }
             | QueueCommand::Ack { queue, .. }
             | QueueCommand::AckBatch { queue, .. }
+            | QueueCommand::Extend { queue, .. }
             | QueueCommand::Nack { queue, .. } => cache_scope_insert(scopes, queue),
             QueueCommand::Move {
                 source,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -19,6 +20,44 @@ type fakeQuerier struct {
 type fakeCall struct {
 	sql    string
 	params []any
+}
+
+type queueHookQuerier struct {
+	mu         sync.Mutex
+	calls      []string
+	delivery   []byte
+	delivered  bool
+	extendErr  error
+	extended   chan struct{}
+	extendOnce sync.Once
+}
+
+func (q *queueHookQuerier) Query(ctx context.Context, sql string, _ ...any) ([]byte, error) {
+	q.mu.Lock()
+	q.calls = append(q.calls, sql)
+	if strings.HasPrefix(sql, "QUEUE READ") && !q.delivered {
+		q.delivered = true
+		body := q.delivery
+		q.mu.Unlock()
+		return body, nil
+	}
+	q.mu.Unlock()
+	if strings.HasPrefix(sql, "QUEUE EXTEND") {
+		q.extendOnce.Do(func() { close(q.extended) })
+		return nil, q.extendErr
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+		return []byte(`{"rows":[]}`), nil
+	}
+}
+
+func (q *queueHookQuerier) statements() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]string(nil), q.calls...)
 }
 
 func (f *fakeQuerier) Query(_ context.Context, sql string, params ...any) ([]byte, error) {
@@ -304,6 +343,12 @@ func TestQueueScope_BindsNameAndPreservesDeliveryMetadata(t *testing.T) {
 	if fq.calls[1].sql != "QUEUE ACK jobs WITH delivery_id = 'd1'" {
 		t.Fatalf("ack SQL: %s", fq.calls[1].sql)
 	}
+	if err := queue.Extend(context.Background(), "d1"); err != nil {
+		t.Fatal(err)
+	}
+	if fq.calls[2].sql != "QUEUE EXTEND jobs WITH delivery_id = 'd1'" {
+		t.Fatalf("extend SQL: %s", fq.calls[2].sql)
+	}
 }
 
 func TestQueueConsumer_HandlesAndAcks(t *testing.T) {
@@ -340,6 +385,92 @@ func TestQueueConsumer_HandlesAndAcks(t *testing.T) {
 	}
 	if len(fq.calls) != 2 || fq.calls[1].sql != "QUEUE ACK jobs WITH delivery_id = 'd1'" {
 		t.Fatalf("calls: %+v", fq.calls)
+	}
+}
+
+func TestQueueConsumer_HeartbeatsAndExposesLifecycle(t *testing.T) {
+	fq := &queueHookQuerier{
+		delivery: reply(t, map[string]any{"rows": []any{map[string]any{
+			"delivery_id": "d1", "payload": "work",
+		}}}),
+		extended: make(chan struct{}),
+	}
+	queue, err := NewHelpers(fq).QueueScope("jobs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var consumer *QueueConsumer
+	consumer, err = queue.Consumer(QueueConsumerOptions{
+		Consumer: "worker1", Wait: time.Second, LeaseHeartbeat: time.Millisecond,
+		Handle: func(_ context.Context, _ QueueMessage) error {
+			<-fq.extended
+			consumer.Stop()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := consumer.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	consumer.Pause()
+	if status := consumer.Status(); status.State != QueueConsumerPaused || !status.IsPaused {
+		t.Fatalf("paused status: %+v", status)
+	}
+	consumer.Resume()
+	if err := consumer.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	statements := strings.Join(fq.statements(), "\n")
+	if !strings.Contains(statements, "QUEUE EXTEND jobs WITH delivery_id = 'd1'") {
+		t.Fatalf("missing heartbeat: %s", statements)
+	}
+	if !strings.Contains(statements, "QUEUE ACK jobs WITH delivery_id = 'd1'") {
+		t.Fatalf("missing ACK: %s", statements)
+	}
+}
+
+func TestQueueConsumer_DoesNotSettleAfterLeaseLoss(t *testing.T) {
+	fq := &queueHookQuerier{
+		delivery: reply(t, map[string]any{"rows": []any{map[string]any{
+			"delivery_id": "d1", "payload": "work",
+		}}}),
+		extendErr: errors.New("lease lost"),
+		extended:  make(chan struct{}),
+	}
+	queue, err := NewHelpers(fq).QueueScope("jobs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var consumer *QueueConsumer
+	consumer, err = queue.Consumer(QueueConsumerOptions{
+		Consumer: "worker1", Wait: time.Second, LeaseHeartbeat: time.Millisecond,
+		Handle: func(ctx context.Context, _ QueueMessage) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		HandleError: func(_ context.Context, err error, _ *QueueMessage) error {
+			if !strings.Contains(err.Error(), "lease lost") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			consumer.Stop()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := consumer.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := consumer.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	for _, sql := range fq.statements() {
+		if strings.HasPrefix(sql, "QUEUE ACK") || strings.HasPrefix(sql, "QUEUE NACK") {
+			t.Fatalf("lost lease must not settle delivery: %s", sql)
+		}
 	}
 }
 

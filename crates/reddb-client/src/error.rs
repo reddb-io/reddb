@@ -49,6 +49,8 @@ pub enum ErrorCode {
     InvalidArgument,
     /// Server-side response did not match the helper contract.
     InvalidResponse,
+    /// A queue handler exceeded its configured processing budget.
+    QueueHandlerTimeout,
 }
 
 impl ErrorCode {
@@ -72,6 +74,7 @@ impl ErrorCode {
             ErrorCode::ConsistencyUnsupported => "CONSISTENCY_UNSUPPORTED",
             ErrorCode::InvalidArgument => "INVALID_ARGUMENT",
             ErrorCode::InvalidResponse => "INVALID_RESPONSE",
+            ErrorCode::QueueHandlerTimeout => "QUEUE_HANDLER_TIMEOUT",
         }
     }
 }

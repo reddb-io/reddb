@@ -1,5 +1,13 @@
 # @reddb-io/client
 
+## 1.38.0
+
+### Minor Changes
+
+- [#2860](https://github.com/reddb-io/reddb/pull/2860) [`015220b`](https://github.com/reddb-io/reddb/commit/015220b5c8070279770da85a38fdb392cb750a65) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add Queue Consumer v2 lifecycle controls, bounded receive backoff, optional
+  concurrency, cooperative handler timeouts, and server-backed delivery lease
+  heartbeats.
+
 ## 1.37.0
 
 ### Minor Changes

@@ -226,6 +226,30 @@ impl PrimaryQueueStore {
         Ok((rows, pending))
     }
 
+    fn prepare_deadline_refresh(
+        &self,
+        delivery_id: &str,
+        deadline: Instant,
+        previous: &[crate::storage::unified::store::RowPublication],
+    ) -> Result<crate::storage::unified::store::RowPublication> {
+        let (pending_id, pending) = self
+            .find_pending_by_delivery(delivery_id)
+            .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
+        let target = (QUEUE_META_COLLECTION.to_string(), pending_id);
+        if previous.iter().any(|plan| plan.deletes.contains(&target)) {
+            return Err(QueueStoreError::UnknownDelivery(delivery_id.to_string()));
+        }
+
+        let mut rows = crate::storage::unified::store::RowPublication::default();
+        rows.deletes.push(target);
+        rows.inserts.push((
+            QUEUE_META_COLLECTION.to_string(),
+            queue_meta_entity(pending_fields(pending, deadline)),
+            None,
+        ));
+        Ok(rows)
+    }
+
     // New READ reservations have already excluded legacy pending rows.
     // Call under the publication fence so validation and planning share a view.
     fn prepare_pending_read_rows(
@@ -946,6 +970,24 @@ struct PendingRow {
     lock_deadline_ns: u64,
 }
 
+fn pending_fields(pending: PendingRow, deadline: Instant) -> HashMap<String, Value> {
+    HashMap::from([
+        ("kind".into(), Value::text(KIND_PENDING_LC)),
+        ("queue".into(), Value::text(pending.queue)),
+        ("group".into(), Value::text(pending.group)),
+        (
+            "message_id".into(),
+            Value::UnsignedInteger(pending.message_id),
+        ),
+        ("delivery_id".into(), Value::text(pending.delivery_id)),
+        ("consumer".into(), Value::text(pending.consumer)),
+        (
+            "lock_deadline_ns".into(),
+            Value::UnsignedInteger(instant_to_unix_ns(deadline)),
+        ),
+    ])
+}
+
 impl PendingRow {
     fn from_row(row: &RowData) -> Option<Self> {
         Some(Self {
@@ -1245,6 +1287,44 @@ impl QueueStore for PrimaryQueueStore {
             group: row.group,
             consumer: row.consumer,
         })
+    }
+
+    fn refresh_pending_deadline(
+        &self,
+        _txn: &QueueTxn,
+        delivery_id: &str,
+        deadline: Instant,
+    ) -> Result<()> {
+        if !UnifiedStore::deferred_store_wal_capture_active()
+            && self.runtime.current_xid().is_none()
+        {
+            let store = self.store();
+            let adapter = Self::new(self.runtime.clone());
+            let delivery_id = delivery_id.to_string();
+            return store
+                .prepare_and_publish_rows(move |_, previous| {
+                    let prepared =
+                        adapter.prepare_deadline_refresh(&delivery_id, deadline, previous);
+                    match prepared {
+                        Ok(rows) => Ok((rows, Ok(()))),
+                        Err(error) => Ok((
+                            crate::storage::unified::store::RowPublication::default(),
+                            Err(error),
+                        )),
+                    }
+                })
+                .map_err(|error| QueueStoreError::UnknownQueue(error.to_string()))?;
+        }
+
+        let store = self.store();
+        let _publication = store.vault_publication_lock.lock();
+        let (entity_id, pending) = self
+            .find_pending_by_delivery(delivery_id)
+            .ok_or_else(|| QueueStoreError::UnknownDelivery(delivery_id.to_string()))?;
+        super::vcs_queue::delete_metadata(store.as_ref(), entity_id)
+            .map_err(|error| QueueStoreError::UnknownQueue(error.to_string()))?;
+
+        self.insert_meta_row(pending_fields(pending, deadline))
     }
 
     fn read_max_attempts(&self, queue: &str, message_id: MessageId) -> u32 {

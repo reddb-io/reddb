@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"math/rand"
 	"regexp"
 	"strconv"
 	"strings"
@@ -831,15 +833,57 @@ func (q *ScopedQueueClient) Nack(ctx context.Context, deliveryID, delay string) 
 	return err
 }
 
-// QueueConsumerOptions configures one sequential at-least-once worker.
-// Use one dedicated Conn per consumer; start additional consumers for parallelism.
+// Extend refreshes a delivery's visibility deadline from the queue policy.
+func (q *ScopedQueueClient) Extend(ctx context.Context, deliveryID string) error {
+	if deliveryID == "" {
+		return NewError(CodeInvalidArgument, "queue delivery_id must be non-empty")
+	}
+	_, err := q.queue.q.Query(ctx, fmt.Sprintf(
+		"QUEUE EXTEND %s WITH delivery_id = %s",
+		sqlIdentifier(q.Name), kvTagLiteral(deliveryID)))
+	return err
+}
+
+// QueueReceiveBackoffOptions controls bounded receive-error backoff.
+type QueueReceiveBackoffOptions struct {
+	Initial    time.Duration
+	Max        time.Duration
+	Multiplier float64
+	Jitter     bool
+}
+
+// QueueConsumerOptions configures an at-least-once worker. Concurrency defaults
+// to one; multiple application pods already provide horizontal parallelism.
 type QueueConsumerOptions struct {
-	Consumer    string
-	Group       string
-	Wait        time.Duration
-	RetryDelay  string
-	Handle      func(context.Context, QueueMessage) error
-	HandleError func(context.Context, error, *QueueMessage) error
+	Consumer       string
+	Group          string
+	Wait           time.Duration
+	RetryDelay     string
+	Concurrency    int
+	ReceiveBackoff QueueReceiveBackoffOptions
+	LeaseHeartbeat time.Duration
+	HandlerTimeout time.Duration
+	Handle         func(context.Context, QueueMessage) error
+	HandleError    func(context.Context, error, *QueueMessage) error
+}
+
+type QueueConsumerState string
+
+const (
+	QueueConsumerIdle     QueueConsumerState = "idle"
+	QueueConsumerRunning  QueueConsumerState = "running"
+	QueueConsumerPaused   QueueConsumerState = "paused"
+	QueueConsumerStopping QueueConsumerState = "stopping"
+	QueueConsumerStopped  QueueConsumerState = "stopped"
+	QueueConsumerFailed   QueueConsumerState = "failed"
+)
+
+type QueueConsumerStatus struct {
+	State       QueueConsumerState
+	IsRunning   bool
+	IsPaused    bool
+	InFlight    int
+	Concurrency int
 }
 
 // QueueConsumer owns the read/handle/ACK loop for a scoped queue.
@@ -848,7 +892,13 @@ type QueueConsumer struct {
 	options  QueueConsumerOptions
 	mu       sync.Mutex
 	cancel   context.CancelFunc
+	state    QueueConsumerState
+	paused   bool
 	stopping bool
+	inFlight int
+	wake     chan struct{}
+	stop     chan struct{}
+	stopOnce sync.Once
 	done     chan struct{}
 	err      error
 }
@@ -871,13 +921,38 @@ func (q *ScopedQueueClient) Consumer(options QueueConsumerOptions) (*QueueConsum
 	if options.Wait == 0 {
 		options.Wait = 30 * time.Second
 	}
+	if options.Concurrency == 0 {
+		options.Concurrency = 1
+	}
+	if options.Concurrency < 1 || options.Concurrency > 128 {
+		return nil, NewError(CodeInvalidArgument,
+			"queue consumer concurrency must be between 1 and 128")
+	}
+	if options.LeaseHeartbeat < 0 || options.HandlerTimeout < 0 {
+		return nil, NewError(CodeInvalidArgument,
+			"queue consumer heartbeat and timeout must be non-negative")
+	}
+	backoff := options.ReceiveBackoff
+	if backoff == (QueueReceiveBackoffOptions{}) {
+		backoff = QueueReceiveBackoffOptions{
+			Initial: 250 * time.Millisecond, Max: 30 * time.Second,
+			Multiplier: 2, Jitter: true,
+		}
+	}
+	if backoff.Initial <= 0 || backoff.Max < backoff.Initial || backoff.Multiplier < 1 {
+		return nil, NewError(CodeInvalidArgument, "invalid queue receive backoff")
+	}
+	options.ReceiveBackoff = backoff
 	if options.RetryDelay != "" && !queueRetryDelayPattern.MatchString(options.RetryDelay) {
 		return nil, NewError(CodeInvalidArgument, "invalid queue retry delay")
 	}
 	if options.Handle == nil {
 		return nil, NewError(CodeInvalidArgument, "queue consumer requires a handler")
 	}
-	return &QueueConsumer{queue: q, options: options}, nil
+	return &QueueConsumer{
+		queue: q, options: options, state: QueueConsumerIdle,
+		wake: make(chan struct{}, 1), stop: make(chan struct{}),
+	}, nil
 }
 
 func (c *QueueConsumer) Start(parent context.Context) error {
@@ -889,27 +964,62 @@ func (c *QueueConsumer) Start(parent context.Context) error {
 	ctx, cancel := context.WithCancel(parent)
 	c.cancel = cancel
 	c.done = make(chan struct{})
+	c.state = QueueConsumerRunning
 	go func() {
 		defer close(c.done)
 		c.err = c.run(ctx)
+		c.mu.Lock()
+		if c.err != nil {
+			c.state = QueueConsumerFailed
+		} else {
+			c.state = QueueConsumerStopped
+		}
+		c.mu.Unlock()
 	}()
 	return nil
 }
 
 func (c *QueueConsumer) Stop() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	if c.state == QueueConsumerIdle || c.state == QueueConsumerStopped || c.state == QueueConsumerFailed {
+		c.mu.Unlock()
+		return
+	}
 	c.stopping = true
+	c.paused = false
+	c.state = QueueConsumerStopping
+	c.mu.Unlock()
+	c.stopOnce.Do(func() { close(c.stop) })
+	c.signal()
+}
+
+func (c *QueueConsumer) Pause() {
+	c.mu.Lock()
+	if c.state == QueueConsumerRunning {
+		c.paused = true
+		c.state = QueueConsumerPaused
+	}
+	c.mu.Unlock()
+}
+
+func (c *QueueConsumer) Resume() {
+	c.mu.Lock()
+	if c.state == QueueConsumerPaused {
+		c.paused = false
+		c.state = QueueConsumerRunning
+	}
+	c.mu.Unlock()
+	c.signal()
 }
 
 // Abort cancels the in-flight wait and handler context immediately.
 func (c *QueueConsumer) Abort() {
+	c.Stop()
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.stopping = true
 	if c.cancel != nil {
 		c.cancel()
 	}
+	c.mu.Unlock()
 }
 
 func (c *QueueConsumer) Wait() error {
@@ -924,9 +1034,29 @@ func (c *QueueConsumer) Wait() error {
 }
 
 func (c *QueueConsumer) run(ctx context.Context) error {
+	errors := make(chan error, c.options.Concurrency)
+	for range c.options.Concurrency {
+		go func() { errors <- c.runLane(ctx) }()
+	}
+	var first error
+	for range c.options.Concurrency {
+		if err := <-errors; err != nil && first == nil {
+			first = err
+			c.mu.Lock()
+			if c.cancel != nil {
+				c.cancel()
+			}
+			c.mu.Unlock()
+		}
+	}
+	return first
+}
+
+func (c *QueueConsumer) runLane(ctx context.Context) error {
 	readOptions := ReadWaitOptions{Group: c.options.Group, Count: 1}
+	receiveFailures := 0
 	for {
-		if c.isStopping() {
+		if !c.waitUntilReady(ctx) {
 			return nil
 		}
 		if err := ctx.Err(); err != nil {
@@ -941,37 +1071,149 @@ func (c *QueueConsumer) run(ctx context.Context) error {
 			if reportErr := c.reportError(ctx, err, nil); reportErr != nil {
 				return reportErr
 			}
+			receiveFailures++
+			if !c.backoff(ctx, receiveFailures) {
+				return nil
+			}
 			continue
 		}
+		receiveFailures = 0
 		if len(messages) == 0 {
 			continue
 		}
-		message := messages[0]
-		if message.DeliveryID == "" {
-			err = NewError(CodeInvalidResponse, "queue delivery is missing delivery_id")
-		} else {
-			err = c.options.Handle(ctx, message)
-		}
-		if err == nil {
-			err = c.queue.Ack(ctx, message.DeliveryID)
-		} else if message.DeliveryID != "" {
-			nackErr := c.queue.Nack(ctx, message.DeliveryID, c.options.RetryDelay)
-			if nackErr != nil {
-				err = fmt.Errorf("%w; queue NACK failed: %v", err, nackErr)
-			}
-		}
-		if err != nil {
-			if reportErr := c.reportError(ctx, err, &message); reportErr != nil {
-				return reportErr
-			}
+		if err := c.processMessage(ctx, messages[0]); err != nil {
+			return err
 		}
 	}
 }
 
-func (c *QueueConsumer) isStopping() bool {
+func (c *QueueConsumer) processMessage(ctx context.Context, message QueueMessage) error {
+	if message.DeliveryID == "" {
+		return c.reportError(ctx,
+			NewError(CodeInvalidResponse, "queue delivery is missing delivery_id"), &message)
+	}
+	c.addInFlight(1)
+	defer c.addInFlight(-1)
+	handlerCtx, cancelHandler := context.WithCancel(ctx)
+	defer cancelHandler()
+	handlerDone := make(chan error, 1)
+	go func() { handlerDone <- c.options.Handle(handlerCtx, message) }()
+
+	var heartbeat *time.Ticker
+	var heartbeatC <-chan time.Time
+	if c.options.LeaseHeartbeat > 0 {
+		heartbeat = time.NewTicker(c.options.LeaseHeartbeat)
+		heartbeatC = heartbeat.C
+		defer heartbeat.Stop()
+	}
+	var timeout *time.Timer
+	var timeoutC <-chan time.Time
+	if c.options.HandlerTimeout > 0 {
+		timeout = time.NewTimer(c.options.HandlerTimeout)
+		timeoutC = timeout.C
+		defer timeout.Stop()
+	}
+
+	for {
+		select {
+		case handlerErr := <-handlerDone:
+			if handlerErr != nil {
+				if nackErr := c.queue.Nack(ctx, message.DeliveryID, c.options.RetryDelay); nackErr != nil {
+					handlerErr = fmt.Errorf("%w; queue NACK failed: %v", handlerErr, nackErr)
+				}
+				return c.reportError(ctx, handlerErr, &message)
+			}
+			if ackErr := c.queue.Ack(ctx, message.DeliveryID); ackErr != nil {
+				return c.reportError(ctx, ackErr, &message)
+			}
+			return nil
+		case <-heartbeatC:
+			if leaseErr := c.queue.Extend(ctx, message.DeliveryID); leaseErr != nil {
+				cancelHandler()
+				<-handlerDone
+				return c.reportError(ctx, leaseErr, &message)
+			}
+		case <-timeoutC:
+			cancelHandler()
+			<-handlerDone
+			timeoutErr := NewError(CodeQueueHandlerTimeout,
+				fmt.Sprintf("queue handler exceeded %s", c.options.HandlerTimeout))
+			if nackErr := c.queue.Nack(ctx, message.DeliveryID, c.options.RetryDelay); nackErr != nil {
+				timeoutErr = WrapError(CodeQueueHandlerTimeout,
+					"queue handler timed out and NACK failed", nackErr)
+			}
+			return c.reportError(ctx, timeoutErr, &message)
+		case <-ctx.Done():
+			cancelHandler()
+			<-handlerDone
+			return nil
+		}
+	}
+}
+
+func (c *QueueConsumer) waitUntilReady(ctx context.Context) bool {
+	for {
+		c.mu.Lock()
+		paused := c.paused
+		stopping := c.stopping
+		c.mu.Unlock()
+		if stopping {
+			return false
+		}
+		if !paused {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-c.stop:
+			return false
+		case <-c.wake:
+		}
+	}
+}
+
+func (c *QueueConsumer) backoff(ctx context.Context, failures int) bool {
+	options := c.options.ReceiveBackoff
+	delay := float64(options.Initial) * math.Pow(options.Multiplier, float64(failures-1))
+	if delay > float64(options.Max) {
+		delay = float64(options.Max)
+	}
+	if options.Jitter {
+		delay *= rand.Float64()
+	}
+	timer := time.NewTimer(time.Duration(delay))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-c.stop:
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (c *QueueConsumer) signal() {
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (c *QueueConsumer) addInFlight(delta int) {
+	c.mu.Lock()
+	c.inFlight += delta
+	c.mu.Unlock()
+}
+
+func (c *QueueConsumer) Status() QueueConsumerStatus {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.stopping
+	return QueueConsumerStatus{
+		State: c.state, IsRunning: c.state == QueueConsumerRunning || c.state == QueueConsumerPaused,
+		IsPaused: c.paused, InFlight: c.inFlight, Concurrency: c.options.Concurrency,
+	}
 }
 
 func (c *QueueConsumer) reportError(

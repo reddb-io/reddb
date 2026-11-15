@@ -3,7 +3,7 @@
 //! Mirrors the JS and Rust drivers. Same connection-string contract,
 //! same method names, same error semantics. See `PLAN_DRIVERS.md`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pyo3::exceptions::PyValueError;
@@ -1274,16 +1274,35 @@ impl ScopedQueueClient {
         self.delivery_command("NACK", delivery_id, delay)
     }
 
-    #[pyo3(signature = (consumer, *, wait_ms=30_000, group=None, retry_delay=None))]
+    fn extend(&self, delivery_id: &str) -> PyResult<()> {
+        self.delivery_command("EXTEND", delivery_id, None)
+    }
+
+    #[pyo3(signature = (consumer, *, wait_ms=30_000, group=None, retry_delay=None, concurrency=1, lease_heartbeat_ms=0, handler_timeout_ms=0))]
     fn consumer(
         &self,
         consumer: &str,
         wait_ms: i64,
         group: Option<&str>,
         retry_delay: Option<&str>,
+        concurrency: usize,
+        lease_heartbeat_ms: u64,
+        handler_timeout_ms: u64,
     ) -> PyResult<QueueConsumer> {
         let _ = self.read_sql(consumer, wait_ms, group, Some(1))?;
+        if wait_ms == 0 {
+            return Err(err(
+                "INVALID_ARGUMENT",
+                "queue consumer wait_ms must be greater than zero",
+            ));
+        }
         validate_queue_delay(retry_delay)?;
+        if concurrency != 1 {
+            return Err(err(
+                "INVALID_ARGUMENT",
+                "embedded Python queue consumers support concurrency=1; run multiple worker threads",
+            ));
+        }
         Ok(QueueConsumer {
             queue: ScopedQueueClient {
                 backend: self.backend.clone(),
@@ -1294,6 +1313,12 @@ impl ScopedQueueClient {
             group: group.map(str::to_owned),
             retry_delay: retry_delay.map(str::to_owned),
             stopping: Arc::new(AtomicBool::new(false)),
+            paused: Arc::new(AtomicBool::new(false)),
+            aborted: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(AtomicU8::new(0)),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            lease_heartbeat_ms,
+            handler_timeout_ms,
         })
     }
 }
@@ -1368,19 +1393,89 @@ pub struct QueueConsumer {
     group: Option<String>,
     retry_delay: Option<String>,
     stopping: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    aborted: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
+    in_flight: Arc<AtomicUsize>,
+    lease_heartbeat_ms: u64,
+    handler_timeout_ms: u64,
 }
 
 #[pymethods]
 impl QueueConsumer {
     fn stop(&self) {
         self.stopping.store(true, Ordering::Release);
+        self.paused.store(false, Ordering::Release);
+        if !matches!(self.state.load(Ordering::Acquire), 0 | 4 | 5) {
+            self.state.store(3, Ordering::Release);
+        }
+    }
+
+    fn abort(&self) {
+        self.aborted.store(true, Ordering::Release);
+        self.stop();
+    }
+
+    fn pause(&self) {
+        if self.state.load(Ordering::Acquire) == 1 {
+            self.paused.store(true, Ordering::Release);
+            self.state.store(2, Ordering::Release);
+        }
+    }
+
+    fn resume(&self) {
+        if self.state.load(Ordering::Acquire) == 2 {
+            self.paused.store(false, Ordering::Release);
+            self.state.store(1, Ordering::Release);
+        }
+    }
+
+    fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let state_code = self.state.load(Ordering::Acquire);
+        let state = match state_code {
+            1 => "running",
+            2 => "paused",
+            3 => "stopping",
+            4 => "stopped",
+            5 => "failed",
+            _ => "idle",
+        };
+        let out = PyDict::new(py);
+        out.set_item("state", state)?;
+        out.set_item("is_running", matches!(state_code, 1 | 2))?;
+        out.set_item("is_paused", self.paused.load(Ordering::Acquire))?;
+        out.set_item("in_flight", self.in_flight.load(Ordering::Acquire))?;
+        out.set_item("concurrency", 1)?;
+        Ok(out)
     }
 
     fn run(&self, py: Python<'_>, handler: Py<PyAny>) -> PyResult<()> {
+        if self
+            .state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(err("INVALID_ARGUMENT", "queue consumer already started"));
+        }
+        let result = self.run_loop(py, handler);
+        self.state
+            .store(if result.is_ok() { 4 } else { 5 }, Ordering::Release);
+        result
+    }
+}
+
+impl QueueConsumer {
+    fn run_loop(&self, py: Python<'_>, handler: Py<PyAny>) -> PyResult<()> {
         let read_sql =
             self.queue
                 .read_sql(&self.consumer, self.wait_ms, self.group.as_deref(), Some(1))?;
         while !self.stopping.load(Ordering::Acquire) {
+            while self.paused.load(Ordering::Acquire) && !self.stopping.load(Ordering::Acquire) {
+                py.detach(|| std::thread::sleep(std::time::Duration::from_millis(10)));
+            }
+            if self.stopping.load(Ordering::Acquire) {
+                break;
+            }
             let rt = self.queue.embedded()?;
             let qr = py
                 .detach(|| rt.query(&read_sql))
@@ -1405,8 +1500,60 @@ impl QueueConsumer {
                 ));
             }
             let message = row_to_pydict(py, row)?;
-            match handler.call1(py, (message,)) {
-                Ok(_) => self.queue.ack(&delivery_id)?,
+            self.in_flight.fetch_add(1, Ordering::AcqRel);
+            let done = AtomicBool::new(false);
+            let timed_out = AtomicBool::new(false);
+            let monitor_result = std::thread::scope(|scope| {
+                let monitor = scope.spawn(|| {
+                    let started = std::time::Instant::now();
+                    let mut next_heartbeat =
+                        started + std::time::Duration::from_millis(self.lease_heartbeat_ms);
+                    while !done.load(Ordering::Acquire) {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        if self.aborted.load(Ordering::Acquire) {
+                            return Ok(());
+                        }
+                        let now = std::time::Instant::now();
+                        if self.handler_timeout_ms > 0
+                            && now.duration_since(started)
+                                >= std::time::Duration::from_millis(self.handler_timeout_ms)
+                        {
+                            timed_out.store(true, Ordering::Release);
+                            return Ok(());
+                        }
+                        if self.lease_heartbeat_ms > 0 && now >= next_heartbeat {
+                            self.queue.extend(&delivery_id)?;
+                            next_heartbeat =
+                                now + std::time::Duration::from_millis(self.lease_heartbeat_ms);
+                        }
+                    }
+                    Ok(())
+                });
+                let handler_result = handler.call1(py, (message,)).map(|_| ());
+                done.store(true, Ordering::Release);
+                let lease_result = monitor
+                    .join()
+                    .map_err(|_| err("INTERNAL_ERROR", "queue heartbeat monitor panicked"))?;
+                Ok::<_, PyErr>((handler_result, lease_result))
+            });
+            self.in_flight.fetch_sub(1, Ordering::AcqRel);
+            let (handler_result, lease_result) = monitor_result?;
+            if self.aborted.load(Ordering::Acquire) {
+                continue;
+            }
+            if let Err(lease_error) = lease_result {
+                // Ownership is uncertain after EXTEND fails: never ACK or NACK.
+                return Err(lease_error);
+            }
+            if timed_out.load(Ordering::Acquire) {
+                self.queue.nack(&delivery_id, self.retry_delay.as_deref())?;
+                return Err(err(
+                    "QUEUE_HANDLER_TIMEOUT",
+                    format!("queue handler exceeded {}ms", self.handler_timeout_ms),
+                ));
+            }
+            match handler_result {
+                Ok(()) => self.queue.ack(&delivery_id)?,
                 Err(handler_error) => {
                     self.queue.nack(&delivery_id, self.retry_delay.as_deref())?;
                     return Err(handler_error);

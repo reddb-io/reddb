@@ -179,6 +179,14 @@ public final class QueueClient {
             + Sql.kvTagLiteral(deliveryId) + delayClause);
     }
 
+    void extend(String queue, String deliveryId) {
+        if (deliveryId == null || deliveryId.isEmpty()) {
+            throw new HelperException.InvalidArgument("queue delivery_id must be non-empty");
+        }
+        q.query("QUEUE EXTEND " + Sql.sqlIdentifier(queue) + " WITH delivery_id = "
+            + Sql.kvTagLiteral(deliveryId));
+    }
+
     private static String stringValue(Object value) {
         return value == null ? "" : String.valueOf(value);
     }
