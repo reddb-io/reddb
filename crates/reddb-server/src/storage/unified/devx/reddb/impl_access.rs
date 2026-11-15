@@ -55,9 +55,20 @@ impl RedDB {
             .take(SAMPLE_LIMIT)
             .cloned()
             .collect();
+        // A bounded registry must retain lifecycle failures even when the
+        // ordinary index catalog exceeds the sample limit. Ready artifacts
+        // can be reconstructed from their artifact summaries; a deferred
+        // artifact has no payload summary and would otherwise disappear.
         let indexes: Vec<_> = metadata
             .indexes
             .iter()
+            .filter(|index| index.backend == "memory-budget-deferred")
+            .chain(metadata.indexes.iter().filter(|index| {
+                index.backend != "memory-budget-deferred" && index.artifact_checksum.is_some()
+            }))
+            .chain(metadata.indexes.iter().filter(|index| {
+                index.backend != "memory-budget-deferred" && index.artifact_checksum.is_none()
+            }))
             .take(SAMPLE_LIMIT)
             .map(|index| NativeRegistryIndexSummary {
                 name: index.name.clone(),

@@ -523,6 +523,29 @@ impl RedDB {
                     }
                 }
             }
+            // Checkpoints avoid loading every native summary, but the bounded
+            // registry is the only durable source for a deferred artifact: it
+            // has no artifact payload to rediscover. Preserve those sampled
+            // declarations before publishing the replacement registry.
+            if let Some(registry) = self
+                .store
+                .physical_file_header()
+                .filter(|header| header.registry_page != 0)
+                .and_then(|header| {
+                    self.store
+                        .read_native_registry_summary(header.registry_page)
+                        .ok()
+                })
+            {
+                for native in &registry.indexes {
+                    if indexes.iter().any(|index| index.name == native.name) {
+                        continue;
+                    }
+                    if let Some(index) = Self::physical_index_state_from_native_summary(native) {
+                        indexes.push(index);
+                    }
+                }
+            }
             indexes
         };
         if let Some(previous) = previous.as_ref() {
@@ -1177,24 +1200,9 @@ impl RedDB {
             if fresh.iter().any(|index| index.name == native.name) {
                 continue;
             }
-            let Some(kind) = Self::index_kind_from_str(&native.kind) else {
-                continue;
-            };
-            fresh.push(PhysicalIndexState {
-                name: native.name.clone(),
-                kind,
-                collection: native.collection.clone(),
-                enabled: native.enabled,
-                entries: native.entries as usize,
-                estimated_memory_bytes: native.estimated_memory_bytes,
-                last_refresh_ms: native.last_refresh_ms,
-                backend: native.backend.clone(),
-                artifact_kind: Self::native_artifact_kind_for_index(kind)
-                    .map(|value| value.to_string()),
-                artifact_root_page: None,
-                artifact_checksum: None,
-                build_state: "registry-loaded".to_string(),
-            });
+            if let Some(index) = Self::physical_index_state_from_native_summary(native) {
+                fresh.push(index);
+            }
         }
 
         if !registry.indexes_complete {
@@ -1377,6 +1385,33 @@ impl RedDB {
             "search.hybrid" => Some(crate::index::IndexKind::HybridSearch),
             _ => None,
         }
+    }
+
+    fn physical_index_state_from_native_summary(
+        native: &NativeRegistryIndexSummary,
+    ) -> Option<PhysicalIndexState> {
+        let kind = Self::index_kind_from_str(&native.kind)?;
+        let deferred = native.backend == "memory-budget-deferred";
+        Some(PhysicalIndexState {
+            name: native.name.clone(),
+            kind,
+            collection: native.collection.clone(),
+            enabled: native.enabled,
+            entries: native.entries as usize,
+            estimated_memory_bytes: native.estimated_memory_bytes,
+            last_refresh_ms: native.last_refresh_ms,
+            backend: native.backend.clone(),
+            artifact_kind: Self::native_artifact_kind_for_index(kind)
+                .map(|value| value.to_string()),
+            artifact_root_page: None,
+            artifact_checksum: None,
+            build_state: if deferred {
+                "deferred-memory-budget"
+            } else {
+                "registry-loaded"
+            }
+            .to_string(),
+        })
     }
 
     pub(crate) fn native_artifact_kind_for_index(kind: IndexKind) -> Option<&'static str> {
