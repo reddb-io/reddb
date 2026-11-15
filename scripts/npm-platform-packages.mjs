@@ -80,6 +80,7 @@ export function platformManifest(p, version, { addon = false } = {}) {
     cpu: [p.cpu],
     ...(p.libc ? { libc: [p.libc] } : {}),
     files: addon ? ['bin/', 'reddb.node'] : ['bin/'],
+    bin: { red: `bin/${p.os === 'win32' ? 'red.exe' : 'red'}` },
     license: 'MIT',
     homepage: 'https://github.com/reddb-io/reddb',
     repository: { type: 'git', url: 'git+https://github.com/reddb-io/reddb.git' },

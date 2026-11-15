@@ -914,6 +914,8 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
       - name: Enable pnpm
         run: corepack enable
+      - name: Verify npm platform executable packaging
+        run: node --test scripts/npm-platform-packages.test.mjs
       - name: Build platform packages from release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
