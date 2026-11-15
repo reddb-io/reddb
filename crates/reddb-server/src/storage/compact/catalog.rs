@@ -240,9 +240,8 @@ impl Catalog {
     /// or it may also contain an empty bootstrap-created `red.config` tree. The
     /// populated legacy tree is already the complete value/history/index source,
     /// so promote its catalog identity atomically and retire an empty duplicate.
-    /// A canonical-only store is already migrated. Two populated trees are
-    /// ambiguous and must be reconciled by a row-aware recovery path instead of
-    /// silently choosing either side.
+    /// A canonical-only store is already migrated. The caller handles two
+    /// populated trees through the explicit canonical-wins recovery path.
     pub fn migrate_legacy_system_config(&mut self) -> Result<usize> {
         let legacy_roots = self
             .roots
