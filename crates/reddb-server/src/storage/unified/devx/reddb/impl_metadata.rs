@@ -523,29 +523,6 @@ impl RedDB {
                     }
                 }
             }
-            // Checkpoints avoid loading every native summary, but the bounded
-            // registry is the only durable source for a deferred artifact: it
-            // has no artifact payload to rediscover. Preserve those sampled
-            // declarations before publishing the replacement registry.
-            if let Some(registry) = self
-                .store
-                .physical_file_header()
-                .filter(|header| header.registry_page != 0)
-                .and_then(|header| {
-                    self.store
-                        .read_native_registry_summary(header.registry_page)
-                        .ok()
-                })
-            {
-                for native in &registry.indexes {
-                    if indexes.iter().any(|index| index.name == native.name) {
-                        continue;
-                    }
-                    if let Some(index) = Self::physical_index_state_from_native_summary(native) {
-                        indexes.push(index);
-                    }
-                }
-            }
             indexes
         };
         if let Some(previous) = previous.as_ref() {
