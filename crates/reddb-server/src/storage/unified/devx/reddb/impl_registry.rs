@@ -17,21 +17,13 @@ impl RedDB {
         };
         let content_size = crate::storage::engine::page::CONTENT_SIZE;
         let page_count = bytes.len().max(1).div_ceil(content_size);
-        let mut first_page_id = None;
+        let extent = pager.reserve_contig_pages(
+            PageType::ColumnBlock,
+            u32::try_from(page_count).map_err(|_| "column block page count exceeds u32")?,
+        )?;
         for page_index in 0..page_count {
-            let mut page = pager.allocate_page(PageType::ColumnBlock)?;
-            let page_id = page.page_id();
-            if let Some(first) = first_page_id {
-                let expected = first + page_index as u32;
-                if page_id != expected {
-                    return Err(format!(
-                        "column block page allocation was not contiguous: got {page_id}, expected {expected}"
-                    )
-                    .into());
-                }
-            } else {
-                first_page_id = Some(page_id);
-            }
+            let page_id = extent.start_page + page_index as u32;
+            let mut page = pager.read_page_decrypted(page_id)?;
             let start = page_index * content_size;
             let end = (start + content_size).min(bytes.len());
             if start < end {
@@ -40,7 +32,7 @@ impl RedDB {
             pager.write_page_encrypted(page_id, page)?;
         }
         Ok(crate::storage::engine::PageLocation::new(
-            first_page_id.expect("page_count is at least one"),
+            extent.start_page,
             0,
             bytes.len() as u32,
         ))

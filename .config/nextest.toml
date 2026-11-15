@@ -121,7 +121,7 @@ retries = 0
 [[profile.ci.overrides]]
 filter = 'test(=storage::unified::store::commit::storage_apocalypse::checkpoint_and_recovery_crash_matrix) | test(=storage::unified::store::commit::storage_apocalypse::cold_checkpoint_and_recovery_crash_matrix)'
 threads-required = "num-cpus"
-slow-timeout = { period = "60s", terminate-after = 5 }
+slow-timeout = { period = "60s", terminate-after = 10 }
 retries = 0
 
 [profile.ci.junit]

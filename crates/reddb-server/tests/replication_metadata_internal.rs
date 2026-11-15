@@ -43,7 +43,7 @@ fn control_records_survive_process_exit_and_repeated_cold_boot_in_every_durabili
             .ack_primary_replica_lsn_and_prune("replica-a", 42, 40, 0, 0)
             .expect("persist ACK");
         runtime
-            .record_failover_timeline_promotion("replica-a", 40)
+            .record_failover_timeline_promotion("replica-b", 40)
             .expect("promote");
         runtime
             .record_replica_relay_batch("replica-a", &[(1, b"record".to_vec())], 1)
