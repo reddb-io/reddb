@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.36.14
+
+### Patch Changes
+
+- [#2870](https://github.com/reddb-io/reddb/pull/2870) [`ba46b17`](https://github.com/reddb-io/reddb/commit/ba46b17115ad7a40b0b11448b614513c3601e41c) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Publish the derived-snapshot compaction maintenance fix without moving npm, GHCR, or GitHub global latest aliases; `1.36.12` and `1.36.13` remain reserved by failed or partial pre-publication attempts.
+
 ## 1.36.13
 
 ### Patch Changes
