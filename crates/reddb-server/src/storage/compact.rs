@@ -568,6 +568,12 @@ mod canonical_config_wal_tests {
         let destination = directory.path().join("compacted");
         let config = legacy_config_without_resume(&source);
         let original = std::fs::read(&source).expect("source bytes");
+        let snapshot = f::support_dir_for(&source).join("snapshots/legacy.tv");
+        std::fs::create_dir_all(snapshot.parent().expect("snapshot directory"))
+            .expect("legacy support layout");
+        f::write_turboquant_snapshot(&snapshot, 2, 0x7155_8807_FED4_2913, 0, &[])
+            .expect("valid legacy turbo snapshot");
+        let snapshot_original = std::fs::read(&snapshot).expect("snapshot bytes");
 
         let report = compact_paged_canonical_system_config(&source, &destination)
             .expect("compact and prepare legacy catalog");
@@ -576,6 +582,10 @@ mod canonical_config_wal_tests {
         assert_eq!(report.imported_system_records, 1);
         assert_eq!(std::fs::read(&source).unwrap(), original);
         let output = destination.join("data.rdb");
+        assert_eq!(std::fs::read(&snapshot).unwrap(), snapshot_original);
+        assert!(!f::support_dir_for(&output)
+            .join("snapshots/legacy.tv")
+            .exists());
         {
             let prepared = Arc::new(Source::open(&output).expect("inspect compacted store"));
             assert!(!prepared.header.requires_disk_residency());
@@ -1675,10 +1685,11 @@ fn copy_sidecars(source: &Path, destination: &Path, recovery: bool) -> Result<()
     if support.exists() {
         if recovery {
             validate_recovery_support(&support, 0, false)?;
+            copy_directory(&support, &f::support_dir_for(destination), 0)?;
         } else {
-            validate_empty_directory(&support, 0)?;
+            validate_compaction_support(&support, 0, false)?;
+            copy_compaction_support(&support, &f::support_dir_for(destination), 0, false)?;
         }
-        copy_directory(&support, &f::support_dir_for(destination), 0)?;
     }
     let old = source.with_file_name(format!("{}.ops", f::data_file_name(source)));
     let new = destination.with_file_name(format!("{}.ops", f::data_file_name(destination)));
@@ -1891,7 +1902,7 @@ fn copy_directory(source: &Path, destination: &Path, depth: usize) -> Result<()>
     }
     sync_directory(destination)
 }
-fn validate_empty_directory(path: &Path, depth: usize) -> Result<()> {
+fn validate_compaction_support(path: &Path, depth: usize, snapshots: bool) -> Result<()> {
     ensure(depth < 32, "support directory nesting exceeds limit")?;
     ensure(
         std::fs::symlink_metadata(path)?.is_dir(),
@@ -1899,13 +1910,58 @@ fn validate_empty_directory(path: &Path, depth: usize) -> Result<()> {
     )?;
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
-        ensure(
-            entry.file_type()?.is_dir(),
-            "non-empty support layout requires separate compaction qualification",
-        )?;
-        validate_empty_directory(&entry.path(), depth + 1)?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            validate_compaction_support(
+                &entry.path(),
+                depth + 1,
+                depth == 0 && entry.file_name() == "snapshots",
+            )?;
+        } else {
+            ensure(
+                snapshots
+                    && kind.is_file()
+                    && entry.path().extension().is_some_and(|ext| ext == "tv"),
+                "non-empty support layout requires separate compaction qualification",
+            )?;
+        }
     }
     Ok(())
+}
+fn copy_compaction_support(
+    source: &Path,
+    destination: &Path,
+    depth: usize,
+    snapshots: bool,
+) -> Result<()> {
+    ensure(depth < 32, "support directory nesting exceeds limit")?;
+    ensure(
+        std::fs::symlink_metadata(source)?.is_dir(),
+        "support directory must not be a symlink",
+    )?;
+    std::fs::create_dir(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_compaction_support(
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                depth + 1,
+                depth == 0 && entry.file_name() == "snapshots",
+            )?;
+        } else {
+            // Turbo snapshots are derived caches. Omitting them prevents a
+            // stale snapshot from hiding entities copied into the new store.
+            ensure(
+                snapshots
+                    && kind.is_file()
+                    && entry.path().extension().is_some_and(|ext| ext == "tv"),
+                "non-empty support layout requires separate compaction qualification",
+            )?;
+        }
+    }
+    sync_directory(destination)
 }
 fn validate_recovery_support(path: &Path, depth: usize, snapshots: bool) -> Result<()> {
     ensure(depth < 32, "support directory nesting exceeds limit")?;
