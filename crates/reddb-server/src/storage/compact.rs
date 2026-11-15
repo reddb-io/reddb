@@ -82,8 +82,9 @@ pub fn compact_paged(source: &Path, destination: &Path) -> Result<CompactionRepo
 
 /// Rewrite a closed store while explicitly retiring the obsolete physical
 /// `red_config` identity. A populated legacy tree is promoted when the
-/// canonical tree is empty; two populated trees fail closed. The source
-/// remains unchanged and ordinary compaction never enables this.
+/// canonical tree is empty. When both trees are populated, `red.config` is
+/// retained in full and the legacy tree is retired. The source remains
+/// unchanged and ordinary compaction never enables this.
 pub fn compact_paged_canonical_system_config(
     source: &Path,
     destination: &Path,
@@ -904,12 +905,24 @@ fn compact_paged_inner(
             catalog.verify_alias_has_no_references("red_config")?;
         }
     }
-    let mut migrated_system_config_records =
-        if retain_canonical_system_config && !prepare_legacy_catalog {
-            catalog.migrate_legacy_system_config()?
+    let both_system_config_trees_populated = catalog.resume.as_ref().is_some_and(|resume| {
+        resume
+            .collections
+            .get("red_config")
+            .is_some_and(|state| state.entities > 0)
+            && resume
+                .collections
+                .get("red.config")
+                .is_some_and(|state| state.entities > 0)
+    });
+    let mut migrated_system_config_records = 0;
+    if retain_canonical_system_config && !prepare_legacy_catalog {
+        if both_system_config_trees_populated {
+            catalog.retain_canonical_system_config()?;
         } else {
-            0
-        };
+            migrated_system_config_records = catalog.migrate_legacy_system_config()?;
+        }
+    }
     ensure(
         !source.header.requires_disk_residency()
             || catalog.resume.is_some()
