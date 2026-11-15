@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.39.2
+
+### Patch Changes
+
+- [#2874](https://github.com/reddb-io/reddb/pull/2874) [`c71c2dd`](https://github.com/reddb-io/reddb/commit/c71c2ddaf805ab9b9abe1556b80cc265bacfcdf5) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Remove the private WAL replay workspace after successful offline recovery while preserving interrupted recovery evidence.
+
 ## 1.39.1
 
 ### Patch Changes
