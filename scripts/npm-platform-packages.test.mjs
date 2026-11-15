@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, statSync, writeFileSync, existsSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -20,11 +21,11 @@ import { platformPackageNames } from '../drivers/js/src/platform-binary.js'
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const sha = (buf) => createHash('sha256').update(buf).digest('hex')
 
-function stageAssets(assets, { tamper } = {}) {
+function stageAssets(assets, { tamper, bodies = {} } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'reddb-assets-'))
   const lines = []
   for (const name of assets) {
-    const body = Buffer.from(`binary:${name}`)
+    const body = Buffer.from(bodies[name] ?? `binary:${name}`)
     writeFileSync(path.join(dir, name), tamper === name ? Buffer.from('tampered') : body)
     lines.push(`${sha(body)}  ${name}`)
   }
@@ -55,11 +56,43 @@ test('buildPackages emits an installable package per present platform', () => {
 
   const win = JSON.parse(readFileSync(path.join(out, 'red-win32-x64', 'package.json'), 'utf8'))
   assert.equal(win.libc, undefined)
+  assert.deepEqual(win.bin, { red: 'bin/red.exe' })
   assert.ok(existsSync(path.join(out, 'red-win32-x64', 'bin', 'red.exe')))
 
   const bin = path.join(out, 'red-linux-x64', 'bin', 'red')
   assert.equal(readFileSync(bin, 'utf8'), 'binary:red-linux-x86_64')
   assert.notEqual(statSync(bin).mode & 0o111, 0, 'binary must be executable')
+})
+
+test('npm-installed platform package keeps the red binary executable', () => {
+  const linux = PLATFORMS.find((p) => p.key === 'linux-x64')
+  const assets = stageAssets([linux.asset], {
+    bodies: { [linux.asset]: '#!/bin/sh\nprintf "packed-red-ok\\n"\n' },
+  })
+  const out = mkdtempSync(path.join(tmpdir(), 'reddb-packages-'))
+  const [packageDir] = buildPackages({
+    version: '9.9.9',
+    assetsDir: assets,
+    outDir: out,
+    platforms: [linux],
+  })
+  // Registry processing can normalize ordinary payloads to 0644. The package
+  // manifest must identify the native payload as a binary so pack/install
+  // restores the executable contract instead of publishing a dead ELF file.
+  chmodSync(path.join(packageDir, 'bin', 'red'), 0o644)
+  const packDir = mkdtempSync(path.join(tmpdir(), 'reddb-packed-'))
+  const [{ filename }] = JSON.parse(execFileSync('npm', [
+    'pack', packageDir, '--json', '--pack-destination', packDir,
+  ], { encoding: 'utf8' }))
+  const consumer = mkdtempSync(path.join(tmpdir(), 'reddb-consumer-'))
+  execFileSync('npm', [
+    'install', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', consumer,
+    path.join(packDir, filename),
+  ], { stdio: 'pipe' })
+
+  const installed = path.join(consumer, 'node_modules', '@reddb-io', 'red-linux-x64', 'bin', 'red')
+  assert.notEqual(statSync(installed).mode & 0o111, 0, 'packed binary must remain executable after npm install')
+  assert.equal(execFileSync(installed, [], { encoding: 'utf8' }).trim(), 'packed-red-ok')
 })
 
 test('buildPackages skips absent optional platforms but not required ones', () => {
