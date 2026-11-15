@@ -12,7 +12,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "test": "bun test frame-reader.test.ts socket-close.test.ts routing.test.ts && bun run params.test.ts && bun run wire-legacy.test.ts && bun run wire.test.ts"
+    "test": "bun test frame-reader.test.ts socket-close.test.ts routing.test.ts queue-helper.test.ts && bun run params.test.ts && bun run wire-legacy.test.ts && bun run wire.test.ts"
   },
   "license": "MIT",
   "keywords": [

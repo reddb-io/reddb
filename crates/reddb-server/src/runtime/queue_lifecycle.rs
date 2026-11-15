@@ -354,6 +354,19 @@ impl<S: QueueStore> QueueLifecycle<S> {
         self.retire(txn, delivery_id)
     }
 
+    /// Refresh a pending delivery's visibility deadline without changing its
+    /// attempt count or ownership. A stale handle is an error: callers must
+    /// stop processing rather than assume they still own the delivery.
+    pub(crate) fn extend(
+        &self,
+        txn: &QueueTxn,
+        delivery_id: &str,
+        deadline: Instant,
+    ) -> Result<()> {
+        self.store
+            .refresh_pending_deadline(txn, delivery_id, deadline)
+    }
+
     /// Apply mode-appropriate retirement: WORK consumes the message
     /// (removes from queue + payload); FANOUT retires only the calling
     /// group's pending row and marks the (msg, group) as acked.

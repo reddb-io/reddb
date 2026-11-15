@@ -23,4 +23,9 @@ public class HelperException extends RuntimeException {
     public static class InvalidResponse extends HelperException {
         public InvalidResponse(String message) { super(message); }
     }
+
+    /** {@code QUEUE_HANDLER_TIMEOUT} — handler exceeded its cooperative deadline. */
+    public static class QueueHandlerTimeout extends HelperException {
+        public QueueHandlerTimeout(String message) { super(message); }
+    }
 }

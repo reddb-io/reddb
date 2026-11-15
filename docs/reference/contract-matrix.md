@@ -76,6 +76,8 @@ shipped via [#463](https://github.com/reddb-io/reddb/issues/463) and follow-up R
 | Python sync + asyncio helpers | python, python-asyncio | Proven — pyo3 binding + `drivers/python-asyncio/README.md` (SEARCH SIMILAR example aligned with parser in #465 iter 3) |
 | C++ / Kotlin / Zig helpers | cpp, kotlin, zig | Proven — landed fresh in [#463](https://github.com/reddb-io/reddb/issues/463) iter 3; READMEs under `drivers/{cpp,kotlin,zig}/README.md` |
 | Parameterized query contract (`$1` / `params=`) across all drivers | all | Proven — ADR 0015, `crates/reddb-server/tests/parser_hardening.rs`, `crates/reddb-server/tests/sql_injection_audit.rs` |
+| Scoped queue worker + opaque delivery settlement | all official SDKs | Implemented — `QUEUE EXTEND`, bounded wait, ACK/NACK ordering, and per-driver worker tests; v1.1 conformance promotion remains pending |
+| Queue lease-loss safety | all official SDKs | Implemented — renewal failure never emits ACK or NACK; runtime cancellation mechanics are documented in `docs/clients/application-clients.md` |
 
 ## Probabilistic structures
 

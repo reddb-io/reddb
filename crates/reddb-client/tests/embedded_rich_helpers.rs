@@ -1,7 +1,8 @@
 #![cfg(feature = "embedded")]
 
 use reddb_client::{
-    ErrorCode, JsonValue, ListOptions, QueueConsumerOptions, QueuePushOptions, Reddb, ValueOut,
+    ErrorCode, JsonValue, ListOptions, QueueConsumerOptions, QueuePushOptions, QueueWorkerOptions,
+    QueueWorkerState, Reddb, ValueOut,
 };
 
 fn field<'a>(row: &'a [(String, ValueOut)], name: &str) -> &'a ValueOut {
@@ -190,4 +191,104 @@ async fn scoped_queue_consumer_handles_and_acks() {
         .expect("consume");
 
     assert_eq!(queue.len().await.expect("queue len"), 0);
+}
+
+#[tokio::test]
+async fn scoped_queue_extends_an_active_delivery() {
+    let db = Reddb::connect("memory://").await.expect("connect");
+    let queue = db.queue_scope("lease_tasks").expect("queue scope");
+    db.query("CREATE QUEUE lease_tasks LOCK_DEADLINE_MS 1000")
+        .await
+        .expect("create queue");
+    queue
+        .push(&JsonValue::string("work"), QueuePushOptions::new())
+        .await
+        .expect("push");
+    let message = queue
+        .read_wait_entries(
+            "worker1",
+            std::time::Duration::from_secs(1),
+            Default::default(),
+        )
+        .await
+        .expect("read")
+        .into_iter()
+        .next()
+        .expect("message");
+
+    queue
+        .extend(&message.delivery_id)
+        .await
+        .expect("extend lease");
+    queue.ack(&message.delivery_id).await.expect("ack");
+}
+
+#[tokio::test]
+async fn queue_worker_heartbeats_and_stops_gracefully() {
+    let db = Reddb::connect("memory://").await.expect("connect");
+    let queue = db.queue_scope("heartbeat_tasks").expect("queue scope");
+    db.query("CREATE QUEUE heartbeat_tasks LOCK_DEADLINE_MS 40")
+        .await
+        .expect("create queue");
+    queue
+        .push(&JsonValue::string("work"), QueuePushOptions::new())
+        .await
+        .expect("push");
+
+    let worker = queue
+        .worker(
+            QueueWorkerOptions::new("worker1")
+                .wait(std::time::Duration::from_secs(1))
+                .lease_heartbeat(std::time::Duration::from_millis(10)),
+        )
+        .expect("worker");
+    let control = worker.control();
+    let handler_control = control.clone();
+    worker
+        .run(move |_| {
+            let control = handler_control.clone();
+            async move {
+                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                control.stop();
+                Ok(())
+            }
+        })
+        .await
+        .expect("run worker");
+
+    assert_eq!(queue.len().await.expect("queue len"), 0);
+    assert_eq!(control.status().state, QueueWorkerState::Stopped);
+    assert_eq!(control.status().in_flight, 0);
+}
+
+#[tokio::test]
+async fn queue_worker_times_out_then_nacks() {
+    let db = Reddb::connect("memory://").await.expect("connect");
+    let queue = db.queue_scope("timeout_tasks").expect("queue scope");
+    db.query("CREATE QUEUE timeout_tasks LOCK_DEADLINE_MS 1000")
+        .await
+        .expect("create queue");
+    queue
+        .push(&JsonValue::string("work"), QueuePushOptions::new())
+        .await
+        .expect("push");
+
+    let worker = queue
+        .worker(
+            QueueWorkerOptions::new("worker1")
+                .wait(std::time::Duration::from_secs(1))
+                .handler_timeout(std::time::Duration::from_millis(20)),
+        )
+        .expect("worker");
+    let error = worker
+        .run(|_| async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            Ok(())
+        })
+        .await
+        .expect_err("handler must time out");
+
+    assert_eq!(error.code, ErrorCode::QueueHandlerTimeout);
+    assert_eq!(worker.status().state, QueueWorkerState::Failed);
+    assert_eq!(queue.len().await.expect("queue len"), 1);
 }

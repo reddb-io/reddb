@@ -3229,6 +3229,13 @@ pub enum QueueCommand {
         group: String,
         message_ids: Vec<String>,
     },
+    /// Refresh the visibility lease for one pending delivery. The runtime
+    /// derives the new deadline from the queue's current lock policy; callers
+    /// cannot extend a lease beyond operator-configured bounds.
+    Extend {
+        queue: String,
+        delivery_id: String,
+    },
     Nack {
         queue: String,
         group: String,

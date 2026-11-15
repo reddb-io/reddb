@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import json as _json
 import asyncio
+import contextlib
+import inspect
+import random
 import re
 from typing import Any
 
@@ -121,11 +124,19 @@ class ScopedQueueClient:
             f"QUEUE ACK {self.name} WITH delivery_id = {_queue_string_literal(_delivery_id(delivery_id))}"
         )
 
-    async def nack(self, delivery_id: str, *, delay: str | None = None) -> dict[str, Any]:
+    async def nack(
+        self, delivery_id: str, *, delay: str | None = None
+    ) -> dict[str, Any]:
         delay_clause = _retry_delay(delay)
         return await self._queue._t.query(
             f"QUEUE NACK {self.name} WITH delivery_id = "
             f"{_queue_string_literal(_delivery_id(delivery_id))}{delay_clause}"
+        )
+
+    async def extend(self, delivery_id: str) -> dict[str, Any]:
+        return await self._queue._t.query(
+            f"QUEUE EXTEND {self.name} WITH delivery_id = "
+            f"{_queue_string_literal(_delivery_id(delivery_id))}"
         )
 
     def consumer(self, **options: Any) -> "QueueConsumer":
@@ -143,37 +154,119 @@ class QueueConsumer:
         wait_ms: int = 30_000,
         retry_delay: str | None = None,
         on_error: Any = None,
+        concurrency: int = 1,
+        receive_backoff_initial_ms: int = 250,
+        receive_backoff_max_ms: int = 30_000,
+        receive_backoff_multiplier: float = 2.0,
+        receive_backoff_jitter: bool = True,
+        lease_heartbeat_ms: int | None = None,
+        handler_timeout_ms: int | None = None,
     ) -> None:
         if not callable(handle_message):
             raise TypeError("queue consumer requires handle_message")
         self.queue = queue
         self.consumer_name = sql_identifier(consumer)
         self.group = sql_identifier(group) if group is not None else None
-        if not isinstance(wait_ms, int) or isinstance(wait_ms, bool) or wait_ms < 0:
-            raise TypeError("queue consumer wait_ms must be a non-negative integer")
+        if not isinstance(wait_ms, int) or isinstance(wait_ms, bool) or wait_ms <= 0:
+            raise TypeError("queue consumer wait_ms must be a positive integer")
         _retry_delay(retry_delay)
         self.wait_ms = wait_ms
         self.retry_delay = retry_delay
         self.handle_message = handle_message
         self.on_error = on_error
-        self._running = False
+        if (
+            not isinstance(concurrency, int)
+            or isinstance(concurrency, bool)
+            or not 1 <= concurrency <= 128
+        ):
+            raise TypeError(
+                "queue consumer concurrency must be an integer between 1 and 128"
+            )
+        self.concurrency = concurrency
+        self._backoff_initial = _optional_positive_int(
+            receive_backoff_initial_ms, "receive_backoff_initial_ms"
+        )
+        assert self._backoff_initial is not None
+        self._backoff_max = _non_negative_int(
+            receive_backoff_max_ms, "receive_backoff_max_ms"
+        )
+        if self._backoff_max < self._backoff_initial:
+            raise TypeError(
+                "receive_backoff_max_ms must be >= receive_backoff_initial_ms"
+            )
+        if (
+            not isinstance(receive_backoff_multiplier, (int, float))
+            or receive_backoff_multiplier < 1
+        ):
+            raise TypeError("receive_backoff_multiplier must be >= 1")
+        if not isinstance(receive_backoff_jitter, bool):
+            raise TypeError("receive_backoff_jitter must be a boolean")
+        self._backoff_multiplier = float(receive_backoff_multiplier)
+        self._backoff_jitter = receive_backoff_jitter
+        self.lease_heartbeat_ms = _optional_positive_int(
+            lease_heartbeat_ms, "lease_heartbeat_ms"
+        )
+        self.handler_timeout_ms = _optional_positive_int(
+            handler_timeout_ms, "handler_timeout_ms"
+        )
+        self._state = "idle"
         self._task: asyncio.Task[None] | None = None
+        self._lanes: list[asyncio.Task[None]] = []
+        self._handlers: set[asyncio.Task[None]] = set()
+        self._resume = asyncio.Event()
+        self._resume.set()
+        self._stopping = asyncio.Event()
+        self._in_flight = 0
 
     @property
     def is_running(self) -> bool:
-        return self._running
+        return self._state in {"running", "paused"}
+
+    @property
+    def status(self) -> dict[str, Any]:
+        return {
+            "state": self._state,
+            "is_running": self.is_running,
+            "is_paused": self._state == "paused",
+            "in_flight": self._in_flight,
+            "concurrency": self.concurrency,
+        }
 
     def start(self) -> "QueueConsumer":
-        if self._running:
+        if self._state in {"running", "paused", "stopping"}:
             return self
-        self._running = True
+        self._state = "running"
+        self._stopping.clear()
+        self._resume.set()
         self._task = asyncio.create_task(self._run())
         return self
 
     async def stop(self) -> None:
-        self._running = False
-        if self._task is not None and self._task is not asyncio.current_task():
+        if self._state in {"idle", "stopped", "failed"}:
+            return
+        self._state = "stopping"
+        self._stopping.set()
+        self._resume.set()
+        current = asyncio.current_task()
+        if (
+            self._task is not None
+            and current is not self._task
+            and current not in self._lanes
+            and current not in self._handlers
+        ):
             await self._task
+
+    def pause(self) -> "QueueConsumer":
+        if self._state == "running":
+            self._state = "paused"
+            self._resume.clear()
+        return self
+
+    def resume(self) -> "QueueConsumer":
+        if self._state == "paused":
+            self._state = "running"
+            self._resume.set()
+        return self
 
     async def wait(self) -> None:
         if self._task is not None:
@@ -181,36 +274,172 @@ class QueueConsumer:
 
     async def _run(self) -> None:
         try:
-            while self._running:
+            self._lanes = [
+                asyncio.create_task(self._run_lane()) for _ in range(self.concurrency)
+            ]
+            await asyncio.gather(*self._lanes)
+            self._state = "stopped"
+        except Exception:
+            self._stopping.set()
+            self._resume.set()
+            for lane in self._lanes:
+                if not lane.done():
+                    lane.cancel()
+            await asyncio.gather(*self._lanes, return_exceptions=True)
+            self._state = "failed"
+            raise
+        finally:
+            self._lanes = []
+
+    async def _run_lane(self) -> None:
+        receive_failures = 0
+        while not self._stopping.is_set():
+            await self._resume.wait()
+            if self._stopping.is_set():
+                return
+            try:
                 rows = await self.queue.read_wait_entries(
                     self.consumer_name, wait_ms=self.wait_ms, group=self.group
                 )
-                if not rows:
-                    continue
-                message = rows[0]
-                delivery_id = _delivery_id(message.get("delivery_id"))
-                try:
-                    result = self.handle_message(message)
-                    if asyncio.iscoroutine(result):
-                        await result
-                except Exception as error:
+            except Exception as error:
+                if self._stopping.is_set():
+                    return
+                await self._report_error(error, None)
+                receive_failures += 1
+                await self._backoff(receive_failures)
+                continue
+            receive_failures = 0
+            if not rows:
+                continue
+            await self._process_message(rows[0])
+
+    async def _process_message(self, message: dict[str, Any]) -> None:
+        delivery_id = _delivery_id(message.get("delivery_id"))
+        self._in_flight += 1
+        completed = asyncio.Event()
+        handler = asyncio.create_task(self._invoke_handler(message))
+        self._handlers.add(handler)
+        heartbeat = (
+            asyncio.create_task(self._heartbeat(delivery_id, completed))
+            if self.lease_heartbeat_ms is not None
+            else None
+        )
+        timeout = (
+            asyncio.create_task(asyncio.sleep(self.handler_timeout_ms / 1000))
+            if self.handler_timeout_ms is not None
+            else None
+        )
+        watched = {handler}
+        if heartbeat is not None:
+            watched.add(heartbeat)
+        if timeout is not None:
+            watched.add(timeout)
+        try:
+            done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
+            if handler in done:
+                completed.set()
+                if timeout is not None:
+                    timeout.cancel()
+                if heartbeat is not None:
+                    try:
+                        await heartbeat
+                    except Exception as error:
+                        await self._report_error(error, message)
+                        return
+                error = handler.exception()
+                if error is not None:
                     await self.queue.nack(delivery_id, delay=self.retry_delay)
-                    if self.on_error is None:
-                        raise
-                    result = self.on_error(error, message)
-                    if asyncio.iscoroutine(result):
-                        await result
-                    continue
+                    await self._report_error(error, message)
+                    return
                 try:
                     await self.queue.ack(delivery_id)
                 except Exception as error:
-                    if self.on_error is None:
-                        raise
-                    result = self.on_error(error, message)
-                    if asyncio.iscoroutine(result):
-                        await result
+                    await self._report_error(error, message)
+                return
+
+            if heartbeat is not None and heartbeat in done:
+                lease_error = heartbeat.exception()
+                if lease_error is not None:
+                    handler.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await handler
+                    if timeout is not None:
+                        timeout.cancel()
+                    await self._report_error(lease_error, message)
+                    return
+
+            handler.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await handler
+            completed.set()
+            if heartbeat is not None:
+                await heartbeat
+            error = RedDBError(
+                f"queue handler exceeded {self.handler_timeout_ms}ms",
+                code="QUEUE_HANDLER_TIMEOUT",
+            )
+            await self.queue.nack(delivery_id, delay=self.retry_delay)
+            await self._report_error(error, message)
         finally:
-            self._running = False
+            self._handlers.discard(handler)
+            completed.set()
+            for task in (heartbeat, timeout):
+                if task is not None and not task.done():
+                    task.cancel()
+            self._in_flight -= 1
+
+    async def _invoke_handler(self, message: dict[str, Any]) -> None:
+        result = self.handle_message(message)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _heartbeat(self, delivery_id: str, completed: asyncio.Event) -> None:
+        assert self.lease_heartbeat_ms is not None
+        while not completed.is_set():
+            try:
+                await asyncio.wait_for(
+                    completed.wait(), timeout=self.lease_heartbeat_ms / 1000
+                )
+                return
+            except asyncio.TimeoutError:
+                await self.queue.extend(delivery_id)
+
+    async def _backoff(self, failures: int) -> None:
+        delay_ms = min(
+            self._backoff_max,
+            self._backoff_initial * (self._backoff_multiplier ** max(0, failures - 1)),
+        )
+        if self._backoff_jitter:
+            delay_ms = random.uniform(0, delay_ms)
+        if delay_ms <= 0:
+            return
+        try:
+            await asyncio.wait_for(self._stopping.wait(), timeout=delay_ms / 1000)
+        except asyncio.TimeoutError:
+            pass
+
+    async def _report_error(
+        self, error: Exception, message: dict[str, Any] | None
+    ) -> None:
+        if self.on_error is None:
+            raise error
+        result = self.on_error(error, message)
+        if inspect.isawaitable(result):
+            await result
+
+
+def _non_negative_int(value: Any, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise TypeError(f"queue consumer {name} must be a non-negative integer")
+    return value
+
+
+def _optional_positive_int(value: Any, name: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise TypeError(f"queue consumer {name} must be a positive integer")
+    return value
 
 
 def _build_read_wait_sql(
@@ -272,7 +501,9 @@ def _queue_string_literal(value: Any) -> str:
 def _delivery_id(value: Any) -> str:
     delivery_id = "" if value is None else str(value)
     if not delivery_id:
-        raise RedDBError("queue delivery is missing delivery_id", code="INVALID_RESPONSE")
+        raise RedDBError(
+            "queue delivery is missing delivery_id", code="INVALID_RESPONSE"
+        )
     return delivery_id
 
 

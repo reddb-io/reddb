@@ -226,6 +226,25 @@ TEST(Queue, ScopedQueuePreservesDeliveryIdAndAcks) {
     EXPECT_EQ(fq->calls[1].sql.rfind("QUEUE ACK jobs", 0), 0u);
 }
 
+TEST(Queue, ScopedQueueExtendsDeliveryLease) {
+    auto fq = make_fake();
+    fq->replies.push_back("{}");
+    Helpers h(fq);
+    h.queue("jobs").extend("d1");
+    ASSERT_EQ(fq->calls.size(), 1u);
+    EXPECT_EQ(fq->calls[0].sql, "QUEUE EXTEND jobs WITH delivery_id = 'd1'");
+}
+
+TEST(Queue, ConsumerValidatesV2Options) {
+    auto fq = make_fake();
+    Helpers h(fq);
+    QueueConsumer::Options options;
+    options.consumer = "worker";
+    options.concurrency = 0;
+    options.handler = [](const QueueMessage&) {};
+    EXPECT_THROW(QueueConsumer(h.queue("jobs"), options), HelperError);
+}
+
 // ---------------------------------------------------------------- Documents
 
 TEST(Documents, InsertReturnsRIDEnvelope) {

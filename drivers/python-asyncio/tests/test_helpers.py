@@ -6,6 +6,7 @@ generation and dispatch through a stub transport.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -38,7 +39,12 @@ class FakeTransport:
 
     async def bulk_insert(self, collection: str, payloads: list[Any]) -> Any:
         self.calls.append(("bulk_insert", (collection, payloads), {}))
-        return self._pop({"rids": [f"rid-{i}" for i in range(len(payloads))], "affected": len(payloads)})
+        return self._pop(
+            {
+                "rids": [f"rid-{i}" for i in range(len(payloads))],
+                "affected": len(payloads),
+            }
+        )
 
     async def get(self, collection: str, rid: str) -> Any:
         self.calls.append(("get", (collection, rid), {}))
@@ -102,11 +108,17 @@ async def test_kv_exists_uses_get_result():
 
 
 async def test_kv_list_filters_by_prefix_without_rewriting_keys():
-    transport = FakeTransport(replies=[{"rows": [
-        {"key": "a:1", "value": 1},
-        {"key": "b:1", "value": 2},
-        {"key": "a:2", "value": 3},
-    ]}])
+    transport = FakeTransport(
+        replies=[
+            {
+                "rows": [
+                    {"key": "a:1", "value": 1},
+                    {"key": "b:1", "value": 2},
+                    {"key": "a:2", "value": 3},
+                ]
+            }
+        ]
+    )
     kv = KvClient(transport)
     result = await kv.list(prefix="a:")
     assert [row["key"] for row in result["items"]] == ["a:1", "a:2"]
@@ -139,9 +151,7 @@ async def test_queue_len_returns_int():
 
 
 async def test_queue_pop_returns_payload_list():
-    transport = FakeTransport(replies=[
-        {"rows": [{"payload": "a"}, {"payload": "b"}]}
-    ])
+    transport = FakeTransport(replies=[{"rows": [{"payload": "a"}, {"payload": "b"}]}])
     queue = QueueClient(transport)
     assert await queue.pop("jobs", 2) == ["a", "b"]
 
@@ -159,11 +169,13 @@ async def test_queue_rejects_invalid_identifier():
 
 
 async def test_queue_read_wait_builds_sql_and_returns_payloads():
-    transport = FakeTransport(replies=[
-        {"rows": []},
-        {"rows": [{"payload": "x"}]},
-        {"rows": []},
-    ])
+    transport = FakeTransport(
+        replies=[
+            {"rows": []},
+            {"rows": [{"payload": "x"}]},
+            {"rows": []},
+        ]
+    )
     queue = QueueClient(transport)
 
     # Timeout returns empty list — same shape as an empty pop.
@@ -189,10 +201,12 @@ async def test_queue_read_wait_requires_non_negative_wait_ms():
 
 
 async def test_scoped_queue_consumer_handles_and_acks():
-    transport = FakeTransport(replies=[
-        {"rows": [{"message_id": "m1", "delivery_id": "d1", "payload": "work"}]},
-        {"rows": []},
-    ])
+    transport = FakeTransport(
+        replies=[
+            {"rows": [{"message_id": "m1", "delivery_id": "d1", "payload": "work"}]},
+            {"rows": []},
+        ]
+    )
     queue = QueueClient(transport)("jobs")
     handled: list[str] = []
     worker = None
@@ -202,9 +216,7 @@ async def test_scoped_queue_consumer_handles_and_acks():
         assert worker is not None
         await worker.stop()
 
-    worker = queue.consumer(
-        consumer="worker1", wait_ms=1000, handle_message=handle
-    )
+    worker = queue.consumer(consumer="worker1", wait_ms=1000, handle_message=handle)
     worker.start()
     await worker.wait()
 
@@ -213,6 +225,164 @@ async def test_scoped_queue_consumer_handles_and_acks():
         "QUEUE READ jobs CONSUMER worker1 COUNT 1 WAIT 1000ms",
         "QUEUE ACK jobs WITH delivery_id = 'd1'",
     ]
+
+
+async def test_scoped_queue_extends_delivery_lease():
+    transport = FakeTransport()
+    queue = QueueClient(transport)("jobs")
+
+    await queue.extend("d'1")
+
+    assert transport.calls[0][1][0] == ("QUEUE EXTEND jobs WITH delivery_id = 'd''1'")
+
+
+async def test_queue_consumer_heartbeats_and_exposes_lifecycle_state():
+    transport = FakeTransport(
+        replies=[
+            {"rows": [{"delivery_id": "d1", "payload": "work"}]},
+        ]
+    )
+    queue = QueueClient(transport)("jobs")
+    worker = None
+
+    async def handle(_: dict[str, Any]) -> None:
+        await asyncio.sleep(0.02)
+        assert worker is not None
+        await worker.stop()
+
+    worker = queue.consumer(
+        consumer="worker1",
+        wait_ms=1000,
+        lease_heartbeat_ms=5,
+        handle_message=handle,
+    )
+    worker.start()
+    worker.pause()
+    assert worker.status["state"] == "paused"
+    worker.resume()
+    await worker.wait()
+
+    sql = [call[1][0] for call in transport.calls]
+    assert "QUEUE EXTEND jobs WITH delivery_id = 'd1'" in sql
+    assert "QUEUE ACK jobs WITH delivery_id = 'd1'" in sql
+    assert worker.status["state"] == "stopped"
+
+
+async def test_queue_consumer_never_settles_after_lease_loss():
+    class LeaseLossTransport(FakeTransport):
+        async def query(self, sql: str, params: Any | None = None) -> Any:
+            self.calls.append(("query", (sql,), {"params": params}))
+            if sql.startswith("QUEUE READ"):
+                return {"rows": [{"delivery_id": "d1", "payload": "work"}]}
+            if sql.startswith("QUEUE EXTEND"):
+                raise RuntimeError("lease lost")
+            return {"rows": []}
+
+    transport = LeaseLossTransport()
+    errors: list[str] = []
+    worker = None
+
+    async def handle(_: dict[str, Any]) -> None:
+        await asyncio.sleep(60)
+
+    async def on_error(error: Exception, _: dict[str, Any] | None) -> None:
+        errors.append(str(error))
+        assert worker is not None
+        await worker.stop()
+
+    worker = QueueClient(transport)("jobs").consumer(
+        consumer="worker1",
+        wait_ms=1000,
+        lease_heartbeat_ms=5,
+        handle_message=handle,
+        on_error=on_error,
+    )
+    worker.start()
+    await worker.wait()
+
+    sql = [call[1][0] for call in transport.calls]
+    assert errors == ["lease lost"]
+    assert not any(statement.startswith("QUEUE ACK") for statement in sql)
+    assert not any(statement.startswith("QUEUE NACK") for statement in sql)
+
+
+async def test_queue_consumer_timeout_cancels_handler_before_nack():
+    transport = FakeTransport(
+        replies=[
+            {"rows": [{"delivery_id": "d1", "payload": "work"}]},
+        ]
+    )
+    errors: list[str] = []
+    cancelled = False
+    worker = None
+
+    async def handle(_: dict[str, Any]) -> None:
+        nonlocal cancelled
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    async def on_error(error: Exception, _: dict[str, Any] | None) -> None:
+        errors.append(getattr(error, "code", ""))
+        assert worker is not None
+        await worker.stop()
+
+    worker = QueueClient(transport)("jobs").consumer(
+        consumer="worker1",
+        wait_ms=1000,
+        handler_timeout_ms=5,
+        handle_message=handle,
+        on_error=on_error,
+    )
+    worker.start()
+    await worker.wait()
+
+    assert cancelled is True
+    assert errors == ["QUEUE_HANDLER_TIMEOUT"]
+    assert "QUEUE NACK jobs WITH delivery_id = 'd1'" in [
+        call[1][0] for call in transport.calls
+    ]
+
+
+async def test_queue_consumer_honors_bounded_concurrency():
+    transport = FakeTransport(
+        replies=[
+            {"rows": [{"delivery_id": "d1", "payload": "one"}]},
+            {"rows": [{"delivery_id": "d2", "payload": "two"}]},
+        ]
+    )
+    both_active = asyncio.Event()
+    active = 0
+    max_active = 0
+    handled = 0
+    worker = None
+
+    async def handle(_: dict[str, Any]) -> None:
+        nonlocal active, max_active, handled
+        active += 1
+        max_active = max(max_active, active)
+        if active == 2:
+            both_active.set()
+        await both_active.wait()
+        active -= 1
+        handled += 1
+        if handled == 2:
+            assert worker is not None
+            await worker.stop()
+
+    worker = QueueClient(transport)("jobs").consumer(
+        consumer="worker1",
+        wait_ms=1000,
+        concurrency=2,
+        handle_message=handle,
+    )
+    worker.start()
+    await worker.wait()
+
+    assert max_active == 2
+    assert handled == 2
 
 
 async def test_scoped_secrets_separates_metadata_and_reveal():
@@ -233,12 +403,14 @@ async def test_scoped_secrets_separates_metadata_and_reveal():
 
 
 async def test_documents_insert_returns_rid_envelope():
-    transport = FakeTransport(replies=[
-        # CREATE DOCUMENT (succeeds, no rows)
-        {"rows": [], "affected": 0},
-        # INSERT RETURNING *
-        {"rows": [{"rid": "doc-1", "body": {"name": "alice"}}], "affected": 1},
-    ])
+    transport = FakeTransport(
+        replies=[
+            # CREATE DOCUMENT (succeeds, no rows)
+            {"rows": [], "affected": 0},
+            # INSERT RETURNING *
+            {"rows": [{"rid": "doc-1", "body": {"name": "alice"}}], "affected": 1},
+        ]
+    )
     db = Reddb(transport)
     result = await db.documents.insert("people", {"name": "alice"})
     assert result == {
@@ -249,7 +421,8 @@ async def test_documents_insert_returns_rid_envelope():
     # ADR 0067 (#1709): the emitted INSERT uses the inline JSON literal form
     # with no (body) column list and no quoted-string body coercion.
     insert_sql = next(
-        call[1][0] for call in transport.calls
+        call[1][0]
+        for call in transport.calls
         if call[0] == "query" and call[1][0].startswith("INSERT")
     )
     assert insert_sql == (

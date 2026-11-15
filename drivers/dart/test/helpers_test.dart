@@ -211,6 +211,84 @@ void main() {
       await queue.ack('d1');
       expect(q.calls[1].sql, startsWith('QUEUE ACK jobs'));
     });
+
+    test('scoped queue extends a delivery lease', () async {
+      final q = _FakeQuerier(replies: [<String, Object?>{}]);
+      await Helpers(q).queueNamed('jobs').extend('d1');
+      expect(
+        q.calls.single.sql,
+        "QUEUE EXTEND jobs WITH delivery_id = 'd1'",
+      );
+    });
+
+    test('consumer heartbeats and stops gracefully', () async {
+      final q = _FakeQuerier(replies: [
+        {
+          'rows': [
+            {
+              'message_id': 'm1',
+              'delivery_id': 'd1',
+              'payload': 'work',
+            },
+          ],
+        },
+      ]);
+      late QueueConsumer consumer;
+      consumer = Helpers(q).queueNamed('jobs').consumer(
+            QueueConsumerOptions(
+              consumer: 'worker',
+              wait: const Duration(seconds: 1),
+              leaseHeartbeat: const Duration(milliseconds: 5),
+              handler: (_) async {
+                await Future<void>.delayed(const Duration(milliseconds: 20));
+                consumer.requestStop();
+              },
+            ),
+          )..start();
+
+      await consumer.completion;
+      expect(
+          q.calls.any((call) => call.sql.startsWith('QUEUE EXTEND')), isTrue);
+      expect(q.calls.any((call) => call.sql.startsWith('QUEUE ACK')), isTrue);
+      expect(consumer.status.state, QueueConsumerState.stopped);
+      expect(consumer.status.inFlight, 0);
+    });
+
+    test('consumer waits for a timed-out handler before nacking', () async {
+      final q = _FakeQuerier(replies: [
+        {
+          'rows': [
+            {
+              'message_id': 'm1',
+              'delivery_id': 'd1',
+              'payload': 'work',
+            },
+          ],
+        },
+      ]);
+      var settled = false;
+      late QueueConsumer consumer;
+      consumer = Helpers(q).queueNamed('jobs').consumer(
+            QueueConsumerOptions(
+              consumer: 'worker',
+              wait: const Duration(seconds: 1),
+              handlerTimeout: const Duration(milliseconds: 5),
+              handler: (_) async {
+                await Future<void>.delayed(const Duration(milliseconds: 20));
+                settled = true;
+              },
+              onError: (error, _) async {
+                expect(error, isA<QueueHandlerTimeout>());
+                expect(settled, isTrue);
+                consumer.requestStop();
+              },
+            ),
+          )..start();
+
+      await consumer.completion;
+      expect(q.calls.any((call) => call.sql.startsWith('QUEUE NACK')), isTrue);
+      expect(q.calls.any((call) => call.sql.startsWith('QUEUE ACK')), isFalse);
+    });
   });
 
   group('Documents', () {

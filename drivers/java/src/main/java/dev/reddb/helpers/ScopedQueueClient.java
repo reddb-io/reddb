@@ -34,6 +34,7 @@ public final class ScopedQueueClient {
     public void ack(String deliveryId) { queue.ack(name, deliveryId); }
     public void nack(String deliveryId) { queue.nack(name, deliveryId, null); }
     public void nack(String deliveryId, String delay) { queue.nack(name, deliveryId, delay); }
+    public void extend(String deliveryId) { queue.extend(name, deliveryId); }
     public QueueConsumer consumer(QueueConsumer.Options options) {
         return new QueueConsumer(this, options);
     }

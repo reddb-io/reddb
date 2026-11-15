@@ -63,8 +63,10 @@ const worker = db.queue('tasks').consumer({
   group: 'workers',
   waitMs: 30_000,
   retryDelay: '5s',
-  async handleMessage(message) {
-    await processJob(message.payload)
+  // Keep this comfortably below the queue's LOCK_DEADLINE_MS.
+  leaseHeartbeatMs: 10_000,
+  async handleMessage(message, { signal }) {
+    await processJob(message.payload, { signal })
   },
 })
 

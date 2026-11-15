@@ -441,9 +441,9 @@ impl RedDBRuntime {
                     QueueCommand::Peek { queue, .. }
                     | QueueCommand::Len { queue }
                     | QueueCommand::Pending { queue, .. } => (queue.as_str(), "queue:peek"),
-                    QueueCommand::Ack { queue, .. } | QueueCommand::AckBatch { queue, .. } => {
-                        (queue.as_str(), "queue:ack")
-                    }
+                    QueueCommand::Ack { queue, .. }
+                    | QueueCommand::AckBatch { queue, .. }
+                    | QueueCommand::Extend { queue, .. } => (queue.as_str(), "queue:ack"),
                     QueueCommand::Nack {
                         queue, delay_ms, ..
                     } => {

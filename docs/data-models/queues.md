@@ -361,12 +361,19 @@ handle:
 ```sql
 QUEUE ACK tasks WITH delivery_id = '<delivery_id>'
 QUEUE NACK tasks WITH delivery_id = '<delivery_id>' WITH DELAY 5s
+QUEUE EXTEND tasks WITH delivery_id = '<delivery_id>'
 ```
 
 `delivery_id` is the same string on HTTP, RedWire, gRPC, Postgres-wire, and
 embedded execution. Adding it to the read projection is wire-compatible with
 legacy consumers that still use `(queue, group, message_id)` during the
 deprecation window.
+
+`QUEUE EXTEND` refreshes an active delivery's visibility deadline. The new
+deadline is always derived from the queue's current `LOCK_DEADLINE_MS` policy;
+clients cannot choose an unbounded extension. A stale, already ACKed/NACKed, or
+wrong-queue handle fails. Once an extension fails, a worker must assume it no
+longer owns the delivery and must not ACK or NACK it.
 
 #### Duration grammar
 

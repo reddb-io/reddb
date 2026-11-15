@@ -2188,6 +2188,7 @@ name = "reddb-io-client"
 version = "1.37.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "getrandom 0.4.3",
  "reddb-io-grpc-proto",
  "reddb-io-server",

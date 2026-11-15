@@ -9,6 +9,8 @@ import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -21,7 +23,7 @@ class HelpersTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    static final class FakeQuerier implements Querier {
+    static class FakeQuerier implements Querier {
         final List<String> sqls = new ArrayList<>();
         final List<Object[]> params = new ArrayList<>();
         final Deque<byte[]> replies = new ArrayDeque<>();
@@ -176,6 +178,55 @@ class HelpersTest {
         assertEquals("d1", messages.get(0).deliveryId());
         queue.ack("d1");
         assertTrue(fq.sqls.get(1).startsWith("QUEUE ACK jobs"));
+        queue.extend("d1");
+        assertEquals("QUEUE EXTEND jobs WITH delivery_id = 'd1'", fq.sqls.get(2));
+    }
+
+    @Test void queueConsumer_heartbeatsAndExposesLifecycle() throws Exception {
+        CountDownLatch extended = new CountDownLatch(1);
+        FakeQuerier fq = new FakeQuerier() {
+            private boolean delivered;
+
+            @Override public synchronized byte[] query(String sql, Object... params) {
+                sqls.add(sql);
+                if (sql.startsWith("QUEUE READ") && !delivered) {
+                    delivered = true;
+                    try {
+                        return JSON.writeValueAsBytes(map("rows", List.of(map(
+                            "delivery_id", "d1", "payload", "work"))));
+                    } catch (Exception error) {
+                        throw new RuntimeException(error);
+                    }
+                }
+                if (sql.startsWith("QUEUE EXTEND")) extended.countDown();
+                try {
+                    return JSON.writeValueAsBytes(map("rows", List.of()));
+                } catch (Exception error) {
+                    throw new RuntimeException(error);
+                }
+            }
+        };
+        ScopedQueueClient queue = new Helpers(fq).queue("jobs");
+        final QueueConsumer[] holder = new QueueConsumer[1];
+        QueueConsumer consumer = queue.consumer(new QueueConsumer.Options()
+            .consumer("worker")
+            .wait(java.time.Duration.ofSeconds(1))
+            .leaseHeartbeat(java.time.Duration.ofMillis(1))
+            .handler(message -> {
+                assertTrue(extended.await(1, TimeUnit.SECONDS));
+                holder[0].stop();
+            }));
+        holder[0] = consumer;
+
+        consumer.start();
+        consumer.pause();
+        assertTrue(consumer.status().paused());
+        consumer.resume();
+        consumer.await();
+
+        assertTrue(fq.sqls.contains("QUEUE EXTEND jobs WITH delivery_id = 'd1'"));
+        assertTrue(fq.sqls.contains("QUEUE ACK jobs WITH delivery_id = 'd1'"));
+        assertEquals("stopped", consumer.status().state());
     }
 
     // --- Documents ---------------------------------------------------
