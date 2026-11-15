@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.39.1
+
+### Patch Changes
+
+- [#2864](https://github.com/reddb-io/reddb/pull/2864) [`e1d7a3c`](https://github.com/reddb-io/reddb/commit/e1d7a3cbdcbd46d45a9379086635673055425036) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Allow offline compaction and canonical config migration to retire derived TurboQuant `.tv` snapshots while preserving the source generation and rejecting every other non-empty support-layout artifact.
+
 ## 1.39.0
 
 ### Minor Changes
