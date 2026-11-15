@@ -801,6 +801,7 @@ impl RedDB {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
+        let metadata_state = native_state.metadata_state.as_ref();
         let catalog = self.catalog_snapshot();
         let catalog_name = catalog.name.clone();
         let catalog_total_entities = catalog.total_entities;
@@ -895,6 +896,7 @@ impl RedDB {
                     recovery
                         .exports
                         .iter()
+                        .rev()
                         .map(|export| crate::physical::ExportDescriptor {
                             name: export.name.clone(),
                             created_at_unix_ms: export.created_at_unix_ms,
@@ -943,6 +945,7 @@ impl RedDB {
                     recovery
                         .snapshots
                         .iter()
+                        .rev()
                         .map(|snapshot| crate::physical::SnapshotDescriptor {
                             snapshot_id: snapshot.snapshot_id,
                             created_at_unix_ms: snapshot.created_at_unix_ms,
@@ -989,10 +992,14 @@ impl RedDB {
             .unwrap_or_else(|| catalog.stats_by_collection.clone());
 
         PhysicalMetadataFile {
-            protocol_version: crate::physical::PHYSICAL_METADATA_PROTOCOL_VERSION.to_string(),
-            generated_at_unix_ms: now,
-            last_loaded_from: Some("native_bootstrap".to_string()),
-            last_healed_at_unix_ms: Some(now),
+            protocol_version: metadata_state
+                .map(|state| state.protocol_version.clone())
+                .unwrap_or_else(|| crate::physical::PHYSICAL_METADATA_PROTOCOL_VERSION.to_string()),
+            generated_at_unix_ms: metadata_state
+                .map(|state| state.generated_at_unix_ms)
+                .unwrap_or(now),
+            last_loaded_from: metadata_state.and_then(|state| state.last_loaded_from.clone()),
+            last_healed_at_unix_ms: metadata_state.and_then(|state| state.last_healed_at_unix_ms),
             manifest,
             catalog: crate::api::CatalogSnapshot {
                 name: catalog_name,
