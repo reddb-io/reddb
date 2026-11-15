@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.36.13
+
+### Patch Changes
+
+- [#2868](https://github.com/reddb-io/reddb/pull/2868) [`569c82f`](https://github.com/reddb-io/reddb/commit/569c82febcbcde39de6d2cdadd7dcb930d1291dd) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Publish the 1.36 derived-snapshot compaction fix through a fail-closed maintenance release path that requires the exact workspace tag at the current remote `release/1.36` HEAD.
+
 ## 1.36.12
 
 ### Patch Changes
