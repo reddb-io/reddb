@@ -151,6 +151,10 @@ fn recover_pending_double_write_repairs_only_the_staged_copy() {
     let before = std::fs::read(&source).unwrap();
     let output = directory.path().join("recovered");
     recover_paged_wal(&source, &output).unwrap();
+    assert!(
+        !output.join(".wal-replay").exists(),
+        "successful recovery must retire its private replay workspace"
+    );
     assert_eq!(std::fs::read(&source).unwrap(), before);
     assert_recovered_fixture(&output.join("source.rdb"));
     for phase in [
@@ -1807,6 +1811,10 @@ fn interrupted_wal_copy_does_not_publish_or_modify_source() {
     child.kill().unwrap();
     child.wait().unwrap();
     assert!(!destination.join("source.rdb").exists());
+    assert!(
+        destination.join(".wal-replay").join("source.rdb").exists(),
+        "interrupted recovery must preserve its private replay evidence"
+    );
     assert_eq!(std::fs::read(&source).unwrap(), source_image);
     assert_eq!(std::fs::read(&wal).unwrap(), wal_image);
 }
