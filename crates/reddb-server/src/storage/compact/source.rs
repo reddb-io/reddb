@@ -47,7 +47,7 @@ impl Source {
             if allow_unified_wal {
                 validate_recovery_support(&support, 0, false)?;
             } else {
-                validate_empty_directory(&support, 0)?;
+                validate_compaction_support(&support, 0, false)?;
             }
         }
         let mut file = File::open(path)?;

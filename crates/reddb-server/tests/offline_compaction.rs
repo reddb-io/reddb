@@ -3781,6 +3781,139 @@ fn compact_preserves_empty_support_scaffolding_but_refuses_hidden_wal() {
     assert!(!rejected.exists());
 }
 
+#[test]
+fn compact_retires_legacy_turbo_snapshot_and_cold_opens_vectors() {
+    use reddb_server::{RedDBOptions, RedDBRuntime};
+    use reddb_types::Value;
+
+    let directory = tempfile::tempdir().expect("directory");
+    let source = directory.path().join("source.rdb");
+    let options = |path| {
+        RedDBOptions::persistent(path)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true)
+    };
+    let snapshot = reddb_file::support_dir_for(&source).join("snapshots/embeddings.tv");
+    let legacy_vectors;
+    {
+        let runtime = RedDBRuntime::with_options(options(&source)).expect("runtime");
+        runtime
+            .execute_query("CREATE COLLECTION embeddings KIND vector.turbo DIM 2 METRIC cosine")
+            .expect("turbo collection");
+        let old = runtime
+            .db()
+            .vector("embeddings")
+            .dense(vec![1.0, 0.0])
+            .content("old")
+            .save()
+            .expect("old vector");
+        runtime
+            .db()
+            .vector("embeddings")
+            .dense(vec![0.0, 1.0])
+            .content("new")
+            .save()
+            .expect("new vector");
+        runtime.checkpoint().expect("checkpoint");
+        legacy_vectors = vec![(old.raw(), vec![1.0, 0.0])];
+        runtime.graceful_shutdown(false).expect("shutdown");
+    }
+    assert_eq!(legacy_vectors.len(), 1, "exercise a stale derived cache");
+    std::fs::create_dir_all(snapshot.parent().expect("snapshot directory"))
+        .expect("legacy support layout");
+    reddb_file::write_turboquant_snapshot(&snapshot, 2, 0x7155_8807_FED4_2913, 0, &legacy_vectors)
+        .expect("valid legacy turbo snapshot");
+    let source_before = std::fs::read(&source).expect("source bytes");
+    let snapshot_before = std::fs::read(&snapshot).expect("snapshot bytes");
+
+    let destination = directory.path().join("compacted");
+    compact_paged(&source, &destination).expect("compact with derived turbo snapshot");
+
+    assert_eq!(
+        std::fs::read(&source).expect("source retained"),
+        source_before
+    );
+    assert_eq!(
+        std::fs::read(&snapshot).expect("snapshot retained"),
+        snapshot_before
+    );
+    let compacted = destination.join("source.rdb");
+    assert!(
+        !reddb_file::support_dir_for(&compacted)
+            .join("snapshots/embeddings.tv")
+            .exists(),
+        "the compacted generation must rebuild instead of retaining a stale cache"
+    );
+    for _ in 0..2 {
+        let runtime = RedDBRuntime::with_options(options(&compacted)).expect("cold open compacted");
+        let result = runtime
+            .execute_query("VECTOR SEARCH embeddings SIMILAR TO [0, 1] MODE APPROXIMATE LIMIT 1")
+            .expect("rebuild turbo index from compacted entities");
+        assert!(
+            matches!(result.result.records[0].get("content"), Some(Value::Text(content)) if content.as_ref() == "new"),
+            "a stale one-vector cache must not hide the newer persisted vector"
+        );
+        runtime.graceful_shutdown(false).expect("cold shutdown");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn compact_snapshot_support_rejects_non_snapshot_symlink_and_special_files() {
+    use std::os::unix::net::UnixListener;
+
+    for kind in [
+        "non-snapshot",
+        "misplaced-snapshot",
+        "nested-snapshot",
+        "symlink",
+        "special",
+    ] {
+        let directory = tempfile::tempdir().expect("directory");
+        let source = directory.path().join("source.rdb");
+        fixture(&source);
+        let support = reddb_file::support_dir_for(&source);
+        let snapshots = support.join("snapshots");
+        std::fs::create_dir_all(&snapshots).expect("snapshot directory");
+        let path = match kind {
+            "non-snapshot" => snapshots.join("rogue.bin"),
+            "misplaced-snapshot" => support.join("misplaced.tv"),
+            "nested-snapshot" => snapshots.join("nested/hidden.tv"),
+            "symlink" => snapshots.join("linked.tv"),
+            "special" => snapshots.join("socket.tv"),
+            _ => unreachable!("fixed fixture kind"),
+        };
+        std::fs::create_dir_all(path.parent().expect("support entry parent"))
+            .expect("support entry parent");
+        let _socket = match kind {
+            "non-snapshot" | "misplaced-snapshot" | "nested-snapshot" => {
+                std::fs::write(&path, b"not a turbo snapshot").expect("unsupported file");
+                None
+            }
+            "symlink" => {
+                std::os::unix::fs::symlink(&source, &path).expect("snapshot symlink");
+                None
+            }
+            "special" => Some(UnixListener::bind(&path).expect("snapshot socket")),
+            _ => unreachable!("fixed fixture kind"),
+        };
+        let source_before = std::fs::read(&source).expect("source bytes");
+        let destination = directory.path().join("rejected");
+        let error = compact_paged(&source, &destination).expect_err("unsupported support entry");
+        assert!(
+            error
+                .to_string()
+                .contains("non-empty support layout requires separate compaction qualification"),
+            "{kind}: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&source).expect("source retained"),
+            source_before
+        );
+        assert!(!destination.join("source.rdb").exists());
+    }
+}
+
 fn structural_leaves(pager: &Arc<Pager>, tree: &BTree) -> Vec<u32> {
     tree.retired_pages()
         .expect("structural inventory")
