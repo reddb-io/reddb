@@ -312,6 +312,28 @@ fn run_redwire_blocking<T>(execute: impl FnOnce() -> T) -> T {
     }
 }
 
+#[cfg(test)]
+static REDWIRE_TEST_BLOCKING_GATE_CORRELATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static REDWIRE_TEST_BLOCKING_GATE_ENTERED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+fn redwire_test_blocking_gate(correlation_id: u64) {
+    use std::sync::atomic::Ordering;
+
+    if REDWIRE_TEST_BLOCKING_GATE_CORRELATION.load(Ordering::Acquire) != correlation_id {
+        return;
+    }
+    REDWIRE_TEST_BLOCKING_GATE_ENTERED.store(correlation_id, Ordering::Release);
+    while REDWIRE_TEST_BLOCKING_GATE_CORRELATION.load(Ordering::Acquire) == correlation_id
+        && crate::runtime::query_budget::charge(0).is_ok()
+    {
+        std::thread::yield_now();
+    }
+}
+
 pub(super) async fn redwire_spawn_blocking<F, R>(
     runtime: &RedDBRuntime,
     execute: F,
@@ -348,6 +370,24 @@ where
 {
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        execute()
+    })
+    .await
+    .map_err(RedWireExecutionError::Task)
+}
+
+async fn redwire_spawn_blocking_with_permit_cancellation<F, R>(
+    permit: crate::transport::execution_admission::ExecutionPermit,
+    cancellation: Option<crate::runtime::query_budget::RequestCancellation>,
+    execute: F,
+) -> Result<R, RedWireExecutionError>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let _cancellation_scope = cancellation.map(|cancellation| cancellation.install());
         execute()
     })
     .await
@@ -415,6 +455,27 @@ where
     let out_tx = super::output_stream::FrameTx::new(out_tx, Arc::clone(&runtime));
     let _writer_task = out_tx.spawn_writer(out_rx, writer);
 
+    // Keep reading independently of synchronous engine execution. Otherwise
+    // EOF cannot be observed while this task awaits `spawn_blocking`, so a
+    // disconnected client can strand the worker and its execution permit.
+    let session_cancellation = crate::runtime::query_budget::RequestCancellation::new();
+    let reader_cancellation = session_cancellation.clone();
+    let (incoming_tx, mut incoming_rx) =
+        mpsc::channel::<Result<Frame, reddb_wire::redwire::RedWireIoError>>(INBOUND_QUEUE_FRAMES);
+    let mut reader_tasks = tokio::task::JoinSet::new();
+    reader_tasks.spawn(async move {
+        loop {
+            let incoming = read_frame_async(&mut reader).await;
+            let terminal = incoming.is_err();
+            if terminal {
+                reader_cancellation.cancel();
+            }
+            if incoming_tx.send(incoming).await.is_err() || terminal {
+                return;
+            }
+        }
+    });
+
     // Per-connection output-stream registry (issue #762). Tracks
     // active stream workers so a `StreamCancel` for one stream_id
     // does not disturb the rest of the connection.
@@ -453,7 +514,10 @@ where
 
         let incoming = tokio::select! {
             _ = out_tx.failed() => return Err(io::Error::other("redwire: outbound response unavailable")),
-            frame = read_frame_async(&mut reader) => frame,
+            frame = incoming_rx.recv() => match frame {
+                Some(frame) => frame,
+                None => return Err(io::Error::other("redwire: inbound frame reader unavailable")),
+            },
         };
         let frame = match incoming {
             Ok(frame) => frame,
@@ -552,40 +616,58 @@ where
                 let statements = std::mem::take(&mut prepared_stmts);
                 let role = session.role;
                 let correlation_id = frame.correlation_id;
-                let result = redwire_spawn_blocking_with_permit(permit, move || {
-                    // A started blocking task cannot be aborted. Retain the
-                    // lease until execution ends, even if the session is dropped.
-                    let _connection = connection;
-                    let response = execute_with_redwire_context(&operation_context, role, || {
-                        match frame.kind {
-                            MessageKind::Query => QueryResponse::Frame(run_query(
-                                &task_runtime,
-                                statements.registry(),
-                                &frame,
-                            )),
-                            MessageKind::QueryWithParams => QueryResponse::Frame(
-                                run_query_with_params(&task_runtime, statements.registry(), &frame),
-                            ),
-                            MessageKind::QueryBinary => QueryResponse::Legacy(
-                                crate::wire::listener::handle_query_binary(
+                let cancellation = matches!(
+                    frame.kind,
+                    MessageKind::Query | MessageKind::QueryWithParams
+                )
+                .then(|| session_cancellation.clone());
+                let result = redwire_spawn_blocking_with_permit_cancellation(
+                    permit,
+                    cancellation,
+                    move || {
+                        #[cfg(test)]
+                        redwire_test_blocking_gate(correlation_id);
+                        // A started blocking task cannot be aborted. Retain the
+                        // lease until execution ends, even if the session is dropped.
+                        let _connection = connection;
+                        let response =
+                            execute_with_redwire_context(&operation_context, role, || match frame
+                                .kind
+                            {
+                                MessageKind::Query => QueryResponse::Frame(run_query(
                                     &task_runtime,
-                                    &frame.payload,
+                                    statements.registry(),
+                                    &frame,
+                                )),
+                                MessageKind::QueryWithParams => {
+                                    QueryResponse::Frame(run_query_with_params(
+                                        &task_runtime,
+                                        statements.registry(),
+                                        &frame,
+                                    ))
+                                }
+                                MessageKind::QueryBinary => QueryResponse::Legacy(
+                                    crate::wire::listener::handle_query_binary(
+                                        &task_runtime,
+                                        &frame.payload,
+                                    ),
+                                    frame.correlation_id,
                                 ),
-                                frame.correlation_id,
-                            ),
-                            MessageKind::ExecutePrepared => QueryResponse::Legacy(
-                                crate::wire::listener::handle_execute_prepared(
-                                    &task_runtime,
-                                    &frame.payload,
-                                    &statements,
+                                MessageKind::ExecutePrepared => QueryResponse::Legacy(
+                                    crate::wire::listener::handle_execute_prepared(
+                                        &task_runtime,
+                                        &frame.payload,
+                                        &statements,
+                                    ),
+                                    frame.correlation_id,
                                 ),
-                                frame.correlation_id,
-                            ),
-                            _ => unreachable!("only query frames enter the blocking dispatcher"),
-                        }
-                    });
-                    (response, statements)
-                })
+                                _ => {
+                                    unreachable!("only query frames enter the blocking dispatcher")
+                                }
+                            });
+                        (response, statements)
+                    },
+                )
                 .await;
                 let (response, statements) = match result {
                     Ok(result) => result,
@@ -1259,6 +1341,10 @@ where
 /// server buffer an output stream without limit; the writer task drains it
 /// as fast as the socket accepts bytes.
 const OUTBOUND_QUEUE_FRAMES: usize = 256;
+/// Frames decoded ahead of synchronous execution. This bounded reader pump is
+/// what lets EOF cancel a running request without granting peers unbounded
+/// buffering for pipelined frames.
+const INBOUND_QUEUE_FRAMES: usize = 16;
 
 async fn queue_send(out_tx: &super::output_stream::FrameTx, frame: Frame) -> io::Result<()> {
     out_tx.send_frame(frame).await
