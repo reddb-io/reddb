@@ -404,6 +404,8 @@ fn recover_paged_wal_inner(
     // different WAL family: future opens through that name would be unsafe.
     std::fs::remove_file(validated_dir.join(name))?;
     sync_directory(&validated_dir)?;
+    std::fs::remove_dir_all(&stage)?;
+    sync_directory(destination)?;
     Ok(report)
 }
 
