@@ -64,6 +64,12 @@ When a field has domain semantics, switch from plain `Text` to a native type.
 - `Secret` — transparently encrypted with AES-256-GCM using the vault's master key. Reads return `***` when the vault is sealed and the plaintext only when unsealed.
 - `Password` — stored as an argon2id hash. Never round-tripped as plaintext; compare with `VERIFY_PASSWORD(column, 'candidate')`.
 
+### Biometric records and comparison artifacts
+
+- `Fingerprint`, `Face`, `Iris` — bounded standardized records; no image feature extraction
+- `FeatureVector` — caller-supplied features identified by `space_id`
+- `BitSignature` — caller-supplied bits and validity mask identified by `space_id`
+
 ### Cross-model references
 
 - `NodeRef`, `EdgeRef`, `VectorRef`, `RowRef`
@@ -128,4 +134,5 @@ See:
 - [Locale Types](/types/locale.md)
 - [Reference Types](/types/references.md)
 - [Secret & Password Types](/types/secrets.md)
+- [Biometric Records and Comparison Artifacts](/types/biometrics.md)
 - [Validation & Coercion](/types/validation.md)

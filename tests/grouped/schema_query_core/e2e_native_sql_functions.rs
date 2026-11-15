@@ -34,6 +34,79 @@ fn scalar(rt: &RedDBRuntime, sql: &str) -> Value {
         .clone()
 }
 
+fn scalar_params(rt: &RedDBRuntime, sql: &str, params: &[Value]) -> Value {
+    let result = rt
+        .execute_query_with_params(sql, params)
+        .unwrap_or_else(|err| panic!("query failed: {sql}\n{err:?}"));
+    assert_eq!(result.result.records.len(), 1, "{sql}");
+    result.result.records[0]
+        .get("value")
+        .unwrap_or_else(|| panic!("missing value column for {sql}: {result:?}"))
+        .clone()
+}
+
+fn iso_fingerprint() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"FMR\0 20\0");
+    bytes.extend_from_slice(&48_u32.to_be_bytes());
+    bytes.extend_from_slice(&0_u16.to_be_bytes());
+    bytes.extend_from_slice(&500_u16.to_be_bytes());
+    bytes.extend_from_slice(&500_u16.to_be_bytes());
+    bytes.extend_from_slice(&197_u16.to_be_bytes());
+    bytes.extend_from_slice(&197_u16.to_be_bytes());
+    bytes.extend_from_slice(&[1, 0]);
+    bytes.extend_from_slice(&[1, 0, 100, 3]);
+    for (x, y, angle) in [(100_u16, 120_u16, 10_u8), (180, 160, 40), (130, 230, 90)] {
+        bytes.extend_from_slice(&(x | 0x4000).to_be_bytes());
+        bytes.extend_from_slice(&y.to_be_bytes());
+        bytes.extend_from_slice(&[angle, 90]);
+    }
+    bytes.extend_from_slice(&[0, 0]);
+    bytes
+}
+
+fn iso_face_landmarks() -> Vec<u8> {
+    let points = [
+        (0xc1_u8, 10_u16, 20_u16),
+        (0xc2, 30, 20),
+        (0xc3, 14, 30),
+        (0xc4, 26, 30),
+        (0x9f, 20, 36),
+    ];
+    let block_length = 20 + points.len() * 8 + 12;
+    let mut bytes = vec![0; 14 + block_length];
+    let total_length = bytes.len() as u32;
+    bytes[..8].copy_from_slice(b"FAC\0010\0");
+    bytes[8..12].copy_from_slice(&total_length.to_be_bytes());
+    bytes[12..14].copy_from_slice(&1_u16.to_be_bytes());
+    bytes[14..18].copy_from_slice(&(block_length as u32).to_be_bytes());
+    bytes[18..20].copy_from_slice(&(points.len() as u16).to_be_bytes());
+    for (index, (code, x, y)) in points.iter().enumerate() {
+        let offset = 34 + index * 8;
+        bytes[offset] = 1;
+        bytes[offset + 1] = *code;
+        bytes[offset + 2..offset + 4].copy_from_slice(&x.to_be_bytes());
+        bytes[offset + 4..offset + 6].copy_from_slice(&y.to_be_bytes());
+    }
+    let image = 34 + points.len() * 8;
+    bytes[image + 2..image + 4].copy_from_slice(&1_u16.to_be_bytes());
+    bytes[image + 4..image + 6].copy_from_slice(&1_u16.to_be_bytes());
+    bytes
+}
+
+fn iso_iris() -> Vec<u8> {
+    let mut bytes = vec![0; 68];
+    bytes[..8].copy_from_slice(b"IIR\0020\0");
+    bytes[8..12].copy_from_slice(&68_u32.to_be_bytes());
+    bytes[12..14].copy_from_slice(&1_u16.to_be_bytes());
+    bytes[15] = 1;
+    bytes[16..20].copy_from_slice(&52_u32.to_be_bytes());
+    bytes[41..43].copy_from_slice(&1_u16.to_be_bytes());
+    bytes[43..45].copy_from_slice(&1_u16.to_be_bytes());
+    bytes[45] = 8;
+    bytes
+}
+
 fn assert_float(actual: &Value, expected: f64, sql: &str) {
     let Value::Float(actual) = actual else {
         panic!("expected float {expected} for {sql}, got {actual:?}");
@@ -135,6 +208,121 @@ fn pure_native_functions_return_their_documented_values() {
     }
     exact_function_cases!(exact_case);
     float_function_cases!(float_case);
+}
+
+#[test]
+fn biometric_and_landmark_functions_have_public_sql_contracts() {
+    let rt = runtime();
+    let space = Value::Uuid([0x51; 16]);
+
+    let fingerprint = scalar_params(
+        &rt,
+        "SELECT FINGERPRINT($1) AS value",
+        &[Value::Blob(iso_fingerprint())],
+    );
+    let face = scalar_params(
+        &rt,
+        "SELECT FACE($1) AS value",
+        &[Value::Blob(iso_face_landmarks())],
+    );
+    let iris = scalar_params(&rt, "SELECT IRIS($1) AS value", &[Value::Blob(iso_iris())]);
+    assert_eq!(
+        scalar_params(&rt, "SELECT BIOMETRIC_FORMAT($1) AS value", &[face.clone()]),
+        Value::text("ISO/IEC 19794-5")
+    );
+    assert!(matches!(
+        scalar_params(&rt, "SELECT BIOMETRIC_INFO($1) AS value", &[iris]),
+        Value::Json(_)
+    ));
+
+    let feature = scalar_params(
+        &rt,
+        "SELECT FEATURE_VECTOR($1, $2) AS value",
+        &[space.clone(), Value::Vector(vec![1.0, 0.0])],
+    );
+    assert_eq!(
+        scalar_params(
+            &rt,
+            "SELECT FEATURE_COMPARE($1, $2) AS value",
+            &[feature.clone(), feature.clone()],
+        ),
+        Value::Float(1.0)
+    );
+    assert_eq!(
+        scalar_params(
+            &rt,
+            "SELECT FEATURE_MATCH($1, $2, $3) AS value",
+            &[feature.clone(), feature, Value::Float(1.0)],
+        ),
+        Value::Boolean(true)
+    );
+
+    let bits = scalar_params(
+        &rt,
+        "SELECT BIT_SIGNATURE($1, $2, $3) AS value",
+        &[
+            space.clone(),
+            Value::Blob(vec![0xaa]),
+            Value::Blob(vec![0xff]),
+        ],
+    );
+    assert_eq!(
+        scalar_params(
+            &rt,
+            "SELECT BIT_SIGNATURE_COMPARE($1, $2) AS value",
+            &[bits.clone(), bits.clone()],
+        ),
+        Value::Float(1.0)
+    );
+    assert_eq!(
+        scalar_params(
+            &rt,
+            "SELECT BIT_SIGNATURE_MATCH($1, $2, $3) AS value",
+            &[bits.clone(), bits, Value::Float(1.0)],
+        ),
+        Value::Boolean(true)
+    );
+    assert_eq!(
+        scalar_params(
+            &rt,
+            "SELECT FINGERPRINT_COMPARE($1, $2) AS value",
+            &[fingerprint.clone(), fingerprint.clone()],
+        ),
+        Value::Float(1.0)
+    );
+    assert_eq!(
+        scalar_params(
+            &rt,
+            "SELECT FINGERPRINT_MATCH($1, $2, $3) AS value",
+            &[fingerprint.clone(), fingerprint, Value::Float(1.0)],
+        ),
+        Value::Boolean(true)
+    );
+
+    let geometry = br#"{"dimensions":2,"pairs":[{"left":[-1,1],"right":[1,1]},{"left":[-2,-1],"right":[2,-1]}],"midline":[[0,2]]}"#;
+    let landmarks = scalar_params(
+        &rt,
+        "SELECT LANDMARK_SET($1, $2) AS value",
+        &[space, Value::Json(geometry.to_vec())],
+    );
+    assert_eq!(
+        scalar_params(
+            &rt,
+            "SELECT LANDMARK_SYMMETRY($1) AS value",
+            std::slice::from_ref(&landmarks),
+        ),
+        Value::Float(1.0)
+    );
+    assert_eq!(
+        scalar_params(
+            &rt,
+            "SELECT LANDMARK_IS_SYMMETRIC($1, $2) AS value",
+            &[landmarks, Value::Integer(1)],
+        ),
+        Value::Boolean(true)
+    );
+    let extracted = scalar_params(&rt, "SELECT FACE_LANDMARKS($1) AS value", &[face]);
+    assert!(matches!(extracted, Value::LandmarkSet(_)));
 }
 
 #[test]
@@ -382,6 +570,27 @@ const CONTEXT_FUNCTIONS: &[&str] = &[
     "VERIFY_PASSWORD",
 ];
 
+const BIOMETRIC_FUNCTIONS: &[&str] = &[
+    "ANSI_NIST_RECORD",
+    "BIOMETRIC_FORMAT",
+    "BIOMETRIC_INFO",
+    "BIT_SIGNATURE",
+    "BIT_SIGNATURE_COMPARE",
+    "BIT_SIGNATURE_MATCH",
+    "FACE",
+    "FACE_LANDMARKS",
+    "FEATURE_COMPARE",
+    "FEATURE_MATCH",
+    "FEATURE_VECTOR",
+    "FINGERPRINT",
+    "FINGERPRINT_COMPARE",
+    "FINGERPRINT_MATCH",
+    "IRIS",
+    "LANDMARK_IS_SYMMETRIC",
+    "LANDMARK_SET",
+    "LANDMARK_SYMMETRY",
+];
+
 #[test]
 fn every_catalog_function_has_a_public_sql_contract() {
     let catalog = FUNCTION_CATALOG
@@ -399,6 +608,7 @@ fn every_catalog_function_has_a_public_sql_contract() {
     covered.extend(AGGREGATE_FUNCTIONS);
     covered.extend(GEOGRAPHIC_FUNCTIONS);
     covered.extend(CONTEXT_FUNCTIONS);
+    covered.extend(BIOMETRIC_FUNCTIONS);
 
     assert_eq!(
         covered, catalog,

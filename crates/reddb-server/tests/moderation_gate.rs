@@ -157,7 +157,10 @@ fn provider_down_quarantine_then_clear_on_remoderation() {
     let mut consumer = CdcEnrichmentConsumer::with_defaults();
     let stats = consumer.tick(&rt, 1_000).expect("tick");
     assert!(stats.ingested >= 1, "the quarantined row must be ingested");
-    assert!(stats.attached >= 1, "re-moderation must complete");
+    assert!(
+        stats.attached >= 1,
+        "re-moderation must complete: {stats:?}"
+    );
     assert_eq!(consumer.pending_len(), 0);
 
     // Re-moderated clean → now visible.
@@ -200,7 +203,10 @@ fn quarantine_then_remoderation_reject_tombstones() {
     let mut consumer = CdcEnrichmentConsumer::with_defaults();
     let stats = consumer.tick(&rt, 1_000).expect("tick");
     assert!(stats.ingested >= 1);
-    assert!(stats.attached >= 1, "re-moderation must complete");
+    assert!(
+        stats.attached >= 1,
+        "re-moderation must complete: {stats:?}"
+    );
 
     // Rejected-tombstone row stays hidden from normal reads.
     assert_eq!(
@@ -230,7 +236,10 @@ fn quarantine_reject_hard_delete_removes_row() {
     PROVIDER_DOWN.store(false, Ordering::SeqCst);
     let mut consumer = CdcEnrichmentConsumer::with_defaults();
     let stats = consumer.tick(&rt, 1_000).expect("tick");
-    assert!(stats.attached >= 1, "re-moderation must complete");
+    assert!(
+        stats.attached >= 1,
+        "re-moderation must complete: {stats:?}"
+    );
 
     // Hard-deleted → hidden, and a second tick finds nothing to do.
     assert_eq!(row_count(&rt, "SELECT * FROM ephemeral"), 0);

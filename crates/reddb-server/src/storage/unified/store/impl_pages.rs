@@ -152,6 +152,18 @@ fn checkpoint_visibility_matches(
         && previous.pending_vault == current.pending_vault
 }
 
+fn checkpoint_visibility_cannot_affect_unchanged_rows(
+    previous: &CheckpointVersion,
+    current: &CheckpointVersion,
+) -> bool {
+    previous.untracked_visibility_revision == current.untracked_visibility_revision
+        && previous.pending_vault == current.pending_vault
+        && previous
+            .deferred_rows
+            .as_ref()
+            .is_some_and(|rows| rows.is_empty())
+}
+
 // ── Pager-meta overflow chain (gh-477) ──────────────────────────────────────
 // When the serialized collection registry + cross-refs exceed a single page,
 // page 1 carries a native metadata-overflow header pointing at an overflow chain of
@@ -257,7 +269,7 @@ fn publish_paged_metadata(pager: &Pager, meta_data: &[u8]) -> Result<(), PagerEr
     }
     // Publish only after all children, data pages and proof paths are durable.
     pager.sync()?;
-    #[cfg(test)]
+    #[cfg(any(test, debug_assertions))]
     if std::env::var_os("REDDB_TEST_EXIT_BEFORE_CATALOG_ROOT_PUBLICATION").is_some() {
         std::process::exit(197);
     }
@@ -265,7 +277,7 @@ fn publish_paged_metadata(pager: &Pager, meta_data: &[u8]) -> Result<(), PagerEr
         page_id: root,
         digest,
     })?;
-    #[cfg(test)]
+    #[cfg(any(test, debug_assertions))]
     if std::env::var_os("REDDB_TEST_EXIT_AFTER_CATALOG_ROOT_PUBLICATION").is_some() {
         std::process::exit(198);
     }
@@ -567,14 +579,60 @@ impl UnifiedStore {
         if let Some((base, overlay)) = manager.backing_overlay(&mut encode) {
             use reddb_engine::storage::collection_read::{CollectionRead, MergedCollection};
             let merged = MergedCollection::new(base.as_ref(), overlay);
-            let mut cursor = merged.cursor()?;
-            let mut builder = CheckpointTreeBuilder::new(pager)?;
-            while let Some(record) = cursor.next_record(
+            let mut source = merged.cursor()?;
+            let mut cursor = previous
+                .map(|tree| tree.cursor_first())
+                .transpose()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            let mut matched = 0;
+            let mut builder = None;
+            while let Some(record) = source.next_record(
                 usize::try_from(self.config.resident_memory_bytes_max.unwrap_or(u64::MAX))
                     .unwrap_or(usize::MAX),
             )? {
-                builder.push((record.id.raw().to_be_bytes().to_vec(), record.bytes))?;
+                let record = (record.id.raw().to_be_bytes().to_vec(), record.bytes);
+                if builder.is_none() {
+                    if let Some(cursor) = cursor.as_mut() {
+                        if cursor
+                            .next()
+                            .map_err(|error| {
+                                StoreError::Io(std::io::Error::other(error.to_string()))
+                            })?
+                            .as_ref()
+                            == Some(&record)
+                        {
+                            matched += 1;
+                            continue;
+                        }
+                    }
+                    let mut replacement = CheckpointTreeBuilder::new(pager)?;
+                    if let Some(previous) = previous {
+                        replacement.copy_prefix(previous, matched)?;
+                    }
+                    builder = Some(replacement);
+                }
+                builder
+                    .as_mut()
+                    .expect("replacement initialized")
+                    .push(record)?;
             }
+            if builder.is_none() {
+                if let (Some(previous), Some(cursor)) = (previous, cursor.as_mut()) {
+                    if cursor
+                        .next()
+                        .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                        .is_none()
+                    {
+                        return Ok(Arc::clone(previous));
+                    }
+                }
+                let mut replacement = CheckpointTreeBuilder::new(pager)?;
+                if let Some(previous) = previous {
+                    replacement.copy_prefix(previous, matched)?;
+                }
+                builder = Some(replacement);
+            }
+            let mut builder = builder.expect("replacement or reused tree");
             builder.flush()?;
             return Ok(builder.tree);
         }
@@ -758,14 +816,12 @@ impl UnifiedStore {
                     .seal_page_proofs()
                     .map_err(|error| page_integrity(tree.root_page_id(), None, error.to_string()))?
                 {
-                    if root != 0 {
-                        if proofs.insert(root, proof).is_some_and(|old| old != proof) {
-                            return Err(page_integrity(
-                                root,
-                                None,
-                                "conflicting tree generation proofs",
-                            ));
-                        }
+                    if root != 0 && proofs.insert(root, proof).is_some_and(|old| old != proof) {
+                        return Err(page_integrity(
+                            root,
+                            None,
+                            "conflicting tree generation proofs",
+                        ));
                     }
                 }
             }
@@ -1672,6 +1728,7 @@ impl UnifiedStore {
                     let mut current = CheckpointVersion {
                         manager: Arc::downgrade(manager),
                         segments: manager.checkpoint_revisions(),
+                        entity_id_upper_bound: manager.identity_counters().0,
                         visibility_revision: 0,
                         untracked_visibility_revision: 0,
                         excluded_xids: Arc::default(),
@@ -1760,6 +1817,7 @@ impl UnifiedStore {
                     CheckpointVersion {
                         manager: Arc::downgrade(manager),
                         segments: manager.checkpoint_revisions(),
+                        entity_id_upper_bound: manager.identity_counters().0,
                         visibility_revision: 0,
                         untracked_visibility_revision: 0,
                         excluded_xids: Arc::default(),
@@ -2305,6 +2363,21 @@ impl UnifiedStore {
                         } else {
                             counters.map_or(0, |state| state.entities)
                         };
+                        if counters.is_some()
+                            && (persisted_entities == 0 || persisted_entities > i64::MAX as u64)
+                            && root_page > 0
+                        {
+                            persisted_entities = u64::try_from(btree.count().map_err(|err| {
+                                page_integrity(root_page, Some(name.clone()), err.to_string())
+                            })?)
+                            .map_err(|_| {
+                                page_integrity(
+                                    root_page,
+                                    Some(name.clone()),
+                                    "collection entity count exceeds u64",
+                                )
+                            })?;
+                        }
                         while counters.is_none() || hydrate_read_only {
                             let next = cursor
                                 .next_with_budget(
@@ -2461,6 +2534,7 @@ impl UnifiedStore {
                                     CheckpointVersion {
                                         manager: Arc::downgrade(manager),
                                         segments: manager.checkpoint_revisions(),
+                                        entity_id_upper_bound: manager.identity_counters().0,
                                         visibility_revision: 0,
                                         untracked_visibility_revision: 0,
                                         excluded_xids: Arc::default(),
@@ -2818,6 +2892,7 @@ impl UnifiedStore {
             let mut version = CheckpointVersion {
                 manager: Arc::downgrade(manager),
                 segments: manager.checkpoint_revisions(),
+                entity_id_upper_bound: manager.identity_counters().0,
                 visibility_revision,
                 untracked_visibility_revision,
                 excluded_xids: Arc::clone(&excluded),
@@ -2835,9 +2910,12 @@ impl UnifiedStore {
                 if hidden_graph_ids.is_empty()
                     && previous.manager.ptr_eq(&version.manager)
                     && previous.segments == version.segments
+                    && previous.entity_id_upper_bound == version.entity_id_upper_bound
                     && previous.format_version == version.format_version
                     && !previous.has_unprojected_rows
-                    && checkpoint_visibility_matches(previous, &version)
+                    && (manager.count() == 0
+                        || checkpoint_visibility_matches(previous, &version)
+                        || checkpoint_visibility_cannot_affect_unchanged_rows(previous, &version))
                 {
                     version.deferred_rows = previous.deferred_rows.clone();
                     collection_roots.push((name.clone(), tree.root_page_id()));
@@ -2997,6 +3075,24 @@ impl UnifiedStore {
             std::process::exit(196);
         }
         self.publish_reclaimable_trees(pager, &mut meta_data, &rebuilt_indices, &rebuilt_keys)?;
+        let published_entity_counts = if self.config.resident_memory_bytes_max.is_some() {
+            let resume = reddb_file::native_resume::decode_catalog_resume(&meta_data)
+                .map_err(|error| StoreError::Serialization(error.to_string()))?
+                .ok_or_else(|| {
+                    StoreError::Serialization(
+                        "disk-resident checkpoint omitted its resume catalog".into(),
+                    )
+                })?;
+            Some(
+                resume
+                    .collections
+                    .into_iter()
+                    .map(|(name, state)| (name, state.entities))
+                    .collect::<HashMap<_, _>>(),
+            )
+        } else {
+            None
+        };
 
         #[cfg(test)]
         if std::env::var_os("REDDB_TEST_EXIT_AFTER_UNDO_CATALOG_PUBLICATION").is_some() {
@@ -3033,6 +3129,17 @@ impl UnifiedStore {
                     .is_some_and(|version| !version.has_unprojected_rows)
                 {
                     if let Some(tree) = btree_indices.get(name) {
+                        let persisted_entities = published_entity_counts
+                            .as_ref()
+                            .and_then(|counts| counts.get(name))
+                            .copied()
+                            .ok_or_else(|| {
+                                page_integrity(
+                                    tree.root_page_id(),
+                                    Some(name.clone()),
+                                    "published resume catalog omitted collection count",
+                                )
+                            })?;
                         manager.install_backing(
                             Arc::new(
                                 {
@@ -3048,7 +3155,7 @@ impl UnifiedStore {
                             tree.root_page_id(),
                             self.format_version(),
                             usize::try_from(limit).unwrap_or(usize::MAX),
-                            manager.count() as u64,
+                            persisted_entities,
                         );
                         if let Some(version) = versions.get_mut(name) {
                             version.segments = manager.checkpoint_revisions();
@@ -4397,7 +4504,6 @@ mod checkpoint_work_tests {
             let mut metadata = read_meta_payload(&pager)
                 .expect("read catalog payload")
                 .expect("published catalog payload");
-            let bytes = metadata.as_mut_slice();
             let mut names = vec![("cfg_legacy", "red_config")];
             if canonical_identity {
                 names.push(("cfg.canon_", "red.config"));
@@ -4420,18 +4526,15 @@ mod checkpoint_work_tests {
             for (source, destination) in names {
                 let (source, destination) = (source.as_bytes(), destination.as_bytes());
                 let mut replacements = 0;
-                for offset in 0..=bytes.len() - source.len() {
-                    if &bytes[offset..offset + source.len()] == source {
-                        bytes[offset..offset + destination.len()].copy_from_slice(destination);
+                for offset in 0..=metadata.len() - source.len() {
+                    if &metadata[offset..offset + source.len()] == source {
+                        metadata[offset..offset + destination.len()].copy_from_slice(destination);
                         replacements += 1;
                     }
                 }
                 assert!(replacements >= 1, "catalog must contain the source name");
             }
-            publish_paged_metadata(&pager, &metadata).expect("write duplicate catalog");
-            pager.sync().expect("sync duplicate catalog");
             if alias_case.is_some() {
-                let mut metadata = read_meta_payload(&pager).unwrap().unwrap();
                 let resume = reddb_file::native_resume::decode_catalog_resume(&metadata)
                     .unwrap()
                     .unwrap();
@@ -4441,9 +4544,9 @@ mod checkpoint_work_tests {
                     .unwrap();
                 metadata.truncate(trailer);
                 reddb_file::native_resume::encode_catalog_resume(&mut metadata, &resume).unwrap();
-                publish_paged_metadata(&pager, &metadata).unwrap();
-                pager.sync().unwrap();
             }
+            publish_paged_metadata(&pager, &metadata).expect("publish duplicate catalog");
+            pager.sync().expect("sync duplicate catalog");
         }
         let mut config_names = vec![("cfg_legacy", "red_config")];
         if canonical_identity {
@@ -5401,6 +5504,36 @@ mod checkpoint_work_tests {
                     .unwrap();
                 file.seek(SeekFrom::Start(3 * PAGE_SIZE as u64)).unwrap();
                 file.write_all(&frame).unwrap();
+                let selected =
+                    reddb_file::select_paged_superblock(&bytes).expect("valid fixture superblock");
+                let start = selected.copy_index * reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE;
+                let mut image = [0; reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE];
+                image
+                    .copy_from_slice(&bytes[start..start + reddb_file::PAGED_SUPERBLOCK_SLOT_SIZE]);
+                reddb_file::file_format::set_database_header_dwb_publication(
+                    &mut image,
+                    Some(reddb_file::file_format::DwbPublication {
+                        phase: reddb_file::file_format::DwbPhase::Ready,
+                        frame_bytes: u32::try_from(frame.len()).expect("bounded DWB fixture"),
+                        digest: reddb_file::file_format::dwb_frame_digest(&frame),
+                    }),
+                )
+                .expect("authorize fixture DWB");
+                for step in 1..=reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT {
+                    let copy =
+                        (selected.copy_index + step) % reddb_file::PAGED_SUPERBLOCK_SLOT_COUNT;
+                    reddb_file::seal_paged_superblock_slot(
+                        &mut image,
+                        copy,
+                        selected.generation + step as u64,
+                    )
+                    .expect("seal fixture authority");
+                    file.seek(SeekFrom::Start(reddb_file::paged_superblock_slot_offset(
+                        copy,
+                    )))
+                    .unwrap();
+                    file.write_all(&image).unwrap();
+                }
                 // Make raw-source identity inspection impossible: only the staged
                 // DWB replay can restore the legacy configuration leaf.
                 file.seek(SeekFrom::Start(offset as u64)).unwrap();

@@ -1197,6 +1197,31 @@ mod tests {
                 .len(),
             1
         );
+        let retry_member = ChangeRecord::decode(
+            &transaction
+                .refresh_records
+                .as_ref()
+                .expect("transaction members")[0],
+        )
+        .expect("transaction member should remain decodable");
+        UnifiedStore::deserialize_entity(
+            retry_member
+                .entity_bytes
+                .as_deref()
+                .expect("update member should contain an entity"),
+            replica.db().store().format_version(),
+        )
+        .expect("retry entity should remain decodable");
+        for version in replica
+            .db()
+            .store()
+            .table_row_versions_by_logical_id("users", EntityId::new(1))
+        {
+            let bytes =
+                UnifiedStore::serialize_entity(&version, replica.db().store().format_version());
+            UnifiedStore::deserialize_entity(&bytes, replica.db().store().format_version())
+                .expect("resident version should remain serializable after failed apply");
+        }
         applier
             .apply(replica.db().as_ref(), &transaction, ApplyMode::Replica)
             .expect("transaction retry should apply");

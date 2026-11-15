@@ -6,6 +6,63 @@ use std::sync::{mpsc, Arc, Mutex};
 use reddb_server::storage::backend::{BackendError, LocalBackend, RemoteBackend};
 use reddb_server::storage::wal::PointInTimeRecovery;
 use reddb_server::{RedDBOptions, RedDBRuntime};
+use reddb_types::{
+    BiometricFormat, BiometricSample, BitSignature, FeatureVector, LandmarkSet, Value,
+};
+
+const BIOMETRIC_SPACE: [u8; 16] = [0x61; 16];
+
+fn fingerprint_sample() -> BiometricSample {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"FMR\0 20\0");
+    bytes.extend_from_slice(&36_u32.to_be_bytes());
+    bytes.extend_from_slice(&0_u16.to_be_bytes());
+    bytes.extend_from_slice(&500_u16.to_be_bytes());
+    bytes.extend_from_slice(&500_u16.to_be_bytes());
+    bytes.extend_from_slice(&197_u16.to_be_bytes());
+    bytes.extend_from_slice(&197_u16.to_be_bytes());
+    bytes.extend_from_slice(&[1, 0]);
+    bytes.extend_from_slice(&[1, 0, 100, 1]);
+    bytes.extend_from_slice(&(100_u16 | 0x4000).to_be_bytes());
+    bytes.extend_from_slice(&120_u16.to_be_bytes());
+    bytes.extend_from_slice(&[10, 90, 0, 0]);
+    BiometricSample::with_format(BiometricFormat::FingerprintIso19794_2, bytes)
+        .expect("standard fingerprint minutiae")
+}
+
+fn typed_values() -> [Value; 6] {
+    let asn1 = vec![0x30, 0x03, 0x02, 0x01, 0x01];
+    [
+        Value::Fingerprint(fingerprint_sample()),
+        Value::Face(
+            BiometricSample::with_format(BiometricFormat::FaceIso39794_5, asn1.clone())
+                .expect("standard face record"),
+        ),
+        Value::Iris(
+            BiometricSample::with_format(BiometricFormat::IrisIso39794_6, asn1)
+                .expect("standard iris record"),
+        ),
+        Value::FeatureVector(
+            FeatureVector::new(BIOMETRIC_SPACE, vec![1.0, -0.5]).expect("feature vector"),
+        ),
+        Value::BitSignature(
+            BitSignature::new(BIOMETRIC_SPACE, vec![0xaa, 0x55], Some(vec![0xff, 0x0f]))
+                .expect("bit signature"),
+        ),
+        Value::LandmarkSet(
+            LandmarkSet::new(
+                BIOMETRIC_SPACE,
+                2,
+                vec![
+                    ([-1.0, 1.0, 0.0], [1.0, 1.0, 0.0]),
+                    ([-2.0, -1.0, 0.0], [2.0, -1.0, 0.0]),
+                ],
+                vec![[0.0, 2.0, 0.0]],
+            )
+            .expect("landmark set"),
+        ),
+    ]
+}
 
 struct SplitSnapshotBackend {
     started: Mutex<Option<mpsc::Sender<()>>>,
@@ -99,6 +156,20 @@ fn populated_single_file_backup_restores_into_an_independent_store() {
             ))
             .expect("synthetic row");
     }
+    runtime
+        .execute_query(
+            "CREATE TABLE backup_biometrics (id INTEGER, print FINGERPRINT, face FACE, iris IRIS, features FEATURE_VECTOR, signature BIT_SIGNATURE, landmarks LANDMARK_SET)",
+        )
+        .expect("typed schema");
+    let values = typed_values();
+    let mut parameters = vec![Value::Integer(1)];
+    parameters.extend(values.iter().cloned());
+    runtime
+        .execute_query_with_params(
+            "INSERT INTO backup_biometrics (id,print,face,iris,features,signature,landmarks) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+            &parameters,
+        )
+        .expect("typed backup row");
     let expected = runtime
         .execute_query("SELECT id, name FROM backup_rows ORDER BY id")
         .expect("source readback")
@@ -130,6 +201,30 @@ fn populated_single_file_backup_restores_into_an_independent_store() {
         rows(&expected),
         "all populated single-file rows must survive backup/restore"
     );
+    let restored_typed = restored
+        .execute_query(
+            "SELECT print,face,iris,features,signature,landmarks FROM backup_biometrics WHERE id = 1",
+        )
+        .expect("restored typed readback")
+        .result;
+    assert_eq!(restored_typed.records.len(), 1);
+    for (column, expected) in [
+        "print",
+        "face",
+        "iris",
+        "features",
+        "signature",
+        "landmarks",
+    ]
+    .into_iter()
+    .zip(values.iter())
+    {
+        assert_eq!(
+            restored_typed.records[0].get(column),
+            Some(expected),
+            "{column} must survive operational backup/restore"
+        );
+    }
 }
 
 #[test]

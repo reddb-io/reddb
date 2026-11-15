@@ -160,6 +160,38 @@ impl HnswIndex {
         self.nodes.len()
     }
 
+    /// Conservative resident allocation estimate used by index admission.
+    /// Hash-table control bytes and allocator metadata vary by platform, so
+    /// this is intentionally an estimate rather than a process-RSS claim.
+    pub fn memory_bytes(&self) -> u64 {
+        let mut bytes = std::mem::size_of::<Self>() as u64;
+        bytes = bytes.saturating_add(
+            self.nodes
+                .capacity()
+                .saturating_mul(std::mem::size_of::<(NodeId, HnswNode)>()) as u64,
+        );
+        for node in self.nodes.values() {
+            bytes = bytes.saturating_add(
+                node.vector
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<f32>()) as u64,
+            );
+            bytes = bytes.saturating_add(
+                node.connections
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Vec<NodeId>>()) as u64,
+            );
+            for connections in &node.connections {
+                bytes = bytes.saturating_add(
+                    connections
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<NodeId>()) as u64,
+                );
+            }
+        }
+        bytes
+    }
+
     /// Check if the index is empty
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()

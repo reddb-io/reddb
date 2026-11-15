@@ -31,5 +31,9 @@ criterion = { version = "0.8", features = ["html_reports"] }
 name = "array_display_bench"
 harness = false
 
+[[bench]]
+name = "biometric_value_bench"
+harness = false
+
 [lints]
 workspace = true

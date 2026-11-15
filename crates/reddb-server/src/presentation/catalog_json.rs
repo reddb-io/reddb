@@ -1629,6 +1629,12 @@ fn schema_data_type_str(data_type: reddb_types::DataType) -> &'static str {
         reddb_types::DataType::Password => "password",
         reddb_types::DataType::TextZstd => "text",
         reddb_types::DataType::BlobZstd => "blob",
+        reddb_types::DataType::Fingerprint => "fingerprint",
+        reddb_types::DataType::Face => "face",
+        reddb_types::DataType::Iris => "iris",
+        reddb_types::DataType::FeatureVector => "feature_vector",
+        reddb_types::DataType::BitSignature => "bit_signature",
+        reddb_types::DataType::LandmarkSet => "landmark_set",
     }
 }
 

@@ -44,7 +44,27 @@ impl UnifiedStore {
         let mut inserted = Vec::new();
         let capture = StoreWalCaptureGuard::begin(Some(session));
         let staged = (|| {
-            for (mut entity, previous) in rows {
+            for (entity, previous) in rows {
+                if let [id] = previous.as_slice() {
+                    // Boot changes volatile system values on every reopen. Keep
+                    // their physical identity so the next sparse checkpoint
+                    // projects one upsert instead of an insert plus a delete.
+                    let mut replacement = self
+                        .get("red.config", *id)
+                        .ok_or(StoreError::EntityNotFound(*id))?;
+                    replacement.data = entity.data;
+                    let action = StoreWalAction::upsert_entity(
+                        "red.config",
+                        &replacement,
+                        self.get_metadata("red.config", *id).as_ref(),
+                        self.format_version(),
+                    );
+                    inserted.push(*id);
+                    self.apply_replayed_action(&action, false)?;
+                    self.finish_paged_write([action])?;
+                    continue;
+                }
+                let mut entity = entity;
                 entity.id = self.next_entity_id();
                 inserted.push(entity.id);
                 self.insert_auto("red.config", entity)?;

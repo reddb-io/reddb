@@ -210,8 +210,13 @@ fn canonicalize_file_uri(input: &str, cwd: &Path) -> Result<String, String> {
 
     let rendered = normalized
         .to_str()
-        .ok_or_else(|| "resolved path is not valid UTF-8".to_string())?;
-    Ok(format!("file://{rendered}"))
+        .ok_or_else(|| "resolved path is not valid UTF-8".to_string())?
+        .replace('\\', "/");
+    if rendered.starts_with('/') {
+        Ok(format!("file://{rendered}"))
+    } else {
+        Ok(format!("file:///{rendered}"))
+    }
 }
 
 /// The production [`DeepLinkEnv`]: probes the OS for the `redui://` handler and

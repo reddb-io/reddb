@@ -1644,10 +1644,8 @@ mod tests {
     #[test]
     fn rest_kv_index_applies_snapshot_before_projecting_values() {
         use crate::runtime::execution_context::{CurrentSnapshotGuard, SnapshotContext};
-        use crate::storage::transaction::snapshot::{Snapshot, SnapshotManager};
         use crate::storage::{EntityData, EntityId, RowData, UnifiedEntity};
         use std::collections::HashSet;
-        use std::sync::Arc;
 
         let server = make_server();
         server
@@ -1660,11 +1658,18 @@ mod tests {
         let db = server.runtime.db();
         let store = db.store();
         let manager = store.get_collection("snapshots").expect("manager");
+        let snapshot_manager = server.runtime.snapshot_manager();
+        let old_xid = snapshot_manager.begin();
+        snapshot_manager.commit(old_xid);
+        let pending_xid = snapshot_manager.begin();
+        let (snapshot, _retention) = snapshot_manager.fresh_retained_snapshot();
+        let new_xid = snapshot_manager.begin();
+        snapshot_manager.commit(new_xid);
         for (id, key, value, xmin, xmax) in [
-            (1000, "changed", "old", 3, 12),
-            (1001, "deleted", "old", 3, 12),
-            (1002, "changed", "new", 12, 0),
-            (1003, "pending", "uncommitted", 4, 0),
+            (1000, "changed", "old", old_xid, new_xid),
+            (1001, "deleted", "old", old_xid, new_xid),
+            (1002, "changed", "new", new_xid, 0),
+            (1003, "pending", "uncommitted", pending_xid, 0),
         ] {
             let mut entity =
                 UnifiedEntity::table_row(EntityId::new(id), "snapshots", id, Vec::new());
@@ -1680,11 +1685,8 @@ mod tests {
         {
             let _snapshot = CurrentSnapshotGuard::install(SnapshotContext {
                 branch: None,
-                snapshot: Snapshot {
-                    xid: 10,
-                    in_progress: HashSet::from([4]),
-                },
-                manager: Arc::new(SnapshotManager::new()),
+                snapshot,
+                manager: snapshot_manager.clone(),
                 own_xids: HashSet::new(),
                 requires_index_fallback: false,
                 serializable_reader: None,
@@ -1706,6 +1708,7 @@ mod tests {
             Some("new")
         );
         assert_eq!(server.handle_get_kv("snapshots", "deleted").status, 404);
+        snapshot_manager.rollback(pending_xid);
     }
 
     fn post_bulk_rows(server: &RedDBServer, collection: &str, body: &str) -> HttpResponse {

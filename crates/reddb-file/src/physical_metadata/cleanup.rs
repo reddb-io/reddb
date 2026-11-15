@@ -1,4 +1,6 @@
 use super::*;
+use std::fs;
+use std::path::Path;
 
 /// Retire the recognized legacy physical metadata files after their contents
 /// have been checkpointed inside the database. Never remove similarly named

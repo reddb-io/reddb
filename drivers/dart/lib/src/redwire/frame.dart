@@ -97,6 +97,8 @@ class MessageKind {
 
 /// Server feature bitmask: QueryWithParams frame support.
 const int FEATURE_PARAMS = 0x00000001;
+const int FEATURE_BIOMETRIC_PARAMS = 0x00000008;
+const int FEATURE_LANDMARK_PARAMS = 0x00000010;
 
 /// Bit values for the frame `flags` byte.
 class Flags {
@@ -197,10 +199,7 @@ Uint8List encodeFrame(Frame frame, {ZstdCodec? zstd}) {
 ///
 /// Throws [ProtocolError] / [UnknownFlags] / [CompressedButNoZstd] on
 /// malformed input.
-({Frame frame, int consumed})? decodeFrame(
-  Uint8List bytes, {
-  ZstdCodec? zstd,
-}) {
+({Frame frame, int consumed})? decodeFrame(Uint8List bytes, {ZstdCodec? zstd}) {
   if (bytes.length < FRAME_HEADER_SIZE) return null;
   final header = FrameHeader.fromBytes(
     Uint8List.sublistView(bytes, 0, FRAME_HEADER_SIZE),

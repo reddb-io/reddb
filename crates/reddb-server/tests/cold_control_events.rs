@@ -256,7 +256,7 @@ fn cold_audit_rejects_oversized_decode_and_releases_scratch() {
 #[test]
 fn cold_audit_does_not_hide_corrupt_backing_pages() {
     use reddb_engine::storage::page::{Page, PageType};
-    let (_directory, runtime) = cold_fixture(3, 128);
+    let (directory, runtime) = cold_fixture(3, 128);
     let manager = runtime
         .db()
         .store()
@@ -275,6 +275,21 @@ fn cold_audit_does_not_hide_corrupt_backing_pages() {
     let error = result.expect_err("corruption must not look like an empty ledger");
     assert!(error.to_string().to_lowercase().contains("page"), "{error}");
     assert_no_query_buffers(&runtime);
+    let error = runtime
+        .execute_query("SELECT * FROM red.control_events")
+        .expect_err("proof mutation must fence the open runtime");
+    assert!(
+        error.to_string().contains("reopen before further access"),
+        "unexpected fenced-runtime error: {error}"
+    );
+
+    drop(manager);
+    drop(pager);
+    drop(runtime);
+    let options = RedDBOptions::persistent(directory.path().join("audit.rdb"))
+        .with_memory_budget(32 * 1024 * 1024)
+        .with_bounded_disk_residency(true);
+    let runtime = RedDBRuntime::with_options(options).expect("reopen restored fixture");
     assert_eq!(
         runtime
             .execute_query("SELECT * FROM red.control_events")

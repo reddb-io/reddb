@@ -48,6 +48,9 @@ impl<'a> Parser<'a> {
                 IndexMethod::Bitmap => "BITMAP",
                 IndexMethod::Spatial => "SPATIAL",
                 IndexMethod::H3 { .. } => "H3",
+                IndexMethod::Hnsw => "HNSW",
+                IndexMethod::Hamming => "HAMMING",
+                IndexMethod::Minutiae => "MINUTIAE",
                 _ => "this",
             };
             return Err(ParseError::new(
@@ -127,10 +130,13 @@ impl<'a> Parser<'a> {
                         ));
                     }
                     "SPATIAL" => IndexMethod::Spatial,
+                    "HNSW" => IndexMethod::Hnsw,
+                    "HAMMING" => IndexMethod::Hamming,
+                    "MINUTIAE" => IndexMethod::Minutiae,
                     _ => {
                         return Err(ParseError::new(
                             format!(
-                                "unknown index method '{}', expected HASH, BTREE, BITMAP, SPATIAL, or H3",
+                                "unknown index method '{}', expected HASH, BTREE, BITMAP, SPATIAL, H3, HNSW, HAMMING, or MINUTIAE",
                                 name
                             ),
                             self.position(),
@@ -141,7 +147,9 @@ impl<'a> Parser<'a> {
                 Ok(method)
             }
             other => Err(ParseError::expected(
-                vec!["HASH", "BTREE", "BITMAP", "SPATIAL", "H3"],
+                vec![
+                    "HASH", "BTREE", "BITMAP", "SPATIAL", "H3", "HNSW", "HAMMING", "MINUTIAE",
+                ],
                 &other,
                 self.position(),
             )),

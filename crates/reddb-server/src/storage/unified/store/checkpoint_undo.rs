@@ -56,7 +56,7 @@ impl StoreCommitCoordinator {
             let (_, record) = match item {
                 Ok(record) => record,
                 Err(error)
-                    if error.kind() == io::ErrorKind::UnexpectedEof && journal.is_empty() =>
+                    if error.kind() == io::ErrorKind::UnexpectedEof && active_epoch.is_none() =>
                 {
                     return Ok(());
                 }

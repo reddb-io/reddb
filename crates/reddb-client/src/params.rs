@@ -46,6 +46,12 @@ pub enum Value {
     Timestamp(i64),
     /// Raw 16-byte UUID.
     Uuid([u8; 16]),
+    Fingerprint(reddb_types::BiometricSample),
+    Face(reddb_types::BiometricSample),
+    Iris(reddb_types::BiometricSample),
+    FeatureVector(reddb_types::FeatureVector),
+    BitSignature(reddb_types::BitSignature),
+    LandmarkSet(reddb_types::LandmarkSet),
 }
 
 impl Value {
@@ -81,6 +87,23 @@ impl Value {
             Value::Json(j) => json_to_serde(&j),
             Value::Timestamp(secs) => serde_json::json!({ "$ts": secs }),
             Value::Uuid(bytes) => serde_json::json!({ "$uuid": format_uuid(&bytes) }),
+            Value::Fingerprint(sample) => biometric_json("fingerprint", &sample),
+            Value::Face(sample) => biometric_json("face", &sample),
+            Value::Iris(sample) => biometric_json("iris", &sample),
+            Value::FeatureVector(vector) => serde_json::json!({
+                "$feature_vector": {
+                    "space_id": hex_encode(&vector.space_id()),
+                    "values": vector.values(),
+                }
+            }),
+            Value::BitSignature(signature) => serde_json::json!({
+                "$bit_signature": {
+                    "space_id": hex_encode(&signature.space_id()),
+                    "bits": hex_encode(signature.bits()),
+                    "mask": hex_encode(signature.mask()),
+                }
+            }),
+            Value::LandmarkSet(landmarks) => landmark_json(&landmarks),
         }
     }
 
@@ -101,8 +124,49 @@ impl Value {
             Value::Json(j) => SV::Json(j.to_json_string().into_bytes()),
             Value::Timestamp(secs) => SV::Timestamp(secs),
             Value::Uuid(bytes) => SV::Uuid(bytes),
+            Value::Fingerprint(value) => SV::Fingerprint(value),
+            Value::Face(value) => SV::Face(value),
+            Value::Iris(value) => SV::Iris(value),
+            Value::FeatureVector(value) => SV::FeatureVector(value),
+            Value::BitSignature(value) => SV::BitSignature(value),
+            Value::LandmarkSet(value) => SV::LandmarkSet(value),
         }
     }
+}
+
+fn landmark_json(landmarks: &reddb_types::LandmarkSet) -> serde_json::Value {
+    let dimensions = usize::from(landmarks.dimensions());
+    let point = |coordinates: &reddb_types::LandmarkCoordinates| coordinates[..dimensions].to_vec();
+    serde_json::json!({
+        "$landmark_set": {
+            "space_id": hex_encode(&landmarks.space_id()),
+            "dimensions": landmarks.dimensions(),
+            "pairs": landmarks.pairs().iter().map(|(left, right)| {
+                serde_json::json!({"left": point(left), "right": point(right)})
+            }).collect::<Vec<_>>(),
+            "midline": landmarks.midline().iter().map(point).collect::<Vec<_>>(),
+        }
+    })
+}
+
+fn biometric_json(modality: &str, sample: &reddb_types::BiometricSample) -> serde_json::Value {
+    serde_json::json!({
+        "$biometric": {
+            "modality": modality,
+            "format": sample.format().standard_name(),
+            "data": hex_encode(sample.bytes()),
+        }
+    })
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(DIGITS[(byte >> 4) as usize] as char);
+        encoded.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 /// Ergonomic conversions so callers can write
@@ -352,6 +416,22 @@ fn format_uuid(bytes: &[u8; 16]) -> String {
 mod tests {
     use super::*;
 
+    fn iso_fmr() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"FMR\0 20\0");
+        bytes.extend_from_slice(&36_u32.to_be_bytes());
+        bytes.extend_from_slice(&0_u16.to_be_bytes());
+        bytes.extend_from_slice(&500_u16.to_be_bytes());
+        bytes.extend_from_slice(&500_u16.to_be_bytes());
+        bytes.extend_from_slice(&197_u16.to_be_bytes());
+        bytes.extend_from_slice(&197_u16.to_be_bytes());
+        bytes.extend_from_slice(&[1, 0]);
+        bytes.extend_from_slice(&[1, 0, 100, 1]);
+        bytes.extend_from_slice(&[0x40, 1, 0, 2, 3, 90]);
+        bytes.extend_from_slice(&[0, 0]);
+        bytes
+    }
+
     #[test]
     fn into_value_primitives() {
         assert_eq!(true.into_value(), Value::Bool(true));
@@ -417,6 +497,58 @@ mod tests {
     }
 
     #[test]
+    fn json_param_envelopes_cover_biometrics_and_features() {
+        let fingerprint = reddb_types::BiometricSample::with_format(
+            reddb_types::BiometricFormat::FingerprintIso19794_2,
+            iso_fmr(),
+        )
+        .expect("valid fingerprint");
+        let biometric = Value::Fingerprint(fingerprint).into_json_param();
+        assert_eq!(
+            biometric["$biometric"]["modality"].as_str(),
+            Some("fingerprint")
+        );
+        assert_eq!(
+            biometric["$biometric"]["format"].as_str(),
+            Some("ISO/IEC 19794-2")
+        );
+
+        let vector =
+            reddb_types::FeatureVector::new([0x11; 16], vec![1.0, -2.0]).expect("valid feature");
+        let feature = Value::FeatureVector(vector).into_json_param();
+        assert_eq!(
+            feature["$feature_vector"]["space_id"].as_str(),
+            Some("11111111111111111111111111111111")
+        );
+
+        let signature = reddb_types::BitSignature::new([0x22; 16], vec![0xaa], Some(vec![0x0f]))
+            .expect("valid signature");
+        let bits = Value::BitSignature(signature).into_json_param();
+        assert_eq!(bits["$bit_signature"]["bits"].as_str(), Some("aa"));
+        assert_eq!(bits["$bit_signature"]["mask"].as_str(), Some("0f"));
+
+        let landmarks = reddb_types::LandmarkSet::new(
+            [0x33; 16],
+            2,
+            vec![
+                ([-2.0, 1.0, 0.0], [2.0, 1.0, 0.0]),
+                ([-1.0, -1.0, 0.0], [1.0, -1.0, 0.0]),
+            ],
+            vec![[0.0, 2.0, 0.0]],
+        )
+        .expect("valid landmarks");
+        let geometry = Value::LandmarkSet(landmarks).into_json_param();
+        assert_eq!(
+            geometry["$landmark_set"]["space_id"].as_str(),
+            Some("33333333333333333333333333333333")
+        );
+        assert_eq!(
+            geometry["$landmark_set"]["pairs"].as_array().map(Vec::len),
+            Some(2)
+        );
+    }
+
+    #[test]
     fn base64_encode_known_vectors() {
         // RFC 4648 §10 test vectors.
         assert_eq!(base64_encode(b""), "");
@@ -460,5 +592,19 @@ mod tests {
             panic!()
         };
         assert_eq!(b, [0u8; 16]);
+
+        let asn1 = vec![0x30, 0x03, 0x02, 0x01, 0x01];
+        let face = reddb_types::BiometricSample::with_format(
+            reddb_types::BiometricFormat::FaceIso39794_5,
+            asn1.clone(),
+        )
+        .expect("valid face");
+        let iris = reddb_types::BiometricSample::with_format(
+            reddb_types::BiometricFormat::IrisIso39794_6,
+            asn1,
+        )
+        .expect("valid iris");
+        assert!(matches!(Value::Face(face).into_schema_value(), SV::Face(_)));
+        assert!(matches!(Value::Iris(iris).into_schema_value(), SV::Iris(_)));
     }
 }

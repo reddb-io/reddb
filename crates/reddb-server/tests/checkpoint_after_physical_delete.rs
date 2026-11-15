@@ -1,4 +1,4 @@
-//! Physical deletion already updates the paged tree; unchanged survivors need no re-encoding.
+//! Physical deletion rebuilds an immutable proof-bearing generation with bounded allocation.
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -51,7 +51,7 @@ unsafe impl GlobalAlloc for TrackedAllocator {
 }
 
 #[test]
-fn physical_delete_checkpoint_does_not_reencode_wide_survivors() {
+fn physical_delete_checkpoint_rebuilds_wide_survivors_with_bounded_allocation() {
     let directory = tempfile::tempdir().expect("isolated fixture");
     let path = directory.path().join("data.rdb");
     let store = UnifiedStore::open_with_config(
@@ -91,9 +91,12 @@ fn physical_delete_checkpoint_does_not_reencode_wide_survivors() {
     checkpoint.expect("checkpoint after physical deletion");
     let allocated = ALLOCATED.load(Ordering::Relaxed);
     eprintln!("checkpoint_after_delete_allocated_bytes={allocated}");
+    // Proof-bearing generations are immutable, so publication copies the live
+    // rows instead of overwriting their pages. Keep allocator growth close to
+    // the eight MiB live payload and reject an unbounded second materialization.
     assert!(
-        allocated < 4 * 1024 * 1024,
-        "checkpoint re-encoded unchanged wide survivors: {allocated} allocated bytes"
+        allocated < 12 * 1024 * 1024,
+        "checkpoint exceeded bounded copy-on-write allocation: {allocated} bytes"
     );
 
     // A direct manager edit is not covered by the preceding paged generation.

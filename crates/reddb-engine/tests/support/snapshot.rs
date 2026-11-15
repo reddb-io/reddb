@@ -462,8 +462,7 @@ fn native_committed_projection() {
     old.xmax = 30;
     let mut active = UnifiedEntity::table_row(EntityId::new(2), "rows", 2, vec![]);
     active.xmin = 30;
-    let mut graph = UnifiedEntity::graph_node(EntityId::new(3), "kept", "node", HashMap::new());
-    graph.xmin = 30;
+    let graph = UnifiedEntity::graph_node(EntityId::new(3), "kept", "node", HashMap::new());
     let pending = UnifiedEntity::graph_node(EntityId::new(4), "pending", "node", HashMap::new());
     let mut vector = UnifiedEntity::vector(EntityId::new(5), "vectors", vec![1.0]);
     vector.xmin = 30;

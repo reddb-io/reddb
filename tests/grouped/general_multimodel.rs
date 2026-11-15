@@ -39,6 +39,9 @@ mod e2e_meta_json_sidecar_policy;
 #[path = "multimodel_query/e2e_multimodel_flow.rs"]
 mod e2e_multimodel_flow;
 
+#[path = "multimodel_query/e2e_biometric_search.rs"]
+mod e2e_biometric_search;
+
 #[path = "multimodel_query/e2e_nested_queries_multimodel_json.rs"]
 mod e2e_nested_queries_multimodel_json;
 

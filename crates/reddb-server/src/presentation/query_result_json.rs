@@ -364,6 +364,12 @@ fn coarse_type_for(value: &StorageValue) -> &'static str {
         StorageValue::Json(_) | StorageValue::Money { .. } => "object",
         StorageValue::Temperature(_) => "object",
         StorageValue::Vector(_) => "vector",
+        StorageValue::FeatureVector(_) => "vector",
+        StorageValue::Fingerprint(_)
+        | StorageValue::Face(_)
+        | StorageValue::Iris(_)
+        | StorageValue::BitSignature(_)
+        | StorageValue::LandmarkSet(_) => "object",
         StorageValue::NodeRef(_)
         | StorageValue::EdgeRef(_)
         | StorageValue::VectorRef(_, _)

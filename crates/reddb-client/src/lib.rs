@@ -1231,9 +1231,7 @@ impl QueueWorker<'_> {
                 };
                 loop {
                     tokio::time::sleep(period).await;
-                    if let Err(error) = self.queue.extend(&message.delivery_id).await {
-                        return Err(error);
-                    }
+                    self.queue.extend(&message.delivery_id).await?;
                 }
             };
             tokio::pin!(heartbeat);

@@ -63,6 +63,14 @@ filter = 'test(=multi_trunk_recovery_reuses_every_page_without_growing)'
 threads-required = "num-cpus"
 slow-timeout = { period = "60s", terminate-after = 10 }
 
+# Authenticated full-generation replacement intentionally exercises 24 real
+# checkpoints over a cold four-page cache. Preserve the complete reuse loop,
+# but isolate its finite fsync workload from the shared integration pool.
+[[profile.default.overrides]]
+filter = 'test(=repeated_changed_checkpoints_reuse_retired_pages)'
+threads-required = "num-cpus"
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 # The full checkpoint/recovery crash matrix repeatedly starts child processes
 # and fsyncs real files. The shared runner reached its final cases at the 120s
 # cutoff. Both resident and cold variants run the same complete matrix.
@@ -105,9 +113,15 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 retries = 0
 
 [[profile.ci.overrides]]
-filter = 'test(=storage::unified::store::commit::storage_apocalypse::checkpoint_and_recovery_crash_matrix) | test(=storage::unified::store::commit::storage_apocalypse::cold_checkpoint_and_recovery_crash_matrix)'
+filter = 'test(=repeated_changed_checkpoints_reuse_retired_pages)'
 threads-required = "num-cpus"
 slow-timeout = { period = "60s", terminate-after = 5 }
+retries = 0
+
+[[profile.ci.overrides]]
+filter = 'test(=storage::unified::store::commit::storage_apocalypse::checkpoint_and_recovery_crash_matrix) | test(=storage::unified::store::commit::storage_apocalypse::cold_checkpoint_and_recovery_crash_matrix)'
+threads-required = "num-cpus"
+slow-timeout = { period = "60s", terminate-after = 10 }
 retries = 0
 
 [profile.ci.junit]

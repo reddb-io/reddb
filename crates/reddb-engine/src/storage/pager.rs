@@ -997,6 +997,36 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         Ok(())
     }
 
+    /// Replace a page whose current image the caller already read. Ownership
+    /// recovery needs that exact prior image, so avoid a second cache lookup.
+    pub(crate) fn write_page_replacing(
+        &self,
+        page_id: u32,
+        mut page: Page,
+        previous: &Page,
+    ) -> Result<(), PagerError> {
+        let _ownership = self.lock_ownership_mutations();
+        self.ensure_writeback_available()?;
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+        pager_io::check_page_identity(&page, page_id)?;
+        pager_io::check_page_identity(previous, page_id)?;
+        let mut required = false;
+        self.record_ownership(|wal| {
+            required = wal.needs_page_image(page_id)?;
+            Ok(())
+        })?;
+        if required {
+            self.record_ownership(|wal| wal.capture_page_image(previous))?;
+        }
+        page.update_checksum();
+        if let Some(dirty_page) = self.cache.insert_dirty(page_id, page) {
+            self.write_evicted_dirty_page(dirty_page, Some(page_id))?;
+        }
+        Ok(())
+    }
+
     /// Write a page without updating checksum (for encrypted pages)
     ///
     /// Use this when the page content has its own integrity protection
@@ -1204,8 +1234,12 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         Ok(id)
     }
 
-    /// Reserve a contiguous extent of vector pages.
-    pub fn reserve_contig_extent(&self, n_pages: u32) -> Result<ExtentId, PagerError> {
+    /// Reserve a contiguous extent of pages without consulting the freelist.
+    pub fn reserve_contig_pages(
+        &self,
+        page_type: PageType,
+        n_pages: u32,
+    ) -> Result<ExtentId, PagerError> {
         let _ownership = self.lock_ownership_mutations();
         self.ensure_writeback_available()?;
         if self.config.read_only {
@@ -1230,7 +1264,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         };
 
         for page_id in start_page..start_page + n_pages {
-            let mut page = Page::new(PageType::Vector, page_id);
+            let mut page = Page::new(page_type, page_id);
             page.update_checksum();
             if let Some(dirty_page) = self.cache.insert_dirty(page_id, page) {
                 self.write_evicted_dirty_page(dirty_page, Some(page_id))?;
@@ -1241,6 +1275,11 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             start_page,
             n_pages,
         })
+    }
+
+    /// Reserve a contiguous extent of vector pages.
+    pub fn reserve_contig_extent(&self, n_pages: u32) -> Result<ExtentId, PagerError> {
+        self.reserve_contig_pages(PageType::Vector, n_pages)
     }
 
     /// Free a page (return to freelist)

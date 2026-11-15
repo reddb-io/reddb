@@ -380,6 +380,7 @@ mod tests {
             columns,
             method: IndexMethodKind::Hash,
             unique: false,
+            similarity_contract: None,
         });
         store
             .hash

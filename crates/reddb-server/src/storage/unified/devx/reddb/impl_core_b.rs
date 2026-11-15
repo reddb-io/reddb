@@ -384,7 +384,8 @@ impl RedDB {
         );
         if let Some(path) = self.path() {
             let metadata_for_native = self.physical_metadata();
-            if let Some(native_state) = self.native_physical_state() {
+            let native_state = self.native_physical_state();
+            if let Some(native_state) = native_state.as_ref() {
                 let native = native_state.header;
                 report =
                     report.with_diagnostic("native_header.sequence", native.sequence.to_string());
@@ -703,9 +704,9 @@ impl RedDB {
                 }
                 report = report.with_diagnostic(
                     "native_bootstrap.ready",
-                    Self::native_state_is_bootstrap_complete(&native_state).to_string(),
+                    Self::native_state_is_bootstrap_complete(native_state).to_string(),
                 );
-                if !Self::native_state_is_bootstrap_complete(&native_state)
+                if !Self::native_state_is_bootstrap_complete(native_state)
                     && metadata_for_native.is_none()
                 {
                     report.issue(
@@ -778,13 +779,24 @@ impl RedDB {
                         "native_manifest.sample_count",
                         native_manifest.recent_events.len().to_string(),
                     );
-                    if let Some(metadata) = metadata_for_native.as_ref() {
-                        if native_manifest.event_count != metadata.manifest_events.len() as u32 {
-                            report.issue(
-                                "native_manifest",
-                                "native manifest summary diverges from physical metadata",
-                            );
-                        }
+                    let sampled_event_count = native_manifest.recent_events.len() as u32;
+                    let manifest_summary_consistent = sampled_event_count
+                        .saturating_add(native_manifest.omitted_event_count)
+                        == native_manifest.event_count;
+                    if !manifest_summary_consistent {
+                        report.issue(
+                            "native_manifest",
+                            "native manifest sample and omitted count do not match its event count",
+                        );
+                    } else if native_manifest.events_complete
+                        && metadata_for_native.as_ref().is_some_and(|metadata| {
+                            native_manifest.event_count != metadata.manifest_events.len() as u32
+                        })
+                    {
+                        report.issue(
+                            "native_manifest",
+                            "native manifest summary diverges from physical metadata",
+                        );
                     }
                 }
             } else if self.store.physical_file_header().is_some() {
@@ -843,8 +855,26 @@ impl RedDB {
                 report =
                     report.with_diagnostic("metadata.exports", metadata.exports.len().to_string());
                 if let Some(native) = self.store.physical_file_header() {
-                    let inspection =
+                    let mut inspection =
                         Self::inspect_native_header_against_metadata(native, &metadata);
+                    let bounded_manifest_is_authoritative = native_state
+                        .as_ref()
+                        .and_then(|state| state.manifest.as_ref())
+                        .is_some_and(|manifest| {
+                            !manifest.events_complete
+                                && manifest.recent_events.len() == metadata.manifest_events.len()
+                                && manifest
+                                    .omitted_event_count
+                                    .saturating_add(manifest.recent_events.len() as u32)
+                                    == manifest.event_count
+                                && native.manifest_event_count == manifest.event_count
+                        });
+                    if bounded_manifest_is_authoritative {
+                        inspection
+                            .mismatches
+                            .retain(|mismatch| mismatch.field != "manifest_event_count");
+                        inspection.consistent = inspection.mismatches.is_empty();
+                    }
                     report = report.with_diagnostic(
                         "native_header.matches_metadata",
                         inspection.consistent.to_string(),

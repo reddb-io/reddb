@@ -177,10 +177,12 @@ fn inspect_tree(
         }
         ensure(count == expected, "tree cursor omits owned records")?;
         if let Some(declared) = declared_count {
-            ensure(
-                count == declared,
-                "collection count disagrees with resume catalog",
-            )?;
+            if count != declared {
+                return Err(format!(
+                    "collection count disagrees with resume catalog: tree has {count}, catalog declares {declared}"
+                )
+                .into());
+            }
         }
         Ok(count)
     })();

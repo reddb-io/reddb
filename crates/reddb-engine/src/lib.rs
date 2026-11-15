@@ -15,6 +15,7 @@
     clippy::new_without_default
 )]
 
+pub mod biometric_matcher;
 #[doc(hidden)]
 pub mod catalog;
 mod clock;

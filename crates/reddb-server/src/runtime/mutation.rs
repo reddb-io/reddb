@@ -233,6 +233,21 @@ impl<'rt> MutationEngine<'rt> {
             self.runtime.enforce_unique_rows(&collection, &rows)?;
         }
 
+        if self
+            .runtime
+            .index_store_ref()
+            .has_typed_similarity_index(&collection)
+        {
+            let fields = rows
+                .iter()
+                .map(|row| row.fields.as_slice())
+                .collect::<Vec<_>>();
+            self.runtime
+                .index_store_ref()
+                .validate_typed_similarity_insert_batch(&collection, &fields)
+                .map_err(RedDBError::Query)?;
+        }
+
         let growth_bytes = rows
             .iter()
             .map(|row| crate::runtime::memory_admission::estimate_row_growth(&row.fields))
@@ -661,6 +676,7 @@ impl<'rt> MutationEngine<'rt> {
             columns,
             method: super::index_store::IndexMethodKind::Hash,
             unique: false,
+            similarity_contract: None,
         };
         // Use the same durable registry as explicit CREATE INDEX. Without it
         // the implicit index disappears after reopen or physical restore.

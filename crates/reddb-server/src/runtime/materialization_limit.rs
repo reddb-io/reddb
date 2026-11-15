@@ -254,27 +254,31 @@ mod tests {
     #[test]
     fn cold_group_limit_page_failure_does_not_relax_admission() {
         use crate::storage::engine::{Page, PageType};
-        let (_directory, _options, runtime) = cold_limit_fixture();
-        let store = runtime.db().store();
-        let root = store
-            .get_collection(RED_CONFIG_COLLECTION)
-            .expect("config")
-            .backing_root_page()
-            .expect("config root");
-        let pager = store.pager().expect("fixture pager");
-        let original = pager.read_page(root).expect("config page");
-        pager
-            .write_page(root, Page::new(PageType::Overflow, root))
-            .expect("inject page failure");
-        let result = guard(&runtime.db(), "aggregation", 1);
-        pager
-            .write_page(root, original)
-            .expect("restore fixture before assertions");
-        let error = result.expect_err("unreadable config must not select the default ceiling");
+        let (_directory, options, runtime) = cold_limit_fixture();
+        let error = {
+            let store = runtime.db().store();
+            let root = store
+                .get_collection(RED_CONFIG_COLLECTION)
+                .expect("config")
+                .backing_root_page()
+                .expect("config root");
+            let pager = store.pager().expect("fixture pager");
+            let original = pager.read_page(root).expect("config page");
+            pager
+                .write_page(root, Page::new(PageType::Overflow, root))
+                .expect("inject page failure");
+            let result = guard(&runtime.db(), "aggregation", 1);
+            pager
+                .write_page(root, original)
+                .expect("restore fixture before assertions");
+            result.expect_err("unreadable config must not select the default ceiling")
+        };
         assert!(
             !matches!(error, RedDBError::MaterializationLimitExceeded { .. }),
             "{error:?}"
         );
-        guard(&runtime.db(), "aggregation", 1).expect("restored config read");
+        drop(runtime);
+        let reopened = cold_open(&options);
+        guard(&reopened.db(), "aggregation", 1).expect("restored config read after reopen");
     }
 }

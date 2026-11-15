@@ -362,6 +362,18 @@ public sealed class RedWireConn : IConn, ITopologySource
             throw new RedDBException.ParamsUnsupported(
                 "server did not advertise FEATURE_PARAMS — upgrade the server to use parameterized queries");
         }
+        if ((_serverFeatures & Frame.FeatureBiometricParams) != Frame.FeatureBiometricParams
+            && args.Any(ValueCodec.RequiresBiometricCapability))
+        {
+            throw new RedDBException.ParamsUnsupported(
+                "server did not advertise FEATURE_BIOMETRIC_PARAMS");
+        }
+        if ((_serverFeatures & Frame.FeatureLandmarkParams) != Frame.FeatureLandmarkParams
+            && args.Any(ValueCodec.RequiresLandmarkCapability))
+        {
+            throw new RedDBException.ParamsUnsupported(
+                "server did not advertise FEATURE_LANDMARK_PARAMS");
+        }
         return await SendQueryAsync(
             Frame.Kind.QueryWithParams,
             ValueCodec.EncodeQueryWithParams(sql, args),

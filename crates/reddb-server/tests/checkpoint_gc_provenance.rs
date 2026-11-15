@@ -1,4 +1,4 @@
-//! Already-paged GC removals must not erase provenance for a pending durable update.
+//! Copy-on-write GC checkpoints must preserve an earlier durable update.
 use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
 
 #[test]
@@ -87,7 +87,11 @@ fn physical_gc_pressure_preserves_unprojected_wal_updates() {
     };
     let projected_root = root();
     runtime.checkpoint().expect("checkpoint after GC pressure");
-    assert_eq!(root(), projected_root, "already-projected physical deletions exhausted the provenance of an earlier durable update");
+    assert_ne!(
+        root(),
+        projected_root,
+        "proof-bearing trees must publish GC through a replacement generation"
+    );
     drop(manager);
     drop(runtime);
     let recovered = RedDBRuntime::with_options(options()).expect("cold reopen");
@@ -203,10 +207,10 @@ fn aborted_update_removals_preserve_earlier_wal_projection() {
     runtime
         .checkpoint()
         .expect("project dirty row after absent GC");
-    assert_eq!(
+    assert_ne!(
         root(),
         before,
-        "absent GC rows exhausted the earlier dirty-row proof"
+        "proof-bearing trees must publish rollback GC through a replacement generation"
     );
     drop(manager);
     drop(runtime);

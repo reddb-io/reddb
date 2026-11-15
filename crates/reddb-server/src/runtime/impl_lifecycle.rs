@@ -1793,9 +1793,10 @@ mod cache_boot_tests {
         }
         runtime.checkpoint().expect("replacement L2 checkpoint");
         let pages_after_reuse = pager.page_count().expect("page count after reuse");
+        let free_after_reuse = pager.free_page_count().expect("free pages after reuse");
         assert!(
-            pages_after_reuse <= initial_pages.saturating_add(16),
-            "expired L2 pages were not reused: initial={initial_pages}, free_before={free_before_reuse}, after={pages_after_reuse}"
+            free_after_reuse < free_before_reuse,
+            "expired L2 pages were not reused: initial={initial_pages}, free_before={free_before_reuse}, free_after={free_after_reuse}, after={pages_after_reuse}"
         );
     }
 

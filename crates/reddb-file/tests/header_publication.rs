@@ -98,6 +98,9 @@ fn legacy_decoder_rejects_publication_capabilities_it_cannot_expose() {
         FILE_CAPABILITY_DWB_PUBLICATION,
         reddb_file::file_format::FILE_CAPABILITY_TREE_PROOFS,
         reddb_file::file_format::FILE_CAPABILITY_RECOVERY_READ_ONLY,
+        reddb_file::file_format::FILE_CAPABILITY_BIOMETRIC_VALUES,
+        reddb_file::file_format::FILE_CAPABILITY_FEATURE_VALUES,
+        reddb_file::file_format::FILE_CAPABILITY_LANDMARK_VALUES,
     ] {
         let mut slot = vec![0; PAGED_PAGE_SIZE];
         encode_database_header(

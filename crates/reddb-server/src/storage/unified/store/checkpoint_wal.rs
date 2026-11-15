@@ -12,15 +12,16 @@ pub(super) struct WalRowReference {
     pub(super) checksum: u32,
 }
 
-pub(super) struct CheckpointWalRow {
+pub(super) struct CheckpointWalProof {
     collection: String,
     id: EntityId,
     reference: WalRowReference,
+    delete: bool,
 }
 
 #[derive(Default)]
 pub(super) struct CheckpointWalBatch {
-    rows: Vec<CheckpointWalRow>,
+    proofs: Vec<CheckpointWalProof>,
     bytes: usize,
     incomplete: bool,
 }
@@ -37,6 +38,37 @@ impl CheckpointWalBatch {
             actions,
             crate::storage::wal::record::WAL_DEFAULT_TERM,
             |action_offset, action| {
+                if let Ok(super::commit::StoreWalAction::DeleteEntityRecord {
+                    collection,
+                    entity_id,
+                }) = super::commit::StoreWalAction::decode(action)
+                {
+                    let bytes = collection.len().saturating_add(192);
+                    if batch.proofs.len() == ROW_REFERENCES_MAX
+                        || batch.bytes.saturating_add(bytes) > REFERENCE_BATCH_BYTES_MAX
+                    {
+                        batch.proofs.clear();
+                        batch.incomplete = true;
+                        return Ok(());
+                    }
+                    batch.proofs.push(CheckpointWalProof {
+                        collection,
+                        id: EntityId::new(entity_id),
+                        reference: WalRowReference {
+                            generation,
+                            offset: action_offset,
+                            length: u32::try_from(action.len()).map_err(|_| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    "WAL delete length exceeds u32",
+                                )
+                            })?,
+                            checksum: crc32fast::hash(action),
+                        },
+                        delete: true,
+                    });
+                    batch.bytes += bytes;
+                }
                 reddb_file::visit_store_wal_entity_records(action, |collection, offset, record| {
                     if batch.incomplete {
                         return Ok(());
@@ -57,14 +89,14 @@ impl CheckpointWalBatch {
                         return Ok(());
                     }
                     let bytes = collection.len().saturating_add(192);
-                    if batch.rows.len() == ROW_REFERENCES_MAX
+                    if batch.proofs.len() == ROW_REFERENCES_MAX
                         || batch.bytes.saturating_add(bytes) > REFERENCE_BATCH_BYTES_MAX
                     {
-                        batch.rows.clear();
+                        batch.proofs.clear();
                         batch.incomplete = true;
                         return Ok(());
                     }
-                    batch.rows.push(CheckpointWalRow {
+                    batch.proofs.push(CheckpointWalProof {
                         collection: collection.to_owned(),
                         id: EntityId::new(id),
                         reference: WalRowReference {
@@ -78,6 +110,7 @@ impl CheckpointWalBatch {
                             })?,
                             checksum: crc32fast::hash(record),
                         },
+                        delete: false,
                     });
                     batch.bytes += bytes;
                     Ok(())
@@ -88,11 +121,18 @@ impl CheckpointWalBatch {
     }
 
     pub(super) fn relocate(&mut self, start_lsn: u64) -> std::io::Result<()> {
-        for row in &mut self.rows {
-            row.reference.offset =
-                row.reference.offset.checked_add(start_lsn).ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "WAL row offset overflow")
-                })?;
+        for proof in &mut self.proofs {
+            proof.reference.offset =
+                proof
+                    .reference
+                    .offset
+                    .checked_add(start_lsn)
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "WAL row offset overflow",
+                        )
+                    })?;
         }
         Ok(())
     }
@@ -101,6 +141,7 @@ impl CheckpointWalBatch {
 #[derive(Default)]
 pub(super) struct WalRowReferences {
     rows: HashMap<(String, EntityId), WalRowReference>,
+    deletes: HashMap<(String, EntityId), WalRowReference>,
     bytes: usize,
 }
 
@@ -113,28 +154,43 @@ impl WalRowReferences {
         self.rows.get(&(collection.to_owned(), id)).copied()
     }
 
+    pub(super) fn get_delete(&self, collection: &str, id: EntityId) -> Option<WalRowReference> {
+        self.deletes.get(&(collection.to_owned(), id)).copied()
+    }
+
     pub(super) fn remember(&mut self, batch: CheckpointWalBatch, limit: usize) {
         if batch.incomplete || self.bytes > limit {
             *self = Self::default();
             return;
         }
-        for row in batch.rows {
-            let key = (row.collection, row.id);
+        for proof in batch.proofs {
+            let key = (proof.collection, proof.id);
             let cost = key.0.len().saturating_add(192);
             if cost > limit {
                 self.rows.remove(&key);
+                self.deletes.remove(&key);
                 self.recount();
                 continue;
             }
-            if !self.rows.contains_key(&key) && self.bytes.saturating_add(cost) > limit {
+            let existed = self.rows.contains_key(&key) || self.deletes.contains_key(&key);
+            if !existed && self.bytes.saturating_add(cost) > limit {
                 self.rows.retain(|(name, _), _| name != &key.0);
+                self.deletes.retain(|(name, _), _| name != &key.0);
                 self.rows.shrink_to_fit();
+                self.deletes.shrink_to_fit();
                 self.recount();
                 if self.bytes.saturating_add(cost) > limit {
                     *self = Self::default();
                 }
             }
-            if self.rows.insert(key, row.reference).is_none() {
+            if proof.delete {
+                self.rows.remove(&key);
+                self.deletes.insert(key, proof.reference);
+            } else {
+                self.deletes.remove(&key);
+                self.rows.insert(key, proof.reference);
+            }
+            if !existed {
                 self.bytes += cost;
             }
         }
@@ -144,6 +200,7 @@ impl WalRowReferences {
         self.bytes = self
             .rows
             .keys()
+            .chain(self.deletes.keys())
             .map(|(name, _)| name.len().saturating_add(192))
             .sum();
     }
@@ -182,8 +239,8 @@ mod tests {
             .unwrap();
             let (action, record) = action();
             let batch = coordinator.append_checkpoint_actions(&[action]).unwrap();
-            assert_eq!(batch.rows.len(), 1);
-            let reference = batch.rows[0].reference;
+            assert_eq!(batch.proofs.len(), 1);
+            let reference = batch.proofs[0].reference;
             assert!(coordinator
                 .checkpoint_row_matches(reference, &record)
                 .unwrap());
@@ -210,8 +267,8 @@ mod tests {
             .unwrap();
         coordinator.truncate().unwrap();
         let new = coordinator.append_checkpoint_actions(&[action]).unwrap();
-        let old = old.rows[0].reference;
-        let new = new.rows[0].reference;
+        let old = old.proofs[0].reference;
+        let new = new.proofs[0].reference;
         assert_eq!(old.offset, new.offset);
         assert!(!coordinator.checkpoint_row_matches(old, &record).unwrap());
         assert!(coordinator.checkpoint_row_matches(new, &record).unwrap());
@@ -230,7 +287,7 @@ mod tests {
         .unwrap();
         let (action, record) = action();
         let batch = coordinator.append_checkpoint_actions(&[action]).unwrap();
-        let reference = batch.rows[0].reference;
+        let reference = batch.proofs[0].reference;
         let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
         file.seek(SeekFrom::Start(reference.offset)).unwrap();
         file.write_all(&[record[0] ^ 1]).unwrap();

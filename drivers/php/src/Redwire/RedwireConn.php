@@ -350,6 +350,18 @@ final class RedwireConn implements Conn, \Reddb\TopologySource
                     'server did not advertise FEATURE_PARAMS — upgrade the server to use parameterized queries'
                 );
             }
+            if (($this->serverFeatures & Frame::FEATURE_BIOMETRIC_PARAMS) !== Frame::FEATURE_BIOMETRIC_PARAMS
+                && array_filter($params, [ValueCodec::class, 'requiresBiometricCapability']) !== []) {
+                throw new ParamsUnsupported(
+                    'server did not advertise FEATURE_BIOMETRIC_PARAMS'
+                );
+            }
+            if (($this->serverFeatures & Frame::FEATURE_LANDMARK_PARAMS) !== Frame::FEATURE_LANDMARK_PARAMS
+                && array_filter($params, [ValueCodec::class, 'requiresLandmarkCapability']) !== []) {
+                throw new ParamsUnsupported(
+                    'server did not advertise FEATURE_LANDMARK_PARAMS'
+                );
+            }
             self::writeFrame(
                 $this->stream,
                 Frame::make(

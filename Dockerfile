@@ -30,14 +30,14 @@ RUN cargo fetch --locked
 # Copy full source and build for real
 COPY src/ src/
 
-RUN cargo build --release --locked --bin red ${REDDB_CARGO_FEATURES:+--features ${REDDB_CARGO_FEATURES}} \
-    && strip /app/target/release/red \
+RUN cargo build --profile release-static --locked --bin red ${REDDB_CARGO_FEATURES:+--features ${REDDB_CARGO_FEATURES}} \
+    && strip /app/target/release-static/red \
     && mkdir -p /image/data/red /image/etc/reddb \
     && touch /image/data/red/.keep /image/etc/reddb/.keep
 
 FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 
-COPY --from=builder --chown=nonroot:nonroot /app/target/release/red /usr/local/bin/red
+COPY --from=builder --chown=nonroot:nonroot /app/target/release-static/red /usr/local/bin/red
 COPY --from=builder --chown=nonroot:nonroot /image/data /data
 COPY --from=builder --chown=nonroot:nonroot /image/etc/reddb /etc/reddb
 

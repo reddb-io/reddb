@@ -55,9 +55,20 @@ impl RedDB {
             .take(SAMPLE_LIMIT)
             .cloned()
             .collect();
+        // A bounded registry must retain lifecycle failures even when the
+        // ordinary index catalog exceeds the sample limit. Ready artifacts
+        // can be reconstructed from their artifact summaries; a deferred
+        // artifact has no payload summary and would otherwise disappear.
         let indexes: Vec<_> = metadata
             .indexes
             .iter()
+            .filter(|index| index.backend == "memory-budget-deferred")
+            .chain(metadata.indexes.iter().filter(|index| {
+                index.backend != "memory-budget-deferred" && index.artifact_checksum.is_some()
+            }))
+            .chain(metadata.indexes.iter().filter(|index| {
+                index.backend != "memory-budget-deferred" && index.artifact_checksum.is_none()
+            }))
             .take(SAMPLE_LIMIT)
             .map(|index| NativeRegistryIndexSummary {
                 name: index.name.clone(),
@@ -165,17 +176,21 @@ impl RedDB {
         let mut deferred_collections = std::collections::HashSet::new();
         let mut collections = self.store.list_collections();
         collections.sort_unstable();
-        'collections: for collection in collections {
+        for collection in collections {
             let Some(manager) = self.store.get_collection(&collection) else {
                 continue;
             };
             if manager.count() == 0 {
                 continue;
             }
-            let mut entities = Vec::new();
             let mut source_bytes = 0usize;
             let mut exceeded = false;
             let column_schema = manager.column_schema();
+            let mut vectors = Vec::new();
+            let mut graph_edges = Vec::new();
+            let mut fulltext_documents = Vec::new();
+            let mut document_records = Vec::new();
+            let mut document_bytes = 0usize;
             manager.for_each_entity(|entity| {
                 let eligible = match &entity.data {
                     EntityData::Vector(vector) => {
@@ -195,86 +210,76 @@ impl RedDB {
                     return false;
                 }
                 source_bytes += bytes;
-                let mut owned = entity.clone();
-                if let EntityData::Row(row) = &mut owned.data {
-                    if row.named.is_none() && row.schema.is_none() {
-                        row.schema = column_schema.clone();
+                match &entity.data {
+                    EntityData::Vector(vector) => {
+                        if !vector.dense.is_empty() {
+                            vectors.push((entity.id, vector.dense.clone()));
+                        }
+                    }
+                    EntityData::Edge(edge) => {
+                        if let EntityKind::GraphEdge(edge_kind) = &entity.kind {
+                            graph_edges.push((
+                                entity.id,
+                                edge_kind.from_node.clone(),
+                                edge_kind.to_node.clone(),
+                                edge_kind.label.clone(),
+                                edge.weight,
+                            ));
+                        }
+                    }
+                    data => {
+                        let text = Self::native_fulltext_text_for_entity(data);
+                        if !text.trim().is_empty() {
+                            fulltext_documents.push((entity.id, text));
+                        }
+                        match Self::native_document_pathvalue_for_entity(
+                            entity.id,
+                            data,
+                            column_schema.as_deref().map(Vec::as_slice),
+                            source_limit.saturating_sub(document_bytes),
+                        ) {
+                            Ok(Some(document)) => {
+                                document_bytes += document
+                                    .1
+                                    .iter()
+                                    .map(|(path, value)| {
+                                        path.len()
+                                            + value.len()
+                                            + std::mem::size_of::<(String, String)>()
+                                    })
+                                    .sum::<usize>();
+                                document_records.push(document);
+                            }
+                            Ok(None) => {}
+                            Err(()) => {
+                                exceeded = true;
+                                return false;
+                            }
+                        }
                     }
                 }
-                entities.push(owned);
                 true
             });
             if exceeded {
                 deferred_collections.insert(collection);
                 continue;
             }
-            if entities.is_empty() {
+            if vectors.is_empty()
+                && graph_edges.is_empty()
+                && fulltext_documents.is_empty()
+                && document_records.is_empty()
+            {
                 continue;
             }
             let first_artifact = artifacts.len();
-            let mut vectors = Vec::new();
-            let mut graph_edges = Vec::new();
-            let mut fulltext_documents = Vec::new();
-            let mut document_records = Vec::new();
-            let mut document_bytes = 0usize;
-            for entity in entities {
-                match entity.data {
-                    EntityData::Vector(vector) => {
-                        if !vector.dense.is_empty() {
-                            vectors.push((entity.id, vector.dense));
-                        }
-                    }
-                    EntityData::Edge(edge) => {
-                        if let EntityKind::GraphEdge(edge_kind) = entity.kind {
-                            graph_edges.push((
-                                entity.id,
-                                edge_kind.from_node,
-                                edge_kind.to_node,
-                                edge_kind.label,
-                                edge.weight,
-                            ));
-                        }
-                    }
-                    data => {
-                        let text = Self::native_fulltext_text_for_entity(&data);
-                        if !text.trim().is_empty() {
-                            fulltext_documents.push((entity.id, text));
-                        }
-                        let document = match Self::native_document_pathvalue_for_entity(
-                            entity.id,
-                            &data,
-                            source_limit.saturating_sub(document_bytes),
-                        ) {
-                            Ok(document) => document,
-                            Err(()) => {
-                                artifacts.truncate(first_artifact);
-                                deferred_collections.insert(collection);
-                                continue 'collections;
-                            }
-                        };
-                        if let Some(document) = document {
-                            document_bytes += document
-                                .1
-                                .iter()
-                                .map(|(path, value)| {
-                                    path.len()
-                                        + value.len()
-                                        + std::mem::size_of::<(String, String)>()
-                                })
-                                .sum::<usize>();
-                            document_records.push(document);
-                        }
-                    }
-                }
-            }
             if !vectors.is_empty() {
                 let dimension = vectors[0].1.len();
                 let mut hnsw = HnswIndex::with_dimension(dimension);
                 for (id, vector) in vectors
-                    .into_iter()
+                    .iter()
                     .filter(|(_, vector)| vector.len() == dimension)
                 {
-                    hnsw.insert_with_id(id.raw(), vector);
+                    hnsw.insert_with_id(id.raw(), vector.clone());
                 }
                 let stats = hnsw.stats();
                 let bytes = hnsw.to_bytes();
@@ -291,26 +296,16 @@ impl RedDB {
 
                 let n_lists = ((stats.node_count as f64).sqrt().ceil() as usize).max(1);
                 let mut ivf = IvfIndex::new(IvfConfig::new(dimension, n_lists));
-                let training = manager
-                    .query_all(|_| true)
-                    .into_iter()
-                    .filter_map(|entity| match entity.data {
-                        EntityData::Vector(vector) if vector.dense.len() == dimension => {
-                            Some(vector.dense)
-                        }
-                        _ => None,
-                    })
+                let training = vectors
+                    .iter()
+                    .filter(|(_, vector)| vector.len() == dimension)
+                    .map(|(_, vector)| vector.clone())
                     .collect::<Vec<_>>();
                 ivf.train(&training);
-                let items = manager
-                    .query_all(|_| true)
+                let items = vectors
                     .into_iter()
-                    .filter_map(|entity| match entity.data {
-                        EntityData::Vector(vector) if vector.dense.len() == dimension => {
-                            Some((entity.id.raw(), vector.dense))
-                        }
-                        _ => None,
-                    })
+                    .filter(|(_, vector)| vector.len() == dimension)
+                    .map(|(id, vector)| (id.raw(), vector))
                     .collect::<Vec<_>>();
                 ivf.add_batch_with_ids(items);
                 let ivf_stats = ivf.stats();
@@ -543,6 +538,7 @@ impl RedDB {
     fn native_document_pathvalue_for_entity(
         entity_id: EntityId,
         data: &EntityData,
+        fallback_schema: Option<&[String]>,
         limit: usize,
     ) -> Result<Option<(EntityId, Vec<(String, String)>)>, ()> {
         let mut entries = Vec::new();
@@ -551,6 +547,16 @@ impl RedDB {
             EntityData::Row(row) => {
                 if row.named.is_some() || row.schema.is_some() {
                     for (key, value) in row.iter_fields() {
+                        Self::collect_native_document_entries_from_value(
+                            key,
+                            value,
+                            &mut entries,
+                            &mut bytes,
+                            limit,
+                        )?;
+                    }
+                } else if let Some(schema) = fallback_schema {
+                    for (key, value) in schema.iter().zip(&row.columns) {
                         Self::collect_native_document_entries_from_value(
                             key,
                             value,
@@ -730,8 +736,8 @@ impl RedDB {
     fn native_value_text(value: &Value) -> Option<String> {
         match value {
             Value::Text(value) => Some(value.to_string()),
-            Value::Json(value) => String::from_utf8(value.clone()).ok(),
-            Value::Blob(value) => String::from_utf8(value.clone()).ok(),
+            Value::Json(value) => std::str::from_utf8(value).ok().map(str::to_owned),
+            Value::Blob(value) => std::str::from_utf8(value).ok().map(str::to_owned),
             Value::Integer(value) => Some(value.to_string()),
             Value::UnsignedInteger(value) => Some(value.to_string()),
             Value::Float(value) => Some(value.to_string()),
@@ -821,6 +827,12 @@ impl RedDB {
             Value::TableRef(name) => Some(name.clone()),
             Value::PageRef(page_id) => Some(format!("page:{}", page_id)),
             Value::Secret(_) | Value::Password(_) => None,
+            Value::Fingerprint(_)
+            | Value::Face(_)
+            | Value::Iris(_)
+            | Value::FeatureVector(_)
+            | Value::BitSignature(_)
+            | Value::LandmarkSet(_) => None,
         }
     }
 
@@ -1743,8 +1755,9 @@ mod artifact_memory_tests {
             vec![Value::Json(br#"{"thing":"kept"}"#.to_vec())],
             vec!["body".into()],
         ));
-        let before = RedDB::native_document_pathvalue_for_entity(entity.id, &entity.data, 4096)
-            .expect("named document");
+        let before =
+            RedDB::native_document_pathvalue_for_entity(entity.id, &entity.data, None, 4096)
+                .expect("named document");
         let EntityData::Row(row) = &mut entity.data else {
             unreachable!("fixture is a row");
         };
@@ -1753,8 +1766,9 @@ mod artifact_memory_tests {
             named: None,
             schema: Some(Arc::new(vec!["body".into()])),
         };
-        let after = RedDB::native_document_pathvalue_for_entity(entity.id, &entity.data, 4096)
-            .expect("shared document");
+        let after =
+            RedDB::native_document_pathvalue_for_entity(entity.id, &entity.data, None, 4096)
+                .expect("shared document");
         assert_eq!(
             before, after,
             "compaction must preserve named document paths"

@@ -18,7 +18,7 @@
 use std::mem::{align_of, size_of};
 use std::net::IpAddr;
 
-use reddb_types::Value;
+use reddb_types::{BiometricSample, BitSignature, FeatureVector, LandmarkSet, Temperature, Value};
 
 /// One measured variant: its name, the size of its payload (the fields it
 /// carries), and whether it owns a heap allocation.
@@ -77,6 +77,7 @@ fn measure() -> Vec<VariantMeasure> {
         v!("Date", i32, heap = false, scalar = true),
         v!("Time", u32, heap = false, scalar = true),
         v!("Decimal", i64, heap = false, scalar = true),
+        v!("DecimalText", String, heap = true, scalar = false),
         v!("EnumValue", u8, heap = false, scalar = true),
         v!("Array", Vec<Value>, heap = true, scalar = false),
         v!("TimestampMs", i64, heap = false, scalar = true),
@@ -93,6 +94,7 @@ fn measure() -> Vec<VariantMeasure> {
         v!("Lang5", [u8; 5], heap = false, scalar = true),
         v!("Currency", [u8; 3], heap = false, scalar = true),
         v!("AssetCode", String, heap = true, scalar = false),
+        v!("Temperature", Temperature, heap = false, scalar = false),
         v!("Money", (String, i64, u8), heap = true, scalar = false),
         v!("ColorAlpha", [u8; 4], heap = false, scalar = true),
         v!("BigInt", i64, heap = false, scalar = true),
@@ -102,6 +104,12 @@ fn measure() -> Vec<VariantMeasure> {
         v!("PageRef", u32, heap = false, scalar = true),
         v!("Secret", Vec<u8>, heap = true, scalar = false),
         v!("Password", String, heap = true, scalar = false),
+        v!("Fingerprint", BiometricSample, heap = true, scalar = false),
+        v!("Face", BiometricSample, heap = true, scalar = false),
+        v!("Iris", BiometricSample, heap = true, scalar = false),
+        v!("FeatureVector", FeatureVector, heap = true, scalar = false),
+        v!("BitSignature", BitSignature, heap = true, scalar = false),
+        v!("LandmarkSet", LandmarkSet, heap = true, scalar = false),
     ]
 }
 
@@ -176,13 +184,14 @@ fn value_layout_report() {
         "expected a multi-field heap variant to dominate the payload"
     );
 
-    // 2. `Money` and `KeyRef` are the rare, wide variants that set the floor —
-    //    the whole point of the measurement. Guard that they remain the (or a)
-    //    dominant variant so a regression here is visible.
+    // 2. Guard that the known rare, wide variants continue to explain the
+    //    layout floor so adding a wider payload remains visible.
     let dominant_names: Vec<&str> = dominant.iter().map(|m| m.name).collect();
     assert!(
-        dominant_names.contains(&"Money") || dominant_names.contains(&"KeyRef"),
-        "expected Money/KeyRef among layout-driving variants, got {dominant_names:?}"
+        dominant_names
+            .iter()
+            .any(|name| { matches!(*name, "Money" | "KeyRef" | "BitSignature" | "LandmarkSet") }),
+        "unexpected layout-driving variants: {dominant_names:?}"
     );
 
     // 3. The common case really is common: the large majority of variants are
@@ -207,7 +216,7 @@ fn value_layout_report() {
     println!("\n-- conclusion --");
     println!(
         "Common scalars ({small_scalar_count}/{}) cost a single word; the enum's {value_size}-byte \
-         footprint is set by rare wide variants (e.g. Money/KeyRef = (String, String)).",
+        footprint is set by rare wide variants (for example Money, KeyRef, or LandmarkSet).",
         measures.len()
     );
     let single_word = size_of::<u64>();

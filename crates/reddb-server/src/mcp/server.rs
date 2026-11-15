@@ -1872,9 +1872,7 @@ impl McpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
-    use std::net::{SocketAddr, TcpListener, TcpStream};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
     use std::time::Duration;
@@ -2868,47 +2866,39 @@ mod tests {
 
     struct AskStub {
         addr: SocketAddr,
-        shutdown: Arc<AtomicBool>,
+        shutdown: Option<tokio::sync::oneshot::Sender<()>>,
         handle: Option<JoinHandle<()>>,
     }
 
     impl AskStub {
         fn start() -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("stub bind");
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("stub bind");
             listener
                 .set_nonblocking(true)
                 .expect("nonblocking listener");
             let addr = listener.local_addr().expect("local addr");
-            let shutdown = Arc::new(AtomicBool::new(false));
-            let server_shutdown = Arc::clone(&shutdown);
+            let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
             let handle = thread::spawn(move || {
-                while !server_shutdown.load(Ordering::Relaxed) {
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
-                            let request = read_stub_request(&mut stream);
-                            if request.contains("/embeddings") {
-                                write_json_response(
-                                    &mut stream,
-                                    r#"{"model":"mock-embedding","data":[{"index":0,"embedding":[1,0,0]}],"usage":{"prompt_tokens":3,"total_tokens":3}}"#,
-                                );
-                            } else {
-                                write_json_response(
-                                    &mut stream,
-                                    r#"{"model":"mock-ask","choices":[{"message":{"role":"assistant","content":"FDD-12313 escalated [^1]."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}"#,
-                                );
-                            }
-                        }
-                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(1));
-                        }
-                        Err(_) => break,
-                    }
-                }
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("stub runtime");
+                runtime.block_on(async move {
+                    let listener =
+                        tokio::net::TcpListener::from_std(listener).expect("async stub listener");
+                    let app = axum::Router::new().fallback(ask_stub_response);
+                    axum::serve(listener, app)
+                        .with_graceful_shutdown(async move {
+                            let _ = shutdown_rx.await;
+                        })
+                        .await
+                        .expect("stub server");
+                });
             });
 
             Self {
                 addr,
-                shutdown,
+                shutdown: Some(shutdown),
                 handle: Some(handle),
             }
         }
@@ -2920,28 +2910,30 @@ mod tests {
 
     impl Drop for AskStub {
         fn drop(&mut self) {
-            self.shutdown.store(true, Ordering::Relaxed);
-            let _ = TcpStream::connect(self.addr);
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(());
+            }
             if let Some(handle) = self.handle.take() {
                 let _ = handle.join();
             }
         }
     }
 
-    fn read_stub_request(stream: &mut TcpStream) -> String {
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
-        let mut buffer = [0_u8; 4096];
-        let count = stream.read(&mut buffer).unwrap_or(0);
-        String::from_utf8_lossy(&buffer[..count]).into_owned()
-    }
-
-    fn write_json_response(stream: &mut TcpStream, body: &str) {
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        stream
-            .write_all(response.as_bytes())
-            .expect("write stub response");
+    async fn ask_stub_response(
+        uri: axum::http::Uri,
+        _body: axum::body::Bytes,
+    ) -> impl axum::response::IntoResponse {
+        let body = if uri.path().ends_with("/embeddings") {
+            r#"{"model":"mock-embedding","data":[{"index":0,"embedding":[1,0,0]}],"usage":{"prompt_tokens":3,"total_tokens":3}}"#
+        } else {
+            r#"{"model":"mock-ask","choices":[{"message":{"role":"assistant","content":"FDD-12313 escalated [^1]."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}"#
+        };
+        (
+            [
+                (axum::http::header::CONTENT_TYPE, "application/json"),
+                (axum::http::header::CONNECTION, "close"),
+            ],
+            body,
+        )
     }
 }

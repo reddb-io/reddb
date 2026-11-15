@@ -33,7 +33,12 @@ fn isolated_runtime(tag: &str) -> (support::TempDataDir, RedDBRuntime) {
 fn spawn_server(tag: &str) -> (support::TempDataDir, String) {
     std::env::remove_var("RED_ADMIN_TOKEN");
     let (dir, rt) = isolated_runtime(tag);
-    let server = RedDBServer::new(rt);
+    // These tests exercise batch atomicity and idempotency, not HTTP admission.
+    // Give the eight synchronized retries enough execution-queue capacity and
+    // disable the orthogonal per-principal cap.
+    let server = RedDBServer::new(rt)
+        .with_http_limiter_cap(16)
+        .with_principal_inflight_cap(0);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().unwrap();
     thread::spawn(move || {

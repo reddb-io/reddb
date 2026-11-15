@@ -161,7 +161,7 @@ fn compare_sparse_startup(path: &std::path::Path, options: RedDBOptions, profile
         runtime
     });
     drop(small);
-    measure_fresh_process(path, profile, "compact");
+    let compact_fresh_read_bytes = measure_fresh_process(path, profile, "compact");
 
     let allocated_bytes_before = allocated_bytes(&path);
     let file = std::fs::OpenOptions::new()
@@ -183,7 +183,7 @@ fn compare_sparse_startup(path: &std::path::Path, options: RedDBOptions, profile
         "50 GiB logical fixture allocated {} additional bytes",
         allocated_bytes_after.saturating_sub(allocated_bytes_before)
     );
-    measure_fresh_process(path, profile, "sparse-50gib");
+    let sparse_fresh_read_bytes = measure_fresh_process(path, profile, "sparse-50gib");
 
     let (large, large_read_bytes) = measure_pager_read_bytes(|| {
         let start = Instant::now();
@@ -197,15 +197,15 @@ fn compare_sparse_startup(path: &std::path::Path, options: RedDBOptions, profile
         );
         runtime
     });
-    eprintln!("startup sparse fixture: logical={} allocated_before={} allocated_after={} compact_read={} sparse_read={}", sparse_metadata.len(), allocated_bytes_before, allocated_bytes_after, small_read_bytes, large_read_bytes);
+    eprintln!("startup sparse fixture: logical={} allocated_before={} allocated_after={} compact_read={} sparse_read={} compact_fresh_read={} sparse_fresh_read={}", sparse_metadata.len(), allocated_bytes_before, allocated_bytes_after, small_read_bytes, large_read_bytes, compact_fresh_read_bytes, sparse_fresh_read_bytes);
     let read_byte_margin = 8_u64.saturating_mul(
         u64::try_from(crate::storage::engine::PAGE_SIZE).expect("page size fits u64"),
     );
     assert!(
-        large_read_bytes <= small_read_bytes.saturating_add(read_byte_margin),
+        sparse_fresh_read_bytes <= compact_fresh_read_bytes.saturating_add(read_byte_margin),
         "startup and first-query data-file reads grew from {} to {} bytes",
-        small_read_bytes,
-        large_read_bytes
+        compact_fresh_read_bytes,
+        sparse_fresh_read_bytes
     );
     large
         .execute_query("INSERT INTO startup_rows (id, payload) VALUES (100, 'tail-proof')")
@@ -229,7 +229,7 @@ fn compare_sparse_startup(path: &std::path::Path, options: RedDBOptions, profile
     );
 }
 
-fn measure_fresh_process(path: &std::path::Path, profile: &str, size: &str) {
+fn measure_fresh_process(path: &std::path::Path, profile: &str, size: &str) -> u64 {
     let result = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -250,6 +250,15 @@ fn measure_fresh_process(path: &std::path::Path, profile: &str, size: &str) {
         "startup child failed: {}",
         result.status
     );
+    result
+        .stderr
+        .split(|byte| *byte == b'\n')
+        .find_map(|line| {
+            let line = std::str::from_utf8(line).ok()?;
+            let (_, bytes) = line.split_once("pager_read_bytes=")?;
+            bytes.split(',').next()?.parse().ok()
+        })
+        .expect("startup child reports pager read bytes")
 }
 
 #[test]

@@ -888,7 +888,7 @@ impl RedDB {
             }
             #[cfg(test)]
             flush_local_only_qualification_phase(&qualification_started, "store-persist");
-            self.persist_metadata()?;
+            self.persist_checkpoint_metadata()?;
             self.remove_imported_metadata_sidecars(path)?;
             #[cfg(test)]
             flush_local_only_qualification_phase(&qualification_started, "metadata-publication");

@@ -652,6 +652,25 @@ impl StoreCommitCoordinator {
         Ok(present && matches)
     }
 
+    pub(super) fn checkpoint_delete_matches(
+        &self,
+        reference: super::checkpoint_wal::WalRowReference,
+        collection: &str,
+        id: EntityId,
+    ) -> io::Result<bool> {
+        let mut bytes = Vec::with_capacity(reference.length as usize);
+        if !self.visit_checkpoint_row(reference, |chunk| bytes.extend_from_slice(chunk))? {
+            return Ok(false);
+        }
+        Ok(matches!(
+            StoreWalAction::decode(&bytes),
+            Ok(StoreWalAction::DeleteEntityRecord {
+                collection: stored,
+                entity_id,
+            }) if stored == collection && entity_id == id.raw()
+        ))
+    }
+
     /// Materialize only one already-validated durable row for a projection batch.
     pub(super) fn checkpoint_row_bytes(
         &self,
@@ -1432,7 +1451,9 @@ impl StoreCommitCoordinator {
             }
         }
 
-        if incomplete_wal_tail.is_some() && !ownership_journal.is_empty() {
+        if incomplete_wal_tail.is_some()
+            && reddb_file::page_ownership_journal::pending_epoch(&ownership_journal)?.is_some()
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "incomplete WAL prevents ownership recovery",
@@ -1831,10 +1852,11 @@ impl UnifiedStore {
         &self,
         actions: impl IntoIterator<Item = StoreWalAction>,
     ) -> Result<(), StoreError> {
-        self.finish_paged_write_for_projection(
-            actions,
-            self.config.resident_memory_bytes_max.is_some(),
-        )
+        // Current proof-bearing files keep their published B-trees immutable
+        // between checkpoints. Retain the bounded exact WAL images for every
+        // paged store so sparse checkpoints can project those ordinary writes
+        // without re-encoding the complete collection.
+        self.finish_paged_write_for_projection(actions, self.pager.is_some())
     }
 
     pub(crate) fn finish_paged_write_for_projection(

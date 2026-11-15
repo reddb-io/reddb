@@ -96,6 +96,7 @@
   - [Temperature](/types/temperature.md)
   - [Reference Types](/types/references.md)
   - [Secret & Password Types](/types/secrets.md)
+  - [Biometric Records](/types/biometrics.md)
   - [Validation & Coercion](/types/validation.md)
 
 - **Storage Engine**

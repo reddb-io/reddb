@@ -629,6 +629,25 @@ impl RedDBRuntime {
         Ok(())
     }
 
+    pub(super) fn with_exclusive_collection_topology<T>(
+        &self,
+        collection: &str,
+        operation: impl FnOnce() -> RedDBResult<T>,
+    ) -> RedDBResult<T> {
+        let store = self.inner.db.store();
+        let topology_lock = self.inner.index_store.collection_topology_lock(collection);
+        let mut operation = Some(operation);
+        loop {
+            let publication = store.vault_publication_lock.lock();
+            if let Some(_topology) = topology_lock.try_write() {
+                return operation.take().expect("drop operation runs once")();
+            }
+            drop(publication);
+            let topology = topology_lock.write();
+            drop(topology);
+        }
+    }
+
     /// Execute DROP TABLE
     ///
     /// Drops the collection and all its data from the store.
@@ -638,6 +657,16 @@ impl RedDBRuntime {
         query: &DropTableQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        self.with_exclusive_collection_topology(&query.name, || {
+            self.execute_drop_table_exclusive(raw_query, query)
+        })
+    }
+
+    fn execute_drop_table_exclusive(
+        &self,
+        raw_query: &str,
+        query: &DropTableQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
         let _publication = store.vault_publication_lock.lock();
         self.vcs_reject_destructive_ddl(&query.name)?;
@@ -676,8 +705,6 @@ impl RedDBRuntime {
             final_count,
         )?;
 
-        let topology_lock = self.inner.index_store.collection_topology_lock(&query.name);
-        let _topology_guard = topology_lock.write();
         let orphaned_indices: Vec<String> = self
             .inner
             .index_store
@@ -1650,6 +1677,9 @@ impl RedDBRuntime {
             IndexMethod::H3 { resolution } => {
                 super::index_store::IndexMethodKind::H3 { resolution }
             }
+            IndexMethod::Hnsw => super::index_store::IndexMethodKind::Hnsw,
+            IndexMethod::Hamming => super::index_store::IndexMethodKind::Hamming,
+            IndexMethod::Minutiae => super::index_store::IndexMethodKind::Minutiae,
         };
 
         // Extract fields from existing entities for indexing. Row
@@ -1764,23 +1794,42 @@ impl RedDBRuntime {
         crate::storage::query::planner::stats_catalog::persist_table_stats(&store, &analyzed);
         self.invalidate_plan_cache();
 
-        // Register metadata
-        self.inner
+        // Persist the inferred typed-similarity contract with the index
+        // definition so restart cannot silently adopt a different feature
+        // space, width, or matcher version.
+        let similarity_contract = self
+            .inner
             .index_store
-            .register(super::index_store::RegisteredIndex {
-                name: query.name.clone(),
-                collection: query.table.clone(),
-                columns: query.columns.clone(),
-                method: method_kind,
-                unique: query.unique,
-            });
-        self.persist_runtime_index_descriptor(super::index_store::RegisteredIndex {
+            .similarity_contract(&query.table, &query.name);
+        if matches!(
+            method_kind,
+            super::index_store::IndexMethodKind::Hnsw
+                | super::index_store::IndexMethodKind::Hamming
+        ) && similarity_contract.is_none()
+        {
+            self.inner
+                .index_store
+                .discard_similarity_backing(&query.table, &query.name);
+            return Err(RedDBError::Query(format!(
+                "{} index '{}' needs at least one non-null value to fix its feature space and width",
+                match method_kind {
+                    super::index_store::IndexMethodKind::Hnsw => "HNSW",
+                    super::index_store::IndexMethodKind::Hamming => "HAMMING",
+                    _ => "typed similarity",
+                },
+                query.name
+            )));
+        }
+        let descriptor = super::index_store::RegisteredIndex {
             name: query.name.clone(),
             collection: query.table.clone(),
             columns: query.columns.clone(),
             method: method_kind,
             unique: query.unique,
-        })?;
+            similarity_contract,
+        };
+        self.inner.index_store.register(descriptor.clone());
+        self.persist_runtime_index_descriptor(descriptor)?;
         // Issue #120 — surface the index name + indexed columns in
         // the schema-vocabulary so AskPipeline (#121) can resolve
         // "the email index" back to its collection.
@@ -1882,6 +1931,25 @@ impl RedDBRuntime {
         if is_system_schema_name(name) {
             return Err(RedDBError::Query("system schema is read-only".to_string()));
         }
+        self.with_exclusive_collection_topology(name, || {
+            self.execute_drop_typed_collection_exclusive(
+                raw_query,
+                name,
+                if_exists,
+                expected_model,
+                label,
+            )
+        })
+    }
+
+    fn execute_drop_typed_collection_exclusive(
+        &self,
+        raw_query: &str,
+        name: &str,
+        if_exists: bool,
+        expected_model: CollectionModel,
+        label: &str,
+    ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
         let _publication = store.vault_publication_lock.lock();
         self.vcs_reject_destructive_ddl(name)?;
@@ -1906,7 +1974,7 @@ impl RedDBRuntime {
                 polymorphic_resolver::resolve(name, &self.inner.db.catalog_model_snapshot())
             })?;
         polymorphic_resolver::ensure_model_match(expected_model, actual)?;
-        self.drop_collection_storage(raw_query, name, label)
+        self.drop_collection_storage_exclusive(raw_query, name, label)
     }
 
     pub fn execute_truncate(
@@ -2003,7 +2071,7 @@ impl RedDBRuntime {
         Ok(deleted_ids.len() as u64)
     }
 
-    fn drop_collection_storage(
+    fn drop_collection_storage_exclusive(
         &self,
         raw_query: &str,
         name: &str,
@@ -2025,8 +2093,6 @@ impl RedDBRuntime {
             final_count,
         )?;
 
-        let topology_lock = self.inner.index_store.collection_topology_lock(name);
-        let _topology_guard = topology_lock.write();
         let orphaned_indices: Vec<String> = self
             .inner
             .index_store

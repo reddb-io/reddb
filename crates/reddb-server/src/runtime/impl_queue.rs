@@ -928,6 +928,16 @@ impl RedDBRuntime {
         query: &DropQueueQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
+        self.with_exclusive_collection_topology(&query.name, || {
+            self.execute_drop_queue_exclusive(raw_query, query)
+        })
+    }
+
+    fn execute_drop_queue_exclusive(
+        &self,
+        raw_query: &str,
+        query: &DropQueueQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
         let _publication = store.vault_publication_lock.lock();
         self.vcs_reject_destructive_ddl(&query.name)?;
@@ -2254,18 +2264,22 @@ fn save_queue_config(
     queue: &str,
     config: &QueueRuntimeConfig,
 ) -> RedDBResult<()> {
-    match super::queue_storage_index::subject_rows_store(store, "queue_config", queue, None, None)?
-    {
-        Some(rows) => {
-            for (id, _) in rows {
-                let _ = super::vcs_queue::delete_metadata(store, id);
-            }
-        }
-        None => remove_meta_rows(store, |row| {
+    let previous = match super::queue_storage_index::subject_rows_store(
+        store,
+        "queue_config",
+        queue,
+        None,
+        None,
+    )? {
+        Some(rows) => rows.into_iter().map(|(id, _)| id).collect(),
+        None => super::vcs_queue::metadata_rows(store, |row| {
             row_text(row, "kind").as_deref() == Some("queue_config")
                 && row_text(row, "queue").as_deref() == Some(queue)
-        }),
-    }
+        })?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect(),
+    };
 
     let mut fields = HashMap::new();
     fields.insert("kind".to_string(), Value::text("queue_config".to_string()));
@@ -2319,7 +2333,41 @@ fn save_queue_config(
             .map(Value::UnsignedInteger)
             .unwrap_or(Value::Null),
     );
-    insert_meta_row(store, fields).map(|_| ())
+    replace_meta_rows(store, fields, previous)
+}
+
+fn replace_meta_rows(
+    store: &UnifiedStore,
+    fields: HashMap<String, Value>,
+    previous: Vec<EntityId>,
+) -> RedDBResult<()> {
+    let created = store.get_collection(QUEUE_META_COLLECTION).is_none();
+    let _ = store.get_or_create_collection(QUEUE_META_COLLECTION);
+    if created {
+        super::queue_storage_index::prepare_meta_store(store)?;
+    }
+    let mut entity = UnifiedEntity::new(
+        store.next_entity_id(),
+        EntityKind::TableRow {
+            table: Arc::from(QUEUE_META_COLLECTION),
+            row_id: 0,
+        },
+        EntityData::Row(RowData {
+            columns: Vec::new(),
+            named: Some(fields),
+            schema: None,
+        }),
+    );
+    super::vcs_queue::stamp_entity(store, QUEUE_META_COLLECTION, &mut entity)?;
+    store.publish_rows(crate::storage::unified::store::RowPublication {
+        inserts: vec![(QUEUE_META_COLLECTION.to_string(), entity, None)],
+        replacements: Vec::new(),
+        deletes: previous
+            .into_iter()
+            .map(|id| (QUEUE_META_COLLECTION.to_string(), id))
+            .collect(),
+    })?;
+    Ok(())
 }
 
 fn remove_queue_metadata(store: &UnifiedStore, queue: &str) {

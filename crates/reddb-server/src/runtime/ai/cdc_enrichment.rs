@@ -24,7 +24,7 @@
 //! and a production scheduler can drive it from a background thread without
 //! changing the semantics.
 
-use crate::application::entity::{CreateVectorInput, DeleteEntityInput, PatchEntityInput};
+use crate::application::entity::{CreateVectorInput, PatchEntityInput};
 use crate::application::ports::RuntimeEntityPort;
 use crate::catalog::{EmbedPolicy, ModerateDegradedMode, ModeratePolicy, VisionPolicy};
 use crate::replication::cdc::ChangeOperation;
@@ -545,25 +545,18 @@ impl RedDBRuntime {
         let text = combine_moderate_text_named(&entity.data, &policy.fields);
         if text.is_empty() {
             // Nothing to screen — clear the quarantine so the row surfaces.
-            return self.clear_row_moderation_marker(collection, entity.id);
+            return self.clear_row_moderation_marker(collection, entity);
         }
 
         let outcome = crate::runtime::ai::moderation::moderate_local(&policy.model, text)?;
         match outcome {
-            ModerationOutcome::Allow => self.clear_row_moderation_marker(collection, entity.id),
+            ModerationOutcome::Allow => self.clear_row_moderation_marker(collection, entity),
             ModerationOutcome::Reject { .. } => {
                 if policy.hard_delete_on_reject {
-                    self.delete_entity(DeleteEntityInput {
-                        collection: collection.to_string(),
-                        id: entity.id,
-                    })?;
+                    self.delete_internal_loaded_entity(collection, entity)?;
                     Ok(())
                 } else {
-                    self.set_row_moderation_status(
-                        collection,
-                        entity.id,
-                        MODERATION_STATUS_REJECTED,
-                    )
+                    self.set_row_moderation_status(collection, entity, MODERATION_STATUS_REJECTED)
                 }
             }
             // Provider still down — surface as a retryable error so the
@@ -580,30 +573,22 @@ impl RedDBRuntime {
     /// as hidden — so an empty marker is, by design, still hidden. To make
     /// the row visible we instead remove the field via a `fields` patch
     /// that sets it to JSON null, which the storage merge drops.
-    fn clear_row_moderation_marker(&self, collection: &str, id: EntityId) -> RedDBResult<()> {
-        self.patch_entity(PatchEntityInput {
-            collection: collection.to_string(),
-            id,
-            payload: moderation_marker_clear_payload(),
-            operations: Vec::new(),
-        })?;
-        Ok(())
+    fn clear_row_moderation_marker(
+        &self,
+        collection: &str,
+        entity: crate::storage::UnifiedEntity,
+    ) -> RedDBResult<()> {
+        self.patch_internal_loaded_entity(collection, entity, moderation_marker_clear_payload())
     }
 
     /// Stamp the row with a moderation status (`pending`/`rejected`).
     fn set_row_moderation_status(
         &self,
         collection: &str,
-        id: EntityId,
+        entity: crate::storage::UnifiedEntity,
         status: &str,
     ) -> RedDBResult<()> {
-        self.patch_entity(PatchEntityInput {
-            collection: collection.to_string(),
-            id,
-            payload: moderation_marker_set_payload(status),
-            operations: Vec::new(),
-        })?;
-        Ok(())
+        self.patch_internal_loaded_entity(collection, entity, moderation_marker_set_payload(status))
     }
 
     /// Compute the embedding for one committed row and attach it as a vector

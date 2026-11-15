@@ -223,6 +223,8 @@ fn category_label(category: TypeCategory) -> &'static str {
         TypeCategory::Reference => "Reference",
         TypeCategory::Vector => "Vector",
         TypeCategory::Json => "Json",
+        TypeCategory::Biometric => "Biometric",
+        TypeCategory::Feature => "Feature",
         TypeCategory::Unknown => "Unknown",
     }
 }
@@ -240,6 +242,8 @@ const CATEGORY_ORDER: &[TypeCategory] = &[
     TypeCategory::Uuid,
     TypeCategory::Json,
     TypeCategory::Vector,
+    TypeCategory::Feature,
+    TypeCategory::Biometric,
     TypeCategory::Array,
     TypeCategory::Reference,
     TypeCategory::Opaque,

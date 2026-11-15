@@ -10,6 +10,26 @@ const params = [new Float32Array([0.12, 0.91, 0.44]), 5, 0.7];
 const rows = await db.query(sql, params);
 ```
 
+## Typed feature and fingerprint search
+
+Search caller-supplied feature artifacts or supported fingerprint minutiae:
+
+```sql
+SEARCH FEATURE $1 IN identities COLUMN face_features LIMIT 10 MIN_SCORE 0.80
+SEARCH BITS $1 IN identities COLUMN iris_code LIMIT 10 MIN_SCORE 0.80
+SEARCH FINGERPRINT $1 IN identities COLUMN fingerprint LIMIT 10 MIN_SCORE 0.80
+```
+
+`LIMIT` and `MIN_SCORE` are required. `MIN_SCORE` must be finite and in
+`0..=1`. Add `EXACT` after the other clauses to force a complete scan. Without
+`EXACT`, a compatible HNSW, Hamming, or minutiae index generates candidates and
+the exact comparator reranks them; equal scores are ordered by entity ID.
+
+An incompatible `space_id`, vector dimension, bit length, fingerprint position,
+or record kind is a query error rather than a non-match. See
+[Biometric Records and Comparison Artifacts](/types/biometrics.md) for
+constructors, typed parameters, and index contracts.
+
 The parameterized-query design is tracked in
 [ADR #352](https://github.com/reddb-io/reddb/issues/352).
 

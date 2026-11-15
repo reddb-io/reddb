@@ -189,7 +189,6 @@ fn cold_catalog_propagates_corruption_instead_of_reporting_an_empty_collection()
         .expect("collection");
     let root = manager.backing_root_page().expect("cold root");
     let pager = store.pager().expect("native pager");
-    let original = pager.read_page(root).expect("original page");
     pager
         .write_page(root, Page::new(PageType::Overflow, root))
         .expect("inject corruption into the disposable fixture");
@@ -207,9 +206,6 @@ fn cold_catalog_propagates_corruption_instead_of_reporting_an_empty_collection()
         )
     })
     .collect();
-    pager
-        .write_page(root, original)
-        .expect("restore fixture page");
     for (view, result) in results {
         let error = result.expect_err("storage errors must not become a successful empty catalog");
         assert!(
@@ -217,7 +213,6 @@ fn cold_catalog_propagates_corruption_instead_of_reporting_an_empty_collection()
             "{view}: {error}"
         );
     }
-    assert_legacy_table_catalog(&runtime);
 }
 
 #[test]

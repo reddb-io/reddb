@@ -382,7 +382,8 @@ impl<P: PageStore> BTree<P> {
         if root_id == 0 && !items.is_empty() {
             return Ok(false);
         }
-        let mut pages = std::collections::BTreeMap::<u32, (Page, Vec<(Vec<u8>, Vec<u8>)>)>::new();
+        let mut pages =
+            std::collections::BTreeMap::<u32, (Page, Vec<(Vec<u8>, Vec<u8>)>, Option<Page>)>::new();
         for (key, value) in items {
             if key.len() > MAX_KEY_SIZE {
                 return Err(BTreeError::KeyTooLarge(key.len()));
@@ -390,13 +391,13 @@ impl<P: PageStore> BTree<P> {
             let Some(new_value) = value_layout::encode_inline_without_pages(value)? else {
                 return Ok(false);
             };
-            let (leaf_id, _) = self.find_leaf(root_id, key)?;
+            let (leaf_page, _) = self.find_leaf_page(root_id, key)?;
+            let leaf_id = leaf_page.page_id();
             if let std::collections::btree_map::Entry::Vacant(entry) = pages.entry(leaf_id) {
-                let page = self.pager.read_page(leaf_id)?;
-                let entries = read_leaf_entries(&page)?;
-                entry.insert((page, entries));
+                let entries = read_leaf_entries(&leaf_page)?;
+                entry.insert((leaf_page, entries, None));
             }
-            let (_, entries) = pages.get_mut(&leaf_id).expect("leaf was loaded");
+            let (_, entries, _) = pages.get_mut(&leaf_id).expect("leaf was loaded");
             match entries.binary_search_by(|(existing, _)| existing.as_slice().cmp(key)) {
                 Ok(position) => {
                     if value_layout::pointer_head(&entries[position].1).is_some() {
@@ -409,14 +410,19 @@ impl<P: PageStore> BTree<P> {
         }
         // Check every leaf before writing any of them. Repacking can use dead
         // cell space, but must never split or alter routing links.
-        for (page, entries) in pages.values_mut() {
+        for (page, entries, previous) in pages.values_mut() {
             if leaf_entries_size(entries) > PAGE_SIZE - LEAF_SLOT_ARRAY_OFFSET {
                 return Ok(false);
             }
+            *previous = Some(page.clone());
             write_leaf_entries(page, entries)?;
         }
-        for (page_id, (page, _)) in pages {
-            self.pager.write_page(page_id, page)?;
+        for (page_id, (page, _, previous)) in pages {
+            self.pager.write_page_replacing(
+                page_id,
+                page,
+                previous.as_ref().expect("previous leaf image"),
+            )?;
         }
         Ok(true)
     }
@@ -939,6 +945,11 @@ impl<P: PageStore> BTree<P> {
 
     /// Find the leaf page containing the key
     fn find_leaf(&self, page_id: u32, key: &[u8]) -> BTreeResult<(u32, Vec<u32>)> {
+        let (page, path) = self.find_leaf_page(page_id, key)?;
+        Ok((page.page_id(), path))
+    }
+
+    fn find_leaf_page(&self, page_id: u32, key: &[u8]) -> BTreeResult<(Page, Vec<u32>)> {
         let mut current_id = page_id;
         let mut path = Vec::new();
 
@@ -949,7 +960,7 @@ impl<P: PageStore> BTree<P> {
 
             match page.page_type()? {
                 PageType::BTreeLeaf => {
-                    return Ok((current_id, path));
+                    return Ok((page, path));
                 }
                 PageType::BTreeInterior => {
                     path.push(current_id);

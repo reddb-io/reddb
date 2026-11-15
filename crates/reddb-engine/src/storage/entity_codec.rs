@@ -511,7 +511,7 @@ fn read_entity_from_reader(
         entity.set_xmin(reader.variable_u64()?);
         entity.set_xmax(reader.variable_u64()?);
     }
-    if format_version >= STORE_VERSION_V14 {
+    if format_version >= STORE_VERSION_V14 && reader.remaining() != 0 {
         match reader.byte()? {
             0 => {}
             1 => {

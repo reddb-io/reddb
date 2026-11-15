@@ -252,6 +252,9 @@ impl StoreStats {
 struct CheckpointVersion {
     manager: std::sync::Weak<SegmentManager>,
     segments: Vec<(u64, u64)>,
+    /// IDs at or above this allocator boundary did not exist in this
+    /// collection when the checkpoint was published.
+    entity_id_upper_bound: u64,
     visibility_revision: u64,
     untracked_visibility_revision: u64,
     excluded_xids: Arc<std::collections::HashSet<u64>>,

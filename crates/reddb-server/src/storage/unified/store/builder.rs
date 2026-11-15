@@ -516,6 +516,21 @@ mod tests {
 
     #[test]
     fn embedded_config_replacement_is_one_wal_publication_and_replays() {
+        let other_id = |store: &UnifiedStore| {
+            store
+                .get_collection("red.config")
+                .unwrap()
+                .query_all(|entity| {
+                    matches!(
+                        entity.data.as_row().and_then(|row| row.get_field("key")),
+                        Some(Value::Text(key)) if key.as_ref() == "system.other"
+                    )
+                })
+                .into_iter()
+                .next()
+                .unwrap()
+                .id
+        };
         for mode in [DurabilityMode::Strict, DurabilityMode::WalDurableGrouped] {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("config.rdb");
@@ -523,6 +538,7 @@ mod tests {
             store
                 .try_set_config_tree("system", &crate::json!({"value": "old", "other": 1}))
                 .unwrap();
+            let stable_other_id = other_id(&store);
             add_duplicate_system_value(&store);
             let snapshot = store.to_binary_dump_bytes();
             let initial =
@@ -533,6 +549,7 @@ mod tests {
             store
                 .try_set_config_tree("system", &crate::json!({"value": "new", "other": 2}))
                 .unwrap();
+            assert_eq!(other_id(&store), stable_other_id);
             let open = crate::storage::EmbeddedRdbArtifact::open(&path).unwrap();
             assert_eq!(
                 open.selected_superblock.generation,
@@ -542,6 +559,7 @@ mod tests {
             for payload in crate::storage::EmbeddedRdbArtifact::read_wal_payloads(&open).unwrap() {
                 replay.apply_encoded_store_wal_action(&payload).unwrap();
             }
+            assert_eq!(other_id(&replay), stable_other_id);
             assert_eq!(
                 replay.get_config("system.value"),
                 Some(reddb_types::Value::text("new"))

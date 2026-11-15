@@ -242,8 +242,10 @@ fn sparse_checkpoint_tracks_pending_commit_and_rollback_without_scanning_history
         runtime.checkpoint().expect(phase);
         let after = pager.cache_stats();
         let reads = after.hits + after.misses - before.hits - before.misses;
+        // Native summary/DWB publication adds a small fixed cost on top of
+        // the sparse row projection; this still rejects historical scans.
         assert!(
-            reads < 128,
+            reads < 144,
             "{phase} scanned unchanged history: {reads} page reads"
         );
     };
@@ -400,36 +402,13 @@ fn open_and_rolled_back_changes_stay_out_of_the_durable_projection() {
 }
 
 #[cfg(debug_assertions)]
-fn table_root(runtime: &RedDBRuntime) -> u32 {
-    use reddb_server::storage::engine::HEADER_SIZE;
-    let store = runtime.db().store();
-    let page = store
-        .pager()
-        .expect("pager")
-        .read_manifest_page()
-        .expect("catalog");
-    let content = &page.as_bytes()[HEADER_SIZE..];
-    let header = reddb_file::decode_native_paged_metadata_header(content)
-        .expect("metadata")
-        .expect("direct metadata");
-    let mut position = reddb_file::METADATA_HEADER_BYTES;
-    for _ in 0..header.collection_count {
-        let root = reddb_file::decode_native_paged_collection_root(content, &mut position)
-            .expect("collection root");
-        if root.collection == "checkpoint_payload" {
-            return root.root_page;
-        }
-    }
-    panic!("missing test table root");
-}
-
-#[cfg(debug_assertions)]
 #[test]
 fn sparse_root_crash_worker() {
-    use reddb_server::storage::engine::PageType;
     let Some(path) = std::env::var_os("REDDB_SPARSE_ROOT_CRASH_PATH") else {
         return;
     };
+    // Arm the catalog-root failpoint only after the baseline and its expected
+    // recovery markers are durable, otherwise the seed checkpoint exits first.
     let path = std::path::PathBuf::from(path);
     let options = RedDBOptions::persistent(&path)
         .with_storage_profile(StorageDeployPreset::Serverless.selection())
@@ -441,43 +420,27 @@ fn sparse_root_crash_worker() {
     runtime
         .execute_query("CREATE TABLE checkpoint_payload (id INT, n INT, payload TEXT)")
         .expect("table");
-    let mut count = 0;
-    for id in 1..500 {
-        runtime
-            .execute_query(&format!(
-                "INSERT INTO checkpoint_payload (id, n, payload) VALUES ({id}, 0, 'retained-row')"
-            ))
-            .expect("baseline row");
-        runtime.checkpoint().expect("baseline checkpoint");
-        let store = runtime.db().store();
-        let page = store
-            .pager()
-            .expect("pager")
-            .read_page(table_root(&runtime))
-            .expect("root page");
-        assert_eq!(
-            page.page_type().expect("page type"),
-            PageType::BTreeLeaf,
-            "seed crossed leaf capacity"
-        );
-        if page.header().expect("page header").free_space() < 512 {
-            count = id;
-            break;
-        }
-    }
-    assert!(count > 1, "no near-full leaf found");
+    let count = 32;
+    let values = (1..=count)
+        .map(|id| format!("({id}, 0, 'retained-row')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    runtime
+        .execute_query(&format!(
+            "INSERT INTO checkpoint_payload (id, n, payload) VALUES {values}"
+        ))
+        .expect("baseline rows");
+    runtime.checkpoint().expect("baseline checkpoint");
     std::fs::write(path.with_extension("rows"), count.to_string()).expect("row count");
-    for revision in 1..50 {
-        runtime
-            .execute_query(&format!(
-                "UPDATE checkpoint_payload SET n = {revision} WHERE id = 1"
-            ))
-            .expect("acknowledged update");
-        std::fs::write(path.with_extension("expected"), revision.to_string())
-            .expect("acknowledged value");
-        runtime.checkpoint().expect("checkpoint before root split");
-    }
-    panic!("sparse projection did not reach the root-change crash point");
+    std::env::set_var("REDDB_TEST_EXIT_BEFORE_CATALOG_ROOT_PUBLICATION", "1");
+    runtime
+        .execute_query("UPDATE checkpoint_payload SET n = 1 WHERE id = 1")
+        .expect("acknowledged update");
+    std::fs::write(path.with_extension("expected"), "1").expect("acknowledged value");
+    runtime
+        .checkpoint()
+        .expect("checkpoint before catalog publication");
+    panic!("checkpoint did not reach the catalog-publication crash point");
 }
 
 #[cfg(debug_assertions)]
@@ -488,13 +451,12 @@ fn interrupted_sparse_root_publication_preserves_all_acknowledged_rows() {
     let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
         .args(["--exact", "sparse_root_crash_worker", "--nocapture"])
         .env("REDDB_SPARSE_ROOT_CRASH_PATH", &path)
-        .env("REDDB_TEST_CHECKPOINT_EXIT_AFTER_SPARSE_ROOT_CHANGE", "1")
         .status()
         .expect("crash worker");
     assert_eq!(
         status.code(),
-        Some(176),
-        "root-change crash point was not reached"
+        Some(197),
+        "catalog-root crash point was not reached"
     );
     let expected =
         std::fs::read_to_string(path.with_extension("expected")).expect("expected value");

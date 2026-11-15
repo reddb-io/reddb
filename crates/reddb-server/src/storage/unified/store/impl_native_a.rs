@@ -1,6 +1,18 @@
 use super::*;
 
 impl UnifiedStore {
+    /// Flush native summary pages and their page-0 header without running a
+    /// second collection checkpoint. Pager sync retains WAL-before-home DWB
+    /// ordering and publishes the dirty header after its referenced pages.
+    pub(crate) fn sync_native_physical_state(&self) -> Result<(), StoreError> {
+        let Some(pager) = &self.pager else {
+            return Ok(());
+        };
+        pager
+            .sync()
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))
+    }
+
     pub fn update_physical_file_header(
         &self,
         physical: PhysicalFileHeader,

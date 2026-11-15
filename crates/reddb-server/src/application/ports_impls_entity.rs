@@ -1379,12 +1379,26 @@ impl RedDBRuntime {
             return Ok(());
         }
 
+        let collection = &applied[0].collection;
+        if self
+            .index_store_ref()
+            .has_typed_similarity_index(collection)
+        {
+            let post_fields = applied
+                .iter()
+                .map(|item| entity_row_fields_snapshot(&item.entity))
+                .collect::<Vec<_>>();
+            let field_refs = post_fields.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            self.index_store_ref()
+                .validate_typed_similarity_insert_batch(collection, &field_refs)
+                .map_err(crate::RedDBError::Query)?;
+        }
+
         let store = self.db().store();
         // Fence the in-memory change and its WAL append together. Otherwise a
         // checkpoint can copy a new transaction's rows or truncate a concurrent
         // autocommit's WAL before those rows belong to its frozen generation.
         let _publication = store.vault_publication_lock.lock();
-        let collection = &applied[0].collection;
         let Some(manager) = store.get_collection(collection) else {
             return Err(crate::RedDBError::NotFound(format!(
                 "collection not found: {collection}"
@@ -1711,6 +1725,115 @@ impl RedDBRuntime {
             id: applied.entity.logical_id(),
             entity: Some(public_document_entity(applied.entity)),
         })
+    }
+
+    pub(crate) fn patch_internal_loaded_entity(
+        &self,
+        collection: &str,
+        entity: crate::storage::UnifiedEntity,
+        payload: JsonValue,
+    ) -> RedDBResult<()> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
+        self.check_collection_privilege(reddb_rql::ast::PolicyAction::Update, collection)?;
+        let store = self.db().store();
+        let _branch_publication = (self.vcs_is_versioned(collection)?
+            || self.has_graph_contract(collection))
+        .then(|| store.vault_publication_lock.lock());
+        let constraint_lock =
+            crate::application::collection_contract_enforcer::row_constraint_lock(self, collection);
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
+        let topology_lock = self.index_store_ref().collection_topology_lock(collection);
+        self.apply_loaded_patch_entity(
+            collection.to_string(),
+            entity,
+            payload,
+            Vec::new(),
+            topology_lock.read(),
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_internal_loaded_entity(
+        &self,
+        collection: &str,
+        entity: crate::storage::UnifiedEntity,
+    ) -> RedDBResult<bool> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
+        self.check_collection_privilege(reddb_rql::ast::PolicyAction::Delete, collection)?;
+        let store = self.db().store();
+        let _branch_publication = (self.vcs_is_versioned(collection)?
+            || self.has_graph_contract(collection))
+        .then(|| store.vault_publication_lock.lock());
+        let constraint_lock =
+            crate::application::collection_contract_enforcer::row_constraint_lock(self, collection);
+        let _constraint_guard = constraint_lock.as_ref().map(|lock| lock.lock());
+        let topology_lock = self.index_store_ref().collection_topology_lock(collection);
+        if !crate::runtime::rls_injection::entity_passes_rls_action(
+            self,
+            collection,
+            reddb_rql::ast::PolicyAction::Delete,
+            &entity,
+        ) {
+            return Ok(false);
+        }
+        self.delete_loaded_entity(collection, entity, topology_lock.read())
+    }
+
+    fn delete_loaded_entity(
+        &self,
+        collection: &str,
+        entity: crate::storage::UnifiedEntity,
+        topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
+    ) -> RedDBResult<bool> {
+        if self.vcs_is_versioned(collection)? || self.has_graph_contract(collection) {
+            if self
+                .db()
+                .collection_contract_arc(collection)
+                .is_some_and(|contract| contract.append_only)
+            {
+                return Err(crate::RedDBError::InvalidOperation(
+                    "append-only collections require their native retirement operation".into(),
+                ));
+            }
+            self.validate_graph_changes(collection, &[], &[entity.id])?;
+            let deleted =
+                self.delete_entities_batch(collection, &[entity.id], topology_guard, None, false)?;
+            if deleted.affected > 0 {
+                self.invalidate_result_cache();
+            }
+            return Ok(deleted.affected > 0);
+        }
+        let pre_delete_fields = entity_row_fields_snapshot(&entity);
+        let store = self.db().store();
+        let deleted = store
+            .delete(collection, entity.id)
+            .map_err(|error| crate::RedDBError::Internal(error.to_string()))?;
+        if deleted {
+            #[cfg(test)]
+            self.index_store_ref().mutation_test_hook(
+                collection,
+                crate::runtime::MutationTestPhase::StoragePublished,
+            );
+            store.context_index().remove_entity(entity.id);
+            if !pre_delete_fields.is_empty() {
+                self.index_store_ref()
+                    .index_entity_delete(collection, entity.id, &pre_delete_fields)
+                    .map_err(crate::RedDBError::Internal)?;
+            }
+            drop(topology_guard);
+            #[cfg(test)]
+            self.index_store_ref()
+                .mutation_test_hook(collection, crate::runtime::MutationTestPhase::BeforeEvents);
+            self.cdc_emit(
+                crate::replication::cdc::ChangeOperation::Delete,
+                collection,
+                entity.id.raw(),
+                "entity",
+            )?;
+        }
+        Ok(deleted)
     }
 }
 
@@ -2662,22 +2785,28 @@ impl RuntimeEntityPort for RedDBRuntime {
     ) -> RedDBResult<Option<(reddb_types::Value, crate::storage::EntityId)>> {
         self.check_collection_privilege(reddb_rql::ast::PolicyAction::Select, collection)?;
         let resolver = crate::runtime::kv_read::KvReadResolver::for_rest_kv(self, collection)?;
+        if crate::runtime::execution_context::current_auth_identity().is_some()
+            && crate::runtime::rls_injection::rls_is_enabled(self, collection)
+        {
+            let Some(entity) = resolver.owned_entity(key)? else {
+                return Ok(None);
+            };
+            if !crate::runtime::rls_injection::entity_passes_rls_action(
+                self,
+                collection,
+                reddb_rql::ast::PolicyAction::Select,
+                &entity,
+            ) {
+                return Ok(None);
+            }
+            let value = crate::runtime::impl_kv::kv_value_from_entity(&entity)
+                .unwrap_or(reddb_types::Value::Null);
+            return Ok(Some((value, entity.id)));
+        }
         let Some(record) = resolver.record(key)? else {
             return Ok(None);
         };
-        let visible = self
-            .db()
-            .store()
-            .get(collection, record.id)
-            .is_some_and(|entity| {
-                crate::runtime::rls_injection::entity_passes_rls_action(
-                    self,
-                    collection,
-                    reddb_rql::ast::PolicyAction::Select,
-                    &entity,
-                )
-            });
-        Ok(visible.then_some((record.value.unwrap_or(Value::Null), record.id)))
+        Ok(Some((record.value.unwrap_or(Value::Null), record.id)))
     }
 
     fn delete_kv(&self, collection: &str, key: &str) -> RedDBResult<bool> {
@@ -2763,10 +2892,6 @@ impl RuntimeEntityPort for RedDBRuntime {
             .index_store_ref()
             .collection_topology_lock(&input.collection);
         let topology_guard = topology_lock.read();
-        let store = self.db().store();
-        // Snapshot row fields before delete so we can mirror the removal
-        // into every secondary index. The fetch is best-effort: if the
-        // entity is already gone, the delete below is a no-op anyway.
         let (snapshot, _retention) = self.native_read_snapshot()?;
         let _snapshot = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot);
         let Some(entity) = self.get_collection_entity_for_action(
@@ -2791,66 +2916,7 @@ impl RuntimeEntityPort for RedDBRuntime {
                 id: input.id,
             });
         }
-        if self.vcs_is_versioned(&input.collection)? || self.has_graph_contract(&input.collection) {
-            if self
-                .db()
-                .collection_contract_arc(&input.collection)
-                .is_some_and(|contract| contract.append_only)
-            {
-                return Err(crate::RedDBError::InvalidOperation(
-                    "append-only collections require their native retirement operation".into(),
-                ));
-            }
-            self.validate_graph_changes(&input.collection, &[], &[entity.id])?;
-            let deleted = self.delete_entities_batch(
-                &input.collection,
-                &[entity.id],
-                topology_guard,
-                None,
-                false,
-            )?;
-            if deleted.affected > 0 {
-                self.invalidate_result_cache();
-            }
-            return Ok(DeleteEntityOutput {
-                deleted: deleted.affected > 0,
-                id: input.id,
-            });
-        }
-        let pre_delete_fields = entity_row_fields_snapshot(&entity);
-        // Store delete first (source of truth). Crash between here and index removal
-        // leaves the entity invisible to most queries but recoverable; the reverse
-        // (remove index first, then crash) leaves the entity permanently orphaned.
-        let deleted = store
-            .delete(&input.collection, input.id)
-            .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
-        if deleted {
-            #[cfg(test)]
-            self.index_store_ref().mutation_test_hook(
-                &input.collection,
-                crate::runtime::MutationTestPhase::StoragePublished,
-            );
-            store.context_index().remove_entity(input.id);
-            // Secondary index maintenance — surface only registry-shape
-            // errors; missing-index removals are tolerated inside the call.
-            if !pre_delete_fields.is_empty() {
-                self.index_store_ref()
-                    .index_entity_delete(&input.collection, input.id, &pre_delete_fields)
-                    .map_err(crate::RedDBError::Internal)?;
-            }
-            drop(topology_guard);
-            #[cfg(test)]
-            self.index_store_ref().mutation_test_hook(
-                &input.collection,
-                crate::runtime::MutationTestPhase::BeforeEvents,
-            );
-            self.cdc_emit(
-                crate::replication::cdc::ChangeOperation::Delete,
-                &input.collection,
-                input.id.raw(),
-                "entity",
-            )?;
-        }
+        let deleted = self.delete_loaded_entity(&input.collection, entity, topology_guard)?;
         Ok(DeleteEntityOutput {
             deleted,
             id: input.id,

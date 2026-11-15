@@ -34,15 +34,35 @@ public final class ValueCodec {
     public static final int TAG_JSON = 0x07;
     public static final int TAG_TIMESTAMP = 0x08;
     public static final int TAG_UUID = 0x09;
+    public static final int TAG_FINGERPRINT = 0x0a;
+    public static final int TAG_FACE = 0x0b;
+    public static final int TAG_IRIS = 0x0c;
+    public static final int TAG_FEATURE_VECTOR = 0x0d;
+    public static final int TAG_BIT_SIGNATURE = 0x0e;
+    public static final int TAG_LANDMARK_SET = 0x0f;
 
     public static final int MAX_PARAM_COUNT = 65_536;
     public static final int MAX_VALUE_PAYLOAD_LEN = Frame.MAX_FRAME_SIZE;
+    public static final int MAX_FEATURE_VECTOR_DIMENSIONS = 65_536;
+    public static final int MAX_BIT_SIGNATURE_BYTES = 1 << 20;
+    public static final int MAX_LANDMARK_POINTS = 4_096;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private ValueCodec() {}
 
     public record Timestamp(long seconds) {}
+
+    public static boolean requiresBiometricCapability(Object value) {
+        JsonNode node = envelopeNode(value);
+        return node != null && (node.has("$biometric") || node.has("$feature_vector")
+            || node.has("$bit_signature"));
+    }
+
+    public static boolean requiresLandmarkCapability(Object value) {
+        JsonNode node = envelopeNode(value);
+        return node != null && node.has("$landmark_set");
+    }
 
     public static byte[] encodeQueryWithParams(String sql, Object[] params) {
         Object[] values = params == null ? new Object[0] : params;
@@ -93,6 +113,13 @@ public final class ValueCodec {
         if (value instanceof Timestamp timestamp) return encodeI64(timestamp.seconds(), TAG_TIMESTAMP);
         if (value instanceof UUID uuid) return encodeUuid(uuid);
         if (value instanceof JsonNode || value instanceof Map<?, ?> || value instanceof List<?>) {
+            JsonNode node = canonicalize(value);
+            if (node.isObject() && node.size() == 1) {
+                if (node.has("$biometric")) return encodeBiometric(node.get("$biometric"));
+                if (node.has("$feature_vector")) return encodeFeatureVector(node.get("$feature_vector"));
+                if (node.has("$bit_signature")) return encodeBitSignature(node.get("$bit_signature"));
+                if (node.has("$landmark_set")) return encodeLandmarkSet(node.get("$landmark_set"));
+            }
             byte[] json = canonicalJson(value).getBytes(StandardCharsets.UTF_8);
             return encodeLenPrefixed(TAG_JSON, json);
         }
@@ -189,6 +216,197 @@ public final class ValueCodec {
         out.putLong(uuid.getMostSignificantBits());
         out.putLong(uuid.getLeastSignificantBits());
         return out.array();
+    }
+
+    private static byte[] encodeBiometric(JsonNode value) {
+        if (value == null || !value.isObject()) {
+            throw new IllegalArgumentException("$biometric must be an object");
+        }
+        String modality = requiredText(value, "modality");
+        int format = biometricFormat(requiredText(value, "format"));
+        int expected = switch (modality) {
+            case "fingerprint" -> 1;
+            case "face" -> 2;
+            case "iris" -> 3;
+            default -> 0;
+        };
+        if (format == 0 || expected == 0 || (format >>> 8) != expected) {
+            throw new IllegalArgumentException("invalid biometric modality or format");
+        }
+        byte[] data = decodeHex(requiredText(value, "data"), "biometric data");
+        if (data.length == 0 || data.length > MAX_VALUE_PAYLOAD_LEN) {
+            throw new IllegalArgumentException("invalid biometric payload length");
+        }
+        int tag = switch (modality) {
+            case "fingerprint" -> TAG_FINGERPRINT;
+            case "face" -> TAG_FACE;
+            case "iris" -> TAG_IRIS;
+            default -> throw new IllegalArgumentException("invalid biometric modality");
+        };
+        ByteBuffer out = ByteBuffer.allocate(1 + 2 + 4 + data.length)
+            .order(ByteOrder.LITTLE_ENDIAN);
+        out.put((byte) tag).putShort((short) format).putInt(data.length).put(data);
+        return out.array();
+    }
+
+    private static byte[] encodeFeatureVector(JsonNode value) {
+        if (value == null || !value.isObject() || !value.path("values").isArray()) {
+            throw new IllegalArgumentException("$feature_vector must contain values");
+        }
+        JsonNode values = value.get("values");
+        if (values.isEmpty() || values.size() > MAX_FEATURE_VECTOR_DIMENSIONS) {
+            throw new IllegalArgumentException("invalid feature vector dimension");
+        }
+        byte[] space = decodeSpaceId(requiredText(value, "space_id"));
+        ByteBuffer out = ByteBuffer.allocate(1 + 16 + 4 + values.size() * 4)
+            .order(ByteOrder.LITTLE_ENDIAN);
+        out.put((byte) TAG_FEATURE_VECTOR).put(space).putInt(values.size());
+        double norm = 0;
+        for (JsonNode coordinateNode : values) {
+            if (!coordinateNode.isNumber()) {
+                throw new IllegalArgumentException("feature vector coordinates must be numeric");
+            }
+            float coordinate = coordinateNode.floatValue();
+            if (!Float.isFinite(coordinate)) {
+                throw new IllegalArgumentException("feature vector coordinates must be finite");
+            }
+            norm += (double) coordinate * coordinate;
+            out.putFloat(coordinate);
+        }
+        if (norm == 0) throw new IllegalArgumentException("feature vector norm must be non-zero");
+        return out.array();
+    }
+
+    private static byte[] encodeBitSignature(JsonNode value) {
+        if (value == null || !value.isObject()) {
+            throw new IllegalArgumentException("$bit_signature must be an object");
+        }
+        byte[] space = decodeSpaceId(requiredText(value, "space_id"));
+        byte[] bits = decodeHex(requiredText(value, "bits"), "bit signature bits");
+        byte[] mask = value.has("mask")
+            ? decodeHex(requiredText(value, "mask"), "bit signature mask")
+            : fullMask(bits.length);
+        boolean hasValidBit = false;
+        for (byte b : mask) hasValidBit |= b != 0;
+        if (bits.length == 0 || bits.length > MAX_BIT_SIGNATURE_BYTES
+            || mask.length != bits.length || !hasValidBit) {
+            throw new IllegalArgumentException("invalid bit signature length or mask");
+        }
+        ByteBuffer out = ByteBuffer.allocate(1 + 16 + 4 + bits.length * 2)
+            .order(ByteOrder.LITTLE_ENDIAN);
+        out.put((byte) TAG_BIT_SIGNATURE).put(space).putInt(bits.length).put(bits).put(mask);
+        return out.array();
+    }
+
+    private static byte[] encodeLandmarkSet(JsonNode value) {
+        if (value == null || !value.isObject() || value.size() != 4
+            || !value.path("pairs").isArray() || !value.path("midline").isArray()) {
+            throw new IllegalArgumentException("$landmark_set must be a canonical object");
+        }
+        JsonNode pairs = value.get("pairs");
+        JsonNode midline = value.get("midline");
+        int dimensions = value.path("dimensions").asInt(0);
+        int pointCount = Math.addExact(Math.multiplyExact(pairs.size(), 2), midline.size());
+        if ((dimensions != 2 && dimensions != 3) || pairs.size() < 2
+            || pointCount > MAX_LANDMARK_POINTS) {
+            throw new IllegalArgumentException("invalid landmark geometry");
+        }
+        byte[] space = decodeSpaceId(requiredText(value, "space_id"));
+        ByteBuffer out = ByteBuffer.allocate(
+            1 + 16 + 1 + 4 + 4 + Math.multiplyExact(pointCount, dimensions * 4))
+            .order(ByteOrder.LITTLE_ENDIAN);
+        out.put((byte) TAG_LANDMARK_SET).put(space).put((byte) dimensions)
+            .putInt(pairs.size()).putInt(midline.size());
+        for (JsonNode pair : pairs) {
+            if (!pair.isObject() || pair.size() != 2 || !pair.has("left") || !pair.has("right")) {
+                throw new IllegalArgumentException("invalid landmark geometry");
+            }
+            putLandmarkPoint(out, pair.get("left"), dimensions);
+            putLandmarkPoint(out, pair.get("right"), dimensions);
+        }
+        for (JsonNode point : midline) putLandmarkPoint(out, point, dimensions);
+        return out.array();
+    }
+
+    private static void putLandmarkPoint(ByteBuffer out, JsonNode point, int dimensions) {
+        if (point == null || !point.isArray() || point.size() != dimensions) {
+            throw new IllegalArgumentException("invalid landmark geometry");
+        }
+        for (JsonNode coordinateNode : point) {
+            if (!coordinateNode.isNumber()) {
+                throw new IllegalArgumentException("invalid landmark geometry");
+            }
+            float coordinate = coordinateNode.floatValue();
+            if (!Float.isFinite(coordinate)) {
+                throw new IllegalArgumentException("invalid landmark geometry");
+            }
+            out.putFloat(coordinate);
+        }
+    }
+
+    private static JsonNode envelopeNode(Object value) {
+        if (!(value instanceof JsonNode) && !(value instanceof Map<?, ?>)) return null;
+        JsonNode node = canonicalize(value);
+        return node.isObject() ? node : null;
+    }
+
+    private static String requiredText(JsonNode value, String field) {
+        JsonNode child = value.get(field);
+        if (child == null || !child.isTextual()) {
+            throw new IllegalArgumentException("typed parameter field '" + field + "' must be text");
+        }
+        return child.asText();
+    }
+
+    private static byte[] decodeSpaceId(String value) {
+        byte[] bytes = decodeHex(value.replace("-", ""), "space_id");
+        if (bytes.length != 16) throw new IllegalArgumentException("space_id must contain 16 bytes");
+        return bytes;
+    }
+
+    private static byte[] decodeHex(String value, String field) {
+        if ((value.length() & 1) != 0) {
+            throw new IllegalArgumentException(field + " must be even-length hexadecimal text");
+        }
+        byte[] out = new byte[value.length() / 2];
+        for (int i = 0; i < out.length; i++) {
+            int high = Character.digit(value.charAt(i * 2), 16);
+            int low = Character.digit(value.charAt(i * 2 + 1), 16);
+            if (high < 0 || low < 0) {
+                throw new IllegalArgumentException(field + " must be hexadecimal text");
+            }
+            out[i] = (byte) ((high << 4) | low);
+        }
+        return out;
+    }
+
+    private static byte[] fullMask(int length) {
+        byte[] mask = new byte[length];
+        java.util.Arrays.fill(mask, (byte) 0xff);
+        return mask;
+    }
+
+    private static int biometricFormat(String name) {
+        return switch (name.toLowerCase(java.util.Locale.ROOT)) {
+            case "iso/iec 39794-2" -> 0x0101;
+            case "iso/iec 39794-4" -> 0x0102;
+            case "iso/iec 19794-2" -> 0x0103;
+            case "iso/iec 19794-4" -> 0x0104;
+            case "ansi incits 378" -> 0x0105;
+            case "ansi incits 381" -> 0x0106;
+            case "ansi/nist-itl type-4" -> 0x0107;
+            case "ansi/nist-itl type-9" -> 0x0108;
+            case "cbeff fingerprint" -> 0x0109;
+            case "iso/iec 39794-5" -> 0x0201;
+            case "iso/iec 19794-5" -> 0x0202;
+            case "ansi/nist-itl type-10" -> 0x0203;
+            case "cbeff face" -> 0x0204;
+            case "iso/iec 39794-6" -> 0x0301;
+            case "iso/iec 19794-6" -> 0x0302;
+            case "ansi/nist-itl type-17" -> 0x0303;
+            case "cbeff iris" -> 0x0304;
+            default -> 0;
+        };
     }
 
     private static String canonicalJson(Object value) {

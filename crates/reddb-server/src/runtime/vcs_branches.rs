@@ -676,7 +676,7 @@ pub(super) fn stage_head(
                     "writer_epoch".into(),
                     Value::UnsignedInteger(view.writer_epoch),
                 ),
-                ("ancestors".into(), encode_epochs(&view)),
+                ("ancestors".into(), encode_epochs(view)),
             ]),
         )?;
     }

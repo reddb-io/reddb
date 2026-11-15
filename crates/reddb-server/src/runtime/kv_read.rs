@@ -68,7 +68,7 @@ impl<'a> KvReadResolver<'a> {
         })
     }
 
-    pub(super) fn owned_entity(&self, key: &str) -> RedDBResult<Option<UnifiedEntity>> {
+    pub(crate) fn owned_entity(&self, key: &str) -> RedDBResult<Option<UnifiedEntity>> {
         self.project(key, Clone::clone)
     }
 

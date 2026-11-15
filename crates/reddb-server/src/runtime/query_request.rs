@@ -32,6 +32,12 @@ pub enum ParamValue {
     Json(Vec<u8>),
     Timestamp(i64),
     Uuid([u8; 16]),
+    Fingerprint(reddb_types::BiometricSample),
+    Face(reddb_types::BiometricSample),
+    Iris(reddb_types::BiometricSample),
+    FeatureVector(reddb_types::FeatureVector),
+    BitSignature(reddb_types::BitSignature),
+    LandmarkSet(reddb_types::LandmarkSet),
 }
 
 impl From<ParamValue> for Value {
@@ -49,6 +55,12 @@ impl From<ParamValue> for Value {
             ParamValue::Json(value) => Self::Json(value),
             ParamValue::Timestamp(value) => Self::Timestamp(value),
             ParamValue::Uuid(value) => Self::Uuid(value),
+            ParamValue::Fingerprint(value) => Self::Fingerprint(value),
+            ParamValue::Face(value) => Self::Face(value),
+            ParamValue::Iris(value) => Self::Iris(value),
+            ParamValue::FeatureVector(value) => Self::FeatureVector(value),
+            ParamValue::BitSignature(value) => Self::BitSignature(value),
+            ParamValue::LandmarkSet(value) => Self::LandmarkSet(value),
         }
     }
 }
@@ -149,6 +161,18 @@ impl ParamValue {
                     if let Some(JsonValue::String(value)) = map.get("$decimal") {
                         return Ok(Self::DecimalText(value.clone()));
                     }
+                    if let Some(value) = map.get("$biometric") {
+                        return decode_biometric_json(value);
+                    }
+                    if let Some(value) = map.get("$feature_vector") {
+                        return decode_feature_vector_json(value);
+                    }
+                    if let Some(value) = map.get("$bit_signature") {
+                        return decode_bit_signature_json(value);
+                    }
+                    if let Some(value) = map.get("$landmark_set") {
+                        return decode_landmark_set_json(value);
+                    }
                 }
                 Ok(Self::Json(crate::json::to_vec(value).unwrap_or_default()))
             }
@@ -161,6 +185,143 @@ impl ParamValue {
     pub fn decode_json_lossy(value: &crate::json::Value) -> Self {
         Self::decode_json(value)
             .unwrap_or_else(|_| Self::Json(crate::json::to_vec(value).unwrap_or_default()))
+    }
+}
+
+fn decode_biometric_json(value: &crate::json::Value) -> Result<ParamValue, String> {
+    let crate::json::Value::Object(object) = value else {
+        return Err("invalid $biometric envelope".to_string());
+    };
+    let modality = json_string_field(object, "modality")?;
+    let format_name = json_string_field(object, "format")?;
+    let data = json_string_field(object, "data")?;
+    if data.len() > reddb_types::MAX_BIOMETRIC_RECORD_BYTES.saturating_mul(2) {
+        return Err("biometric record exceeds the maximum encoded size".to_string());
+    }
+    let format = reddb_types::BiometricFormat::from_standard_name(format_name)
+        .ok_or_else(|| "unknown biometric format".to_string())?;
+    let expected = match modality.to_ascii_lowercase().as_str() {
+        "fingerprint" => reddb_types::BiometricModality::Fingerprint,
+        "face" => reddb_types::BiometricModality::Face,
+        "iris" => reddb_types::BiometricModality::Iris,
+        _ => return Err("unknown biometric modality".to_string()),
+    };
+    if format.modality() != expected {
+        return Err("biometric format does not match modality".to_string());
+    }
+    let bytes = decode_hex(data)?;
+    let sample = reddb_types::BiometricSample::with_format(format, bytes)
+        .map_err(|error| error.to_string())?;
+    Ok(match expected {
+        reddb_types::BiometricModality::Fingerprint => ParamValue::Fingerprint(sample),
+        reddb_types::BiometricModality::Face => ParamValue::Face(sample),
+        reddb_types::BiometricModality::Iris => ParamValue::Iris(sample),
+    })
+}
+
+fn decode_feature_vector_json(value: &crate::json::Value) -> Result<ParamValue, String> {
+    let crate::json::Value::Object(object) = value else {
+        return Err("invalid $feature_vector envelope".to_string());
+    };
+    let space_id = decode_space_id(json_string_field(object, "space_id")?)?;
+    let values = match object.get("values") {
+        Some(crate::json::Value::Array(values))
+            if values.len() <= reddb_types::MAX_FEATURE_VECTOR_DIMENSIONS =>
+        {
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_f64()
+                        .map(|number| number as f32)
+                        .ok_or_else(|| "feature vector coordinate must be numeric".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        Some(crate::json::Value::Array(_)) => {
+            return Err("feature vector exceeds the maximum dimensions".to_string())
+        }
+        _ => return Err("feature vector values must be an array".to_string()),
+    };
+    reddb_types::FeatureVector::new(space_id, values)
+        .map(ParamValue::FeatureVector)
+        .map_err(|error| error.to_string())
+}
+
+fn decode_bit_signature_json(value: &crate::json::Value) -> Result<ParamValue, String> {
+    let crate::json::Value::Object(object) = value else {
+        return Err("invalid $bit_signature envelope".to_string());
+    };
+    let space_id = decode_space_id(json_string_field(object, "space_id")?)?;
+    let bits_hex = json_string_field(object, "bits")?;
+    if bits_hex.len() > reddb_types::MAX_BIT_SIGNATURE_BYTES.saturating_mul(2) {
+        return Err("bit signature exceeds the maximum encoded size".to_string());
+    }
+    let bits = decode_hex(bits_hex)?;
+    let mask = object
+        .get("mask")
+        .map(|value| match value {
+            crate::json::Value::String(mask) if mask.len() <= bits_hex.len() => decode_hex(mask),
+            crate::json::Value::String(_) => Err("bit signature mask is too large".to_string()),
+            _ => Err("bit signature mask must be hexadecimal text".to_string()),
+        })
+        .transpose()?;
+    reddb_types::BitSignature::new(space_id, bits, mask)
+        .map(ParamValue::BitSignature)
+        .map_err(|error| error.to_string())
+}
+
+fn decode_landmark_set_json(value: &crate::json::Value) -> Result<ParamValue, String> {
+    let crate::json::Value::Object(object) = value else {
+        return Err("invalid $landmark_set envelope".to_string());
+    };
+    let space_id = decode_space_id(json_string_field(object, "space_id")?)?;
+    let mut geometry = object.clone();
+    geometry.remove("space_id");
+    let bytes = crate::json::to_vec(&crate::json::Value::Object(geometry))
+        .map_err(|_| "invalid landmark geometry".to_string())?;
+    reddb_types::LandmarkSet::from_geometry_json(space_id, &bytes)
+        .map(ParamValue::LandmarkSet)
+        .map_err(|error| error.to_string())
+}
+
+fn json_string_field<'a>(
+    object: &'a crate::json::Map<String, crate::json::Value>,
+    field: &str,
+) -> Result<&'a str, String> {
+    match object.get(field) {
+        Some(crate::json::Value::String(value)) => Ok(value),
+        _ => Err(format!("typed parameter field '{field}' must be text")),
+    }
+}
+
+fn decode_space_id(value: &str) -> Result<[u8; 16], String> {
+    let bytes = decode_hex(value)?;
+    bytes
+        .try_into()
+        .map_err(|_| "feature space_id must contain 16 bytes".to_string())
+}
+
+fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
+    if !value.len().is_multiple_of(2) {
+        return Err("hexadecimal value must contain an even number of digits".to_string());
+    }
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let high = decode_hex_digit(pair[0])?;
+        let low = decode_hex_digit(pair[1])?;
+        decoded.push((high << 4) | low);
+    }
+    Ok(decoded)
+}
+
+fn decode_hex_digit(value: u8) -> Result<u8, String> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        b'A'..=b'F' => Ok(value - b'A' + 10),
+        _ => Err("invalid hexadecimal value".to_string()),
     }
 }
 
@@ -739,6 +900,102 @@ fn commit_statement_kind(sql: &str, prepared: Option<&QueryExpr>) -> RedDBResult
         ))
     );
     Ok((write, commit))
+}
+
+#[cfg(test)]
+mod typed_param_tests {
+    use super::*;
+
+    fn decode(input: &str) -> Result<ParamValue, String> {
+        let value = crate::json::from_str(input).expect("valid test JSON");
+        ParamValue::decode_json(&value)
+    }
+
+    fn iso_fmr_hex() -> String {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"FMR\0 20\0");
+        bytes.extend_from_slice(&36_u32.to_be_bytes());
+        bytes.extend_from_slice(&0_u16.to_be_bytes());
+        bytes.extend_from_slice(&500_u16.to_be_bytes());
+        bytes.extend_from_slice(&500_u16.to_be_bytes());
+        bytes.extend_from_slice(&197_u16.to_be_bytes());
+        bytes.extend_from_slice(&197_u16.to_be_bytes());
+        bytes.extend_from_slice(&[1, 0]);
+        bytes.extend_from_slice(&[1, 0, 100, 1]);
+        bytes.extend_from_slice(&[0x40, 1, 0, 2, 3, 90]);
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn http_typed_envelopes_decode_all_new_value_types() {
+        let fingerprint = format!(
+            r#"{{"$biometric":{{"modality":"fingerprint","format":"ISO/IEC 19794-2","data":"{}"}}}}"#,
+            iso_fmr_hex()
+        );
+        assert!(matches!(
+            decode(&fingerprint),
+            Ok(ParamValue::Fingerprint(_))
+        ));
+        assert!(matches!(
+            decode(
+                r#"{"$biometric":{"modality":"face","format":"ISO/IEC 39794-5","data":"3003020101"}}"#
+            ),
+            Ok(ParamValue::Face(_))
+        ));
+        assert!(matches!(
+            decode(
+                r#"{"$biometric":{"modality":"iris","format":"ISO/IEC 39794-6","data":"3003020101"}}"#
+            ),
+            Ok(ParamValue::Iris(_))
+        ));
+        assert!(matches!(
+            decode(
+                r#"{"$feature_vector":{"space_id":"11111111111111111111111111111111","values":[1.0,-2.0]}}"#
+            ),
+            Ok(ParamValue::FeatureVector(_))
+        ));
+
+        let signature = decode(
+            r#"{"$bit_signature":{"space_id":"22222222222222222222222222222222","bits":"aa55"}}"#,
+        )
+        .expect("valid signature");
+        let ParamValue::BitSignature(signature) = signature else {
+            panic!("expected bit signature")
+        };
+        assert_eq!(signature.mask(), &[0xff, 0xff]);
+
+        let landmarks = decode(
+            r#"{"$landmark_set":{"space_id":"33333333333333333333333333333333","dimensions":2,"pairs":[{"left":[-2.0,1.0],"right":[2.0,1.0]},{"left":[-1.0,-1.0],"right":[1.0,-1.0]}],"midline":[[0.0,2.0]]}}"#,
+        )
+        .expect("valid landmark set");
+        let ParamValue::LandmarkSet(landmarks) = landmarks else {
+            panic!("expected landmark set")
+        };
+        assert_eq!(landmarks.space_id(), [0x33; 16]);
+        assert_eq!(landmarks.point_count(), 5);
+    }
+
+    #[test]
+    fn http_typed_envelopes_reject_incompatible_metadata() {
+        let wrong_modality = decode(
+            r#"{"$biometric":{"modality":"iris","format":"ISO/IEC 39794-5","data":"3003020101"}}"#,
+        )
+        .expect_err("format and modality must agree");
+        assert!(wrong_modality.contains("does not match"));
+
+        let bad_mask = decode(
+            r#"{"$bit_signature":{"space_id":"22222222222222222222222222222222","bits":"aa55","mask":"ff"}}"#,
+        )
+        .expect_err("mask length must agree");
+        assert!(bad_mask.contains("mask"));
+
+        let weighted_landmarks = decode(
+            r#"{"$landmark_set":{"space_id":"33333333333333333333333333333333","dimensions":2,"pairs":[{"left":[-2.0,1.0],"right":[2.0,1.0],"weight":1},{"left":[-1.0,-1.0],"right":[1.0,-1.0]}],"midline":[]}}"#,
+        )
+        .expect_err("weights are not part of the canonical geometry");
+        assert!(weighted_landmarks.contains("invalid"));
+    }
 }
 
 #[cfg(test)]

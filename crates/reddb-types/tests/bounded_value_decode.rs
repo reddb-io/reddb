@@ -126,7 +126,17 @@ fn bounded_and_legacy_decoders_agree_for_every_registered_uncompressed_tag() {
         if kind == DataType::IpAddr {
             bytes[1] = 4;
         }
-        let expected = Value::from_bytes(&bytes).expect("valid zero/default payload");
+        let expected = match Value::from_bytes(&bytes) {
+            Ok(expected) => expected,
+            Err(expected) => {
+                assert_eq!(
+                    Value::from_bytes_with_limit(&bytes, 4096).expect_err("invalid default"),
+                    expected,
+                    "{kind:?}"
+                );
+                continue;
+            }
+        };
         assert_eq!(
             Value::from_bytes_with_limit(&bytes, 4096).expect("bounded default"),
             expected,

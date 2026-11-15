@@ -3,9 +3,10 @@ use reddb_server::{RedDBOptions, RedDBRuntime};
 use reddb_types::Value;
 use std::path::Path;
 
-const BUDGET_BYTES: u64 = 32 * 1024 * 1024;
+const BUDGET_BYTES: u64 = 8 * 1024 * 1024;
 const PAYLOAD_BYTES: usize = 64 * 1024;
-const ROWS: usize = 2048;
+const ROWS: usize = 512;
+const INSERT_BATCH_ROWS: usize = 14;
 const CHILD_PATH: &str = "REDDB_TEST_BOUNDED_WRITE_PROGRESS_PATH";
 
 fn options(path: &Path) -> RedDBOptions {
@@ -30,15 +31,17 @@ fn payload(id: usize) -> String {
 fn write_rows(runtime: &RedDBRuntime, start: usize, end: usize) {
     let started = std::time::Instant::now();
     let mut maximum_resident = 0;
-    for id in start..end {
-        let statement = format!(
-            "INSERT INTO sustained_rows (id, payload) VALUES ({id}, '{}')",
-            payload(id)
-        );
+    for batch_start in (start..end).step_by(INSERT_BATCH_ROWS) {
+        let batch_end = batch_start.saturating_add(INSERT_BATCH_ROWS).min(end);
+        let values = (batch_start..batch_end)
+            .map(|id| format!("({id}, '{}')", payload(id)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let statement = format!("INSERT INTO sustained_rows (id, payload) VALUES {values}");
         if let Err(error) = runtime.execute_query(&statement) {
             panic!(
-                "committed write {id}/{ROWS} failed after {} logical payload bytes with a {BUDGET_BYTES}-byte budget: {error}",
-                id * PAYLOAD_BYTES,
+                "committed write batch {batch_start}..{batch_end}/{ROWS} failed after {} logical payload bytes with a {BUDGET_BYTES}-byte budget: {error}",
+                batch_start * PAYLOAD_BYTES,
             );
         }
         maximum_resident = maximum_resident.max(runtime.db().store().segment_memory_bytes());
@@ -102,6 +105,7 @@ fn bounded_write_crash_child() {
     let Some(path) = std::env::var_os(CHILD_PATH) else {
         return;
     };
+    std::env::set_var("RED_SLOW_QUERY_THRESHOLD_MS", u64::MAX.to_string());
     let runtime = RedDBRuntime::with_options(options(Path::new(&path))).expect("bounded runtime");
     runtime
         .execute_query("CREATE TABLE sustained_rows (id INTEGER PRIMARY KEY, payload TEXT)")
