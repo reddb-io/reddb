@@ -498,3 +498,12 @@ tag. The `version-integrity` drift guard now fails CI whenever the committed
 version falls behind the latest published `vX.Y.Z` tag — if you see that failure,
 the fix is to land the missing version bump via the Changesets Version PR, not to
 re-dispatch a manual release.
+
+The maintained `release/1.36` line is the only exception. Its release workflow
+sets `REDDB_MAINTENANCE_RELEASE_BRANCH=release/1.36` only for `v1.36.*` refs, and
+the version guard then requires all of the following before allowing the older
+line: the ref is exactly `v<workspace version>`, the workspace major/minor is
+`1.36`, that tag resolves to the checked-out commit, and `git ls-remote` proves
+the same commit is the current remote `release/1.36` HEAD. Any missing or
+divergent condition fails before build or publication; the global guard remains
+unchanged for every other branch and tag.
