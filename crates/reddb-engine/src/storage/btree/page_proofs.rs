@@ -104,12 +104,72 @@ fn verified_page<P: PageStore>(
     Ok(page)
 }
 
-fn verify_stored_page<P: PageStore>(
+struct LoadedProofPath {
+    references: [PageReference; 4],
+    prefixes: [u32; 4],
+    pages: Vec<Option<Page>>,
+}
+
+fn load_update_path<P: PageStore>(
     pager: &P,
     root: PageProofRoot,
     page_id: u32,
-) -> Result<(), PagerError> {
-    verified_page(pager, root, page_id).map(|_| ())
+) -> Result<LoadedProofPath, PagerError> {
+    let mut references = [PageReference::default(); 4];
+    let mut prefixes = [0_u32; 4];
+    let mut pages: Vec<Option<Page>> = std::iter::repeat_with(|| None).take(4).collect();
+    let mut reference = root.reference;
+    let mut prefix = 0;
+    for level in (0..=PROOF_LEVEL_MAX).rev() {
+        references[usize::from(level)] = reference;
+        prefixes[usize::from(level)] = prefix;
+        if reference.page_id != 0 {
+            let page = read_node(pager, reference, level, prefix, root.generation)?;
+            if level != 0 {
+                let index = usize::from(((page_id >> (u32::from(level) * 8)) & 255) as u8);
+                reference = page_proof::decode_reference(
+                    &page.content()[page_proof::entry_range(level, index)],
+                )
+                .ok_or_else(|| invalid(reference.page_id, "invalid child reference"))?;
+            }
+            pages[usize::from(level)] = Some(page);
+        }
+        if level != 0 {
+            let index = usize::from(((page_id >> (u32::from(level) * 8)) & 255) as u8);
+            prefix = page_proof::child_prefix(prefix, level, index);
+        }
+    }
+    Ok(LoadedProofPath {
+        references,
+        prefixes,
+        pages,
+    })
+}
+
+fn verified_page_for_update<P: PageStore>(
+    pager: &P,
+    root: PageProofRoot,
+    page_id: u32,
+) -> Result<LoadedProofPath, PagerError> {
+    let path = load_update_path(pager, root, page_id)?;
+    let leaf = path.pages[0]
+        .as_ref()
+        .ok_or_else(|| invalid(page_id, "page is outside this tree's ownership"))?;
+    let index = usize::from((page_id & 255) as u8);
+    let expected: [u8; 32] = leaf.content()[page_proof::entry_range(0, index)][..32]
+        .try_into()
+        .expect("leaf digest field");
+    if expected == [0; 32] {
+        return Err(invalid(page_id, "page is outside this tree's ownership"));
+    }
+    let page = pager.read_page(page_id)?;
+    if page.page_id() != page_id || page_proof::page_digest(page.as_bytes()) != expected {
+        return Err(invalid(
+            page_id,
+            "page image differs from its published generation",
+        ));
+    }
+    Ok(path)
 }
 
 /// Copy a path on its first mutation after sealing. Later edits reuse private
@@ -121,12 +181,18 @@ fn replace_entry<P: PageStore>(
     prefix: u32,
     index: usize,
     value: &[u8],
+    loaded: Option<Page>,
 ) -> Result<PageReference, PagerError> {
     let PageProofRoot {
         reference,
         generation,
     } = root;
-    let mut page = if reference.page_id == 0 {
+    let mut page = if let Some(page) = loaded {
+        if reference.page_id == 0 || page.page_id() != reference.page_id {
+            return Err(invalid(reference.page_id, "loaded proof node mismatch"));
+        }
+        page
+    } else if reference.page_id == 0 {
         let mut page = pager.allocate_page(PageType::NativeMeta)?;
         page_proof::initialize_node(page.content_mut(), level, prefix, generation);
         page
@@ -161,24 +227,17 @@ fn update_path<P: PageStore>(
     page_id: u32,
     digest: [u8; 32],
 ) -> Result<PageReference, PagerError> {
-    let mut path = [PageReference::default(); 4];
-    let mut prefixes = [0_u32; 4];
-    let mut reference = root.reference;
-    let mut prefix = 0;
-    // Retain compact references, never a stack of 16-KiB page images.
-    for level in (0..=PROOF_LEVEL_MAX).rev() {
-        path[usize::from(level)] = reference;
-        prefixes[usize::from(level)] = prefix;
-        if level != 0 {
-            let index = usize::from(((page_id >> (u32::from(level) * 8)) & 255) as u8);
-            if reference.page_id != 0 {
-                let entry = read_entry(pager, reference, level, prefix, root.generation, index)?;
-                reference = page_proof::decode_reference(&entry)
-                    .ok_or_else(|| invalid(reference.page_id, "invalid child reference"))?;
-            }
-            prefix = page_proof::child_prefix(prefix, level, index);
-        }
-    }
+    let path = load_update_path(pager, root, page_id)?;
+    rewrite_path(pager, root, page_id, digest, path)
+}
+
+fn rewrite_path<P: PageStore>(
+    pager: &P,
+    root: PageProofRoot,
+    page_id: u32,
+    digest: [u8; 32],
+    mut path: LoadedProofPath,
+) -> Result<PageReference, PagerError> {
     let mut child = PageReference::default();
     let mut encoded = [0_u8; page_proof::PROOF_REFERENCE_BYTES];
     for level in 0..=PROOF_LEVEL_MAX {
@@ -192,13 +251,14 @@ fn update_path<P: PageStore>(
         child = replace_entry(
             pager,
             PageProofRoot {
-                reference: path[usize::from(level)],
+                reference: path.references[usize::from(level)],
                 generation: root.generation,
             },
             level,
-            prefixes[usize::from(level)],
+            path.prefixes[usize::from(level)],
             index,
             value,
+            path.pages[usize::from(level)].take(),
         )?;
     }
     Ok(child)
@@ -225,6 +285,18 @@ impl ProofState {
     ) -> Result<(), PagerError> {
         self.begin_mutation()?;
         self.root.reference = update_path(pager, self.root, page_id, digest)?;
+        Ok(())
+    }
+
+    fn set_loaded<P: PageStore>(
+        &mut self,
+        pager: &P,
+        page_id: u32,
+        digest: [u8; 32],
+        path: LoadedProofPath,
+    ) -> Result<(), PagerError> {
+        self.begin_mutation()?;
+        self.root.reference = rewrite_path(pager, self.root, page_id, digest, path)?;
         Ok(())
     }
 }
@@ -417,14 +489,14 @@ impl<P: PageStore> PageStore for TreePageStore<P> {
         let mut state = proof.write();
         self.available()?;
         let result = (|| {
-            verify_stored_page(self.inner.as_ref(), state.root, page_id)?;
+            let path = verified_page_for_update(self.inner.as_ref(), state.root, page_id)?;
             if page.page_id() != page_id {
                 return Err(invalid(page_id, "write address mismatch"));
             }
             page.update_checksum();
             let digest = page_proof::page_digest(page.as_bytes());
             self.inner.write_page(page_id, page)?;
-            state.set(self.inner.as_ref(), page_id, digest)
+            state.set_loaded(self.inner.as_ref(), page_id, digest, path)
         })();
         self.finish(result)
     }
@@ -456,8 +528,8 @@ impl<P: PageStore> PageStore for TreePageStore<P> {
         let mut state = proof.write();
         self.available()?;
         let result = (|| {
-            verify_stored_page(self.inner.as_ref(), state.root, page_id)?;
-            state.set(self.inner.as_ref(), page_id, [0; 32])?;
+            let path = verified_page_for_update(self.inner.as_ref(), state.root, page_id)?;
+            state.set_loaded(self.inner.as_ref(), page_id, [0; 32], path)?;
             self.inner.free_page(page_id)
         })();
         self.finish(result)
