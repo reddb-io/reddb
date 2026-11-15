@@ -5012,17 +5012,40 @@ mod checkpoint_work_tests {
     }
 
     #[test]
-    fn explicit_compaction_refuses_two_populated_system_config_trees() {
+    fn explicit_compaction_prefers_canonical_populated_system_config_tree() {
         let fixture = duplicate_system_catalog_fixture(true, true, false);
-        let destination = fixture._directory.path().join("ambiguous-system-config");
+        let original = std::fs::read(&fixture.path).expect("source bytes");
+        let destination = fixture._directory.path().join("canonical-system-config");
 
-        let error = crate::storage::compact::compact_paged_canonical_system_config(
+        let report = crate::storage::compact::compact_paged_canonical_system_config(
             &fixture.path,
             &destination,
         )
-        .expect_err("two populated config trees must not be discarded");
-        assert!(error.to_string().contains("refusing lossy migration"));
-        assert!(!destination.exists());
+        .expect("explicit repair must retain the populated canonical tree");
+
+        assert_eq!(std::fs::read(&fixture.path).unwrap(), original);
+        assert_eq!(report.reconciled_system_collections, 1);
+        assert_eq!(report.imported_system_records, 0);
+        let rewritten_path = destination.join("data.rdb");
+        {
+            let rewritten = UnifiedStore::open_with_config(&rewritten_path, fixture.config.clone())
+                .expect("open canonical rewrite");
+            assert_eq!(rewritten.list_collections(), ["red.config"]);
+            assert!(rewritten.get("red.config", EntityId::new(1)).is_none());
+            assert!(rewritten.get("red.config", EntityId::new(2)).is_some());
+            rewritten
+                .create_collection("write_after_repair")
+                .expect("write after repair");
+            rewritten.persist().expect("checkpoint after repair");
+        }
+        let reopened = UnifiedStore::open_with_config(&rewritten_path, fixture.config.clone())
+            .expect("cold reopen after checkpoint");
+        assert!(reopened.get_collection("write_after_repair").is_some());
+        assert!(!reopened
+            .list_collections()
+            .iter()
+            .any(|name| name == "red_config"));
+        assert!(reopened.get("red.config", EntityId::new(2)).is_some());
     }
 
     #[test]

@@ -169,15 +169,16 @@ red compact --source /preserved/data.rdb --destination-dir /new/compacted \
   --retain-canonical-system-config --json
 ```
 
-This repair requires exactly one `red_config` and one `red.config` catalog entry
-with complete resume state. It promotes the entire populated legacy tree — data,
-history, key index and secondary indexes — to `red.config`, retires the empty
-duplicate, and reports the migrated record count. A subsequent RedDB boot
-normalizes legacy `red.*` content keys before config consumers run. Two populated
-trees, references to `red_config`, missing identities and other catalog shapes are
-refused instead of discarding or guessing between values. The original store
-remains unchanged, and ordinary compaction never enables this behavior implicitly.
-Scrub and validate the new store before any serving cutover.
+This repair requires complete resume state when both identities exist. If only the
+legacy tree is populated, it promotes that complete tree — data, history, key index
+and secondary indexes — to `red.config`. If both trees are populated, the explicit
+operator policy is deterministic: retain `red.config` in full and retire
+`red_config`. A subsequent RedDB boot normalizes legacy `red.*` content keys before
+config consumers run. References to `red_config`, missing identities and other
+catalog shapes are refused. An unreadable canonical tree fails validation; the
+legacy tree is never used as a silent fallback. The original store remains
+unchanged, and ordinary compaction never enables this behavior implicitly. Scrub
+and validate the new store before any serving cutover.
 
 The source must be closed and fully checkpointed. The command takes a shared
 read lock that excludes the writer's exclusive lock, opens the source without

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.39.0
+
+### Minor Changes
+
+- [#2862](https://github.com/reddb-io/reddb/pull/2862) [`6866608`](https://github.com/reddb-io/reddb/commit/6866608abd9fa453a74fb3aa673e20b52217ed8e) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add an explicit offline canonical-wins repair for stores where both `red_config` and `red.config` are populated, preserving the source and validating the rewritten generation before publication.
+
 ## 1.38.0
 
 ## 1.37.0
