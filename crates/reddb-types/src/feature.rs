@@ -116,8 +116,8 @@ impl Hash for FeatureVector {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct BitSignature {
     space_id: [u8; 16],
-    bits: Vec<u8>,
-    mask: Vec<u8>,
+    bits: Box<[u8]>,
+    mask: Box<[u8]>,
 }
 
 impl fmt::Debug for BitSignature {
@@ -156,8 +156,8 @@ impl BitSignature {
         }
         Ok(Self {
             space_id,
-            bits,
-            mask,
+            bits: bits.into_boxed_slice(),
+            mask: mask.into_boxed_slice(),
         })
     }
 

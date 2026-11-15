@@ -15,8 +15,8 @@ pub type LandmarkPair = (LandmarkCoordinates, LandmarkCoordinates);
 pub struct LandmarkSet {
     space_id: [u8; 16],
     dimensions: u8,
-    pairs: Vec<LandmarkPair>,
-    midline: Vec<LandmarkCoordinates>,
+    pairs: Box<[LandmarkPair]>,
+    midline: Box<[LandmarkCoordinates]>,
 }
 
 impl fmt::Debug for LandmarkSet {
@@ -136,8 +136,8 @@ impl LandmarkSet {
         Ok(Self {
             space_id,
             dimensions,
-            pairs,
-            midline,
+            pairs: pairs.into_boxed_slice(),
+            midline: midline.into_boxed_slice(),
         })
     }
 
