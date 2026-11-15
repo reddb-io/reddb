@@ -704,9 +704,9 @@ impl RedDB {
                 }
                 report = report.with_diagnostic(
                     "native_bootstrap.ready",
-                    Self::native_state_is_bootstrap_complete(&native_state).to_string(),
+                    Self::native_state_is_bootstrap_complete(native_state).to_string(),
                 );
-                if !Self::native_state_is_bootstrap_complete(&native_state)
+                if !Self::native_state_is_bootstrap_complete(native_state)
                     && metadata_for_native.is_none()
                 {
                     report.issue(

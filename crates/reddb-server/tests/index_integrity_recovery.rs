@@ -3,7 +3,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use reddb_server::storage::compact::{salvage_paged_indexes, scrub_paged};
-use reddb_server::storage::engine::{Pager, PagerConfig, PAGE_SIZE};
+use reddb_server::storage::engine::{BTree, Page, Pager, PagerConfig, PAGE_SIZE};
 use reddb_server::{RedDBOptions, RedDBRuntime};
 use reddb_types::Value;
 
@@ -92,6 +92,57 @@ fn catalog_payload(pager: &Pager) -> Vec<u8> {
     }
     assert_eq!(next, 0, "catalog overflow chain has trailing pages");
     payload
+}
+
+fn publish_fixture_tree_proof(pager: &Pager, mut catalog: Page, tree: &BTree) {
+    let data = catalog.content();
+    let header = reddb_file::decode_native_paged_metadata_header(data)
+        .expect("decode fixture catalog")
+        .expect("native fixture catalog");
+    let mut position = reddb_file::METADATA_HEADER_BYTES;
+    for _ in 0..header.collection_count {
+        reddb_file::decode_native_paged_collection_root(data, &mut position).expect("fixture root");
+    }
+    let reference_count = u32::from_le_bytes(
+        data[position..position + 4]
+            .try_into()
+            .expect("reference count"),
+    );
+    position += 4;
+    for _ in 0..reference_count {
+        reddb_file::decode_native_paged_cross_ref(data, &mut position).expect("fixture reference");
+    }
+    reddb_file::decode_native_paged_retired_trees(data, &mut position)
+        .expect("fixture retired roots");
+    reddb_file::decode_native_paged_deferred_pages(data, &mut position)
+        .expect("fixture deferred pages");
+    reddb_file::native_store::decode_native_paged_ownership_epoch(data, &mut position)
+        .expect("fixture ownership epoch");
+    let proof_start = position;
+    let mut proofs = reddb_file::page_proof::decode_catalog(data, &mut position)
+        .expect("decode fixture proofs")
+        .expect("fixture has published proofs");
+    let (root, proof) = tree
+        .seal_page_proofs()
+        .expect("seal replacement tree")
+        .expect("verified replacement tree");
+    assert!(proofs.insert(root, proof).is_some());
+    let mut encoded = Vec::new();
+    reddb_file::page_proof::encode_catalog(&mut encoded, &proofs).expect("encode fixture proofs");
+    assert_eq!(encoded.len(), position - proof_start);
+    catalog.content_mut()[proof_start..position].copy_from_slice(&encoded);
+    catalog.update_checksum();
+    let reference = reddb_file::page_proof::PageReference {
+        page_id: catalog.page_id(),
+        digest: reddb_file::page_proof::page_digest(catalog.as_bytes()),
+    };
+    pager
+        .write_page(catalog.page_id(), catalog)
+        .expect("write fixture catalog");
+    pager.sync().expect("sync replacement generation");
+    pager
+        .publish_manifest_reference(reference)
+        .expect("seal fixture authority");
 }
 
 fn damage_page(path: &Path, root: u32) {
@@ -224,7 +275,6 @@ fn index_recovery_refuses_corrupt_authoritative_data() {
 
 #[test]
 fn missing_posting_with_valid_checksum_is_detected_and_rebuilt() {
-    use reddb_server::storage::engine::BTree;
     use std::sync::Arc;
     for method in ["HASH", "BTREE"] {
         let directory = tempfile::tempdir().expect("fixture");
@@ -253,7 +303,14 @@ fn missing_posting_with_valid_checksum_is_detected_and_rebuilt() {
                 )
                 .expect("fault pager"),
             );
-            let tree = BTree::with_root(Arc::clone(&pager), root);
+            let catalog = pager.read_manifest_page().expect("fixture catalog");
+            let proof = reddb_file::native_store::decode_native_paged_catalog_tree_proofs(
+                catalog.content(),
+            )
+            .expect("fixture proofs")
+            .expect("verified fixture")[&root];
+            let tree = BTree::with_verified_root(Arc::clone(&pager), root, proof)
+                .expect("restore verified index");
             let mut cursor = tree.cursor_first().expect("posting cursor");
             let (key, _) = cursor
                 .next_with_budget(64 * 1024)
@@ -262,14 +319,14 @@ fn missing_posting_with_valid_checksum_is_detected_and_rebuilt() {
             drop(cursor);
             assert!(tree.delete(&key).expect("remove one posting"));
             assert_eq!(tree.root_page_id(), root, "keep the catalog root valid");
-            pager.sync().expect("persist valid checksums");
+            publish_fixture_tree_proof(&pager, catalog, &tree);
         }
         // A structurally sound tree can be logically incomplete.
-        assert!(scrub_paged(&source)
-            .expect("physical scrub")
-            .trees
-            .findings
-            .is_empty());
+        let physical_findings = scrub_paged(&source).expect("physical scrub").trees.findings;
+        assert!(
+            physical_findings.is_empty(),
+            "{method}: {physical_findings:#?}"
+        );
         let runtime = open(&source);
         let findings = runtime
             .verify_persisted_indexes("records")
