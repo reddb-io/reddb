@@ -35,4 +35,4 @@ jobs:
           python .github/scripts/quick-check.py
           python -m unittest discover -s .github/scripts -p test_runner_policy.py -v
       - name: Test maintenance release version guard
-        run: node --test scripts/check-version-drift.test.mjs
+        run: node --test scripts/check-version-drift.test.mjs scripts/maintenance-release-publishing.test.mjs

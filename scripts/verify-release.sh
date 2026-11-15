@@ -113,13 +113,55 @@ fi
 
 # ── 3. registry sync ────────────────────────────────────────────────
 echo "→ checking registry versions match $VERSION…"
-NPM_VER="$(npm view @reddb-io/cli version 2>/dev/null || true)"
+NPM_VER="$(npm view @reddb-io/cli@$VERSION version 2>/dev/null || true)"
 if [[ -z "$NPM_VER" ]]; then
   note "·" "npm: could not query @reddb-io/cli (offline?) — skipped"
 elif [[ "$NPM_VER" == "$VERSION" ]]; then
-  note "✓" "npm @reddb-io/cli = $NPM_VER"
+  note "✓" "npm @reddb-io/cli@$VERSION = $NPM_VER"
 else
-  note "✗" "npm @reddb-io/cli latest is $NPM_VER, expected $VERSION"; fail=1
+  note "✗" "npm @reddb-io/cli@$VERSION resolved as $NPM_VER"; fail=1
+fi
+
+if [[ "$VERSION" == 1.36.* ]]; then
+  NPM_TAGS="$(npm view @reddb-io/cli dist-tags --json 2>/dev/null || true)"
+  MAINTENANCE_NPM="$(jq -r '."maintenance-1.36" // empty' <<<"$NPM_TAGS" 2>/dev/null || true)"
+  LATEST_NPM="$(jq -r '.latest // empty' <<<"$NPM_TAGS" 2>/dev/null || true)"
+  if [[ "$MAINTENANCE_NPM" == "$VERSION" ]]; then
+    note "✓" "npm maintenance-1.36 = $VERSION"
+  else
+    note "✗" "npm maintenance-1.36 is ${MAINTENANCE_NPM:-missing}, expected $VERSION"; fail=1
+  fi
+  if [[ -n "$LATEST_NPM" && "$(printf '%s\n%s\n' "$VERSION" "$LATEST_NPM" | sort -V | tail -1)" == "$LATEST_NPM" && "$LATEST_NPM" != "$VERSION" ]]; then
+    note "✓" "npm latest remains newer at $LATEST_NPM"
+  else
+    note "✗" "npm latest was not preserved above maintenance $VERSION (got ${LATEST_NPM:-missing})"; fail=1
+  fi
+
+  image_digest() {
+    docker buildx imagetools inspect "$1" 2>/dev/null \
+      | awk '$1 == "Digest:" { print $2; exit }'
+  }
+  if ! command -v docker >/dev/null 2>&1 || ! docker buildx version >/dev/null 2>&1; then
+    note "✗" "docker buildx is required to verify maintenance GHCR aliases"; fail=1
+  else
+    for IMAGE in "ghcr.io/${REPO}" "ghcr.io/${REPO}-client"; do
+      IMMUTABLE_DIGEST="$(image_digest "${IMAGE}:v${VERSION}")"
+      VERSION_DIGEST="$(image_digest "${IMAGE}:${VERSION}")"
+      MINOR_DIGEST="$(image_digest "${IMAGE}:1.36")"
+      MAJOR_DIGEST="$(image_digest "${IMAGE}:1")"
+      LATEST_DIGEST="$(image_digest "${IMAGE}:latest")"
+      if [[ -n "$IMMUTABLE_DIGEST" && "$IMMUTABLE_DIGEST" == "$VERSION_DIGEST" && "$IMMUTABLE_DIGEST" == "$MINOR_DIGEST" ]]; then
+        note "✓" "$IMAGE immutable/version/1.36 aliases resolve to $IMMUTABLE_DIGEST"
+      else
+        note "✗" "$IMAGE maintenance aliases do not resolve to one digest"; fail=1
+      fi
+      if [[ -n "$MAJOR_DIGEST" && -n "$LATEST_DIGEST" && "$MAJOR_DIGEST" != "$IMMUTABLE_DIGEST" && "$LATEST_DIGEST" != "$IMMUTABLE_DIGEST" ]]; then
+        note "✓" "$IMAGE global 1/latest aliases remain outside maintenance digest"
+      else
+        note "✗" "$IMAGE global 1/latest alias was moved to maintenance digest"; fail=1
+      fi
+    done
+  fi
 fi
 
 CRATE_VER="$(curl -s --max-time 30 "https://crates.io/api/v1/crates/reddb-io" \

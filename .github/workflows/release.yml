@@ -220,6 +220,9 @@ jobs:
       package_version: ${{ steps.plan.outputs.package_version }}
       github_prerelease: ${{ steps.plan.outputs.github_prerelease }}
       publish_cargo: ${{ steps.plan.outputs.publish_cargo }}
+      maintenance_line: ${{ steps.plan.outputs.maintenance_line }}
+      npm_dist_tag: ${{ steps.plan.outputs.npm_dist_tag }}
+      move_global_aliases: ${{ steps.plan.outputs.move_global_aliases }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -242,6 +245,9 @@ jobs:
           PACKAGE_VERSION=""
           IS_PRERELEASE=false
           PUBLISH_CARGO=false
+          MAINTENANCE_LINE=""
+          NPM_DIST_TAG="latest"
+          MOVE_GLOBAL_ALIASES=true
 
           normalize_version() { echo "${1#v}"; }
           next_version() { echo "${1}-next.${GITHUB_RUN_NUMBER}"; }
@@ -299,12 +305,26 @@ jobs:
             fi
           fi
 
+          if [[ -n "${REDDB_MAINTENANCE_RELEASE_BRANCH:-}" ]]; then
+            [[ "$REF" == refs/tags/v1.36.* ]] || { echo "Maintenance publishing requires a v1.36.* tag ref"; exit 1; }
+            [[ "$REDDB_MAINTENANCE_RELEASE_BRANCH" == "release/1.36" ]] || { echo "Maintenance publishing is authorized only for release/1.36"; exit 1; }
+            MAINTENANCE_LINE="1.36"
+            NPM_DIST_TAG="maintenance-1.36"
+            MOVE_GLOBAL_ALIASES=false
+          elif [[ "$RELEASE_CHANNEL" == "next" ]]; then
+            NPM_DIST_TAG="next"
+            MOVE_GLOBAL_ALIASES=false
+          fi
+
           echo "should_skip=${SHOULD_SKIP}" >> "$GITHUB_OUTPUT"
           echo "release_channel=${RELEASE_CHANNEL}" >> "$GITHUB_OUTPUT"
           echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
           echo "package_version=${PACKAGE_VERSION}" >> "$GITHUB_OUTPUT"
           echo "github_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
           echo "publish_cargo=${PUBLISH_CARGO}" >> "$GITHUB_OUTPUT"
+          echo "maintenance_line=${MAINTENANCE_LINE}" >> "$GITHUB_OUTPUT"
+          echo "npm_dist_tag=${NPM_DIST_TAG}" >> "$GITHUB_OUTPUT"
+          echo "move_global_aliases=${MOVE_GLOBAL_ALIASES}" >> "$GITHUB_OUTPUT"
 
       - name: Check workspace version consistency
         if: steps.plan.outputs.should_skip != 'true'
@@ -813,8 +833,8 @@ jobs:
           - \`${TAG}\` and \`${VERSION}\` are immutable release tags.
           - \`${VERSION}\` is also published without the leading \`v\` for Docker-native workflows.
           - \`${MINOR_TAG}\` moves to the latest patch in this minor line.
-          - \`${MAJOR_TAG}\` moves to the latest minor in this major line.
-          - \`latest\` moves to the latest stable release.
+          - Current-line stable releases move \`${MAJOR_TAG}\` and \`latest\`; maintenance releases leave both global aliases unchanged.
+          - Maintenance npm packages use the line-specific \`maintenance-1.36\` dist-tag instead of \`latest\`.
 
           **Or via Docker (thin client, ~7 MB):**
           \`\`\`bash
@@ -872,6 +892,7 @@ jobs:
           name: RedDB ${{ needs.plan.outputs.release_tag }}
           body_path: release-body.md
           prerelease: ${{ needs.plan.outputs.github_prerelease }}
+          make_latest: ${{ needs.plan.outputs.move_global_aliases }}
           files: release/*
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -938,7 +959,7 @@ jobs:
             echo "::warning::NPM_TOKEN secret not set — skipping. Add an Automation token from npmjs.com as NPM_TOKEN in repo secrets."
             exit 0
           fi
-          TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
+          TAG="${{ needs.plan.outputs.npm_dist_tag }}"
           while read -r dir; do
             name="$(node -p "require('${dir}/package.json').name")"
             # Re-runs must not fail on the packages a previous attempt already published.
@@ -980,7 +1001,7 @@ jobs:
             echo "::warning::NPM_TOKEN secret not set — skipping. Add an Automation token from npmjs.com as NPM_TOKEN in repo secrets."
             exit 0
           fi
-          TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
+          TAG="${{ needs.plan.outputs.npm_dist_tag }}"
           pnpm publish --tag "${TAG}" --access public --no-git-checks
 
   publish-cargo:
@@ -1088,7 +1109,7 @@ jobs:
             echo "::warning::NPM_TOKEN secret not set — skipping. Add an Automation token from npmjs.com as NPM_TOKEN in repo secrets."
             exit 0
           fi
-          TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
+          TAG="${{ needs.plan.outputs.npm_dist_tag }}"
           pnpm publish --tag "${TAG}" --access public --no-git-checks
 
   publish-js-client:
@@ -1123,7 +1144,7 @@ jobs:
             echo "::warning::NPM_TOKEN secret not set — skipping. Add an Automation token from npmjs.com as NPM_TOKEN in repo secrets."
             exit 0
           fi
-          TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
+          TAG="${{ needs.plan.outputs.npm_dist_tag }}"
           pnpm publish --tag "${TAG}" --access public --no-git-checks
 
   publish-bun-client:
@@ -1158,7 +1179,7 @@ jobs:
             echo "::warning::NPM_TOKEN secret not set — skipping. Add an Automation token from npmjs.com as NPM_TOKEN in repo secrets."
             exit 0
           fi
-          TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
+          TAG="${{ needs.plan.outputs.npm_dist_tag }}"
           pnpm publish --tag "${TAG}" --access public --no-git-checks
 
   publish-mcp:
@@ -1193,7 +1214,7 @@ jobs:
             echo "::warning::NPM_TOKEN secret not set — skipping. Add an Automation token from npmjs.com as NPM_TOKEN in repo secrets."
             exit 0
           fi
-          TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
+          TAG="${{ needs.plan.outputs.npm_dist_tag }}"
           pnpm publish --tag "${TAG}" --access public --no-git-checks
 
   publish-docker:
@@ -1270,8 +1291,8 @@ jobs:
             type=raw,value=${{ needs.plan.outputs.release_tag }}
             type=raw,value=${{ needs.plan.outputs.package_version }}
             type=semver,pattern={{major}}.{{minor}},value=${{ needs.plan.outputs.release_tag }},enable=${{ needs.plan.outputs.release_channel == 'stable' }}
-            type=semver,pattern={{major}},value=${{ needs.plan.outputs.release_tag }},enable=${{ needs.plan.outputs.release_channel == 'stable' }}
-            type=raw,value=latest,enable=${{ needs.plan.outputs.release_channel == 'stable' }}
+            type=semver,pattern={{major}},value=${{ needs.plan.outputs.release_tag }},enable=${{ needs.plan.outputs.release_channel == 'stable' && needs.plan.outputs.move_global_aliases == 'true' }}
+            type=raw,value=latest,enable=${{ needs.plan.outputs.release_channel == 'stable' && needs.plan.outputs.move_global_aliases == 'true' }}
             type=raw,value=next,enable=${{ needs.plan.outputs.release_channel == 'next' }}
           labels: |
             org.opencontainers.image.title=RedDB
@@ -1379,8 +1400,8 @@ jobs:
             type=raw,value=${{ needs.plan.outputs.release_tag }}
             type=raw,value=${{ needs.plan.outputs.package_version }}
             type=semver,pattern={{major}}.{{minor}},value=${{ needs.plan.outputs.release_tag }},enable=${{ needs.plan.outputs.release_channel == 'stable' }}
-            type=semver,pattern={{major}},value=${{ needs.plan.outputs.release_tag }},enable=${{ needs.plan.outputs.release_channel == 'stable' }}
-            type=raw,value=latest,enable=${{ needs.plan.outputs.release_channel == 'stable' }}
+            type=semver,pattern={{major}},value=${{ needs.plan.outputs.release_tag }},enable=${{ needs.plan.outputs.release_channel == 'stable' && needs.plan.outputs.move_global_aliases == 'true' }}
+            type=raw,value=latest,enable=${{ needs.plan.outputs.release_channel == 'stable' && needs.plan.outputs.move_global_aliases == 'true' }}
             type=raw,value=next,enable=${{ needs.plan.outputs.release_channel == 'next' }}
           labels: |
             org.opencontainers.image.title=RedDB thin client
