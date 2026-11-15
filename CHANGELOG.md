@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.39.4
+
+### Patch Changes
+
+- [#2879](https://github.com/reddb-io/reddb/pull/2879) [`5c19d10`](https://github.com/reddb-io/reddb/commit/5c19d107c5a354e074801716a50e033a45799186) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Cancel cooperative RedWire queries when their client session disconnects so execution permits are returned instead of leaving the server at capacity.
+
 ## 1.39.3
 
 ### Patch Changes

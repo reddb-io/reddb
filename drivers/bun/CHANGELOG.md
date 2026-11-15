@@ -1,5 +1,12 @@
 # @reddb-io/client-bun
 
+## 1.39.4
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @reddb-io/client@1.39.4
+
 ## 1.39.3
 
 ### Patch Changes
