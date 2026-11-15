@@ -2363,6 +2363,21 @@ impl UnifiedStore {
                         } else {
                             counters.map_or(0, |state| state.entities)
                         };
+                        if counters.is_some()
+                            && (persisted_entities == 0 || persisted_entities > i64::MAX as u64)
+                            && root_page > 0
+                        {
+                            persisted_entities = u64::try_from(btree.count().map_err(|err| {
+                                page_integrity(root_page, Some(name.clone()), err.to_string())
+                            })?)
+                            .map_err(|_| {
+                                page_integrity(
+                                    root_page,
+                                    Some(name.clone()),
+                                    "collection entity count exceeds u64",
+                                )
+                            })?;
+                        }
                         while counters.is_none() || hydrate_read_only {
                             let next = cursor
                                 .next_with_budget(
@@ -3095,6 +3110,25 @@ impl UnifiedStore {
                     .is_some_and(|version| !version.has_unprojected_rows)
                 {
                     if let Some(tree) = btree_indices.get(name) {
+                        let mut persisted_entities = manager.count() as u64;
+                        if (persisted_entities == 0 || persisted_entities > i64::MAX as u64)
+                            && tree.root_page_id() > 0
+                        {
+                            persisted_entities = u64::try_from(tree.count().map_err(|error| {
+                                page_integrity(
+                                    tree.root_page_id(),
+                                    Some(name.clone()),
+                                    error.to_string(),
+                                )
+                            })?)
+                            .map_err(|_| {
+                                page_integrity(
+                                    tree.root_page_id(),
+                                    Some(name.clone()),
+                                    "collection entity count exceeds u64",
+                                )
+                            })?;
+                        }
                         manager.install_backing(
                             Arc::new(
                                 {
@@ -3110,7 +3144,7 @@ impl UnifiedStore {
                             tree.root_page_id(),
                             self.format_version(),
                             usize::try_from(limit).unwrap_or(usize::MAX),
-                            manager.count() as u64,
+                            persisted_entities,
                         );
                         if let Some(version) = versions.get_mut(name) {
                             version.segments = manager.checkpoint_revisions();
