@@ -652,6 +652,25 @@ impl StoreCommitCoordinator {
         Ok(present && matches)
     }
 
+    pub(super) fn checkpoint_delete_matches(
+        &self,
+        reference: super::checkpoint_wal::WalRowReference,
+        collection: &str,
+        id: EntityId,
+    ) -> io::Result<bool> {
+        let mut bytes = Vec::with_capacity(reference.length as usize);
+        if !self.visit_checkpoint_row(reference, |chunk| bytes.extend_from_slice(chunk))? {
+            return Ok(false);
+        }
+        Ok(matches!(
+            StoreWalAction::decode(&bytes),
+            Ok(StoreWalAction::DeleteEntityRecord {
+                collection: stored,
+                entity_id,
+            }) if stored == collection && entity_id == id.raw()
+        ))
+    }
+
     /// Materialize only one already-validated durable row for a projection batch.
     pub(super) fn checkpoint_row_bytes(
         &self,

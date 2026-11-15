@@ -152,6 +152,18 @@ fn checkpoint_visibility_matches(
         && previous.pending_vault == current.pending_vault
 }
 
+fn checkpoint_visibility_cannot_affect_unchanged_rows(
+    previous: &CheckpointVersion,
+    current: &CheckpointVersion,
+) -> bool {
+    previous.untracked_visibility_revision == current.untracked_visibility_revision
+        && previous.pending_vault == current.pending_vault
+        && previous
+            .deferred_rows
+            .as_ref()
+            .is_some_and(|rows| rows.is_empty())
+}
+
 // ── Pager-meta overflow chain (gh-477) ──────────────────────────────────────
 // When the serialized collection registry + cross-refs exceed a single page,
 // page 1 carries a native metadata-overflow header pointing at an overflow chain of
@@ -567,14 +579,60 @@ impl UnifiedStore {
         if let Some((base, overlay)) = manager.backing_overlay(&mut encode) {
             use reddb_engine::storage::collection_read::{CollectionRead, MergedCollection};
             let merged = MergedCollection::new(base.as_ref(), overlay);
-            let mut cursor = merged.cursor()?;
-            let mut builder = CheckpointTreeBuilder::new(pager)?;
-            while let Some(record) = cursor.next_record(
+            let mut source = merged.cursor()?;
+            let mut cursor = previous
+                .map(|tree| tree.cursor_first())
+                .transpose()
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            let mut matched = 0;
+            let mut builder = None;
+            while let Some(record) = source.next_record(
                 usize::try_from(self.config.resident_memory_bytes_max.unwrap_or(u64::MAX))
                     .unwrap_or(usize::MAX),
             )? {
-                builder.push((record.id.raw().to_be_bytes().to_vec(), record.bytes))?;
+                let record = (record.id.raw().to_be_bytes().to_vec(), record.bytes);
+                if builder.is_none() {
+                    if let Some(cursor) = cursor.as_mut() {
+                        if cursor
+                            .next()
+                            .map_err(|error| {
+                                StoreError::Io(std::io::Error::other(error.to_string()))
+                            })?
+                            .as_ref()
+                            == Some(&record)
+                        {
+                            matched += 1;
+                            continue;
+                        }
+                    }
+                    let mut replacement = CheckpointTreeBuilder::new(pager)?;
+                    if let Some(previous) = previous {
+                        replacement.copy_prefix(previous, matched)?;
+                    }
+                    builder = Some(replacement);
+                }
+                builder
+                    .as_mut()
+                    .expect("replacement initialized")
+                    .push(record)?;
             }
+            if builder.is_none() {
+                if let (Some(previous), Some(cursor)) = (previous, cursor.as_mut()) {
+                    if cursor
+                        .next()
+                        .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                        .is_none()
+                    {
+                        return Ok(Arc::clone(previous));
+                    }
+                }
+                let mut replacement = CheckpointTreeBuilder::new(pager)?;
+                if let Some(previous) = previous {
+                    replacement.copy_prefix(previous, matched)?;
+                }
+                builder = Some(replacement);
+            }
+            let mut builder = builder.expect("replacement or reused tree");
             builder.flush()?;
             return Ok(builder.tree);
         }
@@ -1670,6 +1728,7 @@ impl UnifiedStore {
                     let mut current = CheckpointVersion {
                         manager: Arc::downgrade(manager),
                         segments: manager.checkpoint_revisions(),
+                        entity_id_upper_bound: manager.sequence_id_next(),
                         visibility_revision: 0,
                         untracked_visibility_revision: 0,
                         excluded_xids: Arc::default(),
@@ -1758,6 +1817,7 @@ impl UnifiedStore {
                     CheckpointVersion {
                         manager: Arc::downgrade(manager),
                         segments: manager.checkpoint_revisions(),
+                        entity_id_upper_bound: manager.sequence_id_next(),
                         visibility_revision: 0,
                         untracked_visibility_revision: 0,
                         excluded_xids: Arc::default(),
@@ -2459,6 +2519,7 @@ impl UnifiedStore {
                                     CheckpointVersion {
                                         manager: Arc::downgrade(manager),
                                         segments: manager.checkpoint_revisions(),
+                                        entity_id_upper_bound: manager.sequence_id_next(),
                                         visibility_revision: 0,
                                         untracked_visibility_revision: 0,
                                         excluded_xids: Arc::default(),
@@ -2816,6 +2877,7 @@ impl UnifiedStore {
             let mut version = CheckpointVersion {
                 manager: Arc::downgrade(manager),
                 segments: manager.checkpoint_revisions(),
+                entity_id_upper_bound: manager.sequence_id_next(),
                 visibility_revision,
                 untracked_visibility_revision,
                 excluded_xids: Arc::clone(&excluded),
@@ -2835,7 +2897,9 @@ impl UnifiedStore {
                     && previous.segments == version.segments
                     && previous.format_version == version.format_version
                     && !previous.has_unprojected_rows
-                    && checkpoint_visibility_matches(previous, &version)
+                    && (manager.count() == 0
+                        || checkpoint_visibility_matches(previous, &version)
+                        || checkpoint_visibility_cannot_affect_unchanged_rows(previous, &version))
                 {
                     version.deferred_rows = previous.deferred_rows.clone();
                     collection_roots.push((name.clone(), tree.root_page_id()));

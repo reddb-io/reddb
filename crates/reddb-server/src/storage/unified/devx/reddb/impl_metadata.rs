@@ -458,6 +458,17 @@ impl RedDB {
     }
 
     pub(crate) fn persist_metadata(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.persist_metadata_inner(true)
+    }
+
+    pub(crate) fn persist_checkpoint_metadata(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.persist_metadata_inner(false)
+    }
+
+    fn persist_metadata_inner(
+        &self,
+        persist_record: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if self.options.mode != StorageMode::Persistent || self.options.read_only {
             return Ok(());
         }
@@ -486,12 +497,34 @@ impl RedDB {
         let collection_roots = self.physical_collection_roots();
         #[cfg(test)]
         metadata_qualification_phase(&qualification_started, "collection-roots");
-        let native_state = self.native_physical_state();
+        let native_state = persist_record
+            .then(|| self.native_physical_state())
+            .flatten();
         #[cfg(test)]
         metadata_qualification_phase(&qualification_started, "native-state");
-        let mut indexes = native_state
-            .map(|state| self.physical_index_state_from_native_state(&state, previous.as_ref()))
-            .unwrap_or_else(|| self.physical_index_state());
+        let mut indexes = if let Some(state) = native_state {
+            self.physical_index_state_from_native_state(&state, previous.as_ref())
+        } else {
+            let mut indexes = self.physical_index_state();
+            if let Some(previous) = previous.as_ref() {
+                for previous_index in &previous.indexes {
+                    if let Some(index) = indexes
+                        .iter_mut()
+                        .find(|index| index.name == previous_index.name)
+                    {
+                        if previous_index.backend == "memory-budget-deferred" {
+                            index.backend = previous_index.backend.clone();
+                            index.build_state = previous_index.build_state.clone();
+                            index.artifact_root_page = None;
+                            index.artifact_checksum = None;
+                        }
+                    } else {
+                        indexes.push(previous_index.clone());
+                    }
+                }
+            }
+            indexes
+        };
         if let Some(previous) = previous.as_ref() {
             // Paged contract edits publish the internal record first. Do not
             // resurrect a dropped collection from the older native registry.
@@ -542,7 +575,7 @@ impl RedDB {
         metadata.hypertables = self.hypertable_registry_snapshot();
         #[cfg(test)]
         metadata_qualification_phase(&qualification_started, "metadata-assembled");
-        self.persist_native_physical_header(&metadata)?;
+        self.persist_native_physical_header_inner(&metadata, persist_record)?;
         #[cfg(test)]
         metadata_qualification_phase(&qualification_started, "native-header");
         Ok(())
@@ -1427,44 +1460,46 @@ impl RedDB {
         &self,
         metadata: &PhysicalMetadataFile,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.persist_native_physical_header_inner(metadata, true)
+    }
+
+    fn persist_native_physical_header_inner(
+        &self,
+        metadata: &PhysicalMetadataFile,
+        persist_record: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.paged_mode {
             return self.persist_physical_metadata_record(metadata);
         }
 
         let _publication = self.store.vault_publication_lock.lock();
-        let existing_page = self
-            .store
-            .physical_file_header()
+        let existing_header = self.store.physical_file_header();
+        let existing_page = existing_header
+            .as_ref()
             .map(|header| header.collection_roots_page)
             .filter(|page| *page != 0);
-        let existing_registry_page = self
-            .store
-            .physical_file_header()
+        let existing_registry_page = existing_header
+            .as_ref()
             .map(|header| header.registry_page)
             .filter(|page| *page != 0);
-        let existing_recovery_page = self
-            .store
-            .physical_file_header()
+        let existing_recovery_page = existing_header
+            .as_ref()
             .map(|header| header.recovery_page)
             .filter(|page| *page != 0);
-        let existing_catalog_page = self
-            .store
-            .physical_file_header()
+        let existing_catalog_page = existing_header
+            .as_ref()
             .map(|header| header.catalog_page)
             .filter(|page| *page != 0);
-        let existing_metadata_state_page = self
-            .store
-            .physical_file_header()
+        let existing_metadata_state_page = existing_header
+            .as_ref()
             .map(|header| header.metadata_state_page)
             .filter(|page| *page != 0);
-        let existing_vector_artifact_page = self
-            .store
-            .physical_file_header()
+        let existing_vector_artifact_page = existing_header
+            .as_ref()
             .map(|header| header.vector_artifact_page)
             .filter(|page| *page != 0);
-        let existing_manifest_page = self
-            .store
-            .physical_file_header()
+        let existing_manifest_page = existing_header
+            .as_ref()
             .map(|header| header.manifest_page)
             .filter(|page| *page != 0);
         let (manifest_page, manifest_checksum) = self.store.write_native_manifest_summary(
@@ -1561,9 +1596,20 @@ impl RedDB {
         header.metadata_state_checksum = metadata_state_checksum;
         header.vector_artifact_page = vector_artifact_page;
         header.vector_artifact_checksum = vector_artifact_checksum;
-        self.persist_physical_metadata_record(metadata)?;
+        // A checkpoint changes roots and bounded native summaries, but not the
+        // schema/contract document. Replacing that large keyed row would turn
+        // every otherwise-sparse checkpoint into a full metadata-tree rebuild.
+        // Explicit metadata publishers still replace the record; readers merge
+        // a newer native header with the last authoritative contract document.
+        if persist_record {
+            self.persist_physical_metadata_record(metadata)?;
+        }
         self.store.update_physical_file_header(header)?;
-        self.store.persist()?;
+        if persist_record {
+            self.store.persist()?;
+        } else {
+            self.store.sync_native_physical_state()?;
+        }
         self.store.publish_detached_native_blob_pages()?;
         Ok(())
     }

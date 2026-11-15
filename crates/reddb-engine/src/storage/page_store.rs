@@ -6,6 +6,14 @@ use reddb_file::VfsFile;
 pub trait PageStore {
     fn read_page(&self, page_id: u32) -> Result<Page, PagerError>;
     fn write_page(&self, page_id: u32, page: Page) -> Result<(), PagerError>;
+    fn write_page_replacing(
+        &self,
+        page_id: u32,
+        page: Page,
+        _previous: &Page,
+    ) -> Result<(), PagerError> {
+        self.write_page(page_id, page)
+    }
     fn allocate_page(&self, page_type: PageType) -> Result<Page, PagerError>;
     fn free_page(&self, page_id: u32) -> Result<(), PagerError>;
     fn page_count(&self) -> Result<u32, PagerError>;
@@ -24,6 +32,9 @@ impl<F: VfsFile, W: WalBarrier> PageStore for Pager<F, W> {
     }
     fn write_page(&self, id: u32, page: Page) -> Result<(), PagerError> {
         self.write_page(id, page)
+    }
+    fn write_page_replacing(&self, id: u32, page: Page, previous: &Page) -> Result<(), PagerError> {
+        Pager::write_page_replacing(self, id, page, previous)
     }
     fn allocate_page(&self, kind: PageType) -> Result<Page, PagerError> {
         self.allocate_page(kind)

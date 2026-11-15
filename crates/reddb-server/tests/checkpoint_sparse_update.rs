@@ -242,8 +242,10 @@ fn sparse_checkpoint_tracks_pending_commit_and_rollback_without_scanning_history
         runtime.checkpoint().expect(phase);
         let after = pager.cache_stats();
         let reads = after.hits + after.misses - before.hits - before.misses;
+        // Native summary/DWB publication adds a small fixed cost on top of
+        // the sparse row projection; this still rejects historical scans.
         assert!(
-            reads < 128,
+            reads < 144,
             "{phase} scanned unchanged history: {reads} page reads"
         );
     };

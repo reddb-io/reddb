@@ -183,10 +183,11 @@ impl UnifiedStore {
         let Some(deferred) = previous.deferred_rows.as_ref() else {
             return Ok(None);
         };
-        let Some(ids) = manager.checkpoint_mutations_since(&previous.segments) else {
+        let Some(changed_ids) = manager.checkpoint_mutations_since(&previous.segments) else {
             return Ok(None);
         };
-        let mut ids: std::collections::BTreeSet<_> = ids.into_iter().collect();
+        let changed_ids: std::collections::BTreeSet<_> = changed_ids.into_iter().collect();
+        let mut ids = changed_ids.clone();
         ids.extend(deferred.iter().copied());
         ids.extend(
             previous
@@ -199,13 +200,21 @@ impl UnifiedStore {
         }
         let retained = self.checkpoint_durable_rows.read();
         let mut upserts = Vec::new();
+        let mut deletes = Vec::new();
         let mut projected_bytes = 0_usize;
         let mut deferred = Vec::new();
         for id in ids {
             let key = id.raw().to_be_bytes().to_vec();
-            let existing = tree
-                .get(&key)
-                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            let exact_delete_is_durable = || -> Result<bool, StoreError> {
+                let (Some(commit), Some(reference)) =
+                    (&self.commit, retained.references.get_delete(collection, id))
+                else {
+                    return Ok(false);
+                };
+                commit
+                    .checkpoint_delete_matches(reference, collection, id)
+                    .map_err(StoreError::Io)
+            };
             let metadata = manager.get_metadata(id);
             let mut defer = false;
             let row = manager.get_with(id, |entity| {
@@ -245,33 +254,67 @@ impl UnifiedStore {
                 deferred.push(id);
             }
             let Some(row) = row else {
+                if id.raw() >= previous.entity_id_upper_bound {
+                    continue;
+                }
+                if exact_delete_is_durable()? {
+                    deletes.push(id);
+                    continue;
+                }
+                let existing = tree
+                    .get(&key)
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
                 if existing.is_some() {
                     return Ok(None);
                 }
                 continue;
             };
             let Some((raw, projected)) = row else {
+                if id.raw() >= previous.entity_id_upper_bound {
+                    continue;
+                }
+                if exact_delete_is_durable()? {
+                    deletes.push(id);
+                    continue;
+                }
+                let existing = tree
+                    .get(&key)
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
                 if existing.is_some() {
                     return Ok(None);
                 }
                 continue;
             };
-            if existing.as_ref() == Some(projected.as_ref().unwrap_or(&raw)) {
-                continue;
-            }
             let source = if retained.rows.get(&(collection.to_owned(), id)) == Some(&raw) {
-                SparseCheckpointValue::Cached
+                Some(SparseCheckpointValue::Cached)
             } else if let (Some(commit), Some(reference)) =
                 (&self.commit, retained.references.get(collection, id))
             {
-                if !commit
+                if commit
                     .checkpoint_row_matches(reference, &raw)
                     .map_err(StoreError::Io)?
                 {
-                    return Ok(None);
+                    Some(SparseCheckpointValue::Wal(reference))
+                } else {
+                    None
                 }
-                SparseCheckpointValue::Wal(reference)
             } else {
+                None
+            };
+            // A changed row backed by its exact durable WAL image can be
+            // upserted directly. Reading the old value first would traverse
+            // the same B-tree path again solely to avoid a harmless identical
+            // replacement. Deferred-only rows still compare against the
+            // checkpoint because their projection may not have changed.
+            if !changed_ids.contains(&id) || source.is_none() {
+                let existing = tree
+                    .get(&key)
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+                if existing.as_ref() == Some(projected.as_ref().unwrap_or(&raw)) {
+                    continue;
+                }
+            }
+            let Some(source) = source else {
                 return Ok(None);
             };
             let source = if let Some(projected) = projected {
@@ -332,6 +375,10 @@ impl UnifiedStore {
             }
             Ok(())
         };
+        for id in deletes {
+            tree.delete(&id.raw().to_be_bytes())
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        }
         let mut batch = Vec::new();
         let mut batch_bytes = 0_usize;
         for (id, source) in upserts {

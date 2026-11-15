@@ -263,10 +263,24 @@ impl SegmentManager {
         root_page: u32,
         update: impl FnOnce() -> (T, Option<(u32, u64)>),
     ) -> Option<T> {
+        self.try_with_unshared_backing_changes(root_page, &[], update)
+    }
+
+    /// Fence a bounded replacement/delete projection against the exact cold
+    /// rows shadowed by the resident overlay. The host must prove every ID from
+    /// the durable WAL before publishing the updated source generation.
+    #[doc(hidden)]
+    pub fn try_with_unshared_backing_changes<T>(
+        &self,
+        root_page: u32,
+        removed: &[EntityId],
+        update: impl FnOnce() -> (T, Option<(u32, u64)>),
+    ) -> Option<T> {
         let mut backing = self.backing.write();
         let backing = backing.as_mut()?;
         if backing.root_page != root_page
-            || !backing.removed.is_empty()
+            || backing.removed.len() != removed.len()
+            || removed.iter().any(|id| !backing.removed.contains(id))
             || Arc::get_mut(&mut backing.source).is_none()
         {
             return None;
@@ -275,6 +289,7 @@ impl SegmentManager {
         if let Some((root_page, total_entities)) = published {
             backing.root_page = root_page;
             backing.total_entities = total_entities;
+            backing.removed.clear();
         }
         Some(result)
     }
@@ -627,6 +642,144 @@ impl SegmentManager {
         if let Some(error) = error {
             return Err(error);
         }
+        self.restore_owned_row_schemas(items.iter_mut());
+        Ok((visible, items))
+    }
+
+    /// Page an unfiltered snapshot view. A published cold base is already the
+    /// committed logical projection, so records outside the requested window
+    /// can be skipped by encoded length. Resident overlays still receive the
+    /// ordinary MVCC visibility check before they affect total or offset.
+    pub fn try_page_in_id_order_at_snapshot(
+        &self,
+        snapshot: Option<&SnapshotContext>,
+        offset: usize,
+        limit: usize,
+        limit_bytes: usize,
+    ) -> Result<(usize, Vec<UnifiedEntity>), StoreError> {
+        if !self.has_backing() {
+            let mut visible = 0_usize;
+            let mut retained_bytes = 0_usize;
+            let mut items = Vec::new();
+            let mut error = None;
+            self.for_each_entity_in_id_order(|entity| {
+                if !Self::scan_entity_visible(snapshot, entity) {
+                    return true;
+                }
+                let position = visible;
+                visible = visible.saturating_add(1);
+                if position < offset || items.len() >= limit {
+                    return true;
+                }
+                let required_bytes = retained_bytes
+                    .saturating_add(crate::storage::memory_size::entity_bytes(entity));
+                if required_bytes > limit_bytes {
+                    error = Some(StoreError::ReadLimitExceeded {
+                        required_bytes,
+                        limit_bytes,
+                    });
+                    return false;
+                }
+                retained_bytes = required_bytes;
+                items.push(entity.clone());
+                true
+            });
+            if let Some(error) = error {
+                return Err(error);
+            }
+            self.restore_owned_row_schemas(items.iter_mut());
+            return Ok((visible, items));
+        }
+        if snapshot.is_some_and(|snapshot| snapshot.branch.is_some()) {
+            return self.try_page_in_id_order_where_at_snapshot(
+                snapshot,
+                offset,
+                limit,
+                limit_bytes,
+                |_| true,
+            );
+        }
+
+        let backing_guard = self.backing.read();
+        let backing = backing_guard.as_ref().expect("checked cold backing");
+        let limit_bytes = limit_bytes.min(backing.read_bytes_max);
+        let mut identities = Vec::new();
+        self.for_each_entity(|entity| {
+            identities.push(entity.id);
+            true
+        });
+        identities.sort_unstable();
+        identities.dedup();
+        let mut identities = identities.into_iter().peekable();
+        let mut cursor = backing.source.cursor()?;
+        let mut visible = 0_usize;
+        let mut retained_bytes = 0_usize;
+        let mut items = Vec::new();
+
+        loop {
+            let base = cursor.peek_id()?;
+            let resident = identities.peek().copied();
+            if let Some(id) = resident.filter(|id| base.is_none_or(|base| *id <= base)) {
+                if base == Some(id) {
+                    cursor.skip_record()?;
+                }
+                identities.next();
+                if let Some(result) = self.get_with(id, |entity| {
+                    if !Self::scan_entity_visible(snapshot, entity) {
+                        return Ok(());
+                    }
+                    let position = visible;
+                    visible = visible.saturating_add(1);
+                    if position < offset || items.len() >= limit {
+                        return Ok(());
+                    }
+                    let required_bytes = retained_bytes
+                        .saturating_add(crate::storage::memory_size::entity_bytes(entity));
+                    if required_bytes > limit_bytes {
+                        return Err(StoreError::ReadLimitExceeded {
+                            required_bytes,
+                            limit_bytes,
+                        });
+                    }
+                    retained_bytes = required_bytes;
+                    items.push(entity.clone());
+                    Ok(())
+                }) {
+                    result?;
+                }
+                continue;
+            }
+
+            let Some(id) = base else {
+                break;
+            };
+            if backing.removed.contains(&id) {
+                cursor.skip_record()?;
+                continue;
+            }
+            let position = visible;
+            visible = visible.saturating_add(1);
+            if position < offset || items.len() >= limit {
+                cursor.skip_record()?;
+                continue;
+            }
+            let record = cursor
+                .next_record(limit_bytes)?
+                .expect("invariant: peeked physical row exists");
+            let (mut entity, _) = record.decode_with_budget(backing.format_version, limit_bytes)?;
+            self.restore_recovery_row_layout(&mut entity, None);
+            let required_bytes =
+                retained_bytes.saturating_add(crate::storage::memory_size::entity_bytes(&entity));
+            if required_bytes > limit_bytes {
+                return Err(StoreError::ReadLimitExceeded {
+                    required_bytes,
+                    limit_bytes,
+                });
+            }
+            retained_bytes = required_bytes;
+            items.push(entity);
+        }
+
         self.restore_owned_row_schemas(items.iter_mut());
         Ok((visible, items))
     }

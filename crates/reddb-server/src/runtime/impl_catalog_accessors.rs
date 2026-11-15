@@ -257,20 +257,24 @@ impl RedDBRuntime {
             .clamp(1, 16 * 1024 * 1024);
         let (snapshot, _retention) = self.native_read_snapshot()?;
         let _snapshot_guard = super::impl_core::CurrentSnapshotGuard::install(snapshot.clone());
-        let (total, items) = manager.try_page_in_id_order_where_at_snapshot(
-            Some(&snapshot),
-            offset,
-            limit,
-            read_bytes,
-            |entity| {
-                crate::runtime::rls_injection::entity_passes_rls_action(
-                    self,
-                    collection,
-                    PolicyAction::Select,
-                    entity,
-                )
-            },
-        )?;
+        let (total, items) = if crate::runtime::rls_injection::rls_is_enabled(self, collection) {
+            manager.try_page_in_id_order_where_at_snapshot(
+                Some(&snapshot),
+                offset,
+                limit,
+                read_bytes,
+                |entity| {
+                    crate::runtime::rls_injection::entity_passes_rls_action(
+                        self,
+                        collection,
+                        PolicyAction::Select,
+                        entity,
+                    )
+                },
+            )?
+        } else {
+            manager.try_page_in_id_order_at_snapshot(Some(&snapshot), offset, limit, read_bytes)?
+        };
         let end = total.min(offset.saturating_add(limit));
         let next = (end < total).then_some(ScanCursor { offset: end });
 
