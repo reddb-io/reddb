@@ -5,6 +5,51 @@ async fn read_one_frame<R: tokio::io::AsyncRead + Unpin + Send>(r: &mut R) -> Fr
     read_frame_async(r).await.expect("read frame")
 }
 
+async fn authenticate_anonymous(client: &mut tokio::io::DuplexStream) {
+    client.write_all(&[1u8]).await.expect("write minor");
+    client
+        .write_all(&encode_frame(&hello_frame(1, Some("test"))))
+        .await
+        .expect("write hello");
+    assert_eq!(read_one_frame(client).await.kind, MessageKind::HelloAck);
+    client
+        .write_all(&encode_frame(&anonymous_auth_response_frame(2)))
+        .await
+        .expect("write auth response");
+    assert_eq!(read_one_frame(client).await.kind, MessageKind::AuthOk);
+}
+
+struct TestBlockingGate {
+    correlation_id: u64,
+}
+
+impl TestBlockingGate {
+    fn install(correlation_id: u64) -> Self {
+        use std::sync::atomic::Ordering;
+
+        REDWIRE_TEST_BLOCKING_GATE_ENTERED.store(0, Ordering::Release);
+        REDWIRE_TEST_BLOCKING_GATE_CORRELATION.store(correlation_id, Ordering::Release);
+        Self { correlation_id }
+    }
+
+    fn release(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        let _ = REDWIRE_TEST_BLOCKING_GATE_CORRELATION.compare_exchange(
+            self.correlation_id,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
+impl Drop for TestBlockingGate {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 fn request_frame(correlation_id: u64, kind: MessageKind, payload: Vec<u8>) -> Frame {
     reddb_wire::redwire::build_request_frame(correlation_id, kind, payload)
         .expect("build request frame")
@@ -169,4 +214,64 @@ async fn bulk_stream_rows_error_still_emits_error_frame() {
 
     drop(client);
     let _ = server_task.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disconnected_session_cancels_blocking_query_and_releases_execution_permit() {
+    use std::sync::atomic::Ordering;
+
+    const CORRELATION_ID: u64 = u64::MAX - 41;
+
+    let runtime = std::sync::Arc::new(RedDBRuntime::in_memory().expect("runtime"));
+    runtime.configure_execution_admission(1, 0, 1_000);
+    let admission = runtime.execution_admission();
+    let server_runtime = std::sync::Arc::clone(&runtime);
+    let (server_io, mut client) = tokio::io::duplex(64 * 1024);
+    let server_task =
+        tokio::spawn(async move { handle_session(server_io, server_runtime, None, None).await });
+
+    authenticate_anonymous(&mut client).await;
+    let mut gate = TestBlockingGate::install(CORRELATION_ID);
+    let query = reddb_wire::redwire::build_query_frame(CORRELATION_ID, "SELECT 1 AS healthy")
+        .expect("build blocking query");
+    client
+        .write_all(&encode_frame(&query))
+        .await
+        .expect("write blocking query");
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while REDWIRE_TEST_BLOCKING_GATE_ENTERED.load(Ordering::Acquire) != CORRELATION_ID {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("query entered deterministic blocking gate");
+    assert_eq!(
+        admission.active(),
+        1,
+        "blocked query must retain the execution permit before disconnect"
+    );
+    drop(client);
+
+    let mut server_task = server_task;
+    let disconnected =
+        tokio::time::timeout(std::time::Duration::from_millis(250), &mut server_task).await;
+    gate.release();
+    if disconnected.is_err() {
+        tokio::time::timeout(std::time::Duration::from_secs(1), server_task)
+            .await
+            .expect("released test gate must let the session finish")
+            .expect("session task")
+            .expect("clean disconnect after test cleanup");
+        panic!("disconnected session left the blocking query and its permit running");
+    }
+    disconnected
+        .expect("checked above")
+        .expect("session task")
+        .expect("clean disconnect");
+    assert_eq!(
+        admission.active(),
+        0,
+        "disconnect must return the shared execution permit"
+    );
 }
