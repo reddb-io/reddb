@@ -241,6 +241,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 If you need remote clients, shared access from multiple services, or a CLI REPL from another process, use server mode instead.
 
+### Android shared storage
+
+An embedded store holds OS file locks so that only one process writes it. Android's shared storage
+(`/storage/emulated/0`) is a FUSE mount without advisory locks: lock calls there fail with `ENOSYS`.
+On Android, a lock call that fails because the filesystem has no locks (`ENOSYS`, `EOPNOTSUPP`)
+counts as taken, so a store in shared storage opens. RedDB then cannot stop a second process from
+writing the same file; the app has to make sure there is only one writer. App-private storage
+supports locks and is not affected, and a lock held by another process still fails as before.
+
 ## Logging — optional `tracing` initialisation
 
 RedDB emits structured logs through `tracing` but **never installs a
