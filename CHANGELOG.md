@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.39.5
+
+### Patch Changes
+
+- [#2881](https://github.com/reddb-io/reddb/pull/2881) [`5724890`](https://github.com/reddb-io/reddb/commit/5724890cd78e83e41dd26415538688ab70b484ee) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Keep metadata-only DDL publication bounded by avoiding an unrelated full payload checkpoint after cold WAL replay.
+
 ## 1.39.4
 
 ### Patch Changes
