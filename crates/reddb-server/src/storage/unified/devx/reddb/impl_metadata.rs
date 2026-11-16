@@ -1563,7 +1563,7 @@ impl RedDB {
         header.vector_artifact_checksum = vector_artifact_checksum;
         self.persist_physical_metadata_record(metadata)?;
         self.store.update_physical_file_header(header)?;
-        self.store.persist()?;
+        self.store.flush_paged_registry()?;
         self.store.publish_detached_native_blob_pages()?;
         Ok(())
     }

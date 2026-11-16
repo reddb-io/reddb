@@ -3420,6 +3420,126 @@ mod checkpoint_work_tests {
     }
 
     #[test]
+    fn bounded_cold_create_does_not_checkpoint_an_unrelated_exhausted_wal_collection() {
+        const BASE_ROWS: u64 = 2_048;
+        const WAL_ROWS: u64 = 8_193;
+        const PAYLOAD_BYTES: usize = 1_024;
+
+        let directory = tempfile::tempdir().expect("DDL checkpoint fixture");
+        let path = directory.path().join("data.rdb");
+        let options = crate::RedDBOptions::persistent(&path)
+            .with_memory_budget(256 * 1024 * 1024)
+            .with_bounded_disk_residency(true)
+            .with_auto_checkpoint(0);
+        {
+            let runtime = crate::RedDBRuntime::with_options(options.clone())
+                .expect("prepare bounded runtime");
+            runtime
+                .execute_query("CREATE TABLE payloads (value TEXT)")
+                .expect("payload table");
+            let store = runtime.db().store();
+            let baseline = (1..=BASE_ROWS)
+                .map(|id| {
+                    UnifiedEntity::table_row(
+                        EntityId::new(id),
+                        "payloads",
+                        id,
+                        vec![Value::text("b".repeat(PAYLOAD_BYTES))],
+                    )
+                })
+                .collect();
+            store
+                .bulk_insert("payloads", baseline)
+                .expect("baseline payloads");
+            runtime.checkpoint().expect("compact baseline");
+
+            let wal_tail = (BASE_ROWS + 1..=BASE_ROWS + WAL_ROWS)
+                .map(|id| {
+                    UnifiedEntity::table_row(
+                        EntityId::new(id),
+                        "payloads",
+                        id,
+                        vec![Value::text("w".repeat(PAYLOAD_BYTES))],
+                    )
+                })
+                .collect();
+            store
+                .bulk_insert("payloads", wal_tail)
+                .expect("WAL tail beyond tracking budget");
+            let wal_bytes = std::fs::metadata(reddb_file::layout::unified_wal_path(&path))
+                .expect("WAL metadata")
+                .len();
+            assert!(
+                wal_bytes > 8 * 1024 * 1024,
+                "fixture WAL must exceed the retained proof budget: {wal_bytes} bytes"
+            );
+        }
+
+        let runtime =
+            crate::RedDBRuntime::with_options(options.clone()).expect("cold bounded reopen");
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        runtime
+            .execute_query("CREATE TABLE ddl_probe (id INTEGER)")
+            .expect("small DDL after cold WAL replay");
+        let serialized = CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get());
+        assert_eq!(
+            serialized, 0,
+            "small DDL must not checkpoint any payload rows"
+        );
+        assert!(
+            runtime.db().store().startup_xid_high_water_mark().is_some(),
+            "metadata-only publication must retain the durable XID summary"
+        );
+        assert_eq!(
+            runtime
+                .db()
+                .store()
+                .get_collection("payloads")
+                .expect("payloads after DDL")
+                .count(),
+            usize::try_from(BASE_ROWS + WAL_ROWS).expect("fixture row count fits usize")
+        );
+        let wal_after_ddl = std::fs::metadata(reddb_file::layout::unified_wal_path(&path))
+            .expect("WAL retained after DDL")
+            .len();
+        assert!(
+            wal_after_ddl > 8 * 1024 * 1024,
+            "metadata publication must not truncate the unrelated WAL tail: {wal_after_ddl} bytes"
+        );
+        drop(runtime);
+
+        let reopened = crate::RedDBRuntime::with_options(options).expect("reopen after small DDL");
+        assert!(
+            reopened.db().store().get_collection("ddl_probe").is_some(),
+            "small DDL collection must survive cold reopen"
+        );
+        assert_eq!(
+            reopened
+                .db()
+                .store()
+                .get_collection("payloads")
+                .expect("payloads after second reopen")
+                .count(),
+            usize::try_from(BASE_ROWS + WAL_ROWS).expect("fixture row count fits usize")
+        );
+        assert_eq!(
+            reopened
+                .db()
+                .store()
+                .get("payloads", EntityId::new(BASE_ROWS + WAL_ROWS))
+                .expect("last WAL row after second reopen")
+                .data
+                .as_row()
+                .expect("payload row")
+                .columns,
+            vec![Value::text("w".repeat(PAYLOAD_BYTES))]
+        );
+        reopened
+            .execute_query("INSERT INTO ddl_probe (id) VALUES (1)")
+            .expect("reopened DDL contract accepts writes");
+    }
+
+    #[test]
     fn sparse_wal_replay_does_not_reencode_complete_collections() {
         let directory = tempfile::tempdir().expect("temporary store");
         let path = directory.path().join("data.rdb");
