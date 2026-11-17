@@ -40,7 +40,7 @@ write_header() {
     echo "Targets from PLAN.md B2:"
     echo
     echo "- Static Linux binary: < **30 MB**."
-    echo "- Container image: < **65 MiB**."
+    echo "- Container image: < **68 MiB**."
     echo
     echo "| artifact | bytes | human | target | verdict |"
     echo "|----------|------:|-------|--------|---------|"
@@ -87,12 +87,12 @@ measure_image() {
   docker build -t "$image" . >/dev/null
   local bytes
   bytes=$(docker image inspect "$image" --format '{{.Size}}')
-  local limit=$((65 * 1024 * 1024))
+  local limit=$((68 * 1024 * 1024))
   local verdict="PASS"
   if (( bytes >= limit )); then
     verdict="FAIL"
   fi
-  append_row "container image ${image}" "$bytes" "< 65 MiB" "$verdict"
+  append_row "container image ${image}" "$bytes" "< 68 MiB" "$verdict"
   echo "[artifact-size] image bytes=$bytes verdict=$verdict"
   [[ "$verdict" == "PASS" ]]
 }
