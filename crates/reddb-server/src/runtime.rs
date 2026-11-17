@@ -1147,6 +1147,11 @@ struct RuntimeInner {
     /// direct and synchronous.
     execution_admission:
         parking_lot::RwLock<crate::transport::execution_admission::ExecutionAdmission>,
+    /// Shared execution watchdog (staging incident 2026-11-17): an execution
+    /// that outlives its handler deadline degrades readiness on every
+    /// transport, not only HTTP. RedWire arms tickets against the same
+    /// aggregate so Kubernetes probes observe a wedged wire worker too.
+    pub(crate) execution_watchdog: crate::runtime::execution_watchdog::ExecutionWatchdog,
     execution_queue_timeout_ms: AtomicU64,
     started_at_unix_ms: u128,
     probabilistic: probabilistic_store::ProbabilisticStore,
@@ -1526,6 +1531,14 @@ impl RedDBRuntime {
         self.inner.execution_admission.read().clone()
     }
 
+    /// Shared execution watchdog: HTTP and RedWire tickets land on the same
+    /// aggregate so one transport's wedged worker degrades readiness for all.
+    pub(crate) fn execution_watchdog(
+        &self,
+    ) -> &crate::runtime::execution_watchdog::ExecutionWatchdog {
+        &self.inner.execution_watchdog
+    }
+
     pub(crate) fn configure_execution_admission(
         &self,
         active_max: usize,
@@ -1600,6 +1613,7 @@ fn is_select_query_text(query: &str) -> bool {
 pub(crate) mod agent_tools;
 pub mod ai;
 mod allocator_pressure;
+pub(crate) mod execution_watchdog;
 pub mod analytics_schema_registry;
 pub(crate) mod analytics_source_catalog;
 pub mod ask_pipeline;

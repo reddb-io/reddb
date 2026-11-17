@@ -155,7 +155,7 @@ pub mod ui_deeplink;
 // can reuse the canonical S4 INSERT builders / identifier checks
 // (`build_insert_sql`, `is_safe_sql_identifier`) rather than fork
 // the SQL-escaping logic.
-mod execution_watchdog;
+
 pub(crate) mod handlers_query;
 mod handlers_replication;
 mod handlers_topology;
@@ -189,7 +189,7 @@ pub fn command_coverage_matrix() -> String {
     route_catalog::render_command_coverage_matrix(routes::discovered_route_catalog())
 }
 
-use self::execution_watchdog::ExecutionWatchdog;
+
 use self::handlers_ai::*;
 use self::handlers_entity::*;
 use self::handlers_graph::*;
@@ -306,10 +306,6 @@ pub struct RedDBServer {
     /// `http_limiter` bounds admitted requests; this gate keeps only a CPU-sized
     /// subset active and parks the remainder on a bounded async FIFO queue.
     execution_admission: ExecutionAdmission,
-    /// Fail readiness while a handler that exceeded its deadline still owns a
-    /// blocking executor worker. This is independent from normal admission:
-    /// overload alone stays ready, while work that cannot unwind does not.
-    execution_watchdog: ExecutionWatchdog,
     /// Small, independently bounded admission reserve for Kubernetes health
     /// probes. A saturated query pool must not make a healthy process fail
     /// readiness and disappear from its EndpointSlice. Only the four exact
@@ -493,7 +489,6 @@ impl RedDBServer {
             replication: None,
             http_limiter: HttpConnectionLimiter::new(http_limits.max_handlers),
             execution_admission,
-            execution_watchdog: ExecutionWatchdog::default(),
             health_limiter: HttpConnectionLimiter::new(HEALTH_HANDLER_CAP),
             handler_timeout: DEFAULT_HANDLER_TIMEOUT,
             handler_clock: Arc::new(SystemMonotonicClock::new()),

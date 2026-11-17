@@ -107,14 +107,14 @@ const MAX_CONCURRENT_HTTP2_STREAMS: u32 = 256;
 /// the worker and its admission permits without degrading readiness.
 struct BufferedExecutionCancellation<'a> {
     cancellation: &'a crate::runtime::query_budget::RequestCancellation,
-    ticket: Option<&'a Arc<super::execution_watchdog::ExecutionTicket>>,
+    ticket: Option<&'a Arc<crate::runtime::execution_watchdog::ExecutionTicket>>,
     armed: bool,
 }
 
 impl<'a> BufferedExecutionCancellation<'a> {
     fn new(
         cancellation: &'a crate::runtime::query_budget::RequestCancellation,
-        ticket: Option<&'a Arc<super::execution_watchdog::ExecutionTicket>>,
+        ticket: Option<&'a Arc<crate::runtime::execution_watchdog::ExecutionTicket>>,
     ) -> Self {
         Self {
             cancellation,
@@ -451,7 +451,8 @@ impl RedDBServer {
         };
 
         let server = self.clone();
-        let execution_ticket = (!is_health_request).then(|| self.execution_watchdog.start());
+        let execution_ticket =
+            (!is_health_request).then(|| self.runtime.execution_watchdog().start());
         let worker_ticket = execution_ticket.clone();
         let cancellation = crate::runtime::query_budget::RequestCancellation::new();
         let worker_cancellation = cancellation.clone();
@@ -1238,7 +1239,7 @@ mod tests {
                 .is_cancelled(),
             "request task must be cancelled"
         );
-        let ready_while_worker_is_stuck = server.execution_watchdog.is_ready();
+        let ready_while_worker_is_stuck = server.runtime.execution_watchdog().is_ready();
 
         server.set_test_slow_inject_ms(0);
         for _ in 0..100 {
@@ -1257,14 +1258,14 @@ mod tests {
             "dropping the HTTP future must cancel and mark its blocking worker unready"
         );
         assert!(
-            server.execution_watchdog.is_ready(),
+            server.runtime.execution_watchdog().is_ready(),
             "readiness must recover after the worker exits"
         );
     }
 
     #[test]
     fn completed_worker_is_not_cancelled_when_request_future_drops_late() {
-        let watchdog = super::super::execution_watchdog::ExecutionWatchdog::default();
+        let watchdog = crate::runtime::execution_watchdog::ExecutionWatchdog::default();
         let ticket = watchdog.start();
         drop(ticket.completion());
 

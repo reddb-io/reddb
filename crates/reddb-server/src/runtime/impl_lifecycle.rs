@@ -368,6 +368,7 @@ impl RedDBRuntime {
                 execution_admission: parking_lot::RwLock::new(
                     crate::transport::execution_admission::ExecutionAdmission::for_host(),
                 ),
+                execution_watchdog: Default::default(),
                 execution_queue_timeout_ms: AtomicU64::new(30_000),
                 started_at_unix_ms: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
