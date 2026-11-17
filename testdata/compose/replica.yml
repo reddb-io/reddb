@@ -4,6 +4,7 @@
 
 services:
   primary:
+    command: ["server", "--role", "primary"]
     build:
       context: ../..
       dockerfile: Dockerfile
@@ -37,6 +38,7 @@ services:
       start_period: 5s
 
   replica:
+    command: ["replica"]
     build:
       context: ../..
       dockerfile: Dockerfile
