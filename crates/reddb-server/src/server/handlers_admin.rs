@@ -1066,7 +1066,7 @@ impl RedDBServer {
             );
         }
 
-        let execution_ready = self.execution_watchdog.is_ready();
+        let execution_ready = self.runtime.execution_watchdog().is_ready();
         if phase.accepts_queries() && execution_ready {
             object.insert("status".to_string(), JsonValue::String("ready".to_string()));
             json_response(200, JsonValue::Object(object))

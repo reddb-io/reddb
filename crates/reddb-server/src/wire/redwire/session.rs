@@ -343,7 +343,39 @@ where
     R: Send + 'static,
 {
     let permit = redwire_execution_permit(runtime).await?;
-    redwire_spawn_blocking_with_permit(permit, execute).await
+    redwire_spawn_blocking_with_ticket(runtime, permit, None, execute).await
+}
+
+/// Shared-execution dispatch with a watchdog ticket (staging incident
+/// 2026-11-17): a wire execution that outlives `execution_queue_timeout`
+/// degrades `/health/ready` exactly like an HTTP handler that overruns
+/// `handler_timeout`. Without this, a wedged wire worker holds its
+/// admission permit invisibly while probes keep answering ready.
+async fn redwire_spawn_blocking_with_ticket<F, R>(
+    runtime: &RedDBRuntime,
+    permit: crate::transport::execution_admission::ExecutionPermit,
+    cancellation: Option<crate::runtime::query_budget::RequestCancellation>,
+    execute: F,
+) -> Result<R, RedWireExecutionError>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let ticket = runtime.execution_watchdog().start();
+    let completion = ticket.completion();
+    let worker = redwire_spawn_blocking_with_permit_cancellation(permit, cancellation, execute);
+    // Deadline marker runs on its own task: it degrades readiness the moment
+    // the deadline passes, and the completion guard records the worker's
+    // eventual finish whenever that happens (race-safe per ExecutionTicket).
+    let deadline = runtime.execution_queue_timeout();
+    let marker_ticket = std::sync::Arc::clone(&ticket);
+    tokio::spawn(async move {
+        tokio::time::sleep(deadline).await;
+        marker_ticket.mark_timed_out();
+    });
+    let result = worker.await;
+    drop(completion);
+    result
 }
 
 async fn redwire_execution_permit(
@@ -360,7 +392,8 @@ async fn redwire_execution_permit(
     }
 }
 
-async fn redwire_spawn_blocking_with_permit<F, R>(
+pub(super) async fn redwire_spawn_blocking_with_permit<F, R>(
+    runtime: &RedDBRuntime,
     permit: crate::transport::execution_admission::ExecutionPermit,
     execute: F,
 ) -> Result<R, RedWireExecutionError>
@@ -368,12 +401,7 @@ where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        execute()
-    })
-    .await
-    .map_err(RedWireExecutionError::Task)
+    redwire_spawn_blocking_with_ticket(runtime, permit, None, execute).await
 }
 
 async fn redwire_spawn_blocking_with_permit_cancellation<F, R>(
@@ -621,7 +649,8 @@ where
                     MessageKind::Query | MessageKind::QueryWithParams
                 )
                 .then(|| session_cancellation.clone());
-                let result = redwire_spawn_blocking_with_permit_cancellation(
+                let result = redwire_spawn_blocking_with_ticket(
+                    runtime.as_ref(),
                     permit,
                     cancellation,
                     move || {
@@ -790,7 +819,7 @@ where
                 let role = session.role;
                 let correlation_id = frame.correlation_id;
                 let task_session = stream_session.take();
-                let result = redwire_spawn_blocking_with_permit(permit, move || {
+                let result = redwire_spawn_blocking_with_permit(runtime.as_ref(), permit, move || {
                     let mut task_session = task_session;
                     let raw = execute_with_redwire_context(&operation_context, role, || {
                         crate::wire::listener::handle_stream_rows(
@@ -828,7 +857,7 @@ where
                 let role = session.role;
                 let correlation_id = frame.correlation_id;
                 let task_session = stream_session.take();
-                let result = redwire_spawn_blocking_with_permit(permit, move || {
+                let result = redwire_spawn_blocking_with_permit(runtime.as_ref(), permit, move || {
                     let mut task_session = task_session;
                     let raw = execute_with_redwire_context(&operation_context, role, || {
                         crate::wire::listener::handle_stream_commit(
