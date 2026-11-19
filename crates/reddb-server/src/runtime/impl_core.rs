@@ -2297,10 +2297,10 @@ impl RedDBRuntime {
                             Some(t) => vec![t.clone()],
                             None => store.list_collections(),
                         };
-                        let cutoff_xid = self.mvcc_vacuum_cutoff_xid();
                         let mut vacuum_stats =
                             crate::storage::unified::store::MvccVacuumStats::default();
                         for t in &targets {
+                            let cutoff_xid = self.mvcc_vacuum_cutoff_xid_for(t)?;
                             let stats = store.vacuum_mvcc_history(t, cutoff_xid).map_err(|e| {
                                 RedDBError::Internal(format!(
                                     "VACUUM MVCC history failed for {t}: {e}"

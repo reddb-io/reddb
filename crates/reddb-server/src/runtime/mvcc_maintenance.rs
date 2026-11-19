@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use super::RedDBRuntime;
 use crate::storage::profile::DeployProfile;
 use crate::storage::unified::store::MvccReclaimCursor;
+use crate::storage::StoreError;
 
 #[derive(Default)]
 pub(super) struct MvccMaintenance {
@@ -84,10 +85,13 @@ impl RedDBRuntime {
         let reclaim_budget = self
             .config_u64("runtime.mvcc.autovacuum.reclaim_rows_per_tick", 256)
             .clamp(1, 256) as usize;
-        let result = store.reclaim_mvcc_tick(
+        let result = store.reclaim_mvcc_tick_with(
             cursor,
             &self.snapshot_manager(),
-            self.mvcc_vacuum_cutoff_xid(),
+            |collection| {
+                self.mvcc_vacuum_cutoff_xid_for(collection)
+                    .map_err(|error| StoreError::Serialization(error.to_string()))
+            },
             scan_budget,
             reclaim_budget,
         );
@@ -263,6 +267,375 @@ mod tests {
                 Some(&Value::text(payload(119, id).as_str()))
             );
         }
+    }
+
+    /// #2895: heartbeat-style `UPDATE ... WHERE id = $1` on a TEXT primary
+    /// key must not retain every superseded version, and the primary-key
+    /// lookup and a full scan must agree on exactly one live row.
+    #[test]
+    fn repeated_pk_updates_reclaim_superseded_versions() {
+        use reddb_types::Value;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("heartbeat.rdb");
+        let open = || {
+            let mut runtime = RedDBRuntime::with_options(
+                RedDBOptions::persistent(&path)
+                    .with_memory_budget(32 * 1024 * 1024)
+                    .with_bounded_disk_residency(true),
+            )
+            .unwrap();
+            drop(runtime.background_tasks.take());
+            runtime
+        };
+        let mut runtime = open();
+        // Control stores create their schema through applied migrations,
+        // and every applied migration records a VCS commit.
+        runtime
+            .execute_query(
+                "CREATE MIGRATION heartbeats_v1 AS CREATE TABLE heartbeats \
+                 (id TEXT PRIMARY KEY, observed_at INTEGER, owner TEXT)",
+            )
+            .unwrap();
+        runtime
+            .execute_query("APPLY MIGRATION heartbeats_v1")
+            .unwrap();
+        runtime
+            .execute_query(
+                "INSERT INTO heartbeats (id, observed_at, owner) VALUES ('node-a', 0, 'w0')",
+            )
+            .unwrap();
+        let physical = |runtime: &RedDBRuntime| {
+            runtime
+                .db()
+                .store()
+                .get_collection("heartbeats")
+                .unwrap()
+                .count()
+        };
+        let reported_entities = |runtime: &RedDBRuntime| {
+            let result = runtime
+                .execute_query("SELECT entities FROM red.collections WHERE name = 'heartbeats'")
+                .unwrap();
+            result.result.records[0]
+                .get("entities")
+                .unwrap()
+                .display_string()
+                .parse::<usize>()
+                .unwrap()
+        };
+        // Drive the same paced collector the maintenance thread runs.
+        let collect = |runtime: &RedDBRuntime| {
+            for _ in 0..16 {
+                runtime.try_reclaim_history_tick();
+            }
+        };
+        const UPDATES: usize = 2000;
+        let mut peak = 0;
+        for generation in 1..=UPDATES {
+            runtime
+                .execute_query_with_params(
+                    "UPDATE heartbeats SET observed_at = $1, owner = $2 WHERE id = $3",
+                    &[
+                        Value::Integer(generation as i64),
+                        Value::text(format!("w{generation}")),
+                        Value::text("node-a"),
+                    ],
+                )
+                .unwrap();
+            collect(&runtime);
+            if generation % 500 == 0 {
+                runtime.checkpoint().unwrap();
+                collect(&runtime);
+            }
+            if generation == UPDATES / 2 {
+                // Restarts rehydrate persisted commit horizons.
+                drop(runtime);
+                runtime = open();
+            }
+            peak = peak.max(physical(&runtime));
+            assert!(
+                peak <= 64,
+                "superseded versions accumulated after {generation} updates: \
+                 {peak} physical versions for one live row"
+            );
+        }
+        runtime.checkpoint().unwrap();
+        collect(&runtime);
+        let count = runtime
+            .execute_query("SELECT COUNT(*) AS n FROM heartbeats")
+            .unwrap();
+        assert_eq!(
+            count.result.records[0].get("n").unwrap().display_string(),
+            "1"
+        );
+        let retained = reported_entities(&runtime);
+        eprintln!(
+            "updates={UPDATES} peak_physical={peak} retained_physical={} reported_entities={retained}",
+            physical(&runtime)
+        );
+        assert!(
+            retained <= 4,
+            "SHOW COLLECTIONS reports {retained} entities for one live row"
+        );
+        let point = runtime
+            .execute_query_with_params(
+                "SELECT id, observed_at FROM heartbeats WHERE id = $1",
+                &[Value::text("node-a")],
+            )
+            .unwrap();
+        assert_eq!(point.result.records.len(), 1, "PK lookup");
+        assert_eq!(
+            point.result.records[0].get("observed_at"),
+            Some(&Value::Integer(UPDATES as i64))
+        );
+        let scan = runtime
+            .execute_query("SELECT id, observed_at FROM heartbeats")
+            .unwrap();
+        assert_eq!(scan.result.records.len(), 1, "full scan");
+        drop(runtime);
+        let runtime = open();
+        let point = runtime
+            .execute_query("SELECT id, observed_at FROM heartbeats WHERE id = 'node-a'")
+            .unwrap();
+        assert_eq!(point.result.records.len(), 1, "PK lookup after reopen");
+        let scan = runtime
+            .execute_query("SELECT id, observed_at FROM heartbeats")
+            .unwrap();
+        assert_eq!(scan.result.records.len(), 1, "full scan after reopen");
+    }
+
+    /// #2895: a VCS commit pin protects only history that `AS OF` can read.
+    /// Open snapshots still protect every collection.
+    /// #2895: after heavy churn of one key, an indexed `WHERE id = $1` reads
+    /// O(1) entries instead of every retained version, and EXPLAIN does not
+    /// estimate the whole collection for the seek.
+    #[test]
+    fn indexed_pk_lookup_stays_bounded_under_update_churn() {
+        use crate::storage::{EntityId, StoreError};
+        use reddb_engine::storage::collection_read::{
+            CollectionCursor, CollectionRead, EncodedRecord,
+        };
+        use reddb_types::Value;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        struct CountReads {
+            inner: Arc<dyn CollectionRead + Send + Sync>,
+            scans: Arc<AtomicUsize>,
+            gets: Arc<AtomicUsize>,
+        }
+        impl CollectionRead for CountReads {
+            fn get_record(
+                &self,
+                id: EntityId,
+                bytes: usize,
+            ) -> Result<Option<EncodedRecord>, StoreError> {
+                self.gets.fetch_add(1, Ordering::Relaxed);
+                self.inner.get_record(id, bytes)
+            }
+            fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, StoreError> {
+                self.scans.fetch_add(1, Ordering::Relaxed);
+                self.inner.cursor()
+            }
+            fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, StoreError> {
+                self.scans.fetch_add(1, Ordering::Relaxed);
+                self.inner.owned_cursor()
+            }
+        }
+        const LIVE_ROWS: usize = 50;
+        const UPDATES: i64 = 300;
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("lookup.rdb"))
+                .with_memory_budget(32 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .unwrap();
+        drop(runtime.background_tasks.take());
+        runtime
+            .execute_query(
+                "CREATE MIGRATION windows_v1 AS CREATE TABLE windows \
+                 (id TEXT PRIMARY KEY, observed_at INTEGER)",
+            )
+            .unwrap();
+        runtime.execute_query("APPLY MIGRATION windows_v1").unwrap();
+        let values = (0..LIVE_ROWS)
+            .map(|key| format!("('k{key}', 0)"))
+            .collect::<Vec<_>>()
+            .join(",");
+        runtime
+            .execute_query(&format!(
+                "INSERT INTO windows (id, observed_at) VALUES {values}"
+            ))
+            .unwrap();
+        runtime.checkpoint().unwrap();
+        let collect = |runtime: &RedDBRuntime| {
+            for _ in 0..16 {
+                runtime.try_reclaim_history_tick();
+            }
+        };
+        for generation in 1..=UPDATES {
+            runtime
+                .execute_query_with_params(
+                    "UPDATE windows SET observed_at = $1 WHERE id = $2",
+                    &[Value::Integer(generation), Value::text("k0")],
+                )
+                .unwrap();
+            collect(&runtime);
+        }
+        runtime.checkpoint().unwrap();
+        collect(&runtime);
+        let store = runtime.db().store();
+        let manager = store.get_collection("windows").unwrap();
+        assert!(
+            manager.count() <= LIVE_ROWS + 2,
+            "{} physical entities for {LIVE_ROWS} live rows",
+            manager.count()
+        );
+        let mut resident = 0;
+        manager.for_each_entity(|_| {
+            resident += 1;
+            true
+        });
+        assert!(
+            resident <= 4,
+            "{resident} resident versions after reclamation"
+        );
+        let root = manager.backing_root_page().unwrap();
+        let count = manager.count() as u64;
+        let (source, _) = manager.current_backing_overlay().unwrap();
+        let scans = Arc::new(AtomicUsize::new(0));
+        let gets = Arc::new(AtomicUsize::new(0));
+        manager.install_backing(
+            Arc::new(CountReads {
+                inner: Arc::clone(&source),
+                scans: Arc::clone(&scans),
+                gets: Arc::clone(&gets),
+            }),
+            root,
+            store.format_version(),
+            1024 * 1024,
+            count,
+        );
+        let point = runtime
+            .execute_query_with_params(
+                "SELECT observed_at FROM windows WHERE id = $1",
+                &[Value::text("k0")],
+            )
+            .unwrap();
+        assert_eq!(point.result.records.len(), 1);
+        assert_eq!(
+            point.result.records[0].get("observed_at"),
+            Some(&Value::Integer(UPDATES))
+        );
+        assert_eq!(
+            scans.load(Ordering::Relaxed),
+            0,
+            "an indexed point lookup must not scan the collection"
+        );
+        assert!(
+            gets.load(Ordering::Relaxed) <= 4,
+            "point lookup read {} stored records",
+            gets.load(Ordering::Relaxed)
+        );
+        manager.install_backing(source, root, store.format_version(), 1024 * 1024, count);
+        let explain = runtime
+            .execute_query("EXPLAIN SELECT observed_at FROM windows WHERE id = 'k0'")
+            .unwrap();
+        let seek = explain
+            .result
+            .records
+            .iter()
+            .find(|record| {
+                matches!(record.get("op"), Some(Value::Text(op)) if op.as_ref() == "index_seek")
+            })
+            .expect("indexed point lookup plans an index seek");
+        let estimated = match seek.get("estimated_rows") {
+            Some(Value::Float(rows)) => *rows,
+            other => panic!("estimated_rows: {other:?}"),
+        };
+        assert!(
+            estimated < LIVE_ROWS as f64,
+            "index seek estimated {estimated} rows, the whole collection"
+        );
+    }
+
+    #[test]
+    fn commit_pins_protect_only_versioned_history() {
+        use crate::application::vcs::{Author, CreateCommitInput};
+        use reddb_types::Value;
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("pins.rdb"))
+                .with_memory_budget(32 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .unwrap();
+        drop(runtime.background_tasks.take());
+        for table in ["plain", "tracked"] {
+            runtime
+                .execute_query(&format!(
+                    "CREATE TABLE {table} (id TEXT PRIMARY KEY, v INTEGER)"
+                ))
+                .unwrap();
+        }
+        runtime.vcs_set_versioned("tracked", true).unwrap();
+        for table in ["plain", "tracked"] {
+            runtime
+                .execute_query(&format!("INSERT INTO {table} (id, v) VALUES ('a', 1)"))
+                .unwrap();
+        }
+        let commit = runtime
+            .vcs_commit(CreateCommitInput {
+                connection_id: 0,
+                message: "before update".into(),
+                author: Author {
+                    name: "test".into(),
+                    email: "test@reddb.io".into(),
+                },
+                committer: None,
+                amend: false,
+                allow_empty: true,
+            })
+            .unwrap();
+        let (_, reader) = runtime.snapshot_manager().fresh_retained_snapshot();
+        for table in ["plain", "tracked"] {
+            runtime
+                .execute_query(&format!("UPDATE {table} SET v = 2 WHERE id = 'a'"))
+                .unwrap();
+        }
+        let physical = |table: &str| runtime.db().store().get_collection(table).unwrap().count();
+        let collect = || {
+            for _ in 0..256 {
+                runtime.try_reclaim_history_tick();
+            }
+        };
+        collect();
+        assert_eq!(physical("plain"), 2, "an open reader keeps the preimage");
+        assert_eq!(physical("tracked"), 2);
+        drop(reader);
+        collect();
+        assert_eq!(
+            physical("plain"),
+            1,
+            "no AS OF read can address this history"
+        );
+        assert_eq!(physical("tracked"), 2, "the commit still reads its version");
+        let historical = runtime
+            .execute_query(&format!(
+                "SELECT v FROM tracked AS OF COMMIT '{}' WHERE id = 'a'",
+                commit.hash
+            ))
+            .unwrap();
+        assert_eq!(historical.result.records.len(), 1);
+        assert_eq!(
+            historical.result.records[0].get("v"),
+            Some(&Value::Integer(1))
+        );
+        let current = runtime
+            .execute_query("SELECT v FROM plain WHERE id = 'a'")
+            .unwrap();
+        assert_eq!(current.result.records.len(), 1);
+        assert_eq!(current.result.records[0].get("v"), Some(&Value::Integer(2)));
     }
 
     #[test]

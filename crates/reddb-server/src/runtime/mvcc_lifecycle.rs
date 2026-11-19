@@ -1294,10 +1294,42 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn mvcc_vacuum_cutoff_xid(&self) -> crate::storage::transaction::snapshot::Xid {
+        self.mvcc_cutoff_xid(true)
+    }
+
+    /// Reclamation horizon for one collection (#2895). VCS commit pins are
+    /// permanent and rehydrated on every open, so honoring them everywhere
+    /// froze history reclamation for the whole store after the first commit
+    /// (every `APPLY MIGRATION` records one). Only versioned collections and
+    /// internal metadata serve `AS OF` reads, so only they keep those pins;
+    /// live transactions and captured statement snapshots still protect
+    /// every collection.
+    ///
+    /// Reclaimers decide under `vault_publication_lock`, which also fences
+    /// `vcs_set_versioned`, so the decision cannot race an opt-in.
+    pub(crate) fn mvcc_vacuum_cutoff_xid_for(
+        &self,
+        collection: &str,
+    ) -> RedDBResult<crate::storage::transaction::snapshot::Xid> {
+        let addressable_by_as_of = collection.starts_with("red_")
+            || collection.starts_with("red.")
+            || self.vcs_is_versioned(collection)?;
+        Ok(self.mvcc_cutoff_xid(addressable_by_as_of))
+    }
+
+    fn mvcc_cutoff_xid(
+        &self,
+        honor_commit_pins: bool,
+    ) -> crate::storage::transaction::snapshot::Xid {
         let manager = self.inner.transaction_state.snapshot_manager();
         let next_xid = manager.peek_next_xid();
         let mut cutoff = next_xid;
-        if let Some(oldest_required) = manager.oldest_required_xid() {
+        let oldest_required = if honor_commit_pins {
+            manager.oldest_required_xid()
+        } else {
+            manager.oldest_live_required_xid()
+        };
+        if let Some(oldest_required) = oldest_required {
             cutoff = cutoff.min(oldest_required);
         }
         let retention_xids = self.config_u64("runtime.mvcc.vacuum_retention_xids", 0);
