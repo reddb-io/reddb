@@ -1063,7 +1063,12 @@ impl RedDBRuntime {
                     super::red_schema::READ_ONLY_ERROR.to_string(),
                 ))
             }
-            QueryExpr::Delete(ref delete) if super::red_schema::is_virtual_table(&delete.table) => {
+            // The retention sweeper's scoped DELETE is the only write that may
+            // reach the physical `red.control_events` ledger (issue #2900).
+            QueryExpr::Delete(ref delete)
+                if super::red_schema::is_virtual_table(&delete.table)
+                    && !super::retention_sweeper::is_retention_delete(&delete.table) =>
+            {
                 Err(RedDBError::Query(
                     super::red_schema::READ_ONLY_ERROR.to_string(),
                 ))
@@ -1159,6 +1164,15 @@ impl RedDBRuntime {
                 // (old `default.*` provider/model and per-alias base_url shape)
                 // with a didactic error naming the replacement key.
                 crate::ai::validate_ai_config_key_on_write(key)?;
+                let control_events_retention = key == super::control_events_retention::CONFIG_KEY;
+                if control_events_retention {
+                    let raw = match value {
+                        Value::Text(text) => text.to_string(),
+                        other => other.to_string(),
+                    };
+                    super::control_events_retention::parse_retention(&raw)
+                        .map_err(RedDBError::Query)?;
+                }
                 // The managed-config guardrail runs first: it owns the
                 // didactic error and the `config:write` control event for
                 // registry-managed keys. The generic capability gate below
@@ -1179,6 +1193,9 @@ impl RedDBRuntime {
                             .try_set_config_tree(key, &json_val)
                             .map_err(RedDBError::from)?;
                         update_current_config_value(key, value.clone());
+                        if control_events_retention {
+                            self.apply_control_events_retention()?;
+                        }
                         // Config changes can flip runtime behavior mid-session
                         // (auto_decrypt, auto_encrypt, etc.) — invalidate the
                         // result cache so subsequent reads re-execute against

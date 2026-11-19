@@ -102,6 +102,12 @@ pub const MATRIX: &[ConfigDefault] = &[
         tier: Tier::Optional,
         default: || num(1024.0),
     },
+    // control_events.* — issue #2900. Duration (`48h`, `7d`) or `off`.
+    ConfigDefault {
+        key: "control_events.retention",
+        tier: Tier::Optional,
+        default: || text(crate::runtime::control_events_retention::DEFAULT_RETENTION),
+    },
     // cache.blob.*
     ConfigDefault {
         key: "cache.blob.l1_bytes_max",

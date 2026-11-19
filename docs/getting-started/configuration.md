@@ -387,6 +387,27 @@ For a container environment override, set
 | `auth.session_ttl_secs` | `3600` | Session TTL (1 hour) |
 | `auth.require_auth` | `false` | Require auth for all operations |
 
+### Control events (`control_events.*`)
+
+| Key | Env | Default | Description |
+|:----|:----|:--------|:------------|
+| `control_events.retention` | `REDDB_CONTROL_EVENTS_RETENTION` | `7d` | Retention window of the `red.control_events` ledger: a duration (`48h`, `7d`, `30 days`) or `off` to keep every event |
+
+The window becomes the collection's declarative retention policy, anchored on
+the time each event was recorded. Expired events disappear from reads at once,
+and the background retention sweeper deletes them in bounded batches through
+the normal `DELETE` path, so the WAL and replicas see the same deletes. The
+policy and the sweeper counters appear in `red.retention`
+(`WHERE name = 'red.control_events'`).
+
+The policy is applied at boot and again after
+`SET CONFIG control_events.retention = '48h'`; an invalid value is rejected.
+The env variable wins over `red.config` and is not persisted, so while it is set
+a `SET CONFIG` is stored but has no effect until the env is removed. A stored
+value that cannot be parsed falls back to `7d` with a warning. SQL DDL on
+`red.*` stays refused: `ALTER TABLE red.control_events SET RETENTION` is not
+the way to change it.
+
 ### Backup & Recovery (`backup.*`, `wal.*`, `cdc.*`)
 
 | Key | Default | Description |

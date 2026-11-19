@@ -66,7 +66,7 @@ pub(crate) fn view_records_to_entities(
     out
 }
 
-fn system_keyed_collection_contract(
+pub(super) fn system_keyed_collection_contract(
     name: &str,
     model: crate::catalog::CollectionModel,
 ) -> crate::physical::CollectionContract {
@@ -984,6 +984,15 @@ impl RedDBRuntime {
             let overlay_path = crate::runtime::config_overlay::config_file_path();
             let _ =
                 crate::runtime::config_overlay::apply_config_file(store.as_ref(), &overlay_path);
+        }
+
+        // Issue #2900 — bound `red.control_events` with the declarative
+        // retention policy once env / file / red.config are all resolved.
+        if let Err(err) = runtime.apply_control_events_retention() {
+            tracing::warn!(
+                target: "reddb::control_events",
+                "could not apply control_events.retention: {err}"
+            );
         }
 
         // VCS ("Git for Data") — create the `red_*` metadata
