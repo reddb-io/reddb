@@ -362,19 +362,25 @@ where
     R: Send + 'static,
 {
     let ticket = runtime.execution_watchdog().start();
-    let completion = ticket.completion();
-    let worker = redwire_spawn_blocking_with_permit_cancellation(permit, cancellation, execute);
     // Deadline marker runs on its own task: it degrades readiness the moment
-    // the deadline passes, and the completion guard records the worker's
-    // eventual finish whenever that happens (race-safe per ExecutionTicket).
-    let deadline = runtime.execution_queue_timeout();
-    let marker_ticket = std::sync::Arc::clone(&ticket);
-    tokio::spawn(async move {
-        tokio::time::sleep(deadline).await;
-        marker_ticket.mark_timed_out();
-    });
-    let result = worker.await;
-    drop(completion);
+    // a *running* span overruns the deadline. Spans the worker spends
+    // intentionally parked (QUEUE READ … WAIT on an empty queue) suspend the
+    // deadline, which restarts when work resumes — a long-poll is idle by
+    // design, not wedged (staging incident 2026-11-19).
+    let marker = tokio::spawn(crate::runtime::execution_watchdog::enforce_deadline(
+        std::sync::Arc::clone(&ticket),
+        runtime.execution_queue_timeout(),
+    ));
+    let result = redwire_spawn_blocking_with_permit_cancellation(
+        permit,
+        cancellation,
+        Some(ticket),
+        execute,
+    )
+    .await;
+    // The worker settled its ticket; don't leave one sleeping timer per
+    // execution behind until the deadline elapses.
+    marker.abort();
     result
 }
 
@@ -407,14 +413,21 @@ where
 async fn redwire_spawn_blocking_with_permit_cancellation<F, R>(
     permit: crate::transport::execution_admission::ExecutionPermit,
     cancellation: Option<crate::runtime::query_budget::RequestCancellation>,
+    ticket: Option<std::sync::Arc<crate::runtime::execution_watchdog::ExecutionTicket>>,
     execute: F,
 ) -> Result<R, RedWireExecutionError>
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
+    // Worker-owned completion: created before the spawn so a closure that is
+    // dropped unrun still settles the ticket, and recorded only when the
+    // engine work itself ends — not when the session future goes away.
+    let completion = ticket.as_ref().map(|ticket| ticket.completion());
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        let _completion = completion;
+        let _ticket_scope = ticket.as_ref().map(|ticket| ticket.install());
         let _cancellation_scope = cancellation.map(|cancellation| cancellation.install());
         execute()
     })
