@@ -292,7 +292,8 @@ impl RedDBRuntime {
     ///
     /// Steps, in order, all idempotent across re-entrant calls:
     ///   1. Move lifecycle into `ShuttingDown` (concurrent callers
-    ///      observe `Stopped` after first finishes).
+    ///      observe `Stopped` after first finishes) and cancel every
+    ///      parked queue wait so it resolves as `cancelled` promptly.
     ///   2. Flush WAL + run final checkpoint via `db.flush()` so
     ///      every acked write is durable on disk.
     ///   3. If `backup_on_shutdown == true` and a remote backend is
@@ -324,6 +325,12 @@ impl RedDBRuntime {
             started_at_ms: started_ms,
             ..Default::default()
         };
+
+        // Release every parked `QUEUE READ … WAIT` / live queue wait first:
+        // they resolve as `cancelled` now instead of sitting out their WAIT
+        // budget (or the process exit) while the flush below runs. New waits
+        // opened after this point are refused as cancelled too.
+        self.inner.queue_wait_registry.cancel_all();
 
         // Periodic maintenance can checkpoint too. Drain it before the final
         // flush so no worker can append a fresh ownership epoch after this
