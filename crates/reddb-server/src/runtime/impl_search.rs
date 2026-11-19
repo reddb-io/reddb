@@ -10,6 +10,14 @@ fn mark_table_scan_as_index_seek(
     node: &mut crate::storage::query::planner::CanonicalLogicalNode,
     index_name: &str,
 ) -> bool {
+    mark_index_seek_under_filter(node, index_name, None)
+}
+
+fn mark_index_seek_under_filter(
+    node: &mut crate::storage::query::planner::CanonicalLogicalNode,
+    index_name: &str,
+    filtered: Option<(f64, f64)>,
+) -> bool {
     if node.operator == "table_scan" {
         node.operator = "index_seek".to_string();
         node.details
@@ -18,10 +26,19 @@ fn mark_table_scan_as_index_seek(
             "reason".to_string(),
             "runtime index registry has a usable index".to_string(),
         );
+        // A seek yields the predicate's candidates, not the whole collection
+        // the replaced scan estimated (#2895).
+        if let Some((rows, selectivity)) = filtered {
+            node.estimated_rows = node.estimated_rows.min(rows);
+            node.estimated_selectivity = node.estimated_selectivity.min(selectivity);
+        }
         return true;
     }
+    let filtered = (node.operator == "filter")
+        .then_some((node.estimated_rows, node.estimated_selectivity))
+        .or(filtered);
     for child in &mut node.children {
-        if mark_table_scan_as_index_seek(child, index_name) {
+        if mark_index_seek_under_filter(child, index_name, filtered) {
             return true;
         }
     }

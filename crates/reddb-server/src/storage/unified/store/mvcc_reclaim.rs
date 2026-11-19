@@ -130,6 +130,25 @@ impl UnifiedStore {
         scan_budget: usize,
         reclaim_budget: usize,
     ) -> Result<usize, StoreError> {
+        self.reclaim_mvcc_tick_with(
+            cursor,
+            snapshots,
+            |_| Ok(cutoff),
+            scan_budget,
+            reclaim_budget,
+        )
+    }
+
+    /// Resolves the collection's cutoff inside the publication fence, so a
+    /// retention decision cannot race a concurrent change of that policy.
+    pub(crate) fn reclaim_mvcc_tick_with(
+        &self,
+        cursor: &mut MvccReclaimCursor,
+        snapshots: &SnapshotManager,
+        cutoff: impl FnOnce(&str) -> Result<u64, StoreError>,
+        scan_budget: usize,
+        reclaim_budget: usize,
+    ) -> Result<usize, StoreError> {
         let Some(_publication) = self.vault_publication_lock.try_lock() else {
             return Ok(0);
         };
@@ -141,6 +160,7 @@ impl UnifiedStore {
             cursor.invalidated = true;
             return Ok(0);
         }
+        let cutoff = cutoff(&cursor.collection)?;
         let mut scan_left = scan_budget;
         let mut reclaim = Vec::with_capacity(reclaim_budget);
         while scan_left > 0 && reclaim.len() < reclaim_budget && !cursor.scan.finished() {

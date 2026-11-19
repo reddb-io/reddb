@@ -572,6 +572,11 @@ impl reddb_engine::query::planning::TablePlanningHost for NativeTablePlanningHos
             universal_entity_cardinality(self.0)
         } else if access.path == "document_path_index_seek" {
             document_index_cardinality(self.0, query.table.as_str())
+        } else if access.path == "index_seek"
+            && reddb_rql::sql_lowering::effective_table_filter(query).is_some()
+        {
+            // A seek yields the predicate's candidates, not the collection (#2895).
+            table_filtered_cardinality(self.0, query)
         } else {
             base_collection_cardinality(self.0, query.table.as_str())
         }

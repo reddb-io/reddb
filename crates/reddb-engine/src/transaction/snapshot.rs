@@ -619,6 +619,21 @@ impl SnapshotManager {
             .min()
     }
 
+    /// Like [`oldest_required_xid`](Self::oldest_required_xid), but ignores
+    /// durable pins (VCS commit horizons). Only live transactions and captured
+    /// statement snapshots count. History that no `AS OF` read can address,
+    /// such as rows of a collection outside the VCS, is reclaimable against it.
+    pub fn oldest_live_required_xid(&self) -> Option<Xid> {
+        let state = self.state.read();
+        state
+            .active
+            .iter()
+            .chain(state.snapshot_horizons.values())
+            .chain(state.statement_horizons.keys())
+            .copied()
+            .min()
+    }
+
     /// Oldest externally pinned xid. Pinned snapshots behave like active
     /// snapshots for VACUUM: any tuple visible to that xid must survive even
     /// when no SQL transaction is currently active.
