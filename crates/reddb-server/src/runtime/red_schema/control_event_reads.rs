@@ -144,11 +144,24 @@ pub(super) fn read(
         .map(|limit| offset.saturating_add(limit))
         .unwrap_or(usize::MAX);
     let cap = crate::runtime::materialization_limit::max_materialized_rows(db.as_ref())?;
+    // Issue #2900 — hide rows past the retention window before the sweeper
+    // reclaims them.
+    let retention_cutoff = db
+        .collection_contract_arc(super::super::control_events::CONTROL_EVENTS_COLLECTION)
+        .and_then(|contract| contract.retention_duration_ms)
+        .map(|window| {
+            super::super::retention_sweeper::cutoff_ms(crate::utils::now_unix_millis(), window)
+        });
     let mut skipped = 0;
     let mut accept = |entity: &crate::storage::UnifiedEntity| -> RedDBResult<bool> {
         let Some(row) = entity.data.as_row() else {
             return Ok(false);
         };
+        if retention_cutoff.is_some_and(|cutoff| {
+            super::super::control_events_retention::is_expired(entity, cutoff)
+        }) {
+            return Ok(false);
+        }
         if let Some(tenant) = tenant {
             if !matches!(row.get_field("scope"), Some(Value::Text(scope)) if scope.as_ref() == tenant)
             {

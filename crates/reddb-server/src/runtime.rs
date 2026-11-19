@@ -1632,6 +1632,7 @@ pub mod config_watcher;
 pub mod continuous_materialized_view;
 mod control_event_index;
 pub mod control_events;
+pub(crate) mod control_events_retention;
 pub(crate) mod ddl;
 mod delete_publication;
 pub mod disk_space_monitor;

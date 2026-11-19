@@ -144,7 +144,14 @@ impl RedDBRuntime {
                 continue;
             }
 
-            let stmt = format!("DELETE FROM {} WHERE {} < {}", name, ts_column, cutoff);
+            // Quoted like the TTL sweep so system collections such as
+            // `red.control_events` bypass the virtual `red.*` rewrite.
+            let stmt = format!(
+                "DELETE FROM {} WHERE {} < {}",
+                quote_maintenance_identifier(name),
+                ts_column,
+                cutoff
+            );
             let result = super::retention_sweeper::with_delete_candidates(
                 candidates,
                 name,

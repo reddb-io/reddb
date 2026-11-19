@@ -63,6 +63,9 @@ fn mutable_scan_budget_is_shared_and_rotates_between_collections() {
 fn retention_scan_advances_past_live_rows_in_bounded_ticks() {
     let rt = RedDBRuntime::in_memory().unwrap();
     rt.background_tasks.as_ref().unwrap().shutdown();
+    // The tick budget below is exact; keep the ledger's default policy out of it.
+    rt.execute_query("SET CONFIG control_events.retention = 'off'")
+        .unwrap();
     rt.execute_query("CREATE TABLE events (id INTEGER) WITH timestamps = true")
         .unwrap();
     rt.execute_query("INSERT INTO events (id) VALUES (1), (2), (3), (4), (5), (6)")
