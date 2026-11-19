@@ -83,6 +83,99 @@ pub(crate) enum RedwireWaitOutcome {
     Cancelled,
 }
 
+/// Owned identity + request of one live queue wait, shared with the
+/// blocking-pool probes so each runs under the session's auth/tenant
+/// context regardless of which thread picks it up.
+struct RedwireWaitProbe {
+    queue: String,
+    consumer: String,
+    count: usize,
+    wait_ms: u64,
+    auth_identity: Option<(String, crate::auth::Role)>,
+    auth_principal: Option<crate::auth::UserId>,
+    tenant: Option<String>,
+}
+
+impl RedwireWaitProbe {
+    fn with_context<T>(&self, f: impl FnOnce() -> T) -> T {
+        with_redwire_wait_context(&self.auth_identity, &self.auth_principal, &self.tenant, f)
+    }
+
+    fn resolve_group(&self, runtime: &RedDBRuntime, group: Option<&str>) -> RedDBResult<String> {
+        self.with_context(|| {
+            let expr =
+                reddb_rql::ast::QueryExpr::QueueCommand(reddb_rql::ast::QueueCommand::GroupRead {
+                    queue: self.queue.clone(),
+                    group: group.map(str::to_string),
+                    consumer: self.consumer.clone(),
+                    count: self.count,
+                    wait_ms: Some(self.wait_ms),
+                });
+            runtime
+                .check_query_privilege(&expr)
+                .map_err(RedDBError::Query)?;
+            let store = runtime.inner.db.store();
+            ensure_queue_exists(store.as_ref(), &self.queue)?;
+            let config = load_queue_config(store.as_ref(), &self.queue);
+            resolve_read_group(store.as_ref(), &self.queue, group, &self.consumer, &config)
+        })
+    }
+
+    /// One arbitrated delivery probe (the same path as the synchronous
+    /// `QUEUE READ`), plus the soonest future `available_at_ns` when nothing
+    /// was deliverable (the park horizon for delayed messages, issue #722).
+    fn read(
+        &self,
+        runtime: &RedDBRuntime,
+        group: &str,
+    ) -> RedDBResult<(
+        Vec<crate::runtime::queue_lifecycle::DeliveredMessage>,
+        Option<u64>,
+    )> {
+        #[cfg(test)]
+        redwire_wait_probe_test_stall(&self.queue);
+        self.with_context(|| {
+            let delivered = runtime.group_read_arbitrated(
+                &self.queue,
+                group,
+                &self.consumer,
+                self.count,
+                true,
+            )?;
+            let next_available_at_ns = if delivered.is_empty() {
+                earliest_future_available_at(&runtime.inner.db.store(), &self.queue)
+            } else {
+                None
+            };
+            Ok((delivered, next_available_at_ns))
+        })
+    }
+}
+
+/// Test hook: queues whose live-wait probes stall (bounded) on the blocking
+/// pool, standing in for a storage call held up by a lock or slow I/O.
+#[cfg(test)]
+pub(crate) static REDWIRE_WAIT_PROBE_STALLS: std::sync::Mutex<Vec<(String, std::time::Instant)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn redwire_wait_probe_test_stall(queue: &str) {
+    loop {
+        let until = REDWIRE_WAIT_PROBE_STALLS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .find(|(stalled, _)| stalled == queue)
+            .map(|(_, until)| *until);
+        match until {
+            Some(until) if std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(1))
+            }
+            _ => return,
+        }
+    }
+}
+
 /// Slice C of PRD #718 — scope key for the queue wait registry.
 /// Today every connection in the process shares a single namespace;
 /// the helper exists so multi-tenant scoping (e.g. tenant id) can be
@@ -245,6 +338,60 @@ impl QueueMessageView {
 }
 
 impl RedDBRuntime {
+    /// One delivery probe through the normal `group_read` path, shared by
+    /// the synchronous `QUEUE READ` and the RedWire live wait so both get the
+    /// same arbitration: the batched fast path, then the #1371 per-queue read
+    /// lock + publication lock so one available message is claimed by
+    /// exactly one competing consumer. `live` re-reads under a fresh snapshot
+    /// so each retry of a wait observes commits since the previous probe.
+    pub(super) fn group_read_arbitrated(
+        &self,
+        queue: &str,
+        group: &str,
+        consumer: &str,
+        count: usize,
+        live: bool,
+    ) -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
+        let runtime = self;
+        super::vcs_queue::with_operation(runtime, &[queue], true, || {
+            // WAIT is an autocommit live subscription: each retry must see
+            // commits since the previous probe. Keep identity/tenant fixed
+            // and restore the enclosing statement snapshot after the read.
+            let _snapshot_guard = live
+                .then(crate::runtime::impl_core::capture_current_snapshot)
+                .flatten()
+                .map(|mut context| {
+                    context.snapshot = context.manager.fresh_read_snapshot();
+                    crate::runtime::execution_context::CurrentSnapshotGuard::install(context)
+                });
+            let adapter = PrimaryQueueStore::new(runtime.clone());
+            if let Some(delivered) = adapter
+                .try_group_read_batched(queue, group, consumer, count)
+                .map_err(map_qse)?
+            {
+                return Ok(delivered);
+            }
+            // #1371 — serialize concurrent group consumers on this queue so
+            // a single available message is claimed (mark_pending) and
+            // returned by exactly one consumer. Without this, woken
+            // competing waiters all observe the message as available and
+            // each delivers it (double-delivery across the wake-all).
+            let read_lock = runtime
+                .inner
+                .rmw_locks
+                .lock_for(queue, "__queue_group_read__");
+            let _read_guard = read_lock.lock();
+            // The fallback must also exclude prepared concurrent READs
+            // between candidate selection and reservation.
+            let store = runtime.inner.db.store();
+            let _publication = store.vault_publication_lock.lock();
+            let (lifecycle, _ps, txn) = runtime_lifecycle(runtime, queue);
+            lifecycle
+                .group_read(&txn, queue, group, consumer, count)
+                .map_err(map_qse)
+        })
+    }
+
     /// Slice C of PRD #718 — non-blocking `group_read` plus optional
     /// `WAIT <duration>` retry. When `wait_ms` is `None` this is the
     /// pre-slice-C synchronous read. When `Some`, an immediate empty
@@ -261,45 +408,9 @@ impl RedDBRuntime {
         count: usize,
         wait_ms: Option<u64>,
     ) -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
-        let do_read =
-            |runtime: &RedDBRuntime| -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
-                super::vcs_queue::with_operation(runtime, &[queue], true, || {
-                // WAIT is an autocommit live subscription: each retry must see
-                // commits since the previous probe. Keep identity/tenant fixed
-                // and restore the enclosing statement snapshot after the read.
-                let _snapshot_guard = wait_ms
-                    .and_then(|_| crate::runtime::impl_core::capture_current_snapshot())
-                    .map(|mut context| {
-                        context.snapshot = context.manager.fresh_read_snapshot();
-                        crate::runtime::execution_context::CurrentSnapshotGuard::install(context)
-                    });
-                let adapter = PrimaryQueueStore::new(runtime.clone());
-                if let Some(delivered) = adapter
-                    .try_group_read_batched(queue, group, consumer, count)
-                    .map_err(map_qse)?
-                {
-                    return Ok(delivered);
-                }
-                // #1371 — serialize concurrent group consumers on this queue so
-                // a single available message is claimed (mark_pending) and
-                // returned by exactly one consumer. Without this, woken
-                // competing waiters all observe the message as available and
-                // each delivers it (double-delivery across the wake-all).
-                let read_lock = runtime
-                    .inner
-                    .rmw_locks
-                    .lock_for(queue, "__queue_group_read__");
-                let _read_guard = read_lock.lock();
-                // The fallback must also exclude prepared concurrent READs
-                // between candidate selection and reservation.
-                let store = runtime.inner.db.store();
-                let _publication = store.vault_publication_lock.lock();
-                let (lifecycle, _ps, txn) = runtime_lifecycle(runtime, queue);
-                lifecycle
-                    .group_read(&txn, queue, group, consumer, count)
-                    .map_err(map_qse)
-                })
-            };
+        let do_read = |runtime: &RedDBRuntime| {
+            runtime.group_read_arbitrated(queue, group, consumer, count, wait_ms.is_some())
+        };
 
         let delivered = do_read(self)?;
         let Some(wait_ms) = wait_ms else {
@@ -423,36 +534,38 @@ impl RedDBRuntime {
         auth_principal: Option<crate::auth::UserId>,
         tenant: Option<String>,
     ) -> RedDBResult<RedwireWaitOutcome> {
-        let group_owned: RedDBResult<String> =
-            with_redwire_wait_context(&auth_identity, &auth_principal, &tenant, || {
-                let expr = reddb_rql::ast::QueryExpr::QueueCommand(
-                    reddb_rql::ast::QueueCommand::GroupRead {
-                        queue: queue.to_string(),
-                        group: group.map(str::to_string),
-                        consumer: consumer.to_string(),
-                        count,
-                        wait_ms: Some(wait_ms),
-                    },
-                );
-                self.check_query_privilege(&expr)
-                    .map_err(RedDBError::Query)?;
-                let store = self.inner.db.store();
-                ensure_queue_exists(store.as_ref(), queue)?;
-                let config = load_queue_config(store.as_ref(), queue);
-                resolve_read_group(store.as_ref(), queue, group, consumer, &config)
-            });
-        let group_owned = group_owned?;
-        let group_ref = group_owned.as_str();
+        // The wait budget runs from the open, so a slow first probe or a
+        // queued admission spends it like any other part of the wait.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+        let probe = Arc::new(RedwireWaitProbe {
+            queue: queue.to_string(),
+            consumer: consumer.to_string(),
+            count,
+            wait_ms,
+            auth_identity,
+            auth_principal,
+            tenant,
+        });
 
-        let do_read =
-            |runtime: &RedDBRuntime| -> RedDBResult<Vec<crate::runtime::queue_lifecycle::DeliveredMessage>> {
-                with_redwire_wait_context(&auth_identity, &auth_principal, &tenant, || {
-                    let (lifecycle, _ps, txn) = runtime_lifecycle(runtime, queue);
-                    lifecycle
-                        .group_read(&txn, queue, group_ref, consumer, count)
-                        .map_err(map_qse)
-                })
-            };
+        let resolved = {
+            let probe = Arc::clone(&probe);
+            let group = group.map(str::to_string);
+            self.redwire_wait_blocking(deadline, move |runtime| {
+                probe.resolve_group(runtime, group.as_deref())
+            })
+            .await?
+        };
+        let Some(group_owned) = resolved.transpose()? else {
+            return Ok(RedwireWaitOutcome::TimedOut);
+        };
+        let group_owned: Arc<str> = Arc::from(group_owned);
+        let group_ref: &str = &group_owned;
+
+        let read = |probe: &Arc<RedwireWaitProbe>| {
+            let probe = Arc::clone(probe);
+            let group = Arc::clone(&group_owned);
+            move |runtime: &RedDBRuntime| probe.read(runtime, &group)
+        };
 
         let render = |delivered: Vec<crate::runtime::queue_lifecycle::DeliveredMessage>| {
             RedwireWaitOutcome::Delivered(
@@ -461,15 +574,15 @@ impl RedDBRuntime {
         };
 
         // Fast path: a message is already deliverable at open time.
-        let delivered = do_read(self)?;
-        if !delivered.is_empty() {
-            return Ok(render(delivered));
+        if let Some(probed) = self.redwire_wait_blocking(deadline, read(&probe)).await? {
+            let (delivered, _) = probed?;
+            if !delivered.is_empty() {
+                return Ok(render(delivered));
+            }
         }
 
         let registry = self.queue_wait_registry();
-        let scope =
-            with_redwire_wait_context(&auth_identity, &auth_principal, &tenant, queue_wait_scope);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+        let scope = probe.with_context(queue_wait_scope);
         let telemetry = self.queue_telemetry();
         telemetry.record_wait_started(&scope, queue);
         let wait_start = std::time::Instant::now();
@@ -504,7 +617,15 @@ impl RedDBRuntime {
             // the re-probe so a notify landing between probe and park is
             // observed as a generation move rather than a lost wake.
             let waiter = registry.async_waiter(&scope, queue);
-            let delivered = do_read(self)?;
+            // The probe touches storage (lease reclaim publishes to the WAL
+            // under the vault publication lock), so it runs on the blocking
+            // pool. A stalled probe can neither pin this tokio worker nor
+            // hold the wait past its deadline.
+            let Some(probed) = self.redwire_wait_blocking(deadline, read(&probe)).await? else {
+                observe(crate::runtime::queue_telemetry::WaitOutcomeLabel::Timeout);
+                return Ok(RedwireWaitOutcome::TimedOut);
+            };
+            let (delivered, next_available_at_ns) = probed?;
             if !delivered.is_empty() {
                 observe(crate::runtime::queue_telemetry::WaitOutcomeLabel::Woken);
                 return Ok(render(delivered));
@@ -517,7 +638,7 @@ impl RedDBRuntime {
                 observe(crate::runtime::queue_telemetry::WaitOutcomeLabel::Timeout);
                 return Ok(RedwireWaitOutcome::TimedOut);
             }
-            let park_deadline = match earliest_future_available_at(&self.inner.db.store(), queue) {
+            let park_deadline = match next_available_at_ns {
                 Some(at_ns) => {
                     let now_ns = now_ns();
                     if at_ns <= now_ns {
@@ -549,6 +670,69 @@ impl RedDBRuntime {
                     return Ok(RedwireWaitOutcome::Cancelled);
                 }
             }
+        }
+    }
+
+    /// Run one storage probe of the live queue wait on the blocking pool
+    /// under the shared execution admission, bounded by the wait deadline.
+    ///
+    /// `Ok(None)` means the deadline elapsed first — while queued for a
+    /// permit or while the probe ran. A probe still running at that point
+    /// finishes on its own and releases its permit; should it have claimed
+    /// a message meanwhile, the claim's lease expires and the message is
+    /// redelivered (the same at-least-once path as a consumer that dies
+    /// holding a delivery).
+    async fn redwire_wait_blocking<T, F>(
+        &self,
+        deadline: std::time::Instant,
+        probe: F,
+    ) -> RedDBResult<Option<T>>
+    where
+        T: Send + 'static,
+        F: FnOnce(&RedDBRuntime) -> T + Send + 'static,
+    {
+        use crate::transport::execution_admission::ExecutionAdmissionError;
+
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        let queue_deadline = now + self.execution_queue_timeout();
+        let acquire_until = tokio::time::Instant::from_std(deadline.min(queue_deadline));
+        let admission = self.execution_admission();
+        let permit = match tokio::time::timeout_at(acquire_until, admission.acquire()).await {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(ExecutionAdmissionError::QueueFull)) => {
+                return Err(RedDBError::Query(
+                    "execution_queue_full: engine execution queue is full; retryable=true"
+                        .to_string(),
+                ))
+            }
+            Ok(Err(ExecutionAdmissionError::Closed)) => {
+                return Err(RedDBError::Query(
+                    "execution_admission_closed: engine execution admission is unavailable"
+                        .to_string(),
+                ))
+            }
+            Err(_) if std::time::Instant::now() >= deadline => return Ok(None),
+            Err(_) => {
+                return Err(RedDBError::Query(
+                    "execution_queue_timeout: deadline expired while waiting to execute; retryable=true"
+                        .to_string(),
+                ))
+            }
+        };
+        let runtime = self.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            probe(&runtime)
+        });
+        match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), task).await {
+            Ok(Ok(value)) => Ok(Some(value)),
+            Ok(Err(error)) => Err(RedDBError::Internal(format!(
+                "queue wait probe task failed: {error}"
+            ))),
+            Err(_) => Ok(None),
         }
     }
 
@@ -4076,6 +4260,141 @@ mod presence_integration_tests {
         assert_eq!(
             snap[0].lease_count, 0,
             "no messages delivered → zero leases"
+        );
+    }
+}
+
+#[cfg(test)]
+mod redwire_wait_async_tests {
+    use super::*;
+    use crate::{RedDBOptions, RedDBRuntime};
+    use std::time::{Duration, Instant};
+
+    struct ProbeStall(String);
+
+    impl ProbeStall {
+        fn install(queue: &str, for_duration: Duration) -> Self {
+            REDWIRE_WAIT_PROBE_STALLS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push((queue.to_string(), Instant::now() + for_duration));
+            Self(queue.to_string())
+        }
+    }
+
+    impl Drop for ProbeStall {
+        fn drop(&mut self) {
+            REDWIRE_WAIT_PROBE_STALLS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .retain(|(queue, _)| queue != &self.0);
+        }
+    }
+
+    fn runtime_with_queue(queue: &str) -> RedDBRuntime {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query(&format!("CREATE QUEUE {queue}")).unwrap();
+        rt
+    }
+
+    /// The live wait's storage probes (lease reclaim under the vault
+    /// publication lock + WAL, delayed-message scan) run on the blocking
+    /// pool. On a single-threaded runtime a probe stalled far past the wait
+    /// budget must neither pin the only worker nor delay the timeout.
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_wait_times_out_on_schedule_while_its_storage_probe_is_stalled() {
+        const WAIT_MS: u64 = 300;
+        let rt = runtime_with_queue("stalled_probe_q");
+        let _stall = ProbeStall::install("stalled_probe_q", Duration::from_millis(1_500));
+
+        let ticker = tokio::spawn(async {
+            let started = Instant::now();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            started.elapsed()
+        });
+        let started = Instant::now();
+        let outcome = rt
+            .redwire_queue_wait_json("stalled_probe_q", None, "w1", 1, WAIT_MS, None, None, None)
+            .await
+            .expect("live wait");
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(outcome, RedwireWaitOutcome::TimedOut),
+            "{outcome:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(WAIT_MS)
+                && elapsed < Duration::from_millis(WAIT_MS + 500),
+            "a stalled probe held the wait past its budget: {elapsed:?}"
+        );
+        let ticked = ticker.await.expect("ticker");
+        assert!(
+            ticked < Duration::from_millis(250),
+            "a stalled probe pinned the tokio worker: 50ms timer took {ticked:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_wait_delivers_through_the_blocking_probe() {
+        let rt = runtime_with_queue("probe_delivery_q");
+        rt.execute_query("QUEUE PUSH probe_delivery_q 'job'")
+            .unwrap();
+
+        let outcome = rt
+            .redwire_queue_wait_json("probe_delivery_q", None, "w1", 1, 1_000, None, None, None)
+            .await
+            .expect("live wait");
+        match outcome {
+            RedwireWaitOutcome::Delivered(messages) => assert_eq!(messages.len(), 1),
+            other => panic!("expected a delivery, got {other:?}"),
+        }
+    }
+
+    /// Shutdown must release parked waits as `cancelled` promptly — both
+    /// the async live wait and a synchronous `QUEUE READ … WAIT` — instead
+    /// of leaving them parked until their budget or the process exit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graceful_shutdown_cancels_parked_queue_waits() {
+        let rt = runtime_with_queue("shutdown_q");
+
+        let live_rt = rt.clone();
+        let live = tokio::spawn(async move {
+            live_rt
+                .redwire_queue_wait_json("shutdown_q", None, "live", 1, 30_000, None, None, None)
+                .await
+        });
+        let sql_rt = rt.clone();
+        let sql = std::thread::spawn(move || {
+            sql_rt
+                .execute_query("QUEUE READ shutdown_q CONSUMER sql WAIT 30000ms")
+                .map(|_| ())
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!live.is_finished(), "live wait parked before shutdown");
+
+        let shutdown_rt = rt.clone();
+        let started = Instant::now();
+        tokio::task::spawn_blocking(move || shutdown_rt.graceful_shutdown(false))
+            .await
+            .expect("shutdown task")
+            .expect("graceful shutdown");
+
+        let live = tokio::time::timeout(Duration::from_secs(2), live)
+            .await
+            .expect("live wait resolves promptly on shutdown")
+            .expect("live wait task")
+            .expect("live wait result");
+        assert!(matches!(live, RedwireWaitOutcome::Cancelled), "{live:?}");
+        let sql = sql.join().expect("sql wait thread");
+        let error = sql.expect_err("sql wait is cancelled");
+        assert!(
+            error.to_string().contains(QUEUE_READ_WAIT_CANCELLED),
+            "unexpected sql wait error: {error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "waits must not sit out their 30s budget"
         );
     }
 }
