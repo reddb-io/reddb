@@ -369,7 +369,14 @@ impl RedDBRuntime {
                 }
                 None => deadline,
             };
-            match registry.wait_until(&snapshot, park_deadline) {
+            // Only the park itself is exempt from the execution watchdog
+            // deadline; the probes above still count as work, so a wedged
+            // read keeps degrading readiness.
+            let parked = {
+                let _parked = crate::runtime::execution_watchdog::park_current_execution();
+                registry.wait_until(&snapshot, park_deadline)
+            };
+            match parked {
                 crate::runtime::queue_wait_registry::WaitOutcome::Woken => continue,
                 crate::runtime::queue_wait_registry::WaitOutcome::Timeout => {
                     // If this was the user-supplied deadline, give up;

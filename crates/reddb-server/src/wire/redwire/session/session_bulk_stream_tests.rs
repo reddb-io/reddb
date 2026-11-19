@@ -19,6 +19,10 @@ async fn authenticate_anonymous(client: &mut tokio::io::DuplexStream) {
     assert_eq!(read_one_frame(client).await.kind, MessageKind::AuthOk);
 }
 
+/// The deterministic blocking gate is process-global; tests that arm it must
+/// not interleave or one test's install clobbers the other's correlation id.
+static BLOCKING_GATE_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct TestBlockingGate {
     correlation_id: u64,
 }
@@ -221,6 +225,7 @@ async fn disconnected_session_cancels_blocking_query_and_releases_execution_perm
     use std::sync::atomic::Ordering;
 
     const CORRELATION_ID: u64 = u64::MAX - 41;
+    let _serial = BLOCKING_GATE_SERIAL.lock().await;
 
     let runtime = std::sync::Arc::new(RedDBRuntime::in_memory().expect("runtime"));
     runtime.configure_execution_admission(1, 0, 1_000);
@@ -274,4 +279,186 @@ async fn disconnected_session_cancels_blocking_query_and_releases_execution_perm
         0,
         "disconnect must return the shared execution permit"
     );
+}
+
+/// Staging incident 2026-11-19 (engine v1.39.6): consumers long-poll with
+/// `QUEUE READ … WAIT 30000ms` while `execution_queue_timeout` is 30 s. On an
+/// empty queue the statement parks for its full WAIT by design, so the
+/// execution watchdog declared the engine wedged and `/health/ready` flapped
+/// to 503 every cycle until liveness restarted the pod. Time spent parked in
+/// the queue wait must not count toward the deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queue_read_wait_longer_than_execution_deadline_keeps_readiness() {
+    const DEADLINE_MS: u64 = 100;
+    const WAIT_MS: u64 = 600;
+
+    let runtime = std::sync::Arc::new(RedDBRuntime::in_memory().expect("runtime"));
+    runtime.configure_execution_admission(4, 4, DEADLINE_MS);
+    runtime
+        .execute_query("CREATE QUEUE idle_jobs")
+        .expect("create queue");
+    let server_runtime = std::sync::Arc::clone(&runtime);
+    let (server_io, mut client) = tokio::io::duplex(64 * 1024);
+    let server_task =
+        tokio::spawn(async move { handle_session(server_io, server_runtime, None, None).await });
+    authenticate_anonymous(&mut client).await;
+
+    let query = reddb_wire::redwire::build_query_frame(
+        10,
+        &format!("QUEUE READ idle_jobs CONSUMER w1 WAIT {WAIT_MS}ms"),
+    )
+    .expect("build queue read");
+    let started = std::time::Instant::now();
+    client
+        .write_all(&encode_frame(&query))
+        .await
+        .expect("write queue read");
+
+    let response = {
+        let read = read_one_frame(&mut client);
+        tokio::pin!(read);
+        loop {
+            tokio::select! {
+                frame = &mut read => break frame,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
+                    assert!(
+                        runtime.execution_watchdog().is_ready(),
+                        "parked QUEUE READ WAIT degraded readiness after {:?}",
+                        started.elapsed()
+                    );
+                }
+            }
+        }
+    };
+    assert_eq!(
+        response.kind,
+        MessageKind::Result,
+        "empty WAIT times out cleanly"
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(WAIT_MS),
+        "the read must have parked past the {DEADLINE_MS}ms execution deadline"
+    );
+    assert!(runtime.execution_watchdog().is_ready());
+
+    drop(client);
+    let _ = server_task.await;
+}
+
+/// The exemption is scoped to the park: an execution genuinely stuck in
+/// engine work still degrades readiness once it overruns the deadline, and
+/// recovers only when that worker finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stuck_redwire_execution_still_degrades_readiness_after_deadline() {
+    use std::sync::atomic::Ordering;
+
+    const CORRELATION_ID: u64 = u64::MAX - 42;
+    let _serial = BLOCKING_GATE_SERIAL.lock().await;
+
+    let runtime = std::sync::Arc::new(RedDBRuntime::in_memory().expect("runtime"));
+    runtime.configure_execution_admission(4, 4, 100);
+    let server_runtime = std::sync::Arc::clone(&runtime);
+    let (server_io, mut client) = tokio::io::duplex(64 * 1024);
+    let server_task =
+        tokio::spawn(async move { handle_session(server_io, server_runtime, None, None).await });
+    authenticate_anonymous(&mut client).await;
+
+    let mut gate = TestBlockingGate::install(CORRELATION_ID);
+    let query = reddb_wire::redwire::build_query_frame(CORRELATION_ID, "SELECT 1 AS stuck")
+        .expect("build blocking query");
+    client
+        .write_all(&encode_frame(&query))
+        .await
+        .expect("write blocking query");
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while REDWIRE_TEST_BLOCKING_GATE_ENTERED.load(Ordering::Acquire) != CORRELATION_ID {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("query entered deterministic blocking gate");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while runtime.execution_watchdog().is_ready() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a wedged execution must degrade readiness after the deadline");
+
+    gate.release();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        read_one_frame(&mut client),
+    )
+    .await
+    .expect("released query replies");
+    assert_eq!(response.kind, MessageKind::Result);
+    assert!(
+        runtime.execution_watchdog().is_ready(),
+        "readiness recovers once the stuck worker completes"
+    );
+
+    drop(client);
+    let _ = server_task.await;
+}
+
+/// Incident follow-up: the async live wait (`QueueWaitOpen` path) must time
+/// out on its own schedule while a ticketed SQL `QUEUE READ … WAIT` on the
+/// same queue is parked past the execution deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_queue_wait_times_out_on_schedule_beside_a_ticketed_sql_wait() {
+    const LIVE_WAIT_MS: u64 = 300;
+
+    let runtime = std::sync::Arc::new(RedDBRuntime::in_memory().expect("runtime"));
+    runtime.configure_execution_admission(4, 4, 100);
+    runtime
+        .execute_query("CREATE QUEUE shared_jobs")
+        .expect("create queue");
+    let server_runtime = std::sync::Arc::clone(&runtime);
+    let (server_io, mut client) = tokio::io::duplex(64 * 1024);
+    let server_task =
+        tokio::spawn(async move { handle_session(server_io, server_runtime, None, None).await });
+    authenticate_anonymous(&mut client).await;
+    let sql_wait = reddb_wire::redwire::build_query_frame(
+        11,
+        "QUEUE READ shared_jobs CONSUMER sql_worker WAIT 1500ms",
+    )
+    .expect("build queue read");
+    client
+        .write_all(&encode_frame(&sql_wait))
+        .await
+        .expect("write queue read");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let started = std::time::Instant::now();
+    let outcome = runtime
+        .redwire_queue_wait_json(
+            "shared_jobs",
+            None,
+            "live_worker",
+            1,
+            LIVE_WAIT_MS,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("live wait");
+    let elapsed = started.elapsed();
+    assert!(matches!(
+        outcome,
+        crate::runtime::RedwireWaitOutcome::TimedOut
+    ));
+    assert!(
+        elapsed >= std::time::Duration::from_millis(LIVE_WAIT_MS)
+            && elapsed < std::time::Duration::from_millis(LIVE_WAIT_MS + 400),
+        "live wait resolved late: {elapsed:?}"
+    );
+
+    let response = read_one_frame(&mut client).await;
+    assert_eq!(response.kind, MessageKind::Result);
+    assert!(runtime.execution_watchdog().is_ready());
+    drop(client);
+    let _ = server_task.await;
 }
