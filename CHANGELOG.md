@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.39.7
+
+### Patch Changes
+
+- [#2893](https://github.com/reddb-io/reddb/pull/2893) [`0114b3f`](https://github.com/reddb-io/reddb/commit/0114b3f9037c03f6c8747ad66c54cdc28de59e03) Thanks [@filipeforattini](https://github.com/filipeforattini)! - **Live queue waits no longer stall on storage, and shutdown releases parked waits** (follow-up to the staging incident 2026-11-19): the RedWire live queue wait (`QueueWaitOpen`) ran its storage probes directly on a tokio worker. Those probes are `group_read`, whose lease reclaim publishes to the WAL under the vault publication lock, and the delayed-message scan. A probe held up by a lock could therefore pin the worker and keep the wait from timing out; in staging a `wait_ms=30000` wait only resolved at SIGTERM, about 88 s after it parked.
+
+  Each probe now runs on the blocking pool under the shared execution admission and is bounded by the wait deadline, so the wait times out on schedule even while a probe is stalled. The park itself still holds no permit and no OS thread.
+
+  Graceful shutdown (SIGTERM / SIGINT / admin shutdown) now cancels the queue-wait registry first, so parked `QUEUE READ … WAIT` and live waits resolve as `cancelled` immediately instead of hanging until the process exits.
+
+- [#2892](https://github.com/reddb-io/reddb/pull/2892) [`0128ae7`](https://github.com/reddb-io/reddb/commit/0128ae7bc630474325fa53672a4543641fd84392) Thanks [@filipeforattini](https://github.com/filipeforattini)! - **Parked queue waits no longer trip the execution watchdog** (staging incident 2026-11-19, engine v1.39.6): since [#2887](https://github.com/reddb-io/reddb/issues/2887) every RedWire execution armed a watchdog ticket that degraded `/health/ready` to 503 (`handler_deadline_exceeded`) once it outlived `execution_queue_timeout`. A consumer long-polling with `QUEUE READ … WAIT 30000ms` on an empty queue parks for its full WAIT by design, so it reached the 30 s deadline every cycle and Kubernetes restarted the pod repeatedly.
+
+  A watchdog ticket is now suspended while its worker is intentionally parked in a queue wait, and the deadline restarts from zero when work resumes. Only the park is exempt: the queue probes still count, and an execution genuinely stuck in engine work still degrades readiness after the deadline and recovers only when it finishes. RedWire's completion guard is now owned by the blocking worker (it records the end of engine work, not of the session future), and the per-execution deadline marker is cancelled as soon as the execution settles instead of sleeping out the full deadline.
+
 ## 1.39.6
 
 ### Patch Changes
