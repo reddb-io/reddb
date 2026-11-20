@@ -139,6 +139,50 @@ impl RedDBRuntime {
         Ok(None)
     }
 
+    /// A row in the disk base that reserves a declared `PRIMARY KEY`/`UNIQUE`
+    /// key. The contract's resident probe only sees rows still in memory, so
+    /// a constraint without a unique index over the same columns must look at
+    /// the base as well, or a checkpoint silently drops the constraint.
+    /// Costs one bounded pass over the collection; a unique index avoids it.
+    pub(crate) fn cold_constraint_conflict(
+        &self,
+        collection: &str,
+        columns: &[String],
+        signatures: &[String],
+        exclude: Option<EntityId>,
+    ) -> RedDBResult<Option<EntityId>> {
+        let Some(manager) = self.db().store().get_collection(collection) else {
+            return Ok(None);
+        };
+        if !manager.has_backing() {
+            return Ok(None);
+        }
+        let (_workspace, read_bytes_max) = self.reserve_index_scan(&manager)?;
+        let snapshots = self.snapshot_manager();
+        let own_xids = self.own_transaction_xids();
+        let mut conflict = None;
+        manager.try_for_each_entity(read_bytes_max, |entity| {
+            if exclude == Some(entity.id)
+                || !snapshots.row_reserves_unique_key(entity.xmin, entity.xmax, &own_xids)
+            {
+                return true;
+            }
+            let Some(row) = entity.data.as_row() else {
+                return true;
+            };
+            // Same key representation as the resident probe.
+            let reserved = columns.iter().zip(signatures).all(|(column, signature)| {
+                row.get_field(column)
+                    .is_some_and(|value| format!("{value:?}") == *signature)
+            });
+            if reserved {
+                conflict = Some(entity.id);
+            }
+            !reserved
+        })?;
+        Ok(conflict)
+    }
+
     pub(crate) fn has_unique_batch_conflict(
         &self,
         collection: &str,
@@ -202,5 +246,104 @@ impl RedDBRuntime {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{RedDBOptions, RedDBRuntime};
+    use reddb_types::Value;
+
+    /// A table whose rows all live in the disk base, like after a restart.
+    fn cold_table(ddl: &[&str]) -> (tempfile::TempDir, RedDBRuntime) {
+        let directory = tempfile::tempdir().expect("constraint fixture");
+        let options = RedDBOptions::persistent(directory.path().join("constraints.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile");
+        let seed = RedDBRuntime::with_options(options.clone()).expect("seed");
+        for sql in ddl {
+            seed.execute_query(sql).expect(sql);
+        }
+        seed.flush().expect("seed checkpoint");
+        drop(seed);
+        let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options)
+        })
+        .expect("cold runtime");
+        (directory, runtime)
+    }
+
+    fn values(runtime: &RedDBRuntime, sql: &str, column: &str) -> Vec<Value> {
+        runtime
+            .execute_query(sql)
+            .expect(sql)
+            .result
+            .records
+            .iter()
+            .filter_map(|record| record.get(column).cloned())
+            .collect()
+    }
+
+    #[test]
+    fn primary_key_still_rejects_duplicates_of_rows_on_disk() {
+        let (_directory, runtime) = cold_table(&[
+            "CREATE TABLE accounts (id TEXT PRIMARY KEY, v TEXT)",
+            "INSERT INTO accounts (id, v) VALUES ('a', '1'), ('b', '2')",
+        ]);
+        let error = runtime
+            .execute_query("INSERT INTO accounts (id, v) VALUES ('a', 'duplicate')")
+            .expect_err("a primary key on disk must still reject its duplicate");
+        assert!(error.to_string().contains("primary key"), "{error}");
+        // An upsert must find the row on disk and update it, not append.
+        runtime
+            .execute_query(
+                "INSERT INTO accounts (id, v) VALUES ('b', 'upserted') \
+                 ON CONFLICT (id) DO UPDATE SET v = 'upserted'",
+            )
+            .expect("upsert over a row on disk");
+        assert_eq!(
+            values(&runtime, "SELECT v FROM accounts WHERE id = 'b'", "v"),
+            vec![Value::text("upserted")]
+        );
+        // An UPDATE may not move a row onto a key held on disk either, but
+        // rewriting a row under its own key stays legal.
+        assert!(runtime
+            .execute_query("UPDATE accounts SET id = 'a' WHERE id = 'b'")
+            .is_err());
+        runtime
+            .execute_query("UPDATE accounts SET v = 'again' WHERE id = 'a'")
+            .expect("update that keeps its key");
+        // A key freed by a delete can be taken again.
+        runtime
+            .execute_query("DELETE FROM accounts WHERE id = 'a'")
+            .expect("delete");
+        runtime
+            .execute_query("INSERT INTO accounts (id, v) VALUES ('a', 'reborn')")
+            .expect("key freed by delete");
+        assert_eq!(
+            values(&runtime, "SELECT id FROM accounts ORDER BY id", "id"),
+            vec![Value::text("a"), Value::text("b")]
+        );
+    }
+
+    #[test]
+    fn unique_column_still_rejects_duplicates_of_rows_on_disk() {
+        let (_directory, runtime) = cold_table(&[
+            "CREATE TABLE members (id INTEGER PRIMARY KEY, email TEXT UNIQUE, org TEXT)",
+            "INSERT INTO members (id, email, org) VALUES (1, 'a@x', 'o'), (2, 'b@x', 'o')",
+        ]);
+        assert!(runtime
+            .execute_query("INSERT INTO members (id, email, org) VALUES (3, 'a@x', 'o')")
+            .is_err());
+        runtime
+            .execute_query("INSERT INTO members (id, email, org) VALUES (3, 'c@x', 'o')")
+            .expect("a new key is admitted");
+        assert_eq!(
+            values(&runtime, "SELECT id FROM members ORDER BY id", "id").len(),
+            3
+        );
     }
 }

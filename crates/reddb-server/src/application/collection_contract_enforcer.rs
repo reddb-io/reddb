@@ -429,6 +429,18 @@ fn find_row_uniqueness_conflict(
         ) {
             return Ok(Some(UniquenessConflict { rule, entity_id }));
         }
+        // The probe above only sees rows still in memory. A unique index over
+        // these columns admits rows on disk itself; without one, look there.
+        if manager.has_backing() && !runtime.has_unique_target(collection, &rule.columns) {
+            if let Some(entity_id) = runtime.cold_constraint_conflict(
+                collection,
+                &rule.columns,
+                &signatures,
+                exclude_id,
+            )? {
+                return Ok(Some(UniquenessConflict { rule, entity_id }));
+            }
+        }
     }
     Ok(None)
 }
