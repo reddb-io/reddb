@@ -456,11 +456,14 @@ impl StatementExecutionFrame {
         if as_of_floor.is_some() {
             own_xids.clear();
         }
+        // Reserved autocommit slots are in every snapshot's `in_progress` but
+        // have written nothing: only a writer that may already have written
+        // can leave the indexes behind this snapshot.
         let requires_index_fallback = as_of_floor.is_some()
             || tx_context.is_some()
             || graph_insert_xid.is_some()
             || branch.is_some()
-            || !snapshot.in_progress.is_empty();
+            || runtime.snapshot_manager().snapshot_hides_writers(&snapshot);
         let (cache_key, is_volatile_query) = match identity_source {
             StatementIdentity::Text(_) if uses_result_cache => (
                 result_cache_key(query),

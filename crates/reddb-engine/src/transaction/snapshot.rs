@@ -282,6 +282,21 @@ impl SnapshotManager {
         Snapshot { xid, in_progress }
     }
 
+    /// Whether `snapshot` hides a writer that may already have written.
+    ///
+    /// Every read snapshot lists the reserved-but-unissued autocommit slots
+    /// in `in_progress`, so a row written with one of them later stays
+    /// invisible. Until a slot is issued it has written nothing, and no index
+    /// can be behind it. A slot issued since the snapshot was taken counts as
+    /// a writer here, so the answer only errs towards `true`.
+    pub fn snapshot_hides_writers(&self, snapshot: &Snapshot) -> bool {
+        let pool = self.autocommit_pool.lock();
+        snapshot
+            .in_progress
+            .iter()
+            .any(|xid| !(pool.next..pool.end).contains(xid))
+    }
+
     /// Capture and register under the same lock used by GC cutoff selection.
     /// Registering only when the snapshot is installed leaves a capture-to-read
     /// interval in which a committed writer's old versions can be reclaimed.
@@ -868,6 +883,37 @@ mod tests {
         m.pin(XID_NONE);
         assert!(!m.is_pinned(XID_NONE));
         assert_eq!(m.pin_count(XID_NONE), 0);
+    }
+
+    #[test]
+    fn reserved_autocommit_slots_are_not_writers_until_issued() {
+        let m = SnapshotManager::new();
+        // An autocommit insert reserves a batch and uses one slot of it.
+        let insert = m.allocate_committed_xid();
+        let quiet = m.fresh_read_snapshot();
+        assert!(
+            !quiet.in_progress.is_empty(),
+            "unissued slots stay hidden from the snapshot"
+        );
+        assert!(!quiet.in_progress.contains(&insert));
+        assert!(
+            !m.snapshot_hides_writers(&quiet),
+            "slots that wrote nothing must not look like in-flight writers"
+        );
+
+        // Issuing a slot after the snapshot was taken is a concurrent writer.
+        let later = m.allocate_committed_xid();
+        assert!(quiet.in_progress.contains(&later));
+        assert!(m.snapshot_hides_writers(&quiet));
+
+        // A transaction in flight when the snapshot is taken always counts,
+        // also after it commits: the snapshot still must not see its writes.
+        let writer = m.begin();
+        let concurrent = m.fresh_read_snapshot();
+        assert!(m.snapshot_hides_writers(&concurrent));
+        m.commit(writer);
+        assert!(m.snapshot_hides_writers(&concurrent));
+        assert!(!m.snapshot_hides_writers(&m.fresh_read_snapshot()));
     }
 
     #[test]
