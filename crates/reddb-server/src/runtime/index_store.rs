@@ -1768,6 +1768,8 @@ impl IndexStore {
         }
         for (entity_id, fields) in rows {
             self.paged_btree_overlay_insert(collection, *entity_id, fields)?;
+            self.hash
+                .paged_overlay_insert(collection, *entity_id, fields);
         }
         let registry = self.registry.read();
 
@@ -1875,6 +1877,8 @@ impl IndexStore {
         fields: &[(String, Value)],
     ) -> Result<(), String> {
         self.paged_btree_overlay_insert(collection, entity_id, fields)?;
+        self.hash
+            .paged_overlay_insert(collection, entity_id, fields);
         let registry = self.registry.read();
         for idx in registry.values() {
             if idx.collection != collection || self.index_is_paged(idx) {
@@ -1959,6 +1963,8 @@ impl IndexStore {
         fields: &[(String, Value)],
     ) -> Result<(), String> {
         self.paged_btree_overlay_delete(collection, entity_id, fields)?;
+        self.hash
+            .paged_overlay_delete(collection, entity_id, fields);
         self.hash.note_paged_retired(collection, entity_id);
         let registry = self.registry.read();
         for idx in registry.values() {
@@ -2039,6 +2045,8 @@ impl IndexStore {
         new_fields: &[(String, Value)],
     ) -> Result<(), String> {
         self.paged_btree_overlay_update(collection, entity_id, old_fields, new_fields)?;
+        self.hash
+            .paged_overlay_update(collection, entity_id, old_fields, new_fields);
         // Snapshot the indexed columns once to avoid holding the registry
         // lock across delete/insert sub-calls (those re-acquire it).
         // Also include parent path segments (e.g. "body" for "body.service.tier")

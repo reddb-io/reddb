@@ -100,6 +100,18 @@ pub(crate) trait PagedHashIndex: Send + Sync {
     fn note_retired(&self, _entity_id: EntityId) {}
     /// The published index was rebuilt: nothing retired before it dangles.
     fn clear_retired(&self) {}
+    /// A resident row was inserted; `fields` may be a partial snapshot.
+    fn overlay_insert(&self, _entity_id: EntityId, _fields: &[(String, reddb_types::Value)]) {}
+    /// A resident row (or one of its indexed values) was removed.
+    fn overlay_delete(&self, _entity_id: EntityId, _fields: &[(String, reddb_types::Value)]) {}
+    /// A resident row changed from `old_fields` to `new_fields`.
+    fn overlay_update(
+        &self,
+        _entity_id: EntityId,
+        _old_fields: &[(String, reddb_types::Value)],
+        _new_fields: &[(String, reddb_types::Value)],
+    ) {
+    }
 }
 
 /// A single hash index on one or more columns
@@ -385,6 +397,41 @@ impl HashIndexManager {
     pub(crate) fn note_paged_retired(&self, collection: &str, entity_id: EntityId) {
         for provider in self.paged_providers(Some(collection)) {
             provider.note_retired(entity_id);
+        }
+    }
+
+    /// Feed the resident overlay of every paged index of `collection`.
+    pub(crate) fn paged_overlay_insert(
+        &self,
+        collection: &str,
+        entity_id: EntityId,
+        fields: &[(String, reddb_types::Value)],
+    ) {
+        for provider in self.paged_providers(Some(collection)) {
+            provider.overlay_insert(entity_id, fields);
+        }
+    }
+
+    pub(crate) fn paged_overlay_delete(
+        &self,
+        collection: &str,
+        entity_id: EntityId,
+        fields: &[(String, reddb_types::Value)],
+    ) {
+        for provider in self.paged_providers(Some(collection)) {
+            provider.overlay_delete(entity_id, fields);
+        }
+    }
+
+    pub(crate) fn paged_overlay_update(
+        &self,
+        collection: &str,
+        entity_id: EntityId,
+        old_fields: &[(String, reddb_types::Value)],
+        new_fields: &[(String, reddb_types::Value)],
+    ) {
+        for provider in self.paged_providers(Some(collection)) {
+            provider.overlay_update(entity_id, old_fields, new_fields);
         }
     }
 

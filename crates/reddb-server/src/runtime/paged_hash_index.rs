@@ -16,6 +16,83 @@ use crate::storage::{EntityData, EntityId, EntityKind, StoreError, UnifiedEntity
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Weak};
 
+/// Resident changes since the published index was built, keyed like the
+/// lookup: the full raw key, not its digest. Mirrors the paged BTREE overlay
+/// and is fed by the same index hooks, so a lookup never has to walk the
+/// collection's resident rows.
+#[derive(Default)]
+struct OverlayHash {
+    postings: std::collections::HashMap<Vec<u8>, std::collections::BTreeSet<EntityId>>,
+    /// Rows whose key could not be captured; they force the scanning lookup.
+    scan_required: std::collections::HashSet<EntityId>,
+    /// Every row changed since publication and its current key, if any. A
+    /// published posting of a touched row is superseded by the overlay.
+    touched: std::collections::HashMap<EntityId, Option<Vec<u8>>>,
+}
+
+impl OverlayHash {
+    fn remove_current(&mut self, entity_id: EntityId) {
+        self.scan_required.remove(&entity_id);
+        let Some(Some(key)) = self.touched.remove(&entity_id) else {
+            return;
+        };
+        let emptied = self.postings.get_mut(&key).is_some_and(|ids| {
+            ids.remove(&entity_id);
+            ids.is_empty()
+        });
+        if emptied {
+            self.postings.remove(&key);
+        }
+    }
+
+    fn insert(&mut self, key: Vec<u8>, entity_id: EntityId) {
+        self.remove_current(entity_id);
+        self.postings
+            .entry(key.clone())
+            .or_default()
+            .insert(entity_id);
+        self.touched.insert(entity_id, Some(key));
+    }
+
+    fn remove(&mut self, entity_id: EntityId) {
+        self.remove_current(entity_id);
+        self.touched.insert(entity_id, None);
+    }
+
+    fn require_scan(&mut self, entity_id: EntityId) {
+        self.remove_current(entity_id);
+        self.scan_required.insert(entity_id);
+        self.touched.insert(entity_id, None);
+    }
+
+    fn memory_bytes(&self) -> usize {
+        let postings = self
+            .postings
+            .iter()
+            .map(|(key, ids)| {
+                key.capacity()
+                    .saturating_add(ids.len().saturating_mul(std::mem::size_of::<EntityId>()))
+                    .saturating_add(96)
+            })
+            .sum::<usize>();
+        let touched = self
+            .touched
+            .values()
+            .map(|key| key.as_ref().map_or(0, Vec::capacity).saturating_add(48))
+            .sum::<usize>();
+        postings
+            .saturating_add(touched)
+            .saturating_add(self.scan_required.len().saturating_mul(48))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Lookups on this thread that had to walk the collection instead of
+    /// using postings.
+    static SCANNING_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(super) struct HashProjection {
     columns: Vec<String>,
     key_bytes_max: usize,
@@ -65,6 +142,22 @@ impl HashProjection {
         } else {
             Ok(None)
         }
+    }
+
+    /// The key a row's field snapshot projects to. `Ok(None)` when the
+    /// snapshot does not carry the whole key (partial update hooks).
+    fn raw_key_from_fields(
+        &self,
+        fields: &[(String, reddb_types::Value)],
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        bounded_hash_index_key_from(&self.columns, self.key_bytes_max, |column| {
+            index_field_value_from(column, |name| {
+                fields
+                    .iter()
+                    .find(|(candidate, _)| candidate == name)
+                    .map(|(_, value)| value)
+            })
+        })
     }
 
     fn probe_workspace_factor(&self) -> usize {
@@ -127,6 +220,7 @@ struct RuntimeHashIndex {
     /// Rows removed since the published index was built. Their postings
     /// dangle by construction and say nothing about the rest of the index.
     retired: parking_lot::RwLock<std::collections::HashSet<EntityId>>,
+    overlay: parking_lot::RwLock<OverlayHash>,
 }
 
 fn read_error(error: impl std::fmt::Display) -> HashIndexError {
@@ -153,6 +247,42 @@ impl PagedHashIndex for RuntimeHashIndex {
 
     fn clear_retired(&self) {
         self.retired.write().clear();
+        *self.overlay.write() = OverlayHash::default();
+    }
+
+    fn overlay_insert(&self, entity_id: EntityId, fields: &[(String, reddb_types::Value)]) {
+        match self.projection.raw_key_from_fields(fields) {
+            Ok(Some(key)) => self.overlay.write().insert(key, entity_id),
+            // A partial snapshot says nothing about the whole key.
+            Ok(None) => {}
+            Err(_) => self.overlay.write().require_scan(entity_id),
+        }
+    }
+
+    fn overlay_delete(&self, entity_id: EntityId, fields: &[(String, reddb_types::Value)]) {
+        match self.projection.raw_key_from_fields(fields) {
+            Ok(Some(_)) => self.overlay.write().remove(entity_id),
+            // Update hooks also publish one changed column at a time; a partial
+            // key must not erase the full-row projection `overlay_update` set.
+            Ok(None) => {}
+            Err(_) => self.overlay.write().require_scan(entity_id),
+        }
+    }
+
+    fn overlay_update(
+        &self,
+        entity_id: EntityId,
+        old_fields: &[(String, reddb_types::Value)],
+        new_fields: &[(String, reddb_types::Value)],
+    ) {
+        let old_key = self.projection.raw_key_from_fields(old_fields);
+        let new_key = self.projection.raw_key_from_fields(new_fields);
+        match (old_key, new_key) {
+            (Ok(old), Ok(new)) if old == new => {}
+            (_, Ok(Some(key))) => self.overlay.write().insert(key, entity_id),
+            (_, Ok(None)) => self.overlay.write().remove(entity_id),
+            (_, Err(_)) => self.overlay.write().require_scan(entity_id),
+        }
     }
 
     fn memory_bytes(&self) -> usize {
@@ -170,6 +300,7 @@ impl PagedHashIndex for RuntimeHashIndex {
             + self.projection.schema.as_ref().map_or(0, |schema| {
                 schema.iter().map(|s| s.len() + 24).sum::<usize>()
             })
+            + self.overlay.read().memory_bytes()
     }
 
     fn lookup(&self, key: &[u8]) -> Result<HashCandidates, HashIndexError> {
@@ -294,6 +425,75 @@ impl RuntimeHashIndex {
             Ok(())
         };
 
+        // Postings first: the published candidates this index has not seen
+        // change, plus the overlay's resident rows for exactly this key. No
+        // walk over the collection, however many rows are resident.
+        if let Some(index) = &index {
+            let mut candidates = Vec::new();
+            let mut cursor = index
+                .candidates(&self.projection.digest(key))
+                .map_err(storage_error)?;
+            while let Some(id) = cursor.next_id().map_err(storage_error)? {
+                candidates.try_reserve(1).map_err(read_error)?;
+                candidates.push(id);
+            }
+            drop(cursor);
+            let published = candidates.len();
+            let overlay_is_authoritative = {
+                let overlay = self.overlay.read();
+                if overlay.scan_required.is_empty() {
+                    candidates.retain(|id| !overlay.touched.contains_key(id));
+                    if let Some(ids) = overlay.postings.get(key) {
+                        candidates.try_reserve(ids.len()).map_err(read_error)?;
+                        candidates.extend(ids.iter().copied());
+                    }
+                    true
+                } else {
+                    false
+                }
+            };
+            let untouched_published = published.min(candidates.len());
+            let mut ids = Vec::new();
+            let mut authoritative = overlay_is_authoritative;
+            for (position, id) in candidates.iter().enumerate() {
+                if !authoritative {
+                    break;
+                }
+                match manager
+                    .try_get(*id, read_bytes_max)
+                    .map_err(storage_error)?
+                {
+                    // WAL recovery may retire a published row before its
+                    // replacement reaches the overlay; that posting cannot
+                    // speak for the key (same rule as the paged BTREE).
+                    Some(entity) if position < untouched_published && entity.xmax != 0 => {
+                        authoritative = false;
+                    }
+                    Some(entity) => {
+                        if matches(&entity)? {
+                            ids.try_reserve(1).map_err(read_error)?;
+                            ids.push(entity.id);
+                        }
+                    }
+                    // A row this index saw retired is expected to be gone.
+                    None if self.retired.read().contains(id) => {}
+                    None => authoritative = false,
+                }
+            }
+            if authoritative {
+                let output = runtime
+                    .try_reserve_query_buffer(
+                        ids.len().saturating_mul(std::mem::size_of::<EntityId>()),
+                    )
+                    .ok_or_else(|| read_error("HASH candidates exceed shared memory budget"))?;
+                ids.sort_unstable();
+                ids.dedup();
+                return Ok(HashCandidates::owned(ids, Box::new(output)));
+            }
+        }
+        #[cfg(test)]
+        SCANNING_LOOKUPS.with(|count| count.set(count.get() + 1));
+
         // Count first, then admit exactly the candidate allocation. Reserving
         // the whole decode ceiling made a one-row primary-key lookup fail when
         // the bounded store still had enough headroom for its actual result.
@@ -380,6 +580,7 @@ impl RedDBRuntime {
                 identity,
                 projection,
                 retired: parking_lot::RwLock::new(std::collections::HashSet::new()),
+                overlay: parking_lot::RwLock::new(OverlayHash::default()),
             }),
         );
         Ok(())
@@ -791,6 +992,49 @@ mod tests {
     }
 
     #[test]
+    fn paged_hash_resident_changes_are_found_without_walking_the_collection() {
+        let (_directory, runtime) = fixture();
+        let scans = || SCANNING_LOOKUPS.with(std::cell::Cell::get);
+        for sql in [
+            "INSERT INTO hash_rows (id, email) VALUES (3, 'gamma')",
+            "UPDATE hash_rows SET email = 'renamed' WHERE email = 'alpha'",
+            "UPDATE hash_rows SET payload = 'touched' WHERE email = 'gamma'",
+            "DELETE FROM hash_rows WHERE email = 'beta'",
+            "INSERT INTO hash_rows (id, email) VALUES (5, 'beta')",
+        ] {
+            assert_eq!(runtime.execute_query(sql).expect(sql).affected_rows, 1);
+        }
+        let visible = |key: &str| {
+            runtime
+                .execute_query_with_params(
+                    "SELECT id FROM hash_rows WHERE email = $1",
+                    &[Value::text(key)],
+                )
+                .expect("lookup by key")
+                .result
+                .records
+                .len()
+        };
+        // Every key is answered from postings: published ones the index has
+        // not seen change, plus the overlay's resident rows.
+        let before = scans();
+        for (key, rows) in [("gamma", 1), ("renamed", 1), ("beta", 1), ("alpha", 0)] {
+            assert_eq!(visible(key), rows, "{key}");
+            assert_eq!(lookup(&runtime, key).is_empty(), rows == 0, "{key}");
+        }
+        assert_eq!(lookup(&runtime, "never-indexed").len(), 0);
+        assert_eq!(scans(), before, "resident changes must not force a scan");
+
+        // Publication folds the overlay into the index; answers do not move.
+        runtime.flush().expect("rebase");
+        let before = scans();
+        for (key, rows) in [("gamma", 1), ("renamed", 1), ("beta", 1), ("alpha", 0)] {
+            assert_eq!(visible(key), rows, "{key} after publication");
+        }
+        assert_eq!(scans(), before);
+    }
+
+    #[test]
     fn paged_hash_candidates_retain_admission_until_iterator_is_dropped() {
         let (_directory, runtime) = fixture();
         let accounting = runtime.memory_accounting();
@@ -855,6 +1099,7 @@ mod tests {
                 identity,
                 projection,
                 retired: parking_lot::RwLock::new(std::collections::HashSet::new()),
+                overlay: parking_lot::RwLock::new(OverlayHash::default()),
             }),
         );
         assert_eq!(lookup(&runtime, "alpha").len(), 1);
