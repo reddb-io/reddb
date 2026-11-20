@@ -1209,7 +1209,7 @@ mod tests {
             )
             .expect("profile");
         let seed = RedDBRuntime::with_options(options.clone()).expect("seed");
-        seed.execute_query("CREATE TABLE wide (k INTEGER, payload TEXT)")
+        seed.execute_query("CREATE TABLE wide (seq INTEGER, payload TEXT)")
             .expect("create");
         let payload = "x".repeat(2000);
         for batch in 0..6 {
@@ -1217,7 +1217,7 @@ mod tests {
                 .map(|row| format!("({}, '{payload}')", batch * 100 + row))
                 .collect::<Vec<_>>()
                 .join(",");
-            seed.execute_query(&format!("INSERT INTO wide (k, payload) VALUES {rows}"))
+            seed.execute_query(&format!("INSERT INTO wide (seq, payload) VALUES {rows}"))
                 .expect("seed rows");
         }
         seed.flush().expect("seed checkpoint");
@@ -1228,7 +1228,7 @@ mod tests {
         .expect("cold runtime");
         // One resident row gives the next checkpoint an append to the base.
         runtime
-            .execute_query("INSERT INTO wide (k, payload) VALUES (600, 'new')")
+            .execute_query("INSERT INTO wide (seq, payload) VALUES (600, 'new')")
             .expect("pending row");
         let store = runtime.db().store();
         let pager = Arc::clone(store.pager().expect("pager"));
