@@ -758,14 +758,12 @@ impl UnifiedStore {
                     .seal_page_proofs()
                     .map_err(|error| page_integrity(tree.root_page_id(), None, error.to_string()))?
                 {
-                    if root != 0 {
-                        if proofs.insert(root, proof).is_some_and(|old| old != proof) {
-                            return Err(page_integrity(
-                                root,
-                                None,
-                                "conflicting tree generation proofs",
-                            ));
-                        }
+                    if root != 0 && proofs.insert(root, proof).is_some_and(|old| old != proof) {
+                        return Err(page_integrity(
+                            root,
+                            None,
+                            "conflicting tree generation proofs",
+                        ));
                     }
                 }
             }
