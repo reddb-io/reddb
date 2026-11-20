@@ -889,6 +889,18 @@ impl RedDB {
             #[cfg(test)]
             flush_local_only_qualification_phase(&qualification_started, "store-persist");
             self.persist_metadata()?;
+            if self.paged_mode {
+                // Publishing the metadata appended its record to the WAL. A
+                // checkpoint leaves the WAL empty, which offline compaction
+                // and scrub require of their source, so fold that record in:
+                // every other collection is unchanged since the pass above
+                // and keeps its published tree.
+                if runtime_snapshots_durable {
+                    self.store.persist_after_runtime_snapshots()?;
+                } else {
+                    self.store.persist()?;
+                }
+            }
             self.remove_imported_metadata_sidecars(path)?;
             #[cfg(test)]
             flush_local_only_qualification_phase(&qualification_started, "metadata-publication");
