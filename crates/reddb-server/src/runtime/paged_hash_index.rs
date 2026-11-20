@@ -1282,8 +1282,9 @@ mod tests {
     #[test]
     fn select_of_an_absent_key_does_not_walk_the_collection() {
         // More rows than the reopened page cache can hold, so walking the
-        // collection shows up as page loads.
-        const ROWS: usize = 6_000;
+        // collection shows up as page loads. The payload is noise: a repeated
+        // byte compresses until the whole collection fits in the cache.
+        const ROWS: usize = 8_000;
         let directory = tempfile::tempdir().expect("absent key fixture");
         let options = RedDBOptions::persistent(directory.path().join("absent.rdb"))
             .with_memory_budget(64 * 1024 * 1024)
@@ -1294,12 +1295,22 @@ mod tests {
         let seed = RedDBRuntime::with_options(options.clone()).expect("seed");
         seed.execute_query("CREATE TABLE ledger (id TEXT PRIMARY KEY, code TEXT, payload TEXT)")
             .expect("create");
-        let payload = "x".repeat(2000);
+        let mut state = 0x4d595df4d0f33173_u64;
+        let mut payload = || {
+            (0..2000)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    char::from(b'a' + (state % 26) as u8)
+                })
+                .collect::<String>()
+        };
         for batch in 0..ROWS / 100 {
             let rows = (0..100)
                 .map(|row| {
                     let row = batch * 100 + row;
-                    format!("('{row}', '{row}', '{payload}')")
+                    format!("('{row}', '{row}', '{}')", payload())
                 })
                 .collect::<Vec<_>>()
                 .join(",");
