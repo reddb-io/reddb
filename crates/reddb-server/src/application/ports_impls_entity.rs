@@ -1998,7 +1998,9 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
     runtime.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
     runtime.check_batch_size(rows.len())?;
     runtime.check_db_size()?;
-    let _indexed_mutation = runtime.index_store_ref().begin_indexed_mutation();
+    let _indexed_mutation = runtime
+        .index_store_ref()
+        .begin_indexed_mutation(&collection);
 
     let db = runtime.db();
     let contract = CollectionContractWriteEnforcer::new(runtime, &db, &collection);
@@ -2505,7 +2507,9 @@ impl RuntimeEntityPort for RedDBRuntime {
     }
 
     fn create_document(&self, input: CreateDocumentInput) -> RedDBResult<CreateEntityOutput> {
-        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
+        let _indexed_mutation = self
+            .index_store_ref()
+            .begin_indexed_mutation(&input.collection);
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         self.check_collection_privilege(reddb_rql::ast::PolicyAction::Insert, &input.collection)?;
         let db = self.db();
@@ -2691,7 +2695,9 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn patch_entity(&self, input: PatchEntityInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
-        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
+        let _indexed_mutation = self
+            .index_store_ref()
+            .begin_indexed_mutation(&input.collection);
         self.check_collection_privilege(reddb_rql::ast::PolicyAction::Update, &input.collection)?;
         let branch_store = self.db().store();
         let _branch_publication = (self.vcs_is_versioned(&input.collection)?
@@ -2748,7 +2754,9 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn delete_entity(&self, input: DeleteEntityInput) -> RedDBResult<DeleteEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
-        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
+        let _indexed_mutation = self
+            .index_store_ref()
+            .begin_indexed_mutation(&input.collection);
         self.check_collection_privilege(reddb_rql::ast::PolicyAction::Delete, &input.collection)?;
         let branch_store = self.db().store();
         let _branch_publication = (self.vcs_is_versioned(&input.collection)?
