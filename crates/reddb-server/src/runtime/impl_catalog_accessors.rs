@@ -413,12 +413,13 @@ impl RedDBRuntime {
         Ok(self.inner.db.try_catalog_model_snapshot(read_bytes)?)
     }
 
-    /// Fallible catalog inventory scoped to known collection names. This keeps
-    /// filtered `red.collections` queries from decoding every unrelated
-    /// collection before their predicate is applied.
+    /// Fallible catalog inventory, optionally scoped to known collection
+    /// names. This keeps `red.collections` queries from decoding collection
+    /// payloads they do not project, and filtered ones from touching
+    /// unrelated collections at all.
     pub(crate) fn try_catalog_for_collections(
         &self,
-        collection_names: &std::collections::HashSet<String>,
+        collection_names: Option<&std::collections::HashSet<String>>,
         observe_legacy_payloads: bool,
     ) -> RedDBResult<CatalogModelSnapshot> {
         if self
