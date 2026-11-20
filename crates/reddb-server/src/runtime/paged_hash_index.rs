@@ -31,6 +31,10 @@ struct OverlayHash {
     /// Every row changed since publication and its current key, if any. A
     /// published posting of a touched row is superseded by the overlay.
     touched: std::collections::HashMap<EntityId, Option<Vec<u8>>>,
+    /// The overlay was seeded with every row of a collection that had no
+    /// disk base yet, so it answers lookups alone until the first
+    /// publication. Cleared with the overlay.
+    holds_every_row: bool,
 }
 
 /// Rows one index tracks between publications. Past this the overlay gives up
@@ -464,17 +468,22 @@ impl RuntimeHashIndex {
 
         // Postings first: the published candidates this index has not seen
         // change, plus the overlay's resident rows for exactly this key. No
-        // walk over the collection, however many rows are resident.
-        if let Some(index) = &index {
+        // walk over the collection, however many rows are resident. Before
+        // the first publication there is no published index and no disk
+        // base: every row is resident and in the overlay.
+        let overlay_alone =
+            index.is_none() && !manager.has_backing() && self.overlay.read().holds_every_row;
+        if index.is_some() || overlay_alone {
             let mut candidates = Vec::new();
-            let mut cursor = index
-                .candidates(&self.projection.digest(key))
-                .map_err(storage_error)?;
-            while let Some(id) = cursor.next_id().map_err(storage_error)? {
-                candidates.try_reserve(1).map_err(read_error)?;
-                candidates.push(id);
+            if let Some(index) = &index {
+                let mut cursor = index
+                    .candidates(&self.projection.digest(key))
+                    .map_err(storage_error)?;
+                while let Some(id) = cursor.next_id().map_err(storage_error)? {
+                    candidates.try_reserve(1).map_err(read_error)?;
+                    candidates.push(id);
+                }
             }
-            drop(cursor);
             // Published postings the overlay has not seen change come first.
             let mut untouched_published = 0;
             let mut authoritative = {
@@ -607,6 +616,25 @@ impl RedDBRuntime {
             identity.clone(),
             projection.clone(),
         )?;
+        // A collection without a disk base has every row resident. Seed the
+        // overlay with them once, so lookups (and the unique admission of
+        // every inserted row) do not walk the collection until a checkpoint
+        // publishes the index.
+        let mut overlay = OverlayHash::default();
+        if let Some(manager) = store
+            .get_collection(&index.collection)
+            .filter(|manager| !manager.has_backing())
+        {
+            manager.for_each_entity(|entity| {
+                match projection.raw_key(entity, projection.key_bytes_max) {
+                    Ok(Some(key)) => overlay.insert(key, entity.id),
+                    Ok(None) => {}
+                    Err(_) => overlay.require_scan(entity.id),
+                }
+                true
+            });
+            overlay.holds_every_row = !overlay.overflowed;
+        }
         prepared.hash.install_paged(
             &index.collection,
             &index.name,
@@ -617,7 +645,7 @@ impl RedDBRuntime {
                 identity,
                 projection,
                 retired: parking_lot::RwLock::new(std::collections::HashSet::new()),
-                overlay: parking_lot::RwLock::new(OverlayHash::default()),
+                overlay: parking_lot::RwLock::new(overlay),
             }),
         );
         Ok(())
@@ -1120,6 +1148,55 @@ mod tests {
         overlay.insert(b"later".to_vec(), EntityId::new(7));
         overlay.require_scan(EntityId::new(8));
         assert!(overlay.touched.is_empty() && overlay.scan_required.is_empty());
+    }
+
+    #[test]
+    fn paged_hash_answers_from_the_overlay_before_the_first_publication() {
+        let directory = tempfile::tempdir().expect("unpublished HASH fixture");
+        let options = RedDBOptions::persistent(directory.path().join("unpublished.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile");
+        let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options)
+        })
+        .expect("disk-resident runtime");
+        for sql in [
+            // An index that exists before its rows, and one built over rows.
+            "CREATE TABLE early (id INTEGER, email TEXT)",
+            "CREATE INDEX early_email ON early (email) USING HASH",
+            "INSERT INTO early (id, email) VALUES (1, 'a'), (2, 'b')",
+            "CREATE TABLE late (id INTEGER, email TEXT)",
+            "INSERT INTO late (id, email) VALUES (1, 'a'), (2, 'b')",
+            "CREATE INDEX late_email ON late (email) USING HASH",
+            "UPDATE early SET email = 'c' WHERE id = 2",
+            "DELETE FROM late WHERE id = 1",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        for (table, index) in [("early", "early_email"), ("late", "late_email")] {
+            assert!(runtime.index_store_ref().hash.is_paged(table, index));
+        }
+        let rows = |sql: &str| runtime.execute_query(sql).expect(sql).result.records.len();
+        // Nothing was checkpointed: there is no published index to read, and
+        // the overlay holds every row, so no lookup walks the collection.
+        let before = SCANNING_LOOKUPS.with(std::cell::Cell::get);
+        for (sql, expected) in [
+            ("SELECT id FROM early WHERE email = 'a'", 1),
+            ("SELECT id FROM early WHERE email = 'b'", 0),
+            ("SELECT id FROM early WHERE email = 'c'", 1),
+            ("SELECT id FROM late WHERE email = 'a'", 0),
+            ("SELECT id FROM late WHERE email = 'b'", 1),
+        ] {
+            assert_eq!(rows(sql), expected, "{sql}");
+        }
+        assert_eq!(
+            SCANNING_LOOKUPS.with(std::cell::Cell::get),
+            before,
+            "a lookup walked the collection before the first checkpoint"
+        );
     }
 
     #[test]
