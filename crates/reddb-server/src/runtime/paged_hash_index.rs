@@ -1207,8 +1207,9 @@ mod tests {
         let manager = store.get_collection("hash_rows").expect("hash_rows");
         let (reading, reader_started) = std::sync::mpsc::channel();
         let (published, publication_done) = std::sync::mpsc::channel();
+        let (store, pager, manager) = (&store, &pager, &manager);
         std::thread::scope(|scope| {
-            let publication = scope.spawn(|| {
+            let publication = scope.spawn(move || {
                 // A publication holds the fence and the pager's ownership
                 // epoch for its whole duration, and seals each tree inside.
                 let _fence = store.vault_publication_lock.lock();
@@ -1221,7 +1222,7 @@ mod tests {
                     .map_err(|error| error.to_string());
                 published.send(result).expect("report publication");
             });
-            let reader = scope.spawn(|| {
+            let reader = scope.spawn(move || {
                 reading.send(()).expect("announce read");
                 let mut rows = 0;
                 manager
