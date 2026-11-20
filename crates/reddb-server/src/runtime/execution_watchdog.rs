@@ -23,6 +23,9 @@ const PARKED: u64 = 3;
 /// How often the deadline marker re-checks a parked ticket. Bounded below so
 /// a zero `execution_queue_timeout` cannot spin the marker while parked.
 const MIN_PARKED_POLL: Duration = Duration::from_millis(10);
+/// How often a still-running overdue execution is named again in the log.
+const OVERDUE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+const OVERDUE_LABEL_BYTES_MAX: usize = 400;
 
 thread_local! {
     static CURRENT_TICKET: RefCell<Option<Arc<ExecutionTicket>>> = const { RefCell::new(None) };
@@ -42,6 +45,7 @@ impl ExecutionWatchdog {
             state: AtomicU64::new(RUNNING),
             origin: Instant::now(),
             timed_out_inflight: Arc::clone(&self.timed_out_inflight),
+            label: std::sync::Mutex::new(None),
         })
     }
 
@@ -68,6 +72,8 @@ pub(crate) struct ExecutionTicket {
     state: AtomicU64,
     origin: Instant,
     timed_out_inflight: Arc<AtomicUsize>,
+    /// What this execution is running, for the overdue diagnostics only.
+    label: std::sync::Mutex<Option<String>>,
 }
 
 fn phase(word: u64) -> u64 {
@@ -79,6 +85,29 @@ fn with_phase(word: u64, phase: u64) -> u64 {
 }
 
 impl ExecutionTicket {
+    fn describe(&self) -> String {
+        self.label
+            .lock()
+            .ok()
+            .and_then(|label| label.clone())
+            .unwrap_or_else(|| "<unlabelled execution>".to_string())
+    }
+
+    /// A parked server must say what it is waiting for: an idle process with
+    /// readiness degraded is otherwise indistinguishable from a deadlock.
+    fn report_overdue(&self) {
+        tracing::warn!(
+            target: "reddb::watchdog",
+            statement = %self.describe(),
+            running_secs = self.origin.elapsed().as_secs(),
+            "execution exceeded its deadline and is still running; readiness is degraded until it finishes"
+        );
+    }
+
+    fn is_overdue(&self) -> bool {
+        phase(self.state.load(Ordering::Acquire)) == TIMED_OUT
+    }
+
     /// Returns a worker-owned guard whose drop records completion even when
     /// routing unwinds. The async edge retains the ticket to mark its deadline.
     pub(crate) fn completion(self: &Arc<Self>) -> ExecutionCompletion {
@@ -116,7 +145,10 @@ impl ExecutionTicket {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return true,
+                Ok(_) => {
+                    self.report_overdue();
+                    return true;
+                }
                 Err(current) => word = current,
             }
         }
@@ -200,6 +232,12 @@ impl ExecutionTicket {
         if phase(previous) == TIMED_OUT {
             let previous = self.timed_out_inflight.fetch_sub(1, Ordering::AcqRel);
             debug_assert!(previous > 0, "timed-out execution accounting underflow");
+            tracing::warn!(
+                target: "reddb::watchdog",
+                statement = %self.describe(),
+                ran_secs = self.origin.elapsed().as_secs(),
+                "overdue execution finished"
+            );
         }
     }
 }
@@ -211,7 +249,14 @@ impl ExecutionTicket {
 pub(crate) async fn enforce_deadline(ticket: Arc<ExecutionTicket>, deadline: Duration) {
     loop {
         match ticket.mark_timed_out_if_overdue(deadline) {
-            DeadlineCheck::TimedOut | DeadlineCheck::Settled => return,
+            DeadlineCheck::TimedOut => {
+                ticket.report_overdue();
+                // Keep naming it for as long as it stays stuck; the reporter
+                // ends by itself once the worker settles.
+                tokio::spawn(report_while_overdue(ticket));
+                return;
+            }
+            DeadlineCheck::Settled => return,
             DeadlineCheck::Pending(remaining) => tokio::time::sleep(remaining).await,
             // Polling at `deadline` keeps the restart precise: the poll after
             // a resume lands inside the fresh span and sleeps exactly its
@@ -219,6 +264,36 @@ pub(crate) async fn enforce_deadline(ticket: Arc<ExecutionTicket>, deadline: Dur
             DeadlineCheck::Parked => tokio::time::sleep(deadline.max(MIN_PARKED_POLL)).await,
         }
     }
+}
+
+async fn report_while_overdue(ticket: Arc<ExecutionTicket>) {
+    loop {
+        tokio::time::sleep(OVERDUE_REPORT_INTERVAL).await;
+        if !ticket.is_overdue() {
+            return;
+        }
+        ticket.report_overdue();
+    }
+}
+
+/// Names what the current thread's execution is running. No-op without a
+/// ticket; `describe` is only evaluated when one is installed.
+pub(crate) fn label_current_execution(describe: impl FnOnce() -> String) {
+    CURRENT_TICKET.with(|slot| {
+        if let Some(ticket) = slot.borrow().as_ref() {
+            if let Ok(mut label) = ticket.label.lock() {
+                let mut text = describe();
+                if text.len() > OVERDUE_LABEL_BYTES_MAX {
+                    let mut end = OVERDUE_LABEL_BYTES_MAX;
+                    while !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    text.truncate(end);
+                }
+                *label = Some(text);
+            }
+        }
+    });
 }
 
 /// Suspends the current thread's execution deadline for the guard's lifetime.
@@ -272,6 +347,26 @@ impl Drop for ExecutionCompletion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overdue_execution_is_named_by_its_statement() {
+        let watchdog = ExecutionWatchdog::default();
+        let ticket = watchdog.start();
+        assert_eq!(ticket.describe(), "<unlabelled execution>");
+        // Without an installed ticket the label is neither built nor stored.
+        label_current_execution(|| unreachable!("no ticket installed"));
+        {
+            let _scope = ticket.install();
+            label_current_execution(|| "UPDATE t SET v = 1 WHERE id = 7".to_string());
+            label_current_execution(|| "é".repeat(OVERDUE_LABEL_BYTES_MAX));
+        }
+        let label = ticket.describe();
+        assert!(label.len() <= OVERDUE_LABEL_BYTES_MAX && label.starts_with('é'));
+        assert!(!ticket.is_overdue());
+        let _completion = ticket.completion();
+        ticket.mark_timed_out();
+        assert!(ticket.is_overdue());
+    }
 
     #[test]
     fn timeout_degrades_until_that_worker_completes() {
