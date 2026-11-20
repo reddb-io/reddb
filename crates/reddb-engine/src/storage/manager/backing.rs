@@ -8,6 +8,9 @@ use crate::storage::error::StoreError;
 use crate::storage::metadata_codec::serialize_entity_record;
 use std::collections::HashSet;
 
+/// How long an in-place append waits for base readers that are merely busy.
+const UNSHARED_BACKING_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
 pub(super) struct BackingRead {
     pub source: Arc<dyn CollectionRead + Send + Sync>,
     pub root_page: u32,
@@ -257,13 +260,18 @@ impl SegmentManager {
     /// no strong or weak owners outside this manager. The host still owns the
     /// mutation/publication fence and must not re-enter backing methods here.
     /// A successful projection updates the root and its exact physical count.
+    ///
+    /// The host calls this inside the pager's ownership epoch, and a base
+    /// reader that has to load a page waits for that epoch while holding the
+    /// base. Waiting for such a reader here would never end, so a base that
+    /// stays in use is declined like any other reader pin.
     #[doc(hidden)]
     pub fn try_with_unshared_backing<T>(
         &self,
         root_page: u32,
         update: impl FnOnce() -> (T, Option<(u32, u64)>),
     ) -> Option<T> {
-        let mut backing = self.backing.write();
+        let mut backing = self.backing.try_write_for(UNSHARED_BACKING_WAIT)?;
         let backing = backing.as_mut()?;
         if backing.root_page != root_page
             || !backing.removed.is_empty()

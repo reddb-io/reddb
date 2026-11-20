@@ -1201,6 +1201,9 @@ mod tests {
 
     #[test]
     fn cold_scan_does_not_deadlock_with_a_checkpoint_appending_to_its_base() {
+        // More rows than the reopened page cache can hold, so the scan has to
+        // load pages whatever the boot already read.
+        const ROWS: usize = 10_000;
         let directory = tempfile::tempdir().expect("wide fixture");
         let options = RedDBOptions::persistent(directory.path().join("wide.rdb"))
             .with_memory_budget(64 * 1024 * 1024)
@@ -1212,7 +1215,7 @@ mod tests {
         seed.execute_query("CREATE TABLE wide (seq INTEGER, payload TEXT)")
             .expect("create");
         let payload = "x".repeat(2000);
-        for batch in 0..6 {
+        for batch in 0..ROWS / 100 {
             let rows = (0..100)
                 .map(|row| format!("({}, '{payload}')", batch * 100 + row))
                 .collect::<Vec<_>>()
@@ -1223,12 +1226,12 @@ mod tests {
         seed.flush().expect("seed checkpoint");
         drop(seed);
         let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
-            RedDBRuntime::with_options(options)
+            RedDBRuntime::with_options(options.with_memory_budget(16 * 1024 * 1024))
         })
         .expect("cold runtime");
         // One resident row gives the next checkpoint an append to the base.
         runtime
-            .execute_query("INSERT INTO wide (seq, payload) VALUES (600, 'new')")
+            .execute_query("INSERT INTO wide (seq, payload) VALUES (10000, 'new')")
             .expect("pending row");
         let store = runtime.db().store();
         let pager = Arc::clone(store.pager().expect("pager"));
@@ -1238,17 +1241,23 @@ mod tests {
         // has to load waits for the ownership epoch. A checkpoint holds that
         // epoch throughout and must not wait for the base inside it.
         let epoch = pager.lock_ownership_mutations();
-        let reader = std::thread::spawn(move || {
-            let mut rows = 0;
-            manager
-                .try_for_each_entity(usize::MAX, |_| {
-                    rows += 1;
-                    true
-                })
-                .map(|()| rows)
-                .map_err(|error| error.to_string())
-        });
+        let scanned = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader = {
+            let scanned = Arc::clone(&scanned);
+            std::thread::spawn(move || {
+                manager
+                    .try_for_each_entity(usize::MAX, |_| {
+                        scanned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        true
+                    })
+                    .map_err(|error| error.to_string())
+            })
+        };
         std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            scanned.load(std::sync::atomic::Ordering::Relaxed) <= ROWS,
+            "the scan must be waiting for a page it has to load"
+        );
         let (checkpointed, checkpoint_done) = std::sync::mpsc::channel();
         let checkpoint = {
             let runtime = runtime.clone();
@@ -1264,7 +1273,8 @@ mod tests {
             .expect("a checkpoint deadlocked with a cold scan of the base it was appending to")
             .expect("checkpoint");
         checkpoint.join().expect("checkpoint thread");
-        assert_eq!(reader.join().expect("reader thread").expect("scan"), 601);
+        reader.join().expect("reader thread").expect("scan");
+        assert_eq!(scanned.load(std::sync::atomic::Ordering::Relaxed), ROWS + 1);
     }
 
     #[test]
