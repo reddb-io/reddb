@@ -128,7 +128,8 @@ impl<'a> BufferedExecutionCancellation<'a> {
             return;
         }
         self.armed = false;
-        if self.ticket.is_some_and(|ticket| ticket.mark_timed_out()) {
+        if let Some(ticket) = self.ticket.filter(|ticket| ticket.mark_timed_out()) {
+            ticket.report_until_settled();
             self.cancellation.cancel();
         }
     }
@@ -453,6 +454,9 @@ impl RedDBServer {
         let server = self.clone();
         let execution_ticket =
             (!is_health_request).then(|| self.runtime.execution_watchdog().start());
+        if let Some(ticket) = &execution_ticket {
+            ticket.set_origin(format!("HTTP {} {}", request.method, request.path));
+        }
         let worker_ticket = execution_ticket.clone();
         let cancellation = crate::runtime::query_budget::RequestCancellation::new();
         let worker_cancellation = cancellation.clone();
@@ -460,6 +464,7 @@ impl RedDBServer {
             BufferedExecutionCancellation::new(&cancellation, execution_ticket.as_ref());
         let join = tokio::task::spawn_blocking(move || {
             let _execution_completion = worker_ticket.as_ref().map(|ticket| ticket.completion());
+            let _label_scope = worker_ticket.as_ref().map(|ticket| ticket.label_scope());
             let _cancellation_scope = worker_cancellation.install();
             // Both the global and per-principal permits are held for the
             // duration of the engine call and released when this closure
