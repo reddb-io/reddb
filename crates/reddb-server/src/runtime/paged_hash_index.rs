@@ -25,12 +25,40 @@ struct OverlayHash {
     postings: std::collections::HashMap<Vec<u8>, std::collections::BTreeSet<EntityId>>,
     /// Rows whose key could not be captured; they force the scanning lookup.
     scan_required: std::collections::HashSet<EntityId>,
+    /// Too many rows changed without a publication: the overlay stopped
+    /// tracking and every lookup scans until the next one rebuilds it.
+    overflowed: bool,
     /// Every row changed since publication and its current key, if any. A
     /// published posting of a touched row is superseded by the overlay.
     touched: std::collections::HashMap<EntityId, Option<Vec<u8>>>,
 }
 
+/// Rows one index tracks between publications. Past this the overlay gives up
+/// rather than grow without bound on a node that never checkpoints.
+const OVERLAY_TOUCHED_MAX: usize = 1_000_000;
+
 impl OverlayHash {
+    /// True while postings plus this overlay answer a lookup on their own.
+    fn is_authoritative(&self) -> bool {
+        !self.overflowed && self.scan_required.is_empty()
+    }
+
+    /// Stops tracking once too many rows changed. Returns whether tracking
+    /// is still on.
+    fn admit(&mut self, entity_id: EntityId) -> bool {
+        if self.overflowed {
+            return false;
+        }
+        if self.touched.len() >= OVERLAY_TOUCHED_MAX && !self.touched.contains_key(&entity_id) {
+            *self = Self {
+                overflowed: true,
+                ..Self::default()
+            };
+            return false;
+        }
+        true
+    }
+
     fn remove_current(&mut self, entity_id: EntityId) {
         self.scan_required.remove(&entity_id);
         let Some(Some(key)) = self.touched.remove(&entity_id) else {
@@ -46,6 +74,9 @@ impl OverlayHash {
     }
 
     fn insert(&mut self, key: Vec<u8>, entity_id: EntityId) {
+        if !self.admit(entity_id) {
+            return;
+        }
         self.remove_current(entity_id);
         self.postings
             .entry(key.clone())
@@ -55,11 +86,17 @@ impl OverlayHash {
     }
 
     fn remove(&mut self, entity_id: EntityId) {
+        if !self.admit(entity_id) {
+            return;
+        }
         self.remove_current(entity_id);
         self.touched.insert(entity_id, None);
     }
 
     fn require_scan(&mut self, entity_id: EntityId) {
+        if !self.admit(entity_id) {
+            return;
+        }
         self.remove_current(entity_id);
         self.scan_required.insert(entity_id);
         self.touched.insert(entity_id, None);
@@ -438,11 +475,13 @@ impl RuntimeHashIndex {
                 candidates.push(id);
             }
             drop(cursor);
-            let published = candidates.len();
-            let overlay_is_authoritative = {
+            // Published postings the overlay has not seen change come first.
+            let mut untouched_published = 0;
+            let mut authoritative = {
                 let overlay = self.overlay.read();
-                if overlay.scan_required.is_empty() {
+                if overlay.is_authoritative() {
                     candidates.retain(|id| !overlay.touched.contains_key(id));
+                    untouched_published = candidates.len();
                     if let Some(ids) = overlay.postings.get(key) {
                         candidates.try_reserve(ids.len()).map_err(read_error)?;
                         candidates.extend(ids.iter().copied());
@@ -452,9 +491,7 @@ impl RuntimeHashIndex {
                     false
                 }
             };
-            let untouched_published = published.min(candidates.len());
             let mut ids = Vec::new();
-            let mut authoritative = overlay_is_authoritative;
             for (position, id) in candidates.iter().enumerate() {
                 if !authoritative {
                     break;
@@ -1032,6 +1069,26 @@ mod tests {
             assert_eq!(visible(key), rows, "{key} after publication");
         }
         assert_eq!(scans(), before);
+    }
+
+    #[test]
+    fn overlay_gives_up_instead_of_growing_without_bound() {
+        let mut overlay = OverlayHash::default();
+        for id in 0..OVERLAY_TOUCHED_MAX as u64 {
+            overlay.insert(id.to_be_bytes().to_vec(), EntityId::new(id + 1));
+        }
+        assert!(overlay.is_authoritative());
+        // A row already tracked may still change.
+        overlay.remove(EntityId::new(1));
+        assert!(overlay.is_authoritative());
+        // One more row past the cap: stop tracking, release everything, and
+        // send lookups to the scan until a publication rebuilds the overlay.
+        overlay.insert(b"over".to_vec(), EntityId::new(u64::MAX));
+        assert!(!overlay.is_authoritative());
+        assert!(overlay.touched.is_empty() && overlay.postings.is_empty());
+        overlay.insert(b"later".to_vec(), EntityId::new(7));
+        overlay.require_scan(EntityId::new(8));
+        assert!(overlay.touched.is_empty() && overlay.scan_required.is_empty());
     }
 
     #[test]
