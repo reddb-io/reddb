@@ -616,24 +616,23 @@ impl RedDBRuntime {
             identity.clone(),
             projection.clone(),
         )?;
-        // A collection without a disk base has every row resident. Seed the
-        // overlay with them once, so lookups (and the unique admission of
-        // every inserted row) do not walk the collection until a checkpoint
-        // publishes the index.
+        // The overlay speaks for every row that is not in the published
+        // postings, so it starts from the rows resident now: the ones recovery
+        // replayed from the WAL, and, for a collection without a disk base,
+        // all of them. Later changes reach it through the index hooks.
         let mut overlay = OverlayHash::default();
-        if let Some(manager) = store
-            .get_collection(&index.collection)
-            .filter(|manager| !manager.has_backing())
-        {
+        if let Some(manager) = store.get_collection(&index.collection) {
             manager.for_each_entity(|entity| {
                 match projection.raw_key(entity, projection.key_bytes_max) {
                     Ok(Some(key)) => overlay.insert(key, entity.id),
-                    Ok(None) => {}
+                    // No key, but still a row the published postings may be
+                    // stale about.
+                    Ok(None) => overlay.remove(entity.id),
                     Err(_) => overlay.require_scan(entity.id),
                 }
                 true
             });
-            overlay.holds_every_row = !overlay.overflowed;
+            overlay.holds_every_row = !manager.has_backing() && !overlay.overflowed;
         }
         prepared.hash.install_paged(
             &index.collection,
@@ -1197,6 +1196,87 @@ mod tests {
             before,
             "a lookup walked the collection before the first checkpoint"
         );
+    }
+
+    const REPLAY_CHILD: &str = "REDDB_HASH_OVERLAY_REPLAY_PATH";
+    const REPLAY_TEST: &str =
+        "runtime::paged_hash_index::tests::rows_replayed_after_a_crash_are_found_by_key";
+
+    fn replay_runtime(path: &std::path::Path) -> RedDBRuntime {
+        let options = RedDBOptions::persistent(path)
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile");
+        crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options)
+        })
+        .expect("cold runtime")
+    }
+
+    #[test]
+    fn rows_replayed_after_a_crash_are_found_by_key() {
+        if let Some(path) = std::env::var_os(REPLAY_CHILD) {
+            // The writer dies without a checkpoint: only the WAL has these.
+            let runtime = replay_runtime(std::path::Path::new(&path));
+            for sql in [
+                "INSERT INTO replayed (id, email, v) VALUES ('fresh', 'fresh@x', 'new')",
+                "UPDATE replayed SET v = 'changed' WHERE id = 'b'",
+                "DELETE FROM replayed WHERE id = 'c'",
+            ] {
+                runtime.execute_query(sql).expect(sql);
+            }
+            std::process::exit(0);
+        }
+        let directory = tempfile::tempdir().expect("replay fixture");
+        let path = directory.path().join("replay.rdb");
+        {
+            let seed = replay_runtime(&path);
+            for sql in [
+                "CREATE TABLE replayed (id TEXT PRIMARY KEY, email TEXT, v TEXT)",
+                "CREATE UNIQUE INDEX replayed_email ON replayed (email) USING HASH",
+                "INSERT INTO replayed (id, email, v) VALUES \
+                 ('a', 'a@x', '1'), ('b', 'b@x', '2'), ('c', 'c@x', '3')",
+            ] {
+                seed.execute_query(sql).expect(sql);
+            }
+            seed.flush().expect("publish the base");
+        }
+        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", REPLAY_TEST, "--nocapture"])
+            .env(REPLAY_CHILD, &path)
+            .status()
+            .expect("writer child");
+        assert!(status.success(), "writer child failed: {status}");
+
+        let runtime = replay_runtime(&path);
+        let affected = |sql: &str| runtime.execute_query(sql).expect(sql).affected_rows;
+        let rows = |sql: &str| runtime.execute_query(sql).expect(sql).result.records.len();
+        // Every statement below reaches its row through a HASH index.
+        assert_eq!(rows("SELECT v FROM replayed WHERE id = 'fresh'"), 1);
+        assert_eq!(rows("SELECT v FROM replayed WHERE id = 'c'"), 0);
+        assert_eq!(
+            affected("UPDATE replayed SET v = 'touched' WHERE id = 'fresh'"),
+            1,
+            "a row inserted before the crash must be updatable by key"
+        );
+        assert_eq!(
+            affected("UPDATE replayed SET v = 'again' WHERE id = 'b'"),
+            1,
+            "a row updated before the crash must be updatable by key"
+        );
+        assert!(
+            runtime
+                .execute_query(
+                    "INSERT INTO replayed (id, email, v) VALUES ('other', 'fresh@x', 'dup')"
+                )
+                .is_err(),
+            "the unique index must still see the replayed row"
+        );
+        assert_eq!(affected("DELETE FROM replayed WHERE id = 'fresh'"), 1);
+        assert_eq!(rows("SELECT v FROM replayed WHERE id = 'fresh'"), 0);
+        assert_eq!(rows("SELECT id FROM replayed"), 2);
     }
 
     #[test]
