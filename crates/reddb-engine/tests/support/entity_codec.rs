@@ -32,6 +32,13 @@ fn branch_provenance() {
             .expect("V13 entity without branch tail");
         assert_eq!(legacy_position, legacy.len());
         assert!(legacy_entity.branch_version().is_none());
+        // A V14 reader replays WAL records, backups and replication frames
+        // written before V14: the provenance tail is optional on read.
+        let upgraded =
+            read_entity_binary(&legacy, &mut 0, 14).expect("pre-V14 bytes under a V14 reader");
+        assert!(upgraded.branch_version().is_none());
+        assert_eq!(upgraded.xmin, entity.xmin);
+        assert_eq!(upgraded.xmax, entity.xmax);
         let mut encoded = Vec::new();
         write_entity_binary(&mut encoded, &entity, 14);
         let mut position = 0;

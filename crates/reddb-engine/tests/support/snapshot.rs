@@ -462,8 +462,12 @@ fn native_committed_projection() {
     old.xmax = 30;
     let mut active = UnifiedEntity::table_row(EntityId::new(2), "rows", 2, vec![]);
     active.xmin = 30;
-    let mut graph = UnifiedEntity::graph_node(EntityId::new(3), "kept", "node", HashMap::new());
+    // Graph records follow the same projection as rows since V14: a node
+    // written by an unfinished transaction is not published as committed.
+    let mut graph =
+        UnifiedEntity::graph_node(EntityId::new(3), "unfinished", "node", HashMap::new());
     graph.xmin = 30;
+    let kept = UnifiedEntity::graph_node(EntityId::new(6), "kept", "node", HashMap::new());
     let pending = UnifiedEntity::graph_node(EntityId::new(4), "pending", "node", HashMap::new());
     let mut vector = UnifiedEntity::vector(EntityId::new(5), "vectors", vec![1.0]);
     vector.xmin = 30;
@@ -471,6 +475,7 @@ fn native_committed_projection() {
         ("rows", old),
         ("rows", active),
         ("graph", graph),
+        ("graph", kept),
         ("graph", pending),
         ("vectors", vector),
     ] {
@@ -513,6 +518,7 @@ fn native_committed_projection() {
     );
     assert!(matches!(rows[0].0.data, EntityData::Row(_)));
     assert_eq!(restored.collections["graph"].len(), 1);
+    assert_eq!(restored.collections["graph"][0].0.id.raw(), 6);
     assert!(matches!(
         restored.collections["graph"][0].0.kind,
         EntityKind::GraphNode(_)
