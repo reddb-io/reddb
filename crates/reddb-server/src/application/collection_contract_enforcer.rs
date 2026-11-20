@@ -429,15 +429,26 @@ fn find_row_uniqueness_conflict(
         ) {
             return Ok(Some(UniquenessConflict { rule, entity_id }));
         }
-        // The probe above only sees rows still in memory. A unique index over
-        // these columns admits rows on disk itself; without one, look there.
-        if manager.has_backing() && !runtime.has_unique_target(collection, &rule.columns) {
-            if let Some(entity_id) = runtime.cold_constraint_conflict(
-                collection,
-                &rule.columns,
-                &signatures,
-                exclude_id,
-            )? {
+        // The probe above only sees rows still in memory. Rows on disk are
+        // reached through the constraint's unique index, or by a pass over
+        // the base when it has none.
+        if manager.has_backing() {
+            let on_disk = if runtime.has_unique_target(collection, &rule.columns) {
+                runtime.unique_conflict_id_excluding(
+                    collection,
+                    fields,
+                    Some(&rule.columns),
+                    exclude_id,
+                )?
+            } else {
+                runtime.cold_constraint_conflict(
+                    collection,
+                    &rule.columns,
+                    &signatures,
+                    exclude_id,
+                )?
+            };
+            if let Some(entity_id) = on_disk {
                 return Ok(Some(UniquenessConflict { rule, entity_id }));
             }
         }

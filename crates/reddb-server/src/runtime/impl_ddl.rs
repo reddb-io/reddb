@@ -64,6 +64,16 @@ impl RedDBRuntime {
         let exists = store.get_collection(&query.name).is_some();
         if exists {
             if query.if_not_exists {
+                // Idempotent DDL is how an application reaches a table created
+                // before constraints had an index. Existing duplicates must
+                // not fail it: the constraint then stays enforced by scanning.
+                if let Err(error) = self.ensure_constraint_indexes(&query.name) {
+                    tracing::warn!(
+                        table = %query.name,
+                        %error,
+                        "no unique index for a declared constraint; it is enforced by scanning the table"
+                    );
+                }
                 return Ok(RuntimeQueryResult::ok_message(
                     raw_query.to_string(),
                     &format!("table '{}' already exists", query.name),
@@ -161,6 +171,8 @@ impl RedDBRuntime {
             self.register_tenant_table(&query.name, col);
         }
 
+        self.ensure_constraint_indexes(&query.name)?;
+
         let ttl_suffix = query
             .default_ttl_ms
             .map(|ttl_ms| format!(" with default TTL {}ms", ttl_ms))
@@ -180,6 +192,45 @@ impl RedDBRuntime {
             ),
             "create",
         ))
+    }
+
+    /// Gives every declared `PRIMARY KEY` and `UNIQUE` constraint of `table`
+    /// a unique index, so admitting a row costs one index probe at any table
+    /// size and lookups by the key can use it. A constraint that already has
+    /// a unique index over its columns keeps that one.
+    fn ensure_constraint_indexes(&self, table: &str) -> RedDBResult<()> {
+        let Some(contract) = self.db().collection_contract(table) else {
+            return Ok(());
+        };
+        if contract.declared_model != CollectionModel::Table {
+            return Ok(());
+        }
+        for rule in reddb_engine::catalog::enforcement::resolved_uniqueness_rules(&contract) {
+            if self.has_unique_target(table, &rule.columns) {
+                continue;
+            }
+            let name = if rule.primary_key {
+                format!("{table}_pkey")
+            } else {
+                format!("{table}_{}_key", rule.columns.join("_"))
+            };
+            let query = CreateIndexQuery {
+                name,
+                table: table.to_string(),
+                columns: rule.columns,
+                method: IndexMethod::Hash,
+                unique: true,
+                if_not_exists: true,
+            };
+            let sql = format!(
+                "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {} ({}) USING HASH",
+                query.name,
+                query.table,
+                query.columns.join(", ")
+            );
+            self.execute_create_index(&sql, &query)?;
+        }
+        Ok(())
     }
 
     fn execute_create_keyed_collection(
