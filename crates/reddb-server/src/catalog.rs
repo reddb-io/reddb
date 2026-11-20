@@ -290,20 +290,20 @@ pub fn try_snapshot_store_with_declarations(
     )
 }
 
-/// Catalog inventory for a known subset of collection names.
+/// Catalog inventory for every collection, or for a known subset of names.
 ///
 /// Declared collections already carry their model and schema contract, while
 /// entity/segment counts are maintained by the segment manager. Avoid decoding
-/// their payload rows merely to serve a filtered metadata query. Legacy
-/// contract-less collections retain the observation fallback, scoped to the
-/// requested names only.
+/// their payload rows merely to serve a metadata query. Legacy contract-less
+/// collections retain the observation fallback, and only when the caller
+/// needs a payload-derived column.
 pub fn try_snapshot_store_inventory_with_declarations(
     name: &str,
     store: &UnifiedStore,
     index_catalog: Option<&IndexCatalog>,
     declarations: Option<&CatalogDeclarations>,
     contracts: Option<&[CollectionContract]>,
-    collection_names: &HashSet<String>,
+    collection_names: Option<&HashSet<String>>,
     observe_legacy_payloads: bool,
     read_bytes_max: usize,
 ) -> Result<CatalogModelSnapshot, crate::storage::StoreError> {
@@ -324,7 +324,7 @@ pub fn try_snapshot_store_inventory_with_declarations(
         declarations,
         contracts,
         queue_policies,
-        Some(collection_names),
+        collection_names,
         |manager| {
             if let Some(contract) = collection_contract(manager.collection(), contracts) {
                 let stats = manager.stats();

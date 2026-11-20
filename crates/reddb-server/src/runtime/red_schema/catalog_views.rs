@@ -597,12 +597,8 @@ pub(super) fn collections_snapshot(
         .as_ref()
         .and_then(collection_name_candidates_from_filter);
     let observe_legacy_payloads = collections_query_needs_legacy_payloads(query);
-    let snapshot = match candidate_names.as_ref() {
-        Some(candidate_names) => {
-            runtime.try_catalog_for_collections(candidate_names, observe_legacy_payloads)?
-        }
-        None => runtime.try_catalog()?,
-    };
+    let snapshot =
+        runtime.try_catalog_for_collections(candidate_names.as_ref(), observe_legacy_payloads)?;
     let schema = Arc::new(
         COLLECTION_COLUMNS
             .iter()
@@ -2308,6 +2304,33 @@ mod scoped_collection_introspection_io_tests {
         assert!(
             read_bytes <= 64 * 1024,
             "filtered red.collections read {read_bytes} bytes from unrelated collection pages"
+        );
+    }
+
+    #[test]
+    fn unfiltered_red_collections_counts_rows_without_reading_payload_pages() {
+        let (_directory, runtime) = persistent_fixture();
+        let (result, read_bytes) = measure_pager_read_bytes(|| {
+            runtime
+                .execute_query("SELECT name, entities FROM red.collections")
+                .expect("collection listing")
+        });
+        let entities = |name: &str| {
+            result
+                .result
+                .records
+                .iter()
+                .find(|record| record.get("name") == Some(&Value::text(name)))
+                .and_then(|record| record.get("entities").cloned())
+        };
+        assert_eq!(entities("target"), Some(Value::UnsignedInteger(1)));
+        assert_eq!(
+            entities("unrelated_payloads"),
+            Some(Value::UnsignedInteger(4_096))
+        );
+        assert!(
+            read_bytes <= 64 * 1024,
+            "listing red.collections read {read_bytes} bytes of collection payloads"
         );
     }
 
