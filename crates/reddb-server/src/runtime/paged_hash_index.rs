@@ -616,24 +616,23 @@ impl RedDBRuntime {
             identity.clone(),
             projection.clone(),
         )?;
-        // A collection without a disk base has every row resident. Seed the
-        // overlay with them once, so lookups (and the unique admission of
-        // every inserted row) do not walk the collection until a checkpoint
-        // publishes the index.
+        // The overlay speaks for every row that is not in the published
+        // postings, so it starts from the rows resident now: the ones recovery
+        // replayed from the WAL, and, for a collection without a disk base,
+        // all of them. Later changes reach it through the index hooks.
         let mut overlay = OverlayHash::default();
-        if let Some(manager) = store
-            .get_collection(&index.collection)
-            .filter(|manager| !manager.has_backing())
-        {
+        if let Some(manager) = store.get_collection(&index.collection) {
             manager.for_each_entity(|entity| {
                 match projection.raw_key(entity, projection.key_bytes_max) {
                     Ok(Some(key)) => overlay.insert(key, entity.id),
-                    Ok(None) => {}
+                    // No key, but still a row the published postings may be
+                    // stale about.
+                    Ok(None) => overlay.remove(entity.id),
                     Err(_) => overlay.require_scan(entity.id),
                 }
                 true
             });
-            overlay.holds_every_row = !overlay.overflowed;
+            overlay.holds_every_row = !manager.has_backing() && !overlay.overflowed;
         }
         prepared.hash.install_paged(
             &index.collection,
