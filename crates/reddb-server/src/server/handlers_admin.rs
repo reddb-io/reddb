@@ -1087,6 +1087,10 @@ impl RedDBServer {
                     "reason".to_string(),
                     JsonValue::String("handler_deadline_exceeded".to_string()),
                 );
+                object.insert(
+                    "overdue_executions".to_string(),
+                    overdue_executions_json(self.runtime.execution_watchdog()),
+                );
             } else if let Some(reason) = lifecycle.not_ready_reason() {
                 object.insert("reason".to_string(), JsonValue::String(reason));
             } else {
@@ -1104,6 +1108,41 @@ impl RedDBServer {
             json_response(503, JsonValue::Object(object))
         }
     }
+}
+
+/// What is holding readiness down: how many executions outlived their
+/// deadline, and where the longest-running ones came from. Statement text
+/// stays in the `reddb::watchdog` log; this probe is public.
+fn overdue_executions_json(
+    watchdog: &crate::runtime::execution_watchdog::ExecutionWatchdog,
+) -> JsonValue {
+    let (count, listed) = watchdog.overdue_executions();
+    let mut object = Map::new();
+    object.insert("count".to_string(), JsonValue::Number(count as f64));
+    object.insert(
+        "longest_running".to_string(),
+        JsonValue::Array(
+            listed
+                .into_iter()
+                .map(|execution| {
+                    let mut entry = Map::new();
+                    entry.insert(
+                        "origin".to_string(),
+                        execution
+                            .origin
+                            .map(JsonValue::String)
+                            .unwrap_or(JsonValue::Null),
+                    );
+                    entry.insert(
+                        "running_secs".to_string(),
+                        JsonValue::Number(execution.running_secs as f64),
+                    );
+                    JsonValue::Object(entry)
+                })
+                .collect(),
+        ),
+    );
+    JsonValue::Object(object)
 }
 
 #[cfg(test)]
