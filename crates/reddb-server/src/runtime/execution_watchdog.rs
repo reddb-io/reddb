@@ -29,6 +29,9 @@ const OVERDUE_LABEL_BYTES_MAX: usize = 400;
 
 thread_local! {
     static CURRENT_TICKET: RefCell<Option<Arc<ExecutionTicket>>> = const { RefCell::new(None) };
+    /// Ticket that only receives the statement label. The HTTP edge owns its
+    /// own deadline timer and must not expose its ticket to parking.
+    static LABEL_TICKET: RefCell<Option<Arc<ExecutionTicket>>> = const { RefCell::new(None) };
 }
 
 /// Tracks handler work that exceeded its public deadline but is still running
@@ -46,6 +49,7 @@ impl ExecutionWatchdog {
             origin: Instant::now(),
             timed_out_inflight: Arc::clone(&self.timed_out_inflight),
             label: std::sync::Mutex::new(None),
+            origin_label: std::sync::Mutex::new(None),
         })
     }
 
@@ -74,6 +78,8 @@ pub(crate) struct ExecutionTicket {
     timed_out_inflight: Arc<AtomicUsize>,
     /// What this execution is running, for the overdue diagnostics only.
     label: std::sync::Mutex<Option<String>>,
+    /// Where it came from (e.g. `HTTP POST /query`), same purpose.
+    origin_label: std::sync::Mutex<Option<String>>,
 }
 
 fn phase(word: u64) -> u64 {
@@ -86,11 +92,39 @@ fn with_phase(word: u64, phase: u64) -> u64 {
 
 impl ExecutionTicket {
     fn describe(&self) -> String {
-        self.label
-            .lock()
-            .ok()
-            .and_then(|label| label.clone())
-            .unwrap_or_else(|| "<unlabelled execution>".to_string())
+        let read = |slot: &std::sync::Mutex<Option<String>>| {
+            slot.lock().ok().and_then(|label| label.clone())
+        };
+        match (read(&self.origin_label), read(&self.label)) {
+            (Some(origin), Some(statement)) => format!("{origin} :: {statement}"),
+            (Some(only), None) | (None, Some(only)) => only,
+            (None, None) => "<unlabelled execution>".to_string(),
+        }
+    }
+
+    /// Records where this execution came from.
+    pub(crate) fn set_origin(&self, origin: String) {
+        if let Ok(mut slot) = self.origin_label.lock() {
+            *slot = Some(bounded_label(origin));
+        }
+    }
+
+    /// Lets engine code on this thread name the statement of this execution
+    /// without making it parkable. Restores the enclosing ticket on drop.
+    pub(crate) fn label_scope(self: &Arc<Self>) -> ExecutionLabelScope {
+        let previous = LABEL_TICKET.with(|slot| slot.borrow_mut().replace(Arc::clone(self)));
+        ExecutionLabelScope {
+            previous,
+            _thread: PhantomData,
+        }
+    }
+
+    /// Keeps naming an overdue execution until it settles. No-op outside a
+    /// Tokio runtime.
+    pub(crate) fn report_until_settled(self: &Arc<Self>) {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(report_while_overdue(Arc::clone(self)));
+        }
     }
 
     /// A parked server must say what it is waiting for: an idle process with
@@ -279,21 +313,38 @@ async fn report_while_overdue(ticket: Arc<ExecutionTicket>) {
 /// Names what the current thread's execution is running. No-op without a
 /// ticket; `describe` is only evaluated when one is installed.
 pub(crate) fn label_current_execution(describe: impl FnOnce() -> String) {
-    CURRENT_TICKET.with(|slot| {
-        if let Some(ticket) = slot.borrow().as_ref() {
-            if let Ok(mut label) = ticket.label.lock() {
-                let mut text = describe();
-                if text.len() > OVERDUE_LABEL_BYTES_MAX {
-                    let mut end = OVERDUE_LABEL_BYTES_MAX;
-                    while !text.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    text.truncate(end);
-                }
-                *label = Some(text);
-            }
+    let ticket = CURRENT_TICKET
+        .with(|slot| slot.borrow().clone())
+        .or_else(|| LABEL_TICKET.with(|slot| slot.borrow().clone()));
+    if let Some(ticket) = ticket {
+        if let Ok(mut label) = ticket.label.lock() {
+            *label = Some(bounded_label(describe()));
         }
-    });
+    }
+}
+
+fn bounded_label(mut text: String) -> String {
+    if text.len() > OVERDUE_LABEL_BYTES_MAX {
+        let mut end = OVERDUE_LABEL_BYTES_MAX;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
+}
+
+/// Thread-affine guard restoring the enclosing label ticket (if any) on drop.
+pub(crate) struct ExecutionLabelScope {
+    previous: Option<Arc<ExecutionTicket>>,
+    _thread: PhantomData<*const ()>,
+}
+
+impl Drop for ExecutionLabelScope {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        LABEL_TICKET.with(|slot| *slot.borrow_mut() = previous);
+    }
 }
 
 /// Suspends the current thread's execution deadline for the guard's lifetime.
@@ -362,6 +413,19 @@ mod tests {
         }
         let label = ticket.describe();
         assert!(label.len() <= OVERDUE_LABEL_BYTES_MAX && label.starts_with('é'));
+
+        // The HTTP edge names the route and lets the engine add the statement
+        // through a label-only scope that parking cannot see.
+        let http = watchdog.start();
+        http.set_origin("HTTP POST /query".to_string());
+        assert_eq!(http.describe(), "HTTP POST /query");
+        {
+            let _scope = http.label_scope();
+            label_current_execution(|| "SELECT 1".to_string());
+            assert!(park_current_execution().ticket.is_none());
+        }
+        assert_eq!(http.describe(), "HTTP POST /query :: SELECT 1");
+        label_current_execution(|| unreachable!("label scope ended"));
         assert!(!ticket.is_overdue());
         let _completion = ticket.completion();
         ticket.mark_timed_out();
