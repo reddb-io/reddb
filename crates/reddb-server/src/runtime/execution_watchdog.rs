@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 // Ticket state word: the low two bits hold the phase, the remaining bits hold
@@ -26,6 +26,8 @@ const MIN_PARKED_POLL: Duration = Duration::from_millis(10);
 /// How often a still-running overdue execution is named again in the log.
 const OVERDUE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 const OVERDUE_LABEL_BYTES_MAX: usize = 400;
+/// How many overdue executions readiness names; the count is always exact.
+const OVERDUE_LISTED_MAX: usize = 8;
 
 thread_local! {
     static CURRENT_TICKET: RefCell<Option<Arc<ExecutionTicket>>> = const { RefCell::new(None) };
@@ -40,21 +42,67 @@ thread_local! {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ExecutionWatchdog {
     timed_out_inflight: Arc<AtomicUsize>,
+    /// Executions declared overdue. Touched only when one times out and when
+    /// an unready probe asks what is stuck, never on the request path.
+    overdue: Arc<Mutex<Vec<Weak<ExecutionTicket>>>>,
+}
+
+/// One execution that outlived its deadline and is still running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OverdueExecution {
+    /// Where it came from (e.g. `HTTP POST /query`). The statement itself is
+    /// only logged: probes are public and must not expose query text.
+    pub(crate) origin: Option<String>,
+    pub(crate) running_secs: u64,
 }
 
 impl ExecutionWatchdog {
     pub(crate) fn start(&self) -> Arc<ExecutionTicket> {
-        Arc::new(ExecutionTicket {
+        Arc::new_cyclic(|this| ExecutionTicket {
             state: AtomicU64::new(RUNNING),
             origin: Instant::now(),
             timed_out_inflight: Arc::clone(&self.timed_out_inflight),
             label: std::sync::Mutex::new(None),
             origin_label: std::sync::Mutex::new(None),
+            this: this.clone(),
+            overdue: Arc::clone(&self.overdue),
         })
     }
 
     pub(crate) fn is_ready(&self) -> bool {
         self.timed_out_inflight.load(Ordering::Acquire) == 0
+    }
+
+    /// Executions still running past their deadline, longest-running first,
+    /// with the exact total. Lists at most [`OVERDUE_LISTED_MAX`].
+    pub(crate) fn overdue_executions(&self) -> (usize, Vec<OverdueExecution>) {
+        let Ok(mut overdue) = self.overdue.lock() else {
+            return (0, Vec::new());
+        };
+        let mut live: Vec<Arc<ExecutionTicket>> = Vec::new();
+        overdue.retain(|ticket| match ticket.upgrade() {
+            Some(ticket) if ticket.is_overdue() => {
+                live.push(ticket);
+                true
+            }
+            _ => false,
+        });
+        drop(overdue);
+        live.sort_by_key(|ticket| ticket.origin);
+        let total = live.len();
+        let listed = live
+            .iter()
+            .take(OVERDUE_LISTED_MAX)
+            .map(|ticket| OverdueExecution {
+                origin: ticket
+                    .origin_label
+                    .lock()
+                    .ok()
+                    .and_then(|label| label.clone()),
+                running_secs: ticket.origin.elapsed().as_secs(),
+            })
+            .collect();
+        (total, listed)
     }
 }
 
@@ -80,6 +128,8 @@ pub(crate) struct ExecutionTicket {
     label: std::sync::Mutex<Option<String>>,
     /// Where it came from (e.g. `HTTP POST /query`), same purpose.
     origin_label: std::sync::Mutex<Option<String>>,
+    this: Weak<ExecutionTicket>,
+    overdue: Arc<Mutex<Vec<Weak<ExecutionTicket>>>>,
 }
 
 fn phase(word: u64) -> u64 {
@@ -138,6 +188,14 @@ impl ExecutionTicket {
         );
     }
 
+    /// Makes a ticket that just timed out visible to readiness.
+    fn publish_overdue(&self) {
+        if let Ok(mut overdue) = self.overdue.lock() {
+            overdue.retain(|ticket| ticket.upgrade().is_some_and(|ticket| ticket.is_overdue()));
+            overdue.push(self.this.clone());
+        }
+    }
+
     fn is_overdue(&self) -> bool {
         phase(self.state.load(Ordering::Acquire)) == TIMED_OUT
     }
@@ -180,6 +238,7 @@ impl ExecutionTicket {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
+                    self.publish_overdue();
                     self.report_overdue();
                     return true;
                 }
@@ -215,6 +274,7 @@ impl ExecutionTicket {
                 )
                 .is_ok()
             {
+                self.publish_overdue();
                 return DeadlineCheck::TimedOut;
             }
             // The worker parked, resumed or completed between the read and
@@ -430,6 +490,57 @@ mod tests {
         let _completion = ticket.completion();
         ticket.mark_timed_out();
         assert!(ticket.is_overdue());
+    }
+
+    #[test]
+    fn readiness_names_the_overdue_executions_until_they_finish() {
+        let watchdog = ExecutionWatchdog::default();
+        assert_eq!(watchdog.overdue_executions(), (0, Vec::new()));
+
+        let within_deadline = watchdog.start();
+        let from_http = watchdog.start();
+        from_http.set_origin("HTTP POST /query".to_string());
+        let from_wire = watchdog.start();
+        assert!(from_http.mark_timed_out());
+        assert_eq!(
+            from_wire.mark_timed_out_if_overdue(Duration::ZERO),
+            DeadlineCheck::TimedOut
+        );
+
+        // Both timeout paths publish; a running execution inside its deadline
+        // is not listed. Oldest first.
+        let (count, listed) = watchdog.overdue_executions();
+        assert_eq!(count, 2);
+        assert_eq!(
+            listed
+                .iter()
+                .map(|execution| execution.origin.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("HTTP POST /query"), None]
+        );
+
+        // Finishing or dropping an execution removes it from the listing.
+        drop(from_http.completion());
+        assert_eq!(watchdog.overdue_executions().0, 1);
+        drop(from_wire.completion());
+        assert_eq!(watchdog.overdue_executions(), (0, Vec::new()));
+        assert!(watchdog.is_ready());
+        drop(within_deadline);
+    }
+
+    #[test]
+    fn overdue_listing_is_bounded_but_the_count_is_exact() {
+        let watchdog = ExecutionWatchdog::default();
+        let tickets: Vec<_> = (0..OVERDUE_LISTED_MAX + 3)
+            .map(|_| {
+                let ticket = watchdog.start();
+                assert!(ticket.mark_timed_out());
+                ticket
+            })
+            .collect();
+        let (count, listed) = watchdog.overdue_executions();
+        assert_eq!(count, tickets.len());
+        assert_eq!(listed.len(), OVERDUE_LISTED_MAX);
     }
 
     #[test]
