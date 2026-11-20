@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.39.9
+
+### Patch Changes
+
+- [#2906](https://github.com/reddb-io/reddb/pull/2906) [`49d1ed7`](https://github.com/reddb-io/reddb/commit/49d1ed7ad309ac9294ce0b048f7d53ab9754bb9c) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Stop scanning the whole collection to find a row that changed since the last
+  checkpoint: the paged hash index no longer treats the posting of a row it saw
+  removed as proof of an incomplete index, and resolving a logical row id under a
+  snapshot returns the live version directly when the reader can see it. On a
+  50k-row table an `UPDATE ... WHERE id = ?` of an already-updated row drops from
+  250-490 ms to 4 ms.
+
+  `red.control_events` now has native retention: `control_events.retention` /
+  `REDDB_CONTROL_EVENTS_RETENTION` (default `7d`, `off` disables).
+
 ## 1.39.8
 
 ### Patch Changes
