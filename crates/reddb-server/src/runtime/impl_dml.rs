@@ -2271,7 +2271,7 @@ impl RedDBRuntime {
                     });
                 ctx.snapshot = ctx.manager.fresh_read_snapshot();
                 ctx.branch = self.vcs_branch_read_view(&ctx.snapshot, None)?;
-                ctx.requires_index_fallback |= !ctx.snapshot.in_progress.is_empty();
+                ctx.requires_index_fallback |= ctx.manager.snapshot_hides_writers(&ctx.snapshot);
                 Some(crate::runtime::impl_core::CurrentSnapshotGuard::install(
                     ctx,
                 ))

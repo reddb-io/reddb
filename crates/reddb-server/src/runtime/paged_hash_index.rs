@@ -1029,6 +1029,37 @@ mod tests {
     }
 
     #[test]
+    fn autocommit_insert_does_not_turn_indexed_statements_into_scans() {
+        let (_directory, runtime) = fixture();
+        // The insert reserves a batch of autocommit xids and uses one. The
+        // rest sit in every later snapshot's in-progress set having written
+        // nothing: they must not push SELECT/UPDATE/DELETE off the index.
+        runtime
+            .execute_query("INSERT INTO hash_rows (id, email) VALUES (3, 'gamma')")
+            .expect("autocommit insert");
+        let scanned = track_backing_scans(&runtime);
+        let selected = runtime
+            .execute_query("SELECT id FROM hash_rows WHERE email = 'alpha'")
+            .expect("indexed select");
+        assert_eq!(selected.result.records.len(), 1);
+        assert!(
+            !scanned.load(std::sync::atomic::Ordering::SeqCst),
+            "a SELECT by indexed key scanned the collection after an autocommit INSERT"
+        );
+        runtime
+            .execute_query("INSERT INTO hash_rows (id, email) VALUES (4, 'delta')")
+            .expect("second autocommit insert");
+        let updated = runtime
+            .execute_query("UPDATE hash_rows SET payload = 'x' WHERE email = 'beta'")
+            .expect("indexed update");
+        assert_eq!(updated.affected_rows, 1);
+        assert!(
+            !scanned.load(std::sync::atomic::Ordering::SeqCst),
+            "an UPDATE by indexed key scanned the collection after an autocommit INSERT"
+        );
+    }
+
+    #[test]
     fn paged_hash_resident_changes_are_found_without_walking_the_collection() {
         let (_directory, runtime) = fixture();
         let scans = || SCANNING_LOOKUPS.with(std::cell::Cell::get);
