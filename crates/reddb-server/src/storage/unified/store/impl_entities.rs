@@ -1189,14 +1189,32 @@ impl UnifiedStore {
         }
 
         let manager = self.get_collection(collection)?;
+        if let Some(entity) = manager.hinted_live_row_version(logical_id) {
+            return Some(entity);
+        }
         let mut matches = manager.query_all(|entity| {
             matches!(entity.kind, EntityKind::TableRow { .. }) && entity.logical_id() == logical_id
         });
-        matches
+        let selected = matches
             .iter()
             .find(|entity| entity.xmax == 0)
             .cloned()
-            .or_else(|| matches.pop())
+            .or_else(|| matches.pop());
+        Self::remember_scanned_live_row_version(&manager, logical_id, selected.as_ref());
+        selected
+    }
+
+    /// Spare the next reader the scan that just found this live version.
+    fn remember_scanned_live_row_version(
+        manager: &SegmentManager,
+        logical_id: EntityId,
+        selected: Option<&UnifiedEntity>,
+    ) {
+        if let Some(entity) = selected {
+            if entity.id != logical_id && entity.xmax == 0 && entity.branch_version().is_none() {
+                manager.remember_live_row_version(logical_id, entity.id);
+            }
+        }
     }
 
     pub fn table_row_versions_by_logical_id(
@@ -1218,10 +1236,47 @@ impl UnifiedStore {
             return Ok(());
         };
         manager.try_for_each_entity(usize::MAX, |entity| {
-            !matches!(entity.kind, EntityKind::TableRow { .. })
+            if !matches!(entity.kind, EntityKind::TableRow { .. })
                 || entity.logical_id() != logical_id
-                || visit(entity)
+            {
+                return true;
+            }
+            // The walk just paid for this; spare the next reader.
+            if entity.id != logical_id && entity.xmax == 0 && entity.branch_version().is_none() {
+                manager.remember_live_row_version(logical_id, entity.id);
+            }
+            visit(entity)
         })
+    }
+
+    /// Head of a row's version chain without walking the collection: the
+    /// physical row itself while it was never replaced, else the hinted live
+    /// version. Declined once any collection opted into VCS, where branch
+    /// versions of one row can be visible side by side.
+    pub(crate) fn try_live_table_row_head(
+        &self,
+        collection: &str,
+        logical_id: EntityId,
+    ) -> Result<Option<UnifiedEntity>, StoreError> {
+        let vcs_never_used = self
+            .get_collection(crate::application::vcs_collections::SETTINGS)
+            .is_none_or(|settings| settings.identity_counters().0 <= 1);
+        if !vcs_never_used {
+            return Ok(None);
+        }
+        let Some(manager) = self.get_collection(collection) else {
+            return Ok(None);
+        };
+        if let Some(entity) = manager.try_get(logical_id, usize::MAX)? {
+            if matches!(entity.kind, EntityKind::TableRow { .. })
+                && entity.logical_id() == logical_id
+                && entity.xmax == 0
+                && entity.branch_version().is_none()
+            {
+                return Ok(Some(entity));
+            }
+        }
+        Ok(manager.hinted_live_row_version(logical_id))
     }
 
     pub(crate) fn try_get_table_row_by_logical_id(
@@ -1240,6 +1295,9 @@ impl UnifiedStore {
                 return Ok(Some(entity));
             }
         }
+        if let Some(entity) = manager.hinted_live_row_version(logical_id) {
+            return Ok(Some(entity));
+        }
         // Preserve the current-row policy: first live version, otherwise the
         // last matching physical version. Retain only one owned candidate.
         let mut selected = None;
@@ -1248,6 +1306,7 @@ impl UnifiedStore {
             entity.xmax != 0
         })?;
         manager.restore_owned_row_schemas(selected.iter_mut());
+        Self::remember_scanned_live_row_version(&manager, logical_id, selected.as_ref());
         Ok(selected)
     }
 

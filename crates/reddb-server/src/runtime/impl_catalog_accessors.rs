@@ -116,6 +116,7 @@ impl RedDBRuntime {
         // ordered live overlay while publication is still exclusive so a
         // concurrent writer cannot be cleared after its WAL change.
         self.index_store_ref().clear_paged_btree_overlays();
+        self.index_store_ref().hash.clear_paged_retired();
         self.inner.probabilistic.replayed_names.lock().clear();
         drop(publication);
         let checkpoint_lsn = self.replication_commit_lsn();

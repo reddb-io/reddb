@@ -113,6 +113,96 @@ fn fallible_version_reads_and_retry() {
     assert_eq!(store.points.get(), 2);
 }
 
+fn live_head_skips_the_version_walk_only_when_visible() {
+    use reddb_engine::storage::entity::UnifiedEntity;
+    use reddb_engine::transaction::read::{try_resolve_logical_id, FallibleTableRowVersionStore};
+    use std::cell::Cell;
+
+    struct HeadStore {
+        rows: Vec<UnifiedEntity>,
+        head: Option<UnifiedEntity>,
+        walks: Cell<usize>,
+    }
+    impl FallibleTableRowVersionStore for HeadStore {
+        type Error = &'static str;
+        fn try_get_table_row_by_logical_id(
+            &self,
+            _collection: &str,
+            _logical_id: EntityId,
+        ) -> Result<Option<UnifiedEntity>, Self::Error> {
+            Ok(self.rows.iter().find(|row| row.xmax == 0).cloned())
+        }
+        fn try_for_each_table_row_version(
+            &self,
+            _collection: &str,
+            _logical_id: EntityId,
+            mut visit: impl FnMut(&UnifiedEntity) -> bool,
+        ) -> Result<(), Self::Error> {
+            self.walks.set(self.walks.get() + 1);
+            for row in &self.rows {
+                if !visit(row) {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        fn try_live_table_row_head(
+            &self,
+            _collection: &str,
+            _logical_id: EntityId,
+        ) -> Result<Option<UnifiedEntity>, Self::Error> {
+            Ok(self.head.clone())
+        }
+    }
+    // v1 (xmin 1) was replaced by v2 (xmin 2, live).
+    let rows: Vec<UnifiedEntity> = [(1, 1, 2), (2, 2, 0)]
+        .into_iter()
+        .map(|(id, xmin, xmax)| {
+            let mut row = UnifiedEntity::table_row(EntityId::new(id), "versions", 7, vec![]);
+            row.set_logical_id(EntityId::new(7));
+            row.set_xmin(xmin);
+            row.set_xmax(xmax);
+            row
+        })
+        .collect();
+    let visible_at = |snapshot: u64| {
+        move |row: &UnifiedEntity| row.xmin <= snapshot && (row.xmax == 0 || row.xmax > snapshot)
+    };
+    let resolve = |store: &HeadStore, snapshot: u64| {
+        try_resolve_logical_id(
+            store,
+            "versions",
+            EntityId::new(7),
+            true,
+            visible_at(snapshot),
+        )
+        .expect("resolve")
+        .map(|row| row.id)
+    };
+    let hinted = HeadStore {
+        head: rows.last().cloned(),
+        rows: rows.clone(),
+        walks: Cell::new(0),
+    };
+    // A reader that sees the head gets it without walking, and it is the
+    // version the walk selects.
+    assert_eq!(resolve(&hinted, 2), Some(EntityId::new(2)));
+    assert_eq!(hinted.walks.get(), 0);
+    // An older snapshot cannot see the head and still walks to its version.
+    assert_eq!(resolve(&hinted, 1), Some(EntityId::new(1)));
+    assert_eq!(hinted.walks.get(), 1);
+
+    let unhinted = HeadStore {
+        head: None,
+        rows,
+        walks: Cell::new(0),
+    };
+    for snapshot in [1, 2] {
+        assert_eq!(resolve(&unhinted, snapshot), resolve(&hinted, snapshot));
+    }
+    assert_eq!(unhinted.walks.get(), 2);
+}
+
 fn snapshot_isolation_and_read_committed() {
     let state = TransactionState::new();
     let manager = state.snapshot_manager();
@@ -436,6 +526,10 @@ pub const CASES: &[(&str, fn())] = &[
     (
         "mvcc_fallible_version_reads_and_retry",
         fallible_version_reads_and_retry,
+    ),
+    (
+        "mvcc_live_head_skips_the_version_walk_only_when_visible",
+        live_head_skips_the_version_walk_only_when_visible,
     ),
     (
         "mvcc_snapshot_isolation_and_read_committed",

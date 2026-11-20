@@ -289,6 +289,9 @@ impl PhysicalScanCursor {
     }
 }
 
+/// Roughly 64 MiB of hint entries per collection at the cap.
+const LIVE_ROW_VERSION_HINTS_MAX: usize = 2_000_000;
+
 /// Segment manager for a collection
 pub struct SegmentManager {
     /// Statement-scoped constraint admission. Reentrant because SQL upserts
@@ -321,6 +324,10 @@ pub struct SegmentManager {
     /// Bulk-inserted entities skip this map; their segment is found by sequential scan
     /// of growing + sealed segments in get()/update()/delete().
     entity_segment: RwLock<HashMap<EntityId, SegmentId>>,
+    /// Hint only: logical row id -> physical id of the live version last
+    /// inserted for it. Readers validate the hinted entity against storage, so
+    /// a stale or missing entry costs the version scan, never a wrong row.
+    live_row_version_hints: RwLock<HashMap<EntityId, EntityId>>,
     /// Absolute deadlines derived from per-entity TTL metadata. Current paged
     /// files persist this projection in their resume trailer; older files
     /// rebuild it in bounded maintenance ticks. Sweeps are O(log N + batch).
@@ -374,6 +381,7 @@ impl SegmentManager {
             retired: RwLock::new(Vec::new()),
             archived: RwLock::new(Vec::new()),
             entity_segment: RwLock::new(HashMap::new()),
+            live_row_version_hints: RwLock::new(HashMap::new()),
             metadata_expiry: RwLock::new(MetadataExpiryIndex::default()),
             metadata_expiry_projection_ready: AtomicBool::new(true),
             column_schema: RwLock::new(None),
@@ -677,6 +685,36 @@ impl SegmentManager {
         segment_arc
     }
 
+    /// The logical id a live, unbranched row version answers for when its
+    /// physical id differs (i.e. it replaced an earlier version).
+    fn live_row_version_key(entity: &UnifiedEntity) -> Option<EntityId> {
+        let logical_id = entity.logical_id();
+        (matches!(entity.kind, EntityKind::TableRow { .. })
+            && logical_id != entity.id
+            && entity.xmax == 0
+            && entity.branch_version().is_none())
+        .then_some(logical_id)
+    }
+
+    /// Record where the live version of `logical_id` was last seen.
+    pub fn remember_live_row_version(&self, logical_id: EntityId, physical_id: EntityId) {
+        let mut hints = self.live_row_version_hints.write();
+        // Bounded: dropping every hint only sends readers back to the scan.
+        if hints.len() >= LIVE_ROW_VERSION_HINTS_MAX {
+            hints.clear();
+        }
+        hints.insert(logical_id, physical_id);
+    }
+
+    /// The live version of `logical_id`, if the hint still names one. Rows
+    /// that never changed are found by their own id and need no hint.
+    pub fn hinted_live_row_version(&self, logical_id: EntityId) -> Option<UnifiedEntity> {
+        let physical_id = *self.live_row_version_hints.read().get(&logical_id)?;
+        let entity = self.get(physical_id)?;
+        (entity.id == physical_id && Self::live_row_version_key(&entity) == Some(logical_id))
+            .then_some(entity)
+    }
+
     /// Insert a new entity
     pub fn insert(&self, mut entity: UnifiedEntity) -> Result<EntityId, SegmentError> {
         if entity.id.raw() == 0 {
@@ -697,7 +735,11 @@ impl SegmentManager {
         let entity_id = entity.id;
         let segment_id = segment.id();
 
+        let version_hint = Self::live_row_version_key(&entity);
         segment.insert(entity)?;
+        if let Some(logical_id) = version_hint {
+            self.remember_live_row_version(logical_id, entity_id);
+        }
 
         // Lock-free counter update — eliminates the stats write lock on the hot path.
         self.total_entities_atomic.fetch_add(1, Ordering::Relaxed);

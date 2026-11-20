@@ -290,6 +290,17 @@ pub trait FallibleTableRowVersionStore {
         logical_id: crate::storage::entity::EntityId,
         visit: impl FnMut(&crate::storage::entity::UnifiedEntity) -> bool,
     ) -> Result<(), Self::Error>;
+
+    /// The live head of `logical_id`'s version chain (`xmax == 0`), when the
+    /// host can name it without walking the collection and no other version
+    /// can be visible alongside it. `None` always falls back to the walk.
+    fn try_live_table_row_head(
+        &self,
+        _collection: &str,
+        _logical_id: crate::storage::entity::EntityId,
+    ) -> Result<Option<crate::storage::entity::UnifiedEntity>, Self::Error> {
+        Ok(None)
+    }
 }
 
 /// Retain one selected version; a later read failure invalidates the selection.
@@ -304,6 +315,14 @@ pub fn try_resolve_logical_id<S: FallibleTableRowVersionStore>(
         return store
             .try_get_table_row_by_logical_id(collection, logical_id)
             .map(|entity| entity.filter(|entity| visible(entity)));
+    }
+    // Every earlier version was closed by a transaction that committed no
+    // later than the head's writer, so a reader that sees the head sees no
+    // other version of the row: the walk below would select the same entity.
+    if let Some(head) = store.try_live_table_row_head(collection, logical_id)? {
+        if visible(&head) {
+            return Ok(Some(head));
+        }
     }
     let mut selected: Option<crate::storage::entity::UnifiedEntity> = None;
     store.try_for_each_table_row_version(collection, logical_id, |entity| {
