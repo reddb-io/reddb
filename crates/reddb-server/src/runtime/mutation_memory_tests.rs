@@ -720,7 +720,8 @@ fn mutation_memory_late_constraint_error_finishes_published_indexes() {
             .expect("seed");
     }
     // The first chunk has distinct new keys; the last target collides with
-    // its first published key. Preparing everything must preserve this check.
+    // the first one's. The declared constraint has a unique index, so the
+    // whole statement is admitted before any chunk is published.
     let error = runtime
         .execute_query(
             "UPDATE growth SET record_key = CASE WHEN id = 2999 THEN 10000 ELSE id + 10000 END",
@@ -735,14 +736,17 @@ fn mutation_memory_late_constraint_error_finishes_published_indexes() {
         .expect("published index remains readable")
         .result
         .records;
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].get("id"), Some(&reddb_types::Value::Integer(0)));
-    assert!(runtime
+    assert!(rows.is_empty(), "a rejected UPDATE must not move any row");
+    let unchanged = runtime
         .execute_query("SELECT id FROM growth WHERE record_key = 0")
-        .expect("old version hidden")
+        .expect("row keeps its key")
         .result
-        .records
-        .is_empty());
+        .records;
+    assert_eq!(unchanged.len(), 1);
+    assert_eq!(
+        unchanged[0].get("id"),
+        Some(&reddb_types::Value::Integer(0))
+    );
 }
 
 #[test]
