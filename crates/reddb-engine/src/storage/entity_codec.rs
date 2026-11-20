@@ -511,7 +511,10 @@ fn read_entity_from_reader(
         entity.set_xmin(reader.variable_u64()?);
         entity.set_xmax(reader.variable_u64()?);
     }
-    if format_version >= STORE_VERSION_V14 {
+    // Like the V4/V8/V9 tails above, the V14 provenance tail is optional on
+    // read: WAL records, backups and replication frames written before V14
+    // are replayed by a V14 reader and simply end here.
+    if format_version >= STORE_VERSION_V14 && reader.remaining() != 0 {
         match reader.byte()? {
             0 => {}
             1 => {
