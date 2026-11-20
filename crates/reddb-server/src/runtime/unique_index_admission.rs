@@ -47,12 +47,24 @@ impl RedDBRuntime {
         fields: &[(String, Value)],
         target: Option<&[String]>,
     ) -> RedDBResult<Option<EntityId>> {
+        self.unique_conflict_id_excluding(collection, fields, target, None)
+    }
+
+    /// [`Self::unique_conflict_id`] that ignores `exclude`, the version an
+    /// UPDATE replaces.
+    pub(crate) fn unique_conflict_id_excluding(
+        &self,
+        collection: &str,
+        fields: &[(String, Value)],
+        target: Option<&[String]>,
+        exclude: Option<EntityId>,
+    ) -> RedDBResult<Option<EntityId>> {
         for index in self.index_store_ref().unique_indexes(collection) {
             if !matches_target(&index, target) {
                 continue;
             }
             if let Some(key) = index_key(&index, fields) {
-                if let Some(id) = self.unique_key_conflict(&index, &key, None)? {
+                if let Some(id) = self.unique_key_conflict(&index, &key, exclude)? {
                     return Ok(Some(id));
                 }
             }
@@ -141,9 +153,10 @@ impl RedDBRuntime {
 
     /// A row in the disk base that reserves a declared `PRIMARY KEY`/`UNIQUE`
     /// key. The contract's resident probe only sees rows still in memory, so
-    /// a constraint without a unique index over the same columns must look at
-    /// the base as well, or a checkpoint silently drops the constraint.
-    /// Costs one bounded pass over the collection; a unique index avoids it.
+    /// the base must be consulted as well, or a checkpoint silently drops the
+    /// constraint. Costs one bounded pass over the collection: this is the
+    /// fallback for a constraint that has no unique index (tables created
+    /// before constraints got one, or whose index was dropped).
     pub(crate) fn cold_constraint_conflict(
         &self,
         collection: &str,
@@ -326,6 +339,74 @@ mod tests {
         assert_eq!(
             values(&runtime, "SELECT id FROM accounts ORDER BY id", "id"),
             vec![Value::text("a"), Value::text("b")]
+        );
+    }
+
+    fn constraint_indexes(runtime: &RedDBRuntime, table: &str) -> Vec<(String, Vec<String>)> {
+        let mut indexes: Vec<_> = runtime
+            .index_store_ref()
+            .unique_indexes(table)
+            .into_iter()
+            .map(|index| (index.name, index.columns))
+            .collect();
+        indexes.sort();
+        indexes
+    }
+
+    #[test]
+    fn declared_constraints_get_a_unique_index() {
+        let (_directory, runtime) = cold_table(&[
+            "CREATE TABLE members (id INTEGER PRIMARY KEY, email TEXT UNIQUE, org TEXT)",
+            "INSERT INTO members (id, email, org) VALUES (1, 'a@x', 'o')",
+        ]);
+        assert_eq!(
+            constraint_indexes(&runtime, "members"),
+            vec![
+                ("members_email_key".to_string(), vec!["email".to_string()]),
+                ("members_pkey".to_string(), vec!["id".to_string()]),
+            ]
+        );
+        // The violation is still reported as the constraint, on disk too.
+        let error = runtime
+            .execute_query("INSERT INTO members (id, email, org) VALUES (1, 'b@x', 'o')")
+            .expect_err("duplicate primary key on disk");
+        assert!(error.to_string().contains("primary key"), "{error}");
+        // A constraint that already has a unique index keeps it.
+        runtime
+            .execute_query("CREATE TABLE IF NOT EXISTS members (id INTEGER PRIMARY KEY, email TEXT UNIQUE, org TEXT)")
+            .expect("idempotent ddl");
+        assert_eq!(constraint_indexes(&runtime, "members").len(), 2);
+    }
+
+    #[test]
+    fn idempotent_ddl_indexes_a_table_created_without_constraint_indexes() {
+        let (_directory, runtime) = cold_table(&[
+            "CREATE TABLE legacy (id TEXT PRIMARY KEY, v TEXT)",
+            "INSERT INTO legacy (id, v) VALUES ('a', '1'), ('b', '2')",
+            // What a table created by an older release looks like.
+            "DROP INDEX legacy_pkey ON legacy",
+        ]);
+        assert!(constraint_indexes(&runtime, "legacy").is_empty());
+        // Without the index the constraint is still enforced, by scanning.
+        assert!(runtime
+            .execute_query("INSERT INTO legacy (id, v) VALUES ('a', 'duplicate')")
+            .is_err());
+        runtime
+            .execute_query("CREATE TABLE IF NOT EXISTS legacy (id TEXT PRIMARY KEY, v TEXT)")
+            .expect("idempotent ddl");
+        assert_eq!(
+            constraint_indexes(&runtime, "legacy"),
+            vec![("legacy_pkey".to_string(), vec!["id".to_string()])]
+        );
+        assert!(runtime
+            .execute_query("INSERT INTO legacy (id, v) VALUES ('b', 'duplicate')")
+            .is_err());
+        runtime
+            .execute_query("INSERT INTO legacy (id, v) VALUES ('c', '3')")
+            .expect("new key");
+        assert_eq!(
+            values(&runtime, "SELECT id FROM legacy ORDER BY id", "id").len(),
+            3
         );
     }
 
