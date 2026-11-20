@@ -1200,6 +1200,48 @@ mod tests {
     }
 
     #[test]
+    fn cold_read_does_not_deadlock_with_a_publication_sealing_its_tree() {
+        let (_directory, runtime) = fixture();
+        let store = runtime.db().store();
+        let pager = Arc::clone(store.pager().expect("pager"));
+        let manager = store.get_collection("hash_rows").expect("hash_rows");
+        let (reading, reader_started) = std::sync::mpsc::channel();
+        let (published, publication_done) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let publication = scope.spawn(|| {
+                // A publication holds the fence and the pager's ownership
+                // epoch for its whole duration, and seals each tree inside.
+                let _fence = store.vault_publication_lock.lock();
+                let _epoch = pager.lock_ownership_mutations();
+                reader_started.recv().expect("reader is about to read");
+                // Let the reader reach a page that is not cached.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let result = store
+                    .flush_paged_registry()
+                    .map_err(|error| error.to_string());
+                published.send(result).expect("report publication");
+            });
+            let reader = scope.spawn(|| {
+                reading.send(()).expect("announce read");
+                let mut rows = 0;
+                manager
+                    .try_for_each_entity(usize::MAX, |_| {
+                        rows += 1;
+                        true
+                    })
+                    .map(|()| rows)
+                    .map_err(|error| error.to_string())
+            });
+            publication_done
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("a publication deadlocked with a cold read of the tree it was sealing")
+                .expect("publication");
+            publication.join().expect("publication thread");
+            assert_eq!(reader.join().expect("reader thread").expect("cold read"), 2);
+        });
+    }
+
+    #[test]
     fn paged_hash_candidates_retain_admission_until_iterator_is_dropped() {
         let (_directory, runtime) = fixture();
         let accounting = runtime.memory_accounting();

@@ -376,6 +376,12 @@ impl reddb_engine::storage::page_store::PageStore for Pager {
     fn write_page(&self, id: u32, page: Page) -> Result<(), PagerError> {
         self.core.write_page(id, page)
     }
+    fn try_read_page(&self, id: u32) -> Result<Option<Page>, PagerError> {
+        self.core.try_read_page(id)
+    }
+    fn ownership_guard(&self) -> Option<parking_lot::ReentrantMutexGuard<'_, ()>> {
+        Some(self.core.lock_ownership_mutations())
+    }
     fn allocate_page(&self, kind: super::page::PageType) -> Result<Page, PagerError> {
         self.core.allocate_page(kind)
     }
