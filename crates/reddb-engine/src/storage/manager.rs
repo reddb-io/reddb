@@ -715,6 +715,21 @@ impl SegmentManager {
             .then_some(entity)
     }
 
+    /// Like [`Self::hinted_live_row_version`], but also finds a hinted version
+    /// that a checkpoint moved to the backing. Read failures propagate.
+    pub fn try_hinted_live_row_version(
+        &self,
+        logical_id: EntityId,
+        limit_bytes: usize,
+    ) -> Result<Option<UnifiedEntity>, crate::storage::error::StoreError> {
+        let Some(physical_id) = self.live_row_version_hints.read().get(&logical_id).copied() else {
+            return Ok(None);
+        };
+        Ok(self.try_get(physical_id, limit_bytes)?.filter(|entity| {
+            entity.id == physical_id && Self::live_row_version_key(entity) == Some(logical_id)
+        }))
+    }
+
     /// Insert a new entity
     pub fn insert(&self, mut entity: UnifiedEntity) -> Result<EntityId, SegmentError> {
         if entity.id.raw() == 0 {
