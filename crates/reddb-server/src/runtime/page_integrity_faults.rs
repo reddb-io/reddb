@@ -396,7 +396,10 @@ fn reused_collection_page(path: &Path) -> (u32, Page) {
     seed(path);
     let (old_root, old_image) = collection_root(path, "records");
     let mut previous = BTreeMap::from([(old_root, old_image)]);
-    for generation in 1..=16 {
+    // Which retired page a checkpoint picks for the new root depends on what
+    // else allocated in between, so the first repeat is a birthday problem
+    // over the free pages, not a fixed distance.
+    for generation in 1..=64 {
         let runtime = open(path).expect("healthy writer");
         let payload = format!("committed-{generation}");
         runtime
@@ -427,5 +430,5 @@ fn reused_collection_page(path: &Path) -> (u32, Page) {
             return (root, old_image);
         }
     }
-    panic!("fixture must reuse a collection page within sixteen checkpoints");
+    panic!("fixture must reuse a collection page within sixty-four checkpoints");
 }
