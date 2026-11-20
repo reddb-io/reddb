@@ -1219,7 +1219,7 @@ mod tests {
             let rows = (0..100)
                 .map(|row| {
                     let row = batch * 100 + row;
-                    format!("('r{row}', '{row}', '{payload}')")
+                    format!("('{row}', '{row}', '{payload}')")
                 })
                 .collect::<Vec<_>>()
                 .join(",");
@@ -1258,7 +1258,7 @@ mod tests {
 
         // A present key still answers, and a literal of another type than the
         // declared column keeps the scan and its comparison rules.
-        assert_eq!(loads("SELECT id FROM ledger WHERE id = 'r4321'").0, 1);
+        assert_eq!(loads("SELECT id FROM ledger WHERE id = '4321'").0, 1);
         assert_eq!(
             loads("SELECT id FROM ledger WHERE id = 4321").0,
             loads("SELECT id FROM ledger WHERE code = 4321").0,
