@@ -1280,6 +1280,84 @@ mod tests {
     }
 
     #[test]
+    fn select_of_an_absent_key_does_not_walk_the_collection() {
+        // More rows than the reopened page cache can hold, so walking the
+        // collection shows up as page loads. The payload is noise: a repeated
+        // byte compresses until the whole collection fits in the cache.
+        const ROWS: usize = 8_000;
+        let directory = tempfile::tempdir().expect("absent key fixture");
+        let options = RedDBOptions::persistent(directory.path().join("absent.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile");
+        let seed = RedDBRuntime::with_options(options.clone()).expect("seed");
+        seed.execute_query("CREATE TABLE ledger (id TEXT PRIMARY KEY, code TEXT, payload TEXT)")
+            .expect("create");
+        let mut state = 0x4d595df4d0f33173_u64;
+        let mut payload = || {
+            (0..2000)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    char::from(b'a' + (state % 26) as u8)
+                })
+                .collect::<String>()
+        };
+        for batch in 0..ROWS / 100 {
+            let rows = (0..100)
+                .map(|row| {
+                    let row = batch * 100 + row;
+                    format!("('{row}', '{row}', '{}')", payload())
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            seed.execute_query(&format!(
+                "INSERT INTO ledger (id, code, payload) VALUES {rows}"
+            ))
+            .expect("seed rows");
+        }
+        seed.flush().expect("seed checkpoint");
+        drop(seed);
+        let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options.with_memory_budget(16 * 1024 * 1024))
+        })
+        .expect("cold runtime");
+        let pager = Arc::clone(runtime.db().store().pager().expect("pager"));
+        let loads = |sql: &str| {
+            let before = pager.cache_stats().misses;
+            let rows = runtime.execute_query(sql).expect(sql).result.records.len();
+            (rows, pager.cache_stats().misses - before)
+        };
+
+        // The automatic index on `id` knows no row has the key.
+        let (rows, absent) = loads("SELECT id FROM ledger WHERE id = 'never-inserted'");
+        assert_eq!(rows, 0);
+        // The same question without an index has to read the collection.
+        let (rows, walked) = loads("SELECT id FROM ledger WHERE code = 'never-inserted'");
+        assert_eq!(rows, 0);
+        assert!(
+            walked > 200,
+            "fixture must be larger than the page cache: a walk loaded {walked} pages"
+        );
+        assert!(
+            absent < 32,
+            "an absent indexed key loaded {absent} pages; a walk loads {walked}"
+        );
+
+        // A present key still answers, and a literal of another type than the
+        // declared column keeps the scan and its comparison rules.
+        assert_eq!(loads("SELECT id FROM ledger WHERE id = '4321'").0, 1);
+        assert_eq!(
+            loads("SELECT id FROM ledger WHERE id = 4321").0,
+            loads("SELECT id FROM ledger WHERE code = 4321").0,
+            "an indexed and an unindexed TEXT column must agree on a numeric literal"
+        );
+    }
+
+    #[test]
     fn cold_scan_does_not_deadlock_with_a_checkpoint_appending_to_its_base() {
         // More rows than the reopened page cache can hold, so the scan has to
         // load pages whatever the boot already read.
