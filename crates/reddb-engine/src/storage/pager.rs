@@ -360,6 +360,19 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         self.ownership_mutations.lock()
     }
 
+    /// [`Self::read_page`] that never waits for another thread's ownership
+    /// publication: `None` when the page is not cached and the epoch is held
+    /// elsewhere. The owning thread itself re-enters and always answers.
+    pub fn try_read_page(&self, page_id: u32) -> Result<Option<Page>, PagerError> {
+        if let Some(page) = self.cache.get(page_id) {
+            return Ok(Some(page));
+        }
+        let Some(_ownership) = self.ownership_mutations.try_lock() else {
+            return Ok(None);
+        };
+        self.read_page(page_id).map(Some)
+    }
+
     /// An interrupted publication must be recovered before any more writes.
     pub fn fence_interrupted_ownership(&self) {
         self.writeback_failed
