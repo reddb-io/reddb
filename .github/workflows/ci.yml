@@ -711,7 +711,9 @@ jobs:
       - platforms
     if: ${{ !inputs.preview_platforms && ((needs.gate.outputs.run_heavy == 'true') && (needs.platforms.outputs.linux_x64 == 'true')) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ matrix.shard == 'unit' && 30 || 20 }}
+    # The unit lane runs to completion (no fail-fast) and takes about 28 min on
+    # a quiet runner; a busy shared runner is 1.6x slower.
+    timeout-minutes: ${{ matrix.shard == 'unit' && 60 || 20 }}
     strategy:
       fail-fast: false
       matrix:
