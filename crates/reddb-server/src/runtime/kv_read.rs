@@ -175,6 +175,61 @@ mod tests {
     }
 
     #[test]
+    fn config_reads_are_cached_and_do_not_wait_for_the_publication_fence() {
+        let directory = tempfile::tempdir().expect("config fixture");
+        let options = crate::RedDBOptions::persistent(directory.path().join("config.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile");
+        let seed = RedDBRuntime::with_options(options.clone()).expect("seed");
+        seed.db()
+            .store()
+            .set_config_tree("probe", &crate::serde_json::json!({ "flag": "on" }));
+        seed.flush().expect("publish config");
+        drop(seed);
+        let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options)
+        })
+        .expect("cold runtime");
+        let store = runtime.db().store();
+        assert!(store
+            .get_collection("red.config")
+            .expect("config collection")
+            .has_backing());
+        assert_eq!(store.get_config("probe.flag"), Some(Value::text("on")));
+
+        // A checkpoint or a long index read holds this fence in production,
+        // and every statement reads configuration.
+        let fence = store.vault_publication_lock.lock();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader_store = std::sync::Arc::clone(&store);
+        let reader = std::thread::spawn(move || {
+            let _ = sender.send((
+                reader_store.get_config("probe.flag"),
+                reader_store.get_config("probe.flag"),
+            ));
+        });
+        let read = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a cached config read must not wait for the publication fence");
+        assert_eq!(read.0, Some(Value::text("on")));
+        assert_eq!(read.1, read.0);
+        drop(fence);
+        reader.join().expect("reader");
+
+        // A write, an added key and an absent key are all seen on the next read.
+        assert_eq!(store.get_config("probe.absent"), None);
+        store.set_config_tree(
+            "probe",
+            &crate::serde_json::json!({ "flag": "off", "absent": "now" }),
+        );
+        assert_eq!(store.get_config("probe.flag"), Some(Value::text("off")));
+        assert_eq!(store.get_config("probe.absent"), Some(Value::text("now")));
+    }
+
+    #[test]
     fn cold_keyed_reads_match_resident_and_propagate_decode_failures() {
         use crate::application::ports::RuntimeEntityPort;
         use crate::storage::engine::BTree;
