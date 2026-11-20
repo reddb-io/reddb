@@ -143,15 +143,21 @@ impl RedDBRuntime {
     /// key. The contract's resident probe only sees rows still in memory, so
     /// a constraint without a unique index over the same columns must look at
     /// the base as well, or a checkpoint silently drops the constraint.
-    /// Costs one bounded pass over the collection; a unique index avoids it.
+    ///
+    /// A HASH index over exactly these columns narrows the search to its
+    /// candidates; the contract's own rule still decides whether a candidate
+    /// reserves the key. Without one this costs a bounded pass over the
+    /// collection.
     pub(crate) fn cold_constraint_conflict(
         &self,
         collection: &str,
         columns: &[String],
+        fields: &[(String, Value)],
         signatures: &[String],
         exclude: Option<EntityId>,
     ) -> RedDBResult<Option<EntityId>> {
-        let Some(manager) = self.db().store().get_collection(collection) else {
+        let store = self.db().store();
+        let Some(manager) = store.get_collection(collection) else {
             return Ok(None);
         };
         if !manager.has_backing() {
@@ -160,25 +166,49 @@ impl RedDBRuntime {
         let (_workspace, read_bytes_max) = self.reserve_index_scan(&manager)?;
         let snapshots = self.snapshot_manager();
         let own_xids = self.own_transaction_xids();
-        let mut conflict = None;
-        manager.try_for_each_entity(read_bytes_max, |entity| {
+        let reserves = |entity: &crate::storage::UnifiedEntity| {
             if exclude == Some(entity.id)
                 || !snapshots.row_reserves_unique_key(entity.xmin, entity.xmax, &own_xids)
             {
-                return true;
+                return false;
             }
-            let Some(row) = entity.data.as_row() else {
-                return true;
-            };
             // Same key representation as the resident probe.
-            let reserved = columns.iter().zip(signatures).all(|(column, signature)| {
-                row.get_field(column)
-                    .is_some_and(|value| format!("{value:?}") == *signature)
-            });
-            if reserved {
+            entity.data.as_row().is_some_and(|row| {
+                columns.iter().zip(signatures).all(|(column, signature)| {
+                    row.get_field(column)
+                        .is_some_and(|value| format!("{value:?}") == *signature)
+                })
+            })
+        };
+        let candidates = self
+            .index_store_ref()
+            .list_indices(collection)
+            .into_iter()
+            .find(|index| {
+                matches!(index.method, super::index_store::IndexMethodKind::Hash)
+                    && matches_target(index, Some(columns))
+            })
+            .and_then(|index| Some((index_key(&index, fields)?, index)));
+        if let Some((key, index)) = candidates {
+            let ids = self
+                .index_store_ref()
+                .hash_lookup(collection, &index.hash_lookup_name(), &key)
+                .map_err(RedDBError::Internal)?;
+            for id in ids {
+                if let Some(entity) = store.try_get(collection, id, read_bytes_max)? {
+                    if reserves(&entity) {
+                        return Ok(Some(id));
+                    }
+                }
+            }
+            return Ok(None);
+        }
+        let mut conflict = None;
+        manager.try_for_each_entity(read_bytes_max, |entity| {
+            if reserves(entity) {
                 conflict = Some(entity.id);
             }
-            !reserved
+            conflict.is_none()
         })?;
         Ok(conflict)
     }
@@ -326,6 +356,55 @@ mod tests {
         assert_eq!(
             values(&runtime, "SELECT id FROM accounts ORDER BY id", "id"),
             vec![Value::text("a"), Value::text("b")]
+        );
+    }
+
+    #[test]
+    fn a_hash_index_on_the_key_serves_the_constraint_check_on_disk() {
+        // The index is not unique: it only narrows the rows the constraint
+        // has to look at. The constraint's own rule still decides.
+        let (_directory, runtime) = cold_table(&[
+            "CREATE TABLE accounts (id TEXT PRIMARY KEY, v TEXT)",
+            "CREATE INDEX accounts_id ON accounts (id) USING HASH",
+            "INSERT INTO accounts (id, v) VALUES ('a', '1'), ('b', '2')",
+        ]);
+        let error = runtime
+            .execute_query("INSERT INTO accounts (id, v) VALUES ('a', 'duplicate')")
+            .expect_err("duplicate primary key on disk");
+        assert!(error.to_string().contains("primary key"), "{error}");
+        runtime
+            .execute_query(
+                "INSERT INTO accounts (id, v) VALUES ('b', 'upserted') \
+                 ON CONFLICT (id) DO UPDATE SET v = 'upserted'",
+            )
+            .expect("upsert over a row on disk");
+        assert_eq!(
+            values(&runtime, "SELECT v FROM accounts WHERE id = 'b'", "v"),
+            vec![Value::text("upserted")]
+        );
+        assert!(runtime
+            .execute_query("UPDATE accounts SET id = 'a' WHERE id = 'b'")
+            .is_err());
+        // Deleting and re-inserting a key inside one transaction, then
+        // rolling back, leaves the original row holding it.
+        for sql in [
+            "BEGIN",
+            "DELETE FROM accounts WHERE id = 'a'",
+            "INSERT INTO accounts (id, v) VALUES ('a', 'replacement')",
+            "ROLLBACK",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        assert_eq!(
+            values(&runtime, "SELECT v FROM accounts WHERE id = 'a'", "v"),
+            vec![Value::text("1")]
+        );
+        runtime
+            .execute_query("INSERT INTO accounts (id, v) VALUES ('c', '3')")
+            .expect("new key");
+        assert_eq!(
+            values(&runtime, "SELECT id FROM accounts ORDER BY id", "id").len(),
+            3
         );
     }
 

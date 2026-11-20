@@ -435,6 +435,7 @@ fn find_row_uniqueness_conflict(
             if let Some(entity_id) = runtime.cold_constraint_conflict(
                 collection,
                 &rule.columns,
+                fields,
                 &signatures,
                 exclude_id,
             )? {
