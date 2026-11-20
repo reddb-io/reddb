@@ -163,7 +163,6 @@ impl RedDBRuntime {
         if !manager.has_backing() {
             return Ok(None);
         }
-        let (_workspace, read_bytes_max) = self.reserve_index_scan(&manager)?;
         let snapshots = self.snapshot_manager();
         let own_xids = self.own_transaction_xids();
         let reserves = |entity: &crate::storage::UnifiedEntity| {
@@ -194,6 +193,12 @@ impl RedDBRuntime {
                 .index_store_ref()
                 .hash_lookup(collection, &index.hash_lookup_name(), &key)
                 .map_err(RedDBError::Internal)?;
+            if ids.is_empty() {
+                return Ok(None);
+            }
+            // Only after the probe: it reserves its own workspace, and a scan
+            // allowance held across it would crowd that out under pressure.
+            let (_workspace, read_bytes_max) = self.reserve_index_scan(&manager)?;
             for id in ids {
                 if let Some(entity) = store.try_get(collection, id, read_bytes_max)? {
                     if reserves(&entity) {
@@ -203,6 +208,7 @@ impl RedDBRuntime {
             }
             return Ok(None);
         }
+        let (_workspace, read_bytes_max) = self.reserve_index_scan(&manager)?;
         let mut conflict = None;
         manager.try_for_each_entity(read_bytes_max, |entity| {
             if reserves(entity) {
