@@ -919,10 +919,8 @@ impl UnifiedStore {
         let mut t_btree_lock = std::time::Duration::ZERO;
         let mut t_btree_insert = std::time::Duration::ZERO;
         let mut t_flush = std::time::Duration::ZERO;
-        if !skip_btree
-            && !Self::deferred_store_wal_capture_active()
-            && !self.immutable_paged_base()?
-        {
+        let immutable_base = self.immutable_paged_base()?;
+        if !skip_btree && !Self::deferred_store_wal_capture_active() && !immutable_base {
             if let (Some(pager), Some(batch)) = (&self.pager, serialized.as_ref()) {
                 let t0 = std::time::Instant::now();
                 let mut btree_indices = self.btree_indices.write();
@@ -960,7 +958,12 @@ impl UnifiedStore {
                 }]
             })
             .unwrap_or_default();
-        if let Err(error) = self.finish_paged_write(actions) {
+        // A batch that skipped the published tree reaches it through the next
+        // checkpoint, which projects each row from its exact WAL image. The
+        // tree is skipped whenever the base is immutable, not only under
+        // bounded residency: without the image the checkpoint has neither the
+        // rows nor their proof and rebuilds the whole collection.
+        if let Err(error) = self.finish_paged_write_for_projection(actions, immutable_base) {
             // Rows are already installed in the resident segment. A failed
             // WAL publication must not leave a successful-looking scan.
             for id in &ids {
