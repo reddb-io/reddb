@@ -1,5 +1,5 @@
 ---
-"reddb-io": patch
+"@reddb-io/cli": patch
 ---
 
 Stop scanning the whole collection to find a row that changed since the last
