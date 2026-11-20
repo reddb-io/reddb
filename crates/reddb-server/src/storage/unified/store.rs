@@ -424,9 +424,10 @@ mod impl_native_c;
 mod impl_pages;
 
 /// Identity of the `red.config` contents a cached read was taken from: the
-/// collection itself, its published base, its physical row count and every
-/// resident segment's mutation counter. Any write moves at least one of them.
-type ConfigStamp = (usize, Option<u32>, usize, Vec<(u64, u64)>);
+/// collection itself, its published base and that base's read allowance, its
+/// physical row count and every resident segment's mutation counter. Any
+/// write, and any change to what a read of the base may return, moves one.
+type ConfigStamp = (usize, Option<u32>, Option<usize>, usize, Vec<(u64, u64)>);
 
 #[derive(Default)]
 struct ConfigReads {

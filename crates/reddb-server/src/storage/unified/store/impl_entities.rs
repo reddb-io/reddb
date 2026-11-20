@@ -490,6 +490,7 @@ impl UnifiedStore {
         let stamp = (
             Arc::as_ptr(&manager) as usize,
             manager.backing_root_page(),
+            manager.backing_read_bytes_max(),
             manager.count(),
             manager.checkpoint_revisions(),
         );
