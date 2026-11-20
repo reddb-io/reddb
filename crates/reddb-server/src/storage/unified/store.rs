@@ -344,6 +344,10 @@ pub struct UnifiedStore {
     /// Reuse only a successfully published generation with the same live rows.
     checkpoint_versions: RwLock<HashMap<String, CheckpointVersion>>,
     checkpoint_durable_rows: RwLock<checkpoint_delta::DurableRows>,
+    /// `red.config` values already read, valid for one state of that
+    /// collection. Statements consult configuration on every execution and
+    /// must not queue behind the publication fence to do it.
+    config_reads: parking_lot::RwLock<ConfigReads>,
     /// The immediately previous published trees and any older reader-pinned
     /// trees. Root identities are persisted with the paged catalog.
     retired_btrees: parking_lot::Mutex<Vec<RetiredBTree>>,
@@ -418,6 +422,18 @@ mod impl_native_a;
 mod impl_native_b;
 mod impl_native_c;
 mod impl_pages;
+
+/// Identity of the `red.config` contents a cached read was taken from: the
+/// collection itself, its published base and that base's read allowance, its
+/// physical row count and every resident segment's mutation counter. Any
+/// write, and any change to what a read of the base may return, moves one.
+type ConfigStamp = (usize, Option<u32>, Option<usize>, usize, Vec<(u64, u64)>);
+
+#[derive(Default)]
+struct ConfigReads {
+    stamp: Option<ConfigStamp>,
+    values: HashMap<String, Option<reddb_types::Value>>,
+}
 mod impl_vault_import;
 mod key_index;
 mod keyed_write;

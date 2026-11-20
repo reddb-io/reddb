@@ -482,7 +482,34 @@ impl UnifiedStore {
 
     pub fn try_get_config(&self, key: &str) -> Result<Option<reddb_types::Value>, StoreError> {
         super::config_keys::validate_config_key(key)?;
-        self.try_get_key_value("red.config", key)
+        let Some(manager) = self.get_collection("red.config") else {
+            return Ok(None);
+        };
+        // Sampled before the read: a write that lands meanwhile moves the
+        // stamp, so the value stored under the old one is dropped next time.
+        let stamp = (
+            Arc::as_ptr(&manager) as usize,
+            manager.backing_root_page(),
+            manager.backing_read_bytes_max(),
+            manager.count(),
+            manager.checkpoint_revisions(),
+        );
+        {
+            let cached = self.config_reads.read();
+            if cached.stamp.as_ref() == Some(&stamp) {
+                if let Some(value) = cached.values.get(key) {
+                    return Ok(value.clone());
+                }
+            }
+        }
+        let value = self.try_get_key_value("red.config", key)?;
+        let mut cached = self.config_reads.write();
+        if cached.stamp.as_ref() != Some(&stamp) {
+            cached.values.clear();
+            cached.stamp = Some(stamp);
+        }
+        cached.values.insert(key.to_string(), value.clone());
+        Ok(value)
     }
 
     pub(crate) fn try_get_config_entity(
