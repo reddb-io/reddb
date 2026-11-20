@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.39.10
+
+### Patch Changes
+
+- [#2909](https://github.com/reddb-io/reddb/pull/2909) [`14788a3`](https://github.com/reddb-io/reddb/commit/14788a39340227c0762f1a65a39f0b23efed5b0b) Thanks [@filipeforattini](https://github.com/filipeforattini)! - The execution watchdog now says what it is waiting for. When an execution
+  outlives its deadline and is still running, the server logs a warning with the
+  statement (redacted like the slow-query log) and how long it has been running,
+  repeats it every minute while it stays stuck, and logs when it finishes. A
+  server that degraded readiness with `handler_deadline_exceeded` while its
+  process sat idle gave no way to tell which statement was blocked ([#2908](https://github.com/reddb-io/reddb/issues/2908)).
+
 ## 1.39.9
 
 ### Patch Changes
