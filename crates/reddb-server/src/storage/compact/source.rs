@@ -148,7 +148,7 @@ impl Source {
             for (id, page) in entries {
                 ensure(
                     id > 0
-                        && (id < DWB_ZONE_START_PAGE || id >= FIRST_ALLOCATABLE_PAGE)
+                        && !(DWB_ZONE_START_PAGE..FIRST_ALLOCATABLE_PAGE).contains(&id)
                         && u64::from(id) < bytes.div_ceil(PAGE_SIZE as u64)
                         && seen.insert(id),
                     "invalid double-write page ownership",
