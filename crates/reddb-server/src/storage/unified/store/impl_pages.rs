@@ -2745,7 +2745,7 @@ impl UnifiedStore {
         };
         // Prevent unrelated allocations or frees from being attributed to
         // this checkpoint's ownership epoch.
-        let _ownership_guard = pager.lock_ownership_mutations();
+        let ownership_guard = pager.lock_ownership_mutations();
 
         match pager.read_manifest_page() {
             Ok(_) => {}
@@ -3025,6 +3025,10 @@ impl UnifiedStore {
         }
         *self.checkpoint_durable_rows.write() = Default::default();
 
+        // The epoch is finished and nothing below allocates. Installing a base
+        // waits for its readers, and a reader that has to load a page waits for
+        // the epoch while holding the base: release it before waiting for them.
+        drop(ownership_guard);
         if let Some(limit) = self.config.resident_memory_bytes_max {
             let mut versions = self.checkpoint_versions.write();
             for (name, manager) in collections.iter() {

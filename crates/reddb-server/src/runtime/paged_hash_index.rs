@@ -1200,6 +1200,84 @@ mod tests {
     }
 
     #[test]
+    fn cold_scan_does_not_deadlock_with_a_checkpoint_appending_to_its_base() {
+        // More rows than the reopened page cache can hold, so the scan has to
+        // load pages whatever the boot already read.
+        const ROWS: usize = 10_000;
+        let directory = tempfile::tempdir().expect("wide fixture");
+        let options = RedDBOptions::persistent(directory.path().join("wide.rdb"))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_storage_profile(
+                crate::storage::profile::StorageDeployPreset::PrimaryReplicaDev.selection(),
+            )
+            .expect("profile");
+        let seed = RedDBRuntime::with_options(options.clone()).expect("seed");
+        seed.execute_query("CREATE TABLE wide (seq INTEGER, payload TEXT)")
+            .expect("create");
+        let payload = "x".repeat(2000);
+        for batch in 0..ROWS / 100 {
+            let rows = (0..100)
+                .map(|row| format!("({}, '{payload}')", batch * 100 + row))
+                .collect::<Vec<_>>()
+                .join(",");
+            seed.execute_query(&format!("INSERT INTO wide (seq, payload) VALUES {rows}"))
+                .expect("seed rows");
+        }
+        seed.flush().expect("seed checkpoint");
+        drop(seed);
+        let runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options.with_memory_budget(16 * 1024 * 1024))
+        })
+        .expect("cold runtime");
+        // One resident row gives the next checkpoint an append to the base.
+        runtime
+            .execute_query("INSERT INTO wide (seq, payload) VALUES (10000, 'new')")
+            .expect("pending row");
+        let store = runtime.db().store();
+        let pager = Arc::clone(store.pager().expect("pager"));
+        let manager = store.get_collection("wide").expect("wide");
+
+        // The scan holds the collection's base while it reads; every page it
+        // has to load waits for the ownership epoch. A checkpoint holds that
+        // epoch throughout and must not wait for the base inside it.
+        let epoch = pager.lock_ownership_mutations();
+        let scanned = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader = {
+            let scanned = Arc::clone(&scanned);
+            std::thread::spawn(move || {
+                manager
+                    .try_for_each_entity(usize::MAX, |_| {
+                        scanned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        true
+                    })
+                    .map_err(|error| error.to_string())
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            scanned.load(std::sync::atomic::Ordering::Relaxed) <= ROWS,
+            "the scan must be waiting for a page it has to load"
+        );
+        let (checkpointed, checkpoint_done) = std::sync::mpsc::channel();
+        let checkpoint = {
+            let runtime = runtime.clone();
+            std::thread::spawn(move || {
+                let result = runtime.flush().map_err(|error| error.to_string());
+                checkpointed.send(result).expect("report checkpoint");
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(epoch);
+        checkpoint_done
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("a checkpoint deadlocked with a cold scan of the base it was appending to")
+            .expect("checkpoint");
+        checkpoint.join().expect("checkpoint thread");
+        reader.join().expect("reader thread").expect("scan");
+        assert_eq!(scanned.load(std::sync::atomic::Ordering::Relaxed), ROWS + 1);
+    }
+
+    #[test]
     fn cold_read_does_not_deadlock_with_a_publication_sealing_its_tree() {
         let (_directory, runtime) = fixture();
         let store = runtime.db().store();
