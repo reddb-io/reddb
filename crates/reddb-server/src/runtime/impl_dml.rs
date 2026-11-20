@@ -452,7 +452,7 @@ impl RedDBRuntime {
         query: &InsertQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
-        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
+        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation(&query.table);
         let branch_store = self.db().store();
         let _branch_publication = (self.vcs_is_versioned(&query.table)?
             || self.has_graph_contract(&query.table))
@@ -2312,7 +2312,7 @@ impl RedDBRuntime {
 
         // Cover the interval from post-image preparation through storage and
         // secondary-index publication. Target selection above remains indexed.
-        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
+        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation(&query.table);
         if needs_rmw_lock {
             let result = self.execute_update_inner_tracked_locked(
                 raw_query,

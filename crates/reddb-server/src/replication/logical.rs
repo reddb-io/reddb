@@ -597,7 +597,7 @@ impl LogicalChangeApplier {
             .get()
             .and_then(crate::runtime::WeakRuntime::upgrade);
         let indexes = runtime.as_ref().map(|runtime| runtime.index_store_ref());
-        let _publication = indexes.map(|indexes| indexes.begin_indexed_mutation());
+        let _publication = indexes.map(|indexes| indexes.begin_unscoped_indexed_mutation());
         let topology = indexes.map(|indexes| indexes.collection_topology_lock(&record.collection));
         // Transaction apply already holds this read guard. Recursive reads
         // must not wait behind an index DDL writer waiting for the outer guard.
@@ -996,7 +996,7 @@ impl LogicalChangeApplier {
             .get()
             .and_then(crate::runtime::WeakRuntime::upgrade);
         let indexes = runtime.as_ref().map(|runtime| runtime.index_store_ref());
-        let _indexes = indexes.map(|indexes| indexes.begin_indexed_mutation());
+        let _indexes = indexes.map(|indexes| indexes.begin_unscoped_indexed_mutation());
         let mut collections: Vec<_> = members.iter().map(|member| &member.collection).collect();
         collections.sort_unstable();
         collections.dedup();

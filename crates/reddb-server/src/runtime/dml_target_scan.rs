@@ -159,7 +159,7 @@ impl<'a> DmlTargetScan<'a> {
 
         let snapshot = crate::runtime::impl_core::capture_current_snapshot();
         let index_store = self.runtime.index_store_ref();
-        let generation = index_store.indexed_mutation_generation();
+        let generation = index_store.indexed_mutation_generation_for(self.table);
         #[cfg(test)]
         index_store.mutation_test_hook(
             self.table,
@@ -177,7 +177,7 @@ impl<'a> DmlTargetScan<'a> {
             || crate::runtime::impl_core::current_snapshot_requires_index_fallback()
             || !can_retry
             || !query_exec::runtime_indexes_queryable(self.table, index_store)
-            || index_store.indexed_mutation_active()
+            || index_store.indexed_mutation_active_for(self.table)
             || snapshot.as_ref().is_some_and(dml_snapshot_index_is_stale);
         if !scan_required {
             if let Some(filter) = self.filter {
@@ -198,8 +198,8 @@ impl<'a> DmlTargetScan<'a> {
                     };
                 if let Some(ids) = candidates {
                     let result = self.recheck_index_candidates(&ids, compiled_filter.as_ref());
-                    if !index_store.indexed_mutation_active()
-                        && generation == index_store.indexed_mutation_generation()
+                    if !index_store.indexed_mutation_active_for(self.table)
+                        && generation == index_store.indexed_mutation_generation_for(self.table)
                         && snapshot
                             .as_ref()
                             .is_none_or(|ctx| !dml_snapshot_index_is_stale(ctx))

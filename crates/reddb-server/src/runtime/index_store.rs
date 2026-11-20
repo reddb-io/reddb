@@ -1128,6 +1128,10 @@ pub struct IndexStore {
     topology: RwLock<HashMap<String, std::sync::Arc<RwLock<()>>>>,
     indexed_mutations_active: AtomicUsize,
     indexed_mutation_generation: AtomicU64,
+    // Per-collection view of the same interval. A collection's secondary
+    // indexes are only published by mutations of that collection, so target
+    // selection on one table must not lose its indexes to writes on another.
+    collection_mutations: RwLock<HashMap<String, std::sync::Arc<CollectionMutationState>>>,
     #[cfg(test)]
     pub(super) before_build: parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
@@ -1136,10 +1140,21 @@ pub struct IndexStore {
 
 /// Covers the interval in which storage and secondary indexes are published.
 /// Scoped to one runtime so unrelated databases do not affect each other.
-pub(crate) struct IndexedMutationGuard<'a>(&'a IndexStore);
+pub(crate) struct IndexedMutationGuard<'a>(&'a IndexStore, std::sync::Arc<CollectionMutationState>);
+
+/// Not a valid collection name; see `begin_unscoped_indexed_mutation`.
+const UNSCOPED_MUTATION: &str = "\0unscoped";
+
+#[derive(Default)]
+struct CollectionMutationState {
+    active: AtomicUsize,
+    generation: AtomicU64,
+}
 
 impl Drop for IndexedMutationGuard<'_> {
     fn drop(&mut self) {
+        self.1.generation.fetch_add(1, Ordering::SeqCst);
+        self.1.active.fetch_sub(1, Ordering::SeqCst);
         self.0
             .indexed_mutation_generation
             .fetch_add(1, Ordering::SeqCst);
@@ -1162,6 +1177,7 @@ impl IndexStore {
             topology: RwLock::new(HashMap::new()),
             indexed_mutations_active: AtomicUsize::new(0),
             indexed_mutation_generation: AtomicU64::new(0),
+            collection_mutations: RwLock::new(HashMap::new()),
             #[cfg(test)]
             before_build: parking_lot::Mutex::new(None),
             #[cfg(test)]
@@ -1169,11 +1185,58 @@ impl IndexStore {
         }
     }
 
-    pub(crate) fn begin_indexed_mutation(&self) -> IndexedMutationGuard<'_> {
+    fn collection_mutation_state(
+        &self,
+        collection: &str,
+    ) -> std::sync::Arc<CollectionMutationState> {
+        if let Some(state) = self.collection_mutations.read().get(collection) {
+            return std::sync::Arc::clone(state);
+        }
+        std::sync::Arc::clone(
+            self.collection_mutations
+                .write()
+                .entry(collection.to_string())
+                .or_default(),
+        )
+    }
+
+    pub(crate) fn begin_indexed_mutation(&self, collection: &str) -> IndexedMutationGuard<'_> {
+        let state = self.collection_mutation_state(collection);
         self.indexed_mutations_active.fetch_add(1, Ordering::SeqCst);
         self.indexed_mutation_generation
             .fetch_add(1, Ordering::SeqCst);
-        IndexedMutationGuard(self)
+        state.active.fetch_add(1, Ordering::SeqCst);
+        state.generation.fetch_add(1, Ordering::SeqCst);
+        IndexedMutationGuard(self, state)
+    }
+
+    /// A mutation whose collections are not known up front (replicated
+    /// transactions). It counts as active for every collection.
+    pub(crate) fn begin_unscoped_indexed_mutation(&self) -> IndexedMutationGuard<'_> {
+        self.begin_indexed_mutation(UNSCOPED_MUTATION)
+    }
+
+    /// Whether a mutation of `collection` is publishing its indexes now.
+    pub(crate) fn indexed_mutation_active_for(&self, collection: &str) -> bool {
+        let states = self.collection_mutations.read();
+        [collection, UNSCOPED_MUTATION].iter().any(|key| {
+            states
+                .get(*key)
+                .is_some_and(|state| state.active.load(Ordering::SeqCst) != 0)
+        })
+    }
+
+    /// Changes whenever a mutation of `collection` starts or finishes.
+    pub(crate) fn indexed_mutation_generation_for(&self, collection: &str) -> u64 {
+        let states = self.collection_mutations.read();
+        [collection, UNSCOPED_MUTATION]
+            .iter()
+            .map(|key| {
+                states
+                    .get(*key)
+                    .map_or(0, |state| state.generation.load(Ordering::SeqCst))
+            })
+            .fold(0, u64::wrapping_add)
     }
 
     pub(crate) fn indexed_mutation_active(&self) -> bool {
@@ -1208,7 +1271,7 @@ impl IndexStore {
     /// The caller exclusively fences collection topology until publication.
     /// No live backing is changed until the complete replacement is ready.
     pub(crate) fn replace_collection_from(&self, collection: &str, prepared: Self) {
-        let _indexed_mutation = self.begin_indexed_mutation();
+        let _indexed_mutation = self.begin_indexed_mutation(collection);
         let mut registry = self.registry.write();
         self.hash.replace_collection_from(collection, prepared.hash);
         #[cfg(test)]
@@ -1525,7 +1588,7 @@ impl IndexStore {
 
     /// Drop an index
     pub fn drop_index(&self, name: &str, collection: &str) -> bool {
-        let _indexed_mutation = self.begin_indexed_mutation();
+        let _indexed_mutation = self.begin_indexed_mutation(collection);
         let mut registry = write_unpoisoned(&self.registry);
         let key = (collection.to_string(), name.to_string());
         if let Some(info) = registry.remove(&key) {
@@ -1768,6 +1831,8 @@ impl IndexStore {
         }
         for (entity_id, fields) in rows {
             self.paged_btree_overlay_insert(collection, *entity_id, fields)?;
+            self.hash
+                .paged_overlay_insert(collection, *entity_id, fields);
         }
         let registry = self.registry.read();
 
@@ -1875,6 +1940,8 @@ impl IndexStore {
         fields: &[(String, Value)],
     ) -> Result<(), String> {
         self.paged_btree_overlay_insert(collection, entity_id, fields)?;
+        self.hash
+            .paged_overlay_insert(collection, entity_id, fields);
         let registry = self.registry.read();
         for idx in registry.values() {
             if idx.collection != collection || self.index_is_paged(idx) {
@@ -1959,6 +2026,8 @@ impl IndexStore {
         fields: &[(String, Value)],
     ) -> Result<(), String> {
         self.paged_btree_overlay_delete(collection, entity_id, fields)?;
+        self.hash
+            .paged_overlay_delete(collection, entity_id, fields);
         self.hash.note_paged_retired(collection, entity_id);
         let registry = self.registry.read();
         for idx in registry.values() {
@@ -2039,6 +2108,8 @@ impl IndexStore {
         new_fields: &[(String, Value)],
     ) -> Result<(), String> {
         self.paged_btree_overlay_update(collection, entity_id, old_fields, new_fields)?;
+        self.hash
+            .paged_overlay_update(collection, entity_id, old_fields, new_fields);
         // Snapshot the indexed columns once to avoid holding the registry
         // lock across delete/insert sub-calls (those re-acquire it).
         // Also include parent path segments (e.g. "body" for "body.service.tier")

@@ -1276,7 +1276,7 @@ impl UnifiedStore {
                 return Ok(Some(entity));
             }
         }
-        Ok(manager.hinted_live_row_version(logical_id))
+        manager.try_hinted_live_row_version(logical_id, usize::MAX)
     }
 
     pub(crate) fn try_get_table_row_by_logical_id(
@@ -1295,7 +1295,7 @@ impl UnifiedStore {
                 return Ok(Some(entity));
             }
         }
-        if let Some(entity) = manager.hinted_live_row_version(logical_id) {
+        if let Some(entity) = manager.try_hinted_live_row_version(logical_id, usize::MAX)? {
             return Ok(Some(entity));
         }
         // Preserve the current-row policy: first live version, otherwise the
