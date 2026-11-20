@@ -301,6 +301,7 @@ impl<P: PageStore> TreePageStore<P> {
         let Some(proof) = &self.proof else {
             return Ok(None);
         };
+        let _ownership = self.inner.ownership_guard();
         let mut state = proof.write();
         self.available()?;
         state.sealed = true;
@@ -311,6 +312,7 @@ impl<P: PageStore> TreePageStore<P> {
         let Some(proof) = &self.proof else {
             return Ok(());
         };
+        let _ownership = self.inner.ownership_guard();
         let result = (|| {
             let pages = self.proof_pages()?;
             let mut state = proof.write();
@@ -340,6 +342,8 @@ impl<P: PageStore> TreePageStore<P> {
         let Some(proof) = &self.proof else {
             return Ok(None);
         };
+        // Walks proof pages, any of which may have to be loaded.
+        let _ownership = self.inner.ownership_guard();
         let state = proof.read();
         if include_data {
             if !state.sealed {
@@ -400,11 +404,62 @@ impl<P: PageStore> TreePageStore<P> {
     }
 }
 
+/// Reads through a store without ever waiting for its ownership epoch, and
+/// records whether a read would have had to.
+struct WithoutWaiting<'a, P> {
+    inner: &'a P,
+    would_wait: std::cell::Cell<bool>,
+}
+
+impl<P: PageStore> PageStore for WithoutWaiting<'_, P> {
+    fn read_page(&self, page_id: u32) -> Result<Page, PagerError> {
+        match self.inner.try_read_page(page_id)? {
+            Some(page) => Ok(page),
+            None => {
+                self.would_wait.set(true);
+                Err(invalid(page_id, "page read would wait for a publication"))
+            }
+        }
+    }
+    fn write_page(&self, page_id: u32, page: Page) -> Result<(), PagerError> {
+        self.inner.write_page(page_id, page)
+    }
+    fn allocate_page(&self, kind: PageType) -> Result<Page, PagerError> {
+        self.inner.allocate_page(kind)
+    }
+    fn free_page(&self, page_id: u32) -> Result<(), PagerError> {
+        self.inner.free_page(page_id)
+    }
+    fn page_count(&self) -> Result<u32, PagerError> {
+        self.inner.page_count()
+    }
+}
+
+// Lock order: the store's ownership epoch, then this tree's proof lock.
+//
+// A publication holds the epoch for its whole duration and takes the proof
+// lock inside it (to seal, or to write pages). So nobody may wait for the
+// epoch while holding the proof lock: a reader whose page is not cached must
+// let go of the proof lock, enter the epoch, and take the lock again. Holding
+// it across that wait deadlocks with a publication sealing the same tree.
 impl<P: PageStore> PageStore for TreePageStore<P> {
     fn read_page(&self, page_id: u32) -> Result<Page, PagerError> {
         let Some(proof) = &self.proof else {
             return self.inner.read_page(page_id);
         };
+        {
+            let state = proof.read();
+            self.available()?;
+            let cached = WithoutWaiting {
+                inner: self.inner.as_ref(),
+                would_wait: std::cell::Cell::new(false),
+            };
+            let result = verified_page(&cached, state.root, page_id);
+            if !cached.would_wait.get() {
+                return self.finish(result);
+            }
+        }
+        let _ownership = self.inner.ownership_guard();
         let state = proof.read();
         self.available()?;
         self.finish(verified_page(self.inner.as_ref(), state.root, page_id))
@@ -414,6 +469,7 @@ impl<P: PageStore> PageStore for TreePageStore<P> {
         let Some(proof) = &self.proof else {
             return self.inner.write_page(page_id, page);
         };
+        let _ownership = self.inner.ownership_guard();
         let mut state = proof.write();
         self.available()?;
         let result = (|| {
@@ -433,6 +489,7 @@ impl<P: PageStore> PageStore for TreePageStore<P> {
         let Some(proof) = &self.proof else {
             return self.inner.allocate_page(kind);
         };
+        let _ownership = self.inner.ownership_guard();
         let mut state = proof.write();
         self.available()?;
         let result = (|| {
@@ -453,6 +510,7 @@ impl<P: PageStore> PageStore for TreePageStore<P> {
         let Some(proof) = &self.proof else {
             return self.inner.free_page(page_id);
         };
+        let _ownership = self.inner.ownership_guard();
         let mut state = proof.write();
         self.available()?;
         let result = (|| {
