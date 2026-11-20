@@ -4405,6 +4405,8 @@ fn cold_dml_late_io_failure_discards_prepared_updates_and_remains_retryable() {
     use reddb_engine::storage::collection_read::{CollectionRead, EncodedRecord};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    // The preimage of each target row is a point read of its live version,
+    // so the late failure is injected there rather than on a cursor.
     struct FailingCursor {
         source: Arc<dyn CollectionRead + Send + Sync>,
         opened: AtomicUsize,
@@ -4416,15 +4418,15 @@ fn cold_dml_late_io_failure_discards_prepared_updates_and_remains_retryable() {
             id: EntityId,
             limit: usize,
         ) -> Result<Option<EncodedRecord>, crate::storage::StoreError> {
-            self.source.get_record(id, limit)
-        }
-        fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, crate::storage::StoreError> {
             let opened = self.opened.fetch_add(1, Ordering::SeqCst) + 1;
             if opened == self.fail_at.load(Ordering::SeqCst) {
                 return Err(crate::storage::StoreError::Io(std::io::Error::other(
                     "injected late DML cursor failure",
                 )));
             }
+            self.source.get_record(id, limit)
+        }
+        fn cursor(&self) -> Result<Box<dyn CollectionCursor + '_>, crate::storage::StoreError> {
             self.source.cursor()
         }
         fn owned_cursor(&self) -> Result<Box<dyn CollectionCursor>, crate::storage::StoreError> {
@@ -4432,6 +4434,11 @@ fn cold_dml_late_io_failure_discards_prepared_updates_and_remains_retryable() {
         }
     }
     let (_directory, runtime) = cold_dml_fixture(None);
+    // The loop below asserts that no reader stays pinned; keep the ledger's
+    // background retention sweep, which takes its own snapshot, out of it.
+    runtime
+        .execute_query("SET CONFIG control_events.retention = 'off'")
+        .expect("disable ledger retention");
     let expected = observe(&runtime, "SELECT id, score FROM cold_dml_probe ORDER BY id");
     let store = runtime.db().store();
     store.persist().expect("publish I/O failure source");
@@ -4474,7 +4481,7 @@ fn cold_dml_late_io_failure_discards_prepared_updates_and_remains_retryable() {
     for cycle in 0..100 {
         runtime.invalidate_result_cache();
         let opened = source.opened.load(Ordering::SeqCst);
-        source.fail_at.store(opened + 3, Ordering::SeqCst);
+        source.fail_at.store(opened + 2, Ordering::SeqCst);
         let error = runtime
             .execute_query(query)
             .err()
@@ -4485,7 +4492,7 @@ fn cold_dml_late_io_failure_discards_prepared_updates_and_remains_retryable() {
                 .contains("injected late DML cursor failure"),
             "cycle {cycle}: {error}"
         );
-        assert_eq!(source.opened.load(Ordering::SeqCst), opened + 3);
+        assert_eq!(source.opened.load(Ordering::SeqCst), opened + 2);
         assert_eq!(
             snapshots.oldest_active_xid(),
             None,

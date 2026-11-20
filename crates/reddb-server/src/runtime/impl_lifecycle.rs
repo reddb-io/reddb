@@ -141,6 +141,7 @@ impl RedDBRuntime {
             .flush_local_only()
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         self.index_store_ref().clear_paged_btree_overlays();
+        self.index_store_ref().hash.clear_paged_retired();
         drop(publication);
         if let Err(err) = self.assert_remote_write_allowed("flush") {
             tracing::warn!(

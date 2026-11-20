@@ -124,6 +124,9 @@ struct RuntimeHashIndex {
     name: String,
     identity: SecondaryIndexIdentity,
     projection: Arc<HashProjection>,
+    /// Rows removed since the published index was built. Their postings
+    /// dangle by construction and say nothing about the rest of the index.
+    retired: parking_lot::RwLock<std::collections::HashSet<EntityId>>,
 }
 
 fn read_error(error: impl std::fmt::Display) -> HashIndexError {
@@ -144,6 +147,14 @@ fn storage_error(error: StoreError) -> HashIndexError {
 }
 
 impl PagedHashIndex for RuntimeHashIndex {
+    fn note_retired(&self, entity_id: EntityId) {
+        self.retired.write().insert(entity_id);
+    }
+
+    fn clear_retired(&self) {
+        self.retired.write().clear();
+    }
+
     fn memory_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + std::mem::size_of::<HashProjection>()
@@ -236,7 +247,9 @@ impl RuntimeHashIndex {
                         manager.try_get(id, read_bytes_max).map_err(storage_error)?
                     {
                         accept(&entity)?;
-                    } else {
+                    } else if !self.retired.read().contains(&id) {
+                        // Not a row this index saw removed: the published
+                        // postings cannot be trusted to be complete.
                         dangling_posting = true;
                     }
                 }
@@ -366,6 +379,7 @@ impl RedDBRuntime {
                 name: storage_name.to_string(),
                 identity,
                 projection,
+                retired: parking_lot::RwLock::new(std::collections::HashSet::new()),
             }),
         );
         Ok(())
@@ -463,8 +477,11 @@ mod tests {
         assert!(lookup(&runtime, "missing").is_empty());
     }
 
-    #[test]
-    fn paged_hash_dangling_posting_scans_authoritative_backing() {
+    /// Route the collection's cold reads through a probe that records any
+    /// cursor (i.e. scan) over the backing.
+    fn track_backing_scans(
+        runtime: &RedDBRuntime,
+    ) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         use crate::storage::engine::BTree;
         use reddb_engine::storage::collection_read::{
             CollectionCursor, CollectionRead, EncodedRecord, PagedCollection,
@@ -493,8 +510,6 @@ mod tests {
             }
         }
 
-        let (_directory, runtime) = fixture();
-        let physical_id = lookup(&runtime, "alpha")[0];
         let store = runtime.db().store();
         let root = store.collection_root_page("hash_rows").expect("root");
         let manager = store.get_collection("hash_rows").expect("hash rows");
@@ -512,6 +527,21 @@ mod tests {
             1024 * 1024,
             2,
         );
+        scanned
+    }
+
+    #[test]
+    fn paged_hash_dangling_posting_scans_authoritative_backing() {
+        use std::sync::atomic::Ordering;
+
+        let (_directory, runtime) = fixture();
+        let physical_id = lookup(&runtime, "alpha")[0];
+        let scanned = track_backing_scans(&runtime);
+        let manager = runtime
+            .db()
+            .store()
+            .get_collection("hash_rows")
+            .expect("hash rows");
         manager
             .delete(physical_id)
             .expect("remove indexed physical row");
@@ -522,6 +552,37 @@ mod tests {
             scanned.load(Ordering::SeqCst),
             "a dangling posting must invalidate the fast path and scan the backing"
         );
+    }
+
+    #[test]
+    fn paged_hash_retired_posting_does_not_scan_the_backing() {
+        use std::sync::atomic::Ordering;
+
+        let (_directory, runtime) = fixture();
+        let physical_id = lookup(&runtime, "alpha")[0];
+        let scanned = track_backing_scans(&runtime);
+        let hash = &runtime.index_store_ref().hash;
+        runtime
+            .db()
+            .store()
+            .get_collection("hash_rows")
+            .expect("hash rows")
+            .delete(physical_id)
+            .expect("remove indexed physical row");
+        // The delete path tells the index which row it removed.
+        hash.note_paged_retired("hash_rows", physical_id);
+
+        assert!(lookup(&runtime, "alpha").is_empty());
+        assert_eq!(lookup(&runtime, "beta").len(), 1);
+        assert!(
+            !scanned.load(Ordering::SeqCst),
+            "a posting the index saw retired must not scan the backing"
+        );
+
+        // After a republication nothing retired earlier may excuse a dangle.
+        hash.clear_paged_retired();
+        assert!(lookup(&runtime, "alpha").is_empty());
+        assert!(scanned.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -793,6 +854,7 @@ mod tests {
                 name: "by_email".into(),
                 identity,
                 projection,
+                retired: parking_lot::RwLock::new(std::collections::HashSet::new()),
             }),
         );
         assert_eq!(lookup(&runtime, "alpha").len(), 1);

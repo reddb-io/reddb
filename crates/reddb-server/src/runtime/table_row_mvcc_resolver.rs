@@ -149,6 +149,14 @@ impl reddb_engine::transaction::read::FallibleTableRowVersionStore for UnifiedSt
     ) -> Result<(), Self::Error> {
         UnifiedStore::try_for_each_table_row_version(self, collection, logical_id, visit)
     }
+
+    fn try_live_table_row_head(
+        &self,
+        collection: &str,
+        logical_id: EntityId,
+    ) -> Result<Option<UnifiedEntity>, Self::Error> {
+        UnifiedStore::try_live_table_row_head(self, collection, logical_id)
+    }
 }
 
 #[cfg(test)]
