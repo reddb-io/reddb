@@ -832,18 +832,19 @@ where
                 let role = session.role;
                 let correlation_id = frame.correlation_id;
                 let task_session = stream_session.take();
-                let result = redwire_spawn_blocking_with_permit(runtime.as_ref(), permit, move || {
-                    let mut task_session = task_session;
-                    let raw = execute_with_redwire_context(&operation_context, role, || {
-                        crate::wire::listener::handle_stream_rows(
-                            &task_runtime,
-                            &frame.payload,
-                            &mut task_session,
-                        )
-                    });
-                    (raw, task_session)
-                })
-                .await;
+                let result =
+                    redwire_spawn_blocking_with_permit(runtime.as_ref(), permit, move || {
+                        let mut task_session = task_session;
+                        let raw = execute_with_redwire_context(&operation_context, role, || {
+                            crate::wire::listener::handle_stream_rows(
+                                &task_runtime,
+                                &frame.payload,
+                                &mut task_session,
+                            )
+                        });
+                        (raw, task_session)
+                    })
+                    .await;
                 match result {
                     Ok((raw, returned_session)) => {
                         stream_session = returned_session;
@@ -870,17 +871,18 @@ where
                 let role = session.role;
                 let correlation_id = frame.correlation_id;
                 let task_session = stream_session.take();
-                let result = redwire_spawn_blocking_with_permit(runtime.as_ref(), permit, move || {
-                    let mut task_session = task_session;
-                    let raw = execute_with_redwire_context(&operation_context, role, || {
-                        crate::wire::listener::handle_stream_commit(
-                            &task_runtime,
-                            &mut task_session,
-                        )
-                    });
-                    (raw, task_session)
-                })
-                .await;
+                let result =
+                    redwire_spawn_blocking_with_permit(runtime.as_ref(), permit, move || {
+                        let mut task_session = task_session;
+                        let raw = execute_with_redwire_context(&operation_context, role, || {
+                            crate::wire::listener::handle_stream_commit(
+                                &task_runtime,
+                                &mut task_session,
+                            )
+                        });
+                        (raw, task_session)
+                    })
+                    .await;
                 match result {
                     Ok((raw, returned_session)) => {
                         stream_session = returned_session;
