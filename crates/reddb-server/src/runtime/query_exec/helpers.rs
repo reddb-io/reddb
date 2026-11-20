@@ -137,6 +137,61 @@ pub(crate) fn extract_index_candidate(
     }
 }
 
+/// The literal [`extract_index_candidate`] picks, with its column.
+fn index_candidate_literal(filter: &reddb_rql::ast::Filter) -> Option<(&str, &Value)> {
+    use reddb_rql::ast::{CompareOp, FieldRef, Filter};
+    match filter {
+        Filter::Compare { field, op, value } if *op == CompareOp::Eq => match (field, value) {
+            (
+                FieldRef::TableColumn { column, .. },
+                Value::Text(_) | Value::Integer(_) | Value::UnsignedInteger(_),
+            ) => Some((column.as_str(), value)),
+            _ => None,
+        },
+        Filter::And(left, right) => {
+            index_candidate_literal(left).or_else(|| index_candidate_literal(right))
+        }
+        _ => None,
+    }
+}
+
+/// Whether "no candidates" from the HASH index answers the filter.
+///
+/// Only when the literal has the column's declared type. A declared column
+/// stores normalised values, so no row can equal the literal through a
+/// coercion the index key does not see. An undeclared column keeps the scan.
+pub(crate) fn hash_miss_answers_filter(
+    db: &RedDB,
+    table: &str,
+    filter: &reddb_rql::ast::Filter,
+) -> bool {
+    use reddb_types::DataType;
+    let Some((column, literal)) = index_candidate_literal(filter) else {
+        return false;
+    };
+    let Some(contract) = db.collection_contract_arc(table) else {
+        return false;
+    };
+    let Some(declared) = contract
+        .declared_columns
+        .iter()
+        .find(|declared| declared.name == column)
+    else {
+        return false;
+    };
+    matches!(
+        (
+            reddb_types::knowledge::resolve_type_name(&declared.data_type),
+            literal
+        ),
+        (Some(DataType::Text), Value::Text(_))
+            | (
+                Some(DataType::Integer | DataType::BigInt),
+                Value::Integer(_) | Value::UnsignedInteger(_)
+            )
+    )
+}
+
 /// Extract ALL equality predicates from an AND-tree, one per indexed column.
 /// Used by the TID bitmap path to AND multiple hash index lookups.
 /// The triple is `(column_name, index_bytes, original_Value)`.

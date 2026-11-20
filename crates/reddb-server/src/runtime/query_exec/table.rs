@@ -1442,11 +1442,22 @@ fn execute_runtime_canonical_table_query_inner(
     ) {
         if let Some((column, value_bytes)) = extract_index_candidate(filter) {
             if let Some(idx) = idx_store.find_hash_index_for_column(&query.table, &column) {
+                let generation = idx_store.indexed_mutation_generation_for(&query.table);
                 let mut entity_ids = idx_store
                     .hash_lookup(&query.table, idx.hash_lookup_name().as_ref(), &value_bytes)
                     .map_err(|err| {
                         RedDBError::Internal(format!("hash index lookup failed: {err}"))
                     })?;
+                // No row has the key: answer now instead of walking the
+                // collection to find nothing. UPDATE and DELETE already take
+                // the index at its word, under the same mutation guard.
+                if entity_ids.is_empty()
+                    && super::helpers::hash_miss_answers_filter(db, &query.table, filter)
+                    && !idx_store.indexed_mutation_active_for(&query.table)
+                    && generation == idx_store.indexed_mutation_generation_for(&query.table)
+                {
+                    return Ok(Vec::new());
+                }
                 if !entity_ids.is_empty() {
                     let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
 
