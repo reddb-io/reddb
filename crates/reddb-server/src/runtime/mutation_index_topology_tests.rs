@@ -667,7 +667,7 @@ fn index_publication_guard_is_scoped_to_one_database() {
     let second_index = second.index_store_ref();
     let initial_generation = second_index.indexed_mutation_generation();
     {
-        let _guard = first_index.begin_indexed_mutation();
+        let _guard = first_index.begin_unscoped_indexed_mutation();
         assert!(first_index.indexed_mutation_active());
         assert!(!second_index.indexed_mutation_active());
         assert_eq!(
@@ -679,6 +679,41 @@ fn index_publication_guard_is_scoped_to_one_database() {
     assert_eq!(
         second_index.indexed_mutation_generation(),
         initial_generation
+    );
+}
+
+#[test]
+fn index_publication_guard_is_scoped_to_one_collection() {
+    // A write on one table must not push indexed target selection on another
+    // table into a full scan; an unscoped mutation still fences every table.
+    let runtime = RedDBRuntime::in_memory().expect("runtime");
+    let index = runtime.index_store_ref();
+    let other_generation = index.indexed_mutation_generation_for("other");
+    {
+        let _guard = index.begin_indexed_mutation("busy");
+        assert!(index.indexed_mutation_active());
+        assert!(index.indexed_mutation_active_for("busy"));
+        assert!(!index.indexed_mutation_active_for("other"));
+        assert_eq!(
+            index.indexed_mutation_generation_for("other"),
+            other_generation
+        );
+    }
+    assert!(!index.indexed_mutation_active_for("busy"));
+    assert_ne!(index.indexed_mutation_generation_for("busy"), 0);
+    assert_eq!(
+        index.indexed_mutation_generation_for("other"),
+        other_generation
+    );
+    {
+        let _guard = index.begin_unscoped_indexed_mutation();
+        assert!(index.indexed_mutation_active_for("busy"));
+        assert!(index.indexed_mutation_active_for("other"));
+    }
+    assert!(!index.indexed_mutation_active_for("other"));
+    assert_ne!(
+        index.indexed_mutation_generation_for("other"),
+        other_generation
     );
 }
 

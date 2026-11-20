@@ -1975,7 +1975,7 @@ impl RedDBRuntime {
         let store = self.inner.db.store();
         let _publication = store.vault_publication_lock.lock();
         self.vcs_reject_destructive_ddl(name)?;
-        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
+        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation(name);
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection(name) else {
             return Ok(0);

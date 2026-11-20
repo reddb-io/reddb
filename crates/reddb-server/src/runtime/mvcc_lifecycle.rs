@@ -991,7 +991,7 @@ impl RedDBRuntime {
         previous_xmax: u64,
         _topology_guard: parking_lot::RwLockReadGuard<'_, ()>,
     ) -> RedDBResult<()> {
-        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation();
+        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation(collection);
         let store = self.inner.db.store();
         let _publication = store.vault_publication_lock.lock();
         let epoch = store
