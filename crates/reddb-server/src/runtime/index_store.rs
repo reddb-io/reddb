@@ -2022,6 +2022,7 @@ impl IndexStore {
         fields: &[(String, Value)],
     ) -> Result<(), String> {
         self.paged_btree_overlay_delete(collection, entity_id, fields)?;
+        self.hash.note_paged_retired(collection, entity_id);
         let registry = self.registry.read();
         for idx in registry.values() {
             if idx.collection != collection || self.index_is_paged(idx) {

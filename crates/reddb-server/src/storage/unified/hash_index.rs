@@ -95,6 +95,11 @@ impl IntoIterator for HashCandidates {
 pub(crate) trait PagedHashIndex: Send + Sync {
     fn lookup(&self, key: &[u8]) -> Result<HashCandidates, HashIndexError>;
     fn memory_bytes(&self) -> usize;
+    /// A row was removed after the last publication; its published posting
+    /// is now expected to dangle until the next one.
+    fn note_retired(&self, _entity_id: EntityId) {}
+    /// The published index was rebuilt: nothing retired before it dangles.
+    fn clear_retired(&self) {}
 }
 
 /// A single hash index on one or more columns
@@ -364,6 +369,30 @@ impl HashIndexManager {
             .entry(collection.into())
             .or_default()
             .insert(name.into(), index);
+    }
+
+    fn paged_providers(&self, collection: Option<&str>) -> Vec<Arc<dyn PagedHashIndex>> {
+        self.indices
+            .read()
+            .iter()
+            .filter(|(name, _)| collection.is_none_or(|wanted| wanted == name.as_str()))
+            .flat_map(|(_, indexes)| indexes.values())
+            .filter_map(|index| index.paged.clone())
+            .collect()
+    }
+
+    /// See [`PagedHashIndex::note_retired`].
+    pub(crate) fn note_paged_retired(&self, collection: &str, entity_id: EntityId) {
+        for provider in self.paged_providers(Some(collection)) {
+            provider.note_retired(entity_id);
+        }
+    }
+
+    /// See [`PagedHashIndex::clear_retired`].
+    pub(crate) fn clear_paged_retired(&self) {
+        for provider in self.paged_providers(None) {
+            provider.clear_retired();
+        }
     }
 
     pub(crate) fn is_paged(&self, collection: &str, name: &str) -> bool {

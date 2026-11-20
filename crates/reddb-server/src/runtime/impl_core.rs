@@ -322,6 +322,7 @@ impl RedDBRuntime {
     /// SlowQueryLogger construction (runtime startup), so the per-call
     /// cost on below-threshold paths is one relaxed atomic load.
     pub fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
+        super::execution_watchdog::label_current_execution(|| redact_sql_for_slow_log(query));
         let started = std::time::Instant::now();
         self.inner.node_load_telemetry.query_start();
         let receipt = super::transactional_replication::CommitReceiptScope::begin(self);
@@ -344,6 +345,7 @@ impl RedDBRuntime {
         if params.is_empty() {
             return self.execute_query(query);
         }
+        super::execution_watchdog::label_current_execution(|| redact_sql_for_slow_log(query));
         let started = std::time::Instant::now();
         self.inner.node_load_telemetry.query_start();
         let receipt = super::transactional_replication::CommitReceiptScope::begin(self);

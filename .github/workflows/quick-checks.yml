@@ -39,3 +39,7 @@ jobs:
           python -m pip install --disable-pip-version-check PyYAML==6.0.3
           python .github/scripts/quick-check.py
           python -m unittest discover -s .github/scripts -p test_runner_policy.py -v
+      - name: Dead-code ratchet
+        run: |
+          python -m unittest discover -s .github/scripts -p test_dead_code_ratchet.py -v
+          python .github/scripts/dead-code-ratchet.py
