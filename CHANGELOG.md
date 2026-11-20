@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.39.11
+
+### Patch Changes
+
+- [#2935](https://github.com/reddb-io/reddb/pull/2935) [`c6e4e00`](https://github.com/reddb-io/reddb/commit/c6e4e0064dcdeec2bced4485176a28e9b8623a45) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix a second deadlock between a checkpoint and readers of an on-disk collection: the checkpoint waited for the collection base (to append in place, or to install the new base) while holding the pager ownership epoch, and a reader holding that base waited for the epoch to load a page. The in-place append now declines a base that stays in use, and the new base is installed after the epoch is released.
+
+- [#2929](https://github.com/reddb-io/reddb/pull/2929) [`3ffffd6`](https://github.com/reddb-io/reddb/commit/3ffffd6be701fbf9fe0c25da328d5db4a1100d57) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix checkpoints rewriting a whole collection after a batch insert on paged stores without bounded residency: once the base is immutable the batch skips the published tree, and its WAL images were not retained for the incremental checkpoint.
+
+- [#2928](https://github.com/reddb-io/reddb/pull/2928) [`faaf01b`](https://github.com/reddb-io/reddb/commit/faaf01b9b33e2a920ff32afd53de8a03cc736acc) Thanks [@filipeforattini](https://github.com/filipeforattini)! - A checkpoint again leaves the WAL empty: the physical metadata record it publishes is folded into the same checkpoint, so offline compaction and scrub accept a checkpointed store.
+
+- [#2933](https://github.com/reddb-io/reddb/pull/2933) [`ee10933`](https://github.com/reddb-io/reddb/commit/ee10933a1a9f64d185c64cc9ca690a248f517c45) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Checking a PRIMARY KEY or UNIQUE constraint against rows on disk uses a HASH index over the same columns when one exists, instead of a pass over the collection. The constraint's own rule still decides the conflict.
+
+- [#2936](https://github.com/reddb-io/reddb/pull/2936) [`c17b417`](https://github.com/reddb-io/reddb/commit/c17b417453c23da60a7a9dbd6e06986984682457) Thanks [@filipeforattini](https://github.com/filipeforattini)! - The on-disk `PRIMARY KEY`/`UNIQUE` check no longer holds a scan allowance while it probes the key index. Under sustained concurrent writes that allowance left no room for the probe and inserts failed with "index probe workspace exceeds the shared memory budget".
+
+- [#2926](https://github.com/reddb-io/reddb/pull/2926) [`baeab76`](https://github.com/reddb-io/reddb/commit/baeab76379c01e46242a04a134417abced1b4088) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Configuration reads are cached per state of `red.config`: statements no longer queue behind a checkpoint or a long index read just to check a setting.
+
+- [#2931](https://github.com/reddb-io/reddb/pull/2931) [`0c74693`](https://github.com/reddb-io/reddb/commit/0c74693cf172dc875ee98c0899b0ce46df6b7626) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Paged HASH index lookups no longer walk the collection before the first checkpoint: while a collection has no disk base, the resident overlay holds every row and answers alone. This also keeps batch loads into tables with a PRIMARY KEY or UNIQUE constraint linear.
+
+- [#2920](https://github.com/reddb-io/reddb/pull/2920) [`a28a4fa`](https://github.com/reddb-io/reddb/commit/a28a4fa3a9b9b88fdba13e59021aa8562af716e3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Paged HASH index lookups no longer walk every resident row of the collection: resident changes are tracked in an overlay, like the paged BTREE index.
+
+- [#2923](https://github.com/reddb-io/reddb/pull/2923) [`71a1b69`](https://github.com/reddb-io/reddb/commit/71a1b6906f1efaae48d99ce0b1ce0334796d30eb) Thanks [@filipeforattini](https://github.com/filipeforattini)! - The live-version hint also resolves rows a checkpoint moved to disk, so resolving a logical row id stays a point read after eviction.
+
+- [#2918](https://github.com/reddb-io/reddb/pull/2918) [`32e0203`](https://github.com/reddb-io/reddb/commit/32e020301413cac6ff70732262accbfcf5127714) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix a regression where any autocommit INSERT turned every indexed SELECT and every UPDATE/DELETE target lookup in the database into a full scan until the next UPDATE, DELETE or explicit transaction.
+
+- [#2903](https://github.com/reddb-io/reddb/pull/2903) [`ea48b69`](https://github.com/reddb-io/reddb/commit/ea48b696dcd03075c41cfa0da4b8c56b3e6fba8e) Thanks [@filipeforattini](https://github.com/filipeforattini)! - The indexed-mutation gate is scoped to one collection: a write on one table no longer forces UPDATE/DELETE target selection on other tables to scan.
+
+- [#2919](https://github.com/reddb-io/reddb/pull/2919) [`1634d53`](https://github.com/reddb-io/reddb/commit/1634d5372c29c84f6319dcc54c36e3b143ae3ccc) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix PRIMARY KEY and UNIQUE constraints being ignored for rows that live on disk in bounded disk residency: duplicates were accepted and ON CONFLICT inserted a second row after a checkpoint and restart.
+
+- [#2934](https://github.com/reddb-io/reddb/pull/2934) [`0bb4260`](https://github.com/reddb-io/reddb/commit/0bb42602769d665297b64086d58e0230d96d9739) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix a deadlock that left the server idle and unready: a read that had to load a page of a proof-carrying tree waited for the pager ownership epoch while holding the tree proof lock, and a publication (checkpoint, registry flush, count projection step) holding that epoch waited for the same lock to seal the tree.
+
+- [#2921](https://github.com/reddb-io/reddb/pull/2921) [`269e47c`](https://github.com/reddb-io/reddb/commit/269e47c10fd271f399bfc0d6385408c599fe864e) Thanks [@filipeforattini](https://github.com/filipeforattini)! - /health/ready now reports how many executions outlived their deadline and where the longest-running ones came from when it answers handler_deadline_exceeded.
+
+- [#2922](https://github.com/reddb-io/reddb/pull/2922) [`145d36c`](https://github.com/reddb-io/reddb/commit/145d36ceb26971eef7374307848afbc2a0bc662a) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Listing red.collections no longer reads the payload of every collection when only inventory columns such as name and entities are selected.
+
+- [#2915](https://github.com/reddb-io/reddb/pull/2915) [`4776be8`](https://github.com/reddb-io/reddb/commit/4776be8b1fdd09a832a16236d309359ce261f266) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Fix `truncated native payload` when replaying WAL records, restoring backups or applying replication frames written before store format V14: the branch provenance tail is now optional on read.
+
+- [#2911](https://github.com/reddb-io/reddb/pull/2911) [`55180ec`](https://github.com/reddb-io/reddb/commit/55180ec68f6f44a9e95914cc39d46d68dd0a8bb3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Overdue-execution warnings now also name HTTP executions: the route
+  (`HTTP POST /query`) and the statement, repeated every minute while the
+  execution stays stuck. Before, only wire executions carried a statement and
+  HTTP ones were logged as `<unlabelled execution>` ([#2908](https://github.com/reddb-io/reddb/issues/2908)).
+
 ## 1.39.10
 
 ### Patch Changes
