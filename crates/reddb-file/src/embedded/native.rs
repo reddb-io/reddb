@@ -92,7 +92,7 @@ impl EmbeddedRdbWriterLock {
                 .read(true)
                 .write(true)
                 .open(&path)?;
-            if let Err(err) = file.try_lock_exclusive() {
+            if let Err(err) = native_lock::skip_unsupported(file.try_lock_exclusive()) {
                 if err.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
                     return Err(RdbFileError::InvalidOperation(format!(
                         "{} is already open for writing by another process; an embedded \

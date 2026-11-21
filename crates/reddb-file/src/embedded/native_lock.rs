@@ -3,11 +3,48 @@
 //! The reserved byte is beyond the supported artifact address space. Locking
 //! it does not allocate space or change the file. Closing the owning handle,
 //! including on process death, releases the fence.
+//!
+//! On Android every lock call goes through [`skip_unsupported`], see there.
 
 use std::fs::File;
 use std::io;
 
 const WRITER_BYTE: u64 = 1 << 62;
+
+/// Whether a lock call that fails because the filesystem has no advisory
+/// locks counts as taken. True only on Android, see [`skip_unsupported`].
+const SKIP_UNSUPPORTED_LOCKS: bool = cfg!(target_os = "android");
+
+/// Android shared storage (`/storage/emulated/0`) is a FUSE mount without
+/// advisory locks: `flock` and OFD `fcntl` locks fail with `ENOSYS`, so every
+/// open of a store there failed with "Function not implemented (os error 38)".
+/// On Android a lock call that fails because the filesystem has no locks
+/// counts as taken. The caller then has to make sure the file has a single
+/// writer. A lock that exists but is held by someone else still fails as
+/// before, on every platform, and so does any other lock error.
+pub(super) fn skip_unsupported(result: io::Result<()>) -> io::Result<()> {
+    skip_unsupported_if(SKIP_UNSUPPORTED_LOCKS, result)
+}
+
+fn skip_unsupported_if(skip: bool, result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(error) if skip && lock_unsupported(&error) => Ok(()),
+        other => other,
+    }
+}
+
+/// The filesystem does not implement the lock call at all.
+fn lock_unsupported(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(error.raw_os_error(), Some(libc::ENOSYS | libc::EOPNOTSUPP))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
 
 pub(super) fn try_lock_writer(file: &File) -> io::Result<()> {
     #[cfg(windows)]
@@ -21,7 +58,7 @@ pub(super) fn try_lock_writer(file: &File) -> io::Result<()> {
         target_os = "ios"
     ))]
     {
-        ofd_lock(file, WRITER_BYTE, 1, libc::F_WRLCK as _, false)
+        skip_unsupported(ofd_lock(file, WRITER_BYTE, 1, libc::F_WRLCK as _, false))
     }
     #[cfg(not(any(
         windows,
@@ -52,7 +89,7 @@ pub(super) fn lock_shared(file: &File) -> io::Result<()> {
     }
     #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
     {
-        fs2::FileExt::lock_shared(file)
+        skip_unsupported(fs2::FileExt::lock_shared(file))
     }
 }
 
@@ -69,7 +106,7 @@ pub(super) fn try_lock_shared(file: &File) -> io::Result<()> {
     }
     #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
     {
-        fs2::FileExt::try_lock_shared(file)
+        skip_unsupported(fs2::FileExt::try_lock_shared(file))
     }
 }
 
@@ -86,7 +123,7 @@ pub(super) fn lock_exclusive(file: &File) -> io::Result<()> {
     }
     #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
     {
-        fs2::FileExt::lock_exclusive(file)
+        skip_unsupported(fs2::FileExt::lock_exclusive(file))
     }
 }
 
@@ -121,7 +158,7 @@ pub(super) fn unlock(file: &File) -> io::Result<()> {
     }
     #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
     {
-        fs2::FileExt::unlock(file)
+        skip_unsupported(fs2::FileExt::unlock(file))
     }
 }
 
@@ -214,5 +251,44 @@ fn ofd_lock(
             return Err(io::ErrorKind::WouldBlock.into());
         }
         return Err(error);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod skip_unsupported_tests {
+    use super::*;
+
+    fn os_error(code: i32) -> io::Result<()> {
+        Err(io::Error::from_raw_os_error(code))
+    }
+
+    #[test]
+    fn missing_lock_support_counts_as_taken_when_enabled() {
+        assert!(skip_unsupported_if(true, os_error(libc::ENOSYS)).is_ok());
+        assert!(skip_unsupported_if(true, os_error(libc::EOPNOTSUPP)).is_ok());
+    }
+
+    #[test]
+    fn contention_and_other_errors_still_fail_when_enabled() {
+        for code in [libc::EWOULDBLOCK, libc::EACCES, libc::EIO, libc::ENOLCK] {
+            let error = skip_unsupported_if(true, os_error(code)).expect_err("must fail");
+            assert_eq!(error.raw_os_error(), Some(code));
+        }
+        let blocked = skip_unsupported_if(true, Err(io::ErrorKind::WouldBlock.into()));
+        assert_eq!(
+            blocked.expect_err("must fail").kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn missing_lock_support_fails_when_disabled() {
+        let error = skip_unsupported_if(false, os_error(libc::ENOSYS)).expect_err("must fail");
+        assert_eq!(error.raw_os_error(), Some(libc::ENOSYS));
+    }
+
+    #[test]
+    fn only_android_skips() {
+        assert_eq!(SKIP_UNSUPPORTED_LOCKS, cfg!(target_os = "android"));
     }
 }
