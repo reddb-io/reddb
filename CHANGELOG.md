@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.39.13
+
+### Patch Changes
+
+- [#2943](https://github.com/reddb-io/reddb/pull/2943) [`e6a2532`](https://github.com/reddb-io/reddb/commit/e6a2532e53c5fada990c9dfd8195e3e67608c3b0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Retention and MVCC reclaim keep up on a busy node. Their background ticks only tried the publication fence and skipped the tick whenever a statement held it, so under sustained load they almost never ran: a table with a retention window kept growing and old row versions were not reclaimed. A tick now waits up to 50 ms for its turn.
+
+- [#2942](https://github.com/reddb-io/reddb/pull/2942) [`f4cc63f`](https://github.com/reddb-io/reddb/commit/f4cc63fa3c0b21ec324d12bf7ef98e1f68c73fa3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Index overlay memory accounting no longer walks the overlay. Every statement refreshes memory accounting, and the HASH and BTREE overlays recounted every entry changed since the last checkpoint each time: with 138k changed rows a `SELECT 1` took 11.6 ms instead of 1.4 ms, and the cost kept growing until the next checkpoint. The total is now kept current as entries change.
+
+- [#2941](https://github.com/reddb-io/reddb/pull/2941) [`a86bdeb`](https://github.com/reddb-io/reddb/commit/a86bdeb235152c493a648707c24c582198680fa8) Thanks [@filipeforattini](https://github.com/filipeforattini)! - `SELECT ... WHERE <indexed column> = <value>` no longer walks the whole collection when no row has the value. An empty answer from the HASH index was treated as "index unusable" and fell back to a full scan, so every existence check on a large table cost seconds. The index answer is now final when the literal has the declared type of the column and no index mutation raced the lookup, which is what UPDATE and DELETE already did.
+
 ## 1.39.12
 
 ### Patch Changes
