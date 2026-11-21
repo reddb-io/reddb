@@ -30,6 +30,11 @@ impl MvccReclaimCursor {
 /// How long a maintenance tick waits for the publication fence.
 const MAINTENANCE_FENCE_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// How long a maintenance removal waits for a walk of the collection's disk
+/// base. It holds the publication fence meanwhile, and readers of the
+/// collection queue behind it.
+pub(super) const MAINTENANCE_WALK_WAIT: std::time::Duration = std::time::Duration::from_millis(5);
+
 impl UnifiedStore {
     pub(crate) fn mvcc_reclaim_cursor(&self, collection: String) -> Option<MvccReclaimCursor> {
         let manager = self.get_collection(&collection)?;
@@ -305,7 +310,9 @@ impl UnifiedStore {
         } // Release primary and visibility generation pins before publication.
         reclaim.sort_unstable();
         reclaim.dedup();
-        Ok(self.delete_batch(&cursor.collection, &reclaim)?.len())
+        Ok(self
+            .delete_batch_between_walks(&cursor.collection, &reclaim)?
+            .len())
     }
 
     pub(crate) fn mvcc_reclaim_read_limit(&self) -> usize {

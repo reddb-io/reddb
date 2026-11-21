@@ -1623,6 +1623,32 @@ impl SegmentManager {
         Ok(false)
     }
 
+    /// Remove rows the way [`delete_batch`](Self::delete_batch) does, but
+    /// never queue behind a walk of the disk base. Removing a row from the
+    /// base excludes such a walk, and a writer waiting for one makes every
+    /// reader that arrives meanwhile wait too. A statement has to wait;
+    /// maintenance stops at the first row it cannot remove within `wait` and
+    /// returns what it removed, leaving the rest for a later pass.
+    pub fn delete_batch_between_walks(
+        &self,
+        ids: &[EntityId],
+        wait: std::time::Duration,
+    ) -> Result<Vec<EntityId>, SegmentError> {
+        if !self.has_backing() {
+            return self.delete_batch(ids);
+        }
+        let mut deleted = Vec::new();
+        for id in ids {
+            if self.backing.try_write_for(wait).is_none() {
+                break;
+            }
+            if self.delete(*id)? {
+                deleted.push(*id);
+            }
+        }
+        Ok(deleted)
+    }
+
     pub fn delete_batch(&self, ids: &[EntityId]) -> Result<Vec<EntityId>, SegmentError> {
         if self.has_backing() {
             let mut deleted = Vec::new();
