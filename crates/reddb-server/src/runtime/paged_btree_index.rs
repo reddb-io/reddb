@@ -567,10 +567,15 @@ impl RuntimeBtreeIndex {
         Ok(())
     }
 
+    /// `None` when this index cannot answer. `not_selective` is then set if
+    /// the only reason is that the range covers too much of the collection:
+    /// another index may bound the same statement by a different column. Any
+    /// other refusal means the statement needs the collection itself.
     fn lookup(
         &self,
         range: &Range,
         preserve_index_order: bool,
+        not_selective: &std::cell::Cell<bool>,
     ) -> crate::RedDBResult<Option<HashCandidates>> {
         let inner = self
             .runtime
@@ -585,7 +590,13 @@ impl RuntimeBtreeIndex {
             .max(1);
         let mut limit = ceiling.min(64 * 1024);
         loop {
-            match self.lookup_with_limit(&runtime, range, limit, preserve_index_order) {
+            match self.lookup_with_limit(
+                &runtime,
+                range,
+                limit,
+                preserve_index_order,
+                not_selective,
+            ) {
                 Err(StoreError::ReadLimitExceeded { required_bytes, .. })
                     if limit < ceiling && required_bytes <= ceiling =>
                 {
@@ -602,6 +613,7 @@ impl RuntimeBtreeIndex {
         range: &Range,
         limit: usize,
         preserve_index_order: bool,
+        not_selective: &std::cell::Cell<bool>,
     ) -> Result<Option<HashCandidates>, StoreError> {
         let store = runtime.db().store();
         let manager = store
@@ -742,6 +754,7 @@ impl RuntimeBtreeIndex {
         while count.next_posting(&mut posting)?.is_some() {
             counted += 1;
             if counted > candidates_max {
+                not_selective.set(true);
                 return Ok(None);
             }
         }
@@ -752,6 +765,7 @@ impl RuntimeBtreeIndex {
         {
             counted += entity_ids.len();
             if counted > candidates_max {
+                not_selective.set(true);
                 return Ok(None);
             }
         }
@@ -807,12 +821,16 @@ impl RuntimeBtreeIndex {
 }
 
 impl IndexStore {
-    fn select_paged_btree(
+    /// The indexes of `collection` that can bound `filter`, most columns
+    /// matched first. When the range of one covers too much of the collection
+    /// the next may bound the statement by another column.
+    fn paged_btree_choices(
         &self,
         collection: &str,
         filter: &Filter,
-    ) -> Option<(Arc<RuntimeBtreeIndex>, Range)> {
-        self.paged_btrees
+    ) -> Vec<(Arc<RuntimeBtreeIndex>, Range)> {
+        let mut choices: Vec<_> = self
+            .paged_btrees
             .read()
             .values()
             .filter(|provider| provider.collection == collection)
@@ -820,9 +838,13 @@ impl IndexStore {
                 Range::for_index(&provider.projection.columns, filter)
                     .map(|range| (Arc::clone(provider), range))
             })
-            .max_by_key(|(provider, range)| {
-                (range.matched_columns, provider.projection.columns.len())
-            })
+            .collect();
+        choices.sort_by(|(left, left_range), (right, right_range)| {
+            (right_range.matched_columns, right.projection.columns.len())
+                .cmp(&(left_range.matched_columns, left.projection.columns.len()))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        choices
     }
 
     pub(crate) fn clear_paged_btree_overlays(&self) {
@@ -899,10 +921,15 @@ impl IndexStore {
             return Ok(None);
         }
         // Release descriptor guards before admission samples memory pools.
-        match self.select_paged_btree(collection, filter) {
-            Some((provider, range)) => provider.lookup(&range, false),
-            None => Ok(None),
+        for (provider, range) in self.paged_btree_choices(collection, filter) {
+            let not_selective = std::cell::Cell::new(false);
+            match provider.lookup(&range, false, &not_selective)? {
+                Some(candidates) => return Ok(Some(candidates)),
+                None if not_selective.get() => {}
+                None => break,
+            }
         }
+        Ok(None)
     }
 
     pub(crate) fn paged_btree_lookup_for_query(
@@ -914,14 +941,16 @@ impl IndexStore {
         if self.paged_btrees.read().is_empty() {
             return Ok((None, false));
         }
-        let Some((provider, range)) = self.select_paged_btree(collection, filter) else {
-            return Ok((None, false));
-        };
-        let ordered = provider.supports_order(&range, order_by);
-        provider.lookup(&range, ordered).map(|candidates| {
-            let order_satisfied = ordered && candidates.is_some();
-            (candidates, order_satisfied)
-        })
+        for (provider, range) in self.paged_btree_choices(collection, filter) {
+            let ordered = provider.supports_order(&range, order_by);
+            let not_selective = std::cell::Cell::new(false);
+            match provider.lookup(&range, ordered, &not_selective)? {
+                Some(candidates) => return Ok((Some(candidates), ordered)),
+                None if not_selective.get() => {}
+                None => break,
+            }
+        }
+        Ok((None, false))
     }
 }
 
@@ -1189,6 +1218,65 @@ mod tests {
         };
         assert_eq!(lookup("key-05"), Some(1));
         assert_eq!(lookup("bulk"), None);
+    }
+
+    #[test]
+    fn a_declined_index_gives_way_to_one_that_bounds_another_column() {
+        let (_directory, runtime, options) = fixture();
+        runtime
+            .execute_query(
+                "CREATE TABLE windows (id INTEGER, owner TEXT, opened INTEGER, closed INTEGER)",
+            )
+            .expect("table");
+        // Both match the owner and one bound of an overlap test. Every window
+        // opened before the new one closes; hardly any closed after it opens.
+        runtime
+            .execute_query("CREATE INDEX windows_opened ON windows (owner, opened) USING BTREE")
+            .expect("opened index");
+        runtime
+            .execute_query("CREATE INDEX windows_closed ON windows (owner, closed) USING BTREE")
+            .expect("closed index");
+        for id in 0..300 {
+            runtime
+                .execute_query_with_params(
+                    "INSERT INTO windows (id, owner, opened, closed) VALUES ($1, 'primary', $2, $3)",
+                    &[
+                        Value::Integer(id),
+                        Value::Integer(id * 10),
+                        Value::Integer(id * 10 + 10),
+                    ],
+                )
+                .expect("insert");
+        }
+        runtime.flush().expect("checkpoint");
+        drop(runtime);
+        let runtime = open(&options);
+        let compare = |column: &str, op, value| Filter::Compare {
+            field: FieldRef::column("windows", column),
+            op,
+            value,
+        };
+        use reddb_rql::ast::CompareOp::{Eq, Gt, Lt};
+        let overlap = Filter::And(
+            Box::new(compare("owner", Eq, Value::text("primary"))),
+            Box::new(Filter::And(
+                Box::new(compare("opened", Lt, Value::Integer(3010))),
+                Box::new(compare("closed", Gt, Value::Integer(2990))),
+            )),
+        );
+        let candidates = runtime
+            .index_store_ref()
+            .paged_btree_lookup("windows", &overlap)
+            .expect("lookup")
+            .expect("the index on the closing bound answers");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            ids(
+                &runtime,
+                "SELECT id FROM windows WHERE owner = 'primary' AND opened < 3010 AND closed > 2990"
+            ),
+            vec![299]
+        );
     }
 
     #[test]
@@ -1884,7 +1972,9 @@ mod tests {
         );
         let (provider, range) = runtime
             .index_store_ref()
-            .select_paged_btree("jobs", &filter)
+            .paged_btree_choices("jobs", &filter)
+            .into_iter()
+            .next()
             .expect("jobs provider");
         let inserted_key = provider
             .projection

@@ -39,6 +39,7 @@ fn visible_entities(rt: &RedDBRuntime, collection: &str) -> usize {
         manager: rt.snapshot_manager(),
         own_xids: rt.current_txn_own_xids(),
         requires_index_fallback: false,
+        hidden_writers_only: false,
         serializable_reader: None,
     };
     mgr.query_all(move |e| entity_visible_with_context(Some(&ctx), e))
@@ -161,6 +162,7 @@ fn cross_model_atomic_rollback() {
                 manager: rt.snapshot_manager(),
                 own_xids: rt.current_txn_own_xids(),
                 requires_index_fallback: false,
+                hidden_writers_only: false,
                 serializable_reader: None,
             };
             mgr.query_all(move |e| {
