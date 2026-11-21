@@ -348,6 +348,9 @@ pub struct UnifiedStore {
     /// collection. Statements consult configuration on every execution and
     /// must not queue behind the publication fence to do it.
     config_reads: parking_lot::RwLock<ConfigReads>,
+    /// The collections under version control, valid for one state of the VCS
+    /// settings collection. Every statement asks; see `config_reads`.
+    versioned_reads: parking_lot::RwLock<Option<(ConfigStamp, Arc<Vec<String>>)>>,
     /// The immediately previous published trees and any older reader-pinned
     /// trees. Root identities are persisted with the paged catalog.
     retired_btrees: parking_lot::Mutex<Vec<RetiredBTree>>,
@@ -428,6 +431,33 @@ mod impl_pages;
 /// physical row count and every resident segment's mutation counter. Any
 /// write, and any change to what a read of the base may return, moves one.
 type ConfigStamp = (usize, Option<u32>, Option<usize>, usize, Vec<(u64, u64)>);
+
+impl UnifiedStore {
+    /// The collections under version control, read once per state of the VCS
+    /// settings collection `settings`.
+    pub(crate) fn versioned_collections_cached<E>(
+        &self,
+        settings: &Arc<SegmentManager>,
+        load: impl FnOnce() -> Result<Vec<String>, E>,
+    ) -> Result<Arc<Vec<String>>, E> {
+        // Sampled before the read, like `try_get_config`.
+        let stamp = (
+            Arc::as_ptr(settings) as usize,
+            settings.backing_root_page(),
+            settings.backing_read_bytes_max(),
+            settings.count(),
+            settings.checkpoint_revisions(),
+        );
+        if let Some((cached, collections)) = self.versioned_reads.read().as_ref() {
+            if *cached == stamp {
+                return Ok(Arc::clone(collections));
+            }
+        }
+        let collections = Arc::new(load()?);
+        *self.versioned_reads.write() = Some((stamp, Arc::clone(&collections)));
+        Ok(collections)
+    }
+}
 
 #[derive(Default)]
 struct ConfigReads {

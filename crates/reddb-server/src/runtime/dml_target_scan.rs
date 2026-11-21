@@ -36,8 +36,8 @@ pub(crate) fn snapshot_requires_index_fallback_for(
     table: &str,
 ) -> bool {
     snapshot.requires_index_fallback
-        && !(snapshot.hidden_writers_only
-            && !snapshot
+        && (!snapshot.hidden_writers_only
+            || snapshot
                 .manager
                 .snapshot_hides_real_writers_of(&snapshot.snapshot, table))
 }
