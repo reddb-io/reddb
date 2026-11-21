@@ -660,7 +660,12 @@ impl RedDBRuntime {
             .with_dependencies(dependencies)
             .with_policy(policy);
         let store = self.inner.db.store();
-        let _publication = store.vault_publication_lock.lock();
+        // Caching a result is optional. Every cacheable statement comes here:
+        // one that finds a publication or a long index read in progress goes
+        // without its cache entry instead of queueing behind it.
+        let Some(_publication) = store.vault_publication_lock.try_lock() else {
+            return;
+        };
         let _promotion = self.inner.result_blob_promotion.lock();
         let mut cache = self.inner.result_blob_entries.write();
         if cache.3 != revision

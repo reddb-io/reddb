@@ -125,6 +125,12 @@ struct OverlayBtree {
 }
 
 /// Accounting weights of the overlay's entries.
+/// A range read through the index admits at most one row in this many of the
+/// collection, and never fewer than [`RANGE_CANDIDATES_MIN`]. Measured on
+/// disk-resident rows, a candidate costs about thirty times what the same row
+/// costs a walk of the collection.
+const RANGE_SELECTIVITY: usize = 32;
+const RANGE_CANDIDATES_MIN: usize = 64;
 const OVERLAY_POSTING_BYTES: usize = 96;
 const OVERLAY_ROW_BYTES: usize = 48;
 const OVERLAY_ID_BYTES: usize = std::mem::size_of::<EntityId>();
@@ -721,11 +727,38 @@ impl RuntimeBtreeIndex {
             }
         }
 
+        let mut posting = [0; SECONDARY_KEY_BYTES_MAX];
+        // Every candidate costs a separate verified read of its row, far more
+        // than that row costs a walk of the collection, and this read holds
+        // the publication fence throughout. A range that covers a sizeable
+        // part of the collection is answered by the walk instead. Counting
+        // stops at the bound, so it never costs more than the range it admits.
+        let candidates_max = (manager.count() / RANGE_SELECTIVITY).max(RANGE_CANDIDATES_MIN);
+        let mut counted = 0usize;
+        let mut count = index.ordered_range(
+            range.lower.as_ref().map(Vec::as_slice),
+            range.upper.as_ref().map(Vec::as_slice),
+        )?;
+        while count.next_posting(&mut posting)?.is_some() {
+            counted += 1;
+            if counted > candidates_max {
+                return Ok(None);
+            }
+        }
+        drop(count);
+        for (_, entity_ids) in overlay
+            .postings
+            .range((range.lower.clone(), range.upper.clone()))
+        {
+            counted += entity_ids.len();
+            if counted > candidates_max {
+                return Ok(None);
+            }
+        }
         let mut cursor = index.ordered_range(
             range.lower.as_ref().map(Vec::as_slice),
             range.upper.as_ref().map(Vec::as_slice),
         )?;
-        let mut posting = [0; SECONDARY_KEY_BYTES_MAX];
         let mut physical = cursor.next_posting(&mut posting)?;
         let mut live = overlay
             .postings
@@ -1115,6 +1148,84 @@ mod tests {
         }
         assert_eq!(overlay.memory_bytes(), overlay.recounted_bytes());
         assert!(overlay.memory_bytes() > 0);
+    }
+
+    #[test]
+    fn a_range_covering_much_of_the_collection_is_read_by_walking_it() {
+        let (_directory, runtime, options) = fixture();
+        for id in 100..400 {
+            runtime
+                .execute_query_with_params(
+                    "INSERT INTO ordered_rows (id, label, payload) VALUES ($1, $2, $3)",
+                    &[
+                        Value::Integer(id),
+                        Value::text("bulk"),
+                        Value::text("payload"),
+                    ],
+                )
+                .expect("insert");
+        }
+        runtime.flush().expect("checkpoint");
+        drop(runtime);
+        let runtime = open(&options);
+        let bulk = "SELECT id FROM ordered_rows WHERE label = 'bulk' ORDER BY id";
+        let one = "SELECT id FROM ordered_rows WHERE label = 'key-05' ORDER BY id";
+        assert_eq!(ids(&runtime, bulk), (100..400).collect::<Vec<_>>());
+        assert_eq!(ids(&runtime, one), vec![5]);
+
+        // The selective read is answered by the index; the one matching most
+        // rows is declined, so the statement walks the collection instead.
+        let label = |value: &str| Filter::Compare {
+            field: FieldRef::column("ordered_rows", "label"),
+            op: reddb_rql::ast::CompareOp::Eq,
+            value: Value::text(value),
+        };
+        let lookup = |value: &str| {
+            runtime
+                .index_store_ref()
+                .paged_btree_lookup("ordered_rows", &label(value))
+                .expect("lookup")
+                .map(|candidates| candidates.len())
+        };
+        assert_eq!(lookup("key-05"), Some(1));
+        assert_eq!(lookup("bulk"), None);
+    }
+
+    #[test]
+    fn statements_do_not_queue_behind_the_publication_fence() {
+        let (_directory, runtime, _options) = fixture();
+        let statements = [
+            "SELECT 1",
+            "SELECT id FROM ordered_rows WHERE payload = 'absent'",
+        ];
+        // Steady state: the first statement after a change to the versioning
+        // settings reads them. These exact statements have not run, so their
+        // results are not cached yet.
+        runtime.execute_query("SELECT 2").expect("warm-up");
+        let store = runtime.db().store();
+        let (held, holding) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            // A publication, or a long index read, is in progress elsewhere.
+            let store = &store;
+            scope.spawn(move || {
+                let _publication = store.vault_publication_lock.lock();
+                held.send(()).expect("fence taken");
+                released.recv().expect("fence released");
+            });
+            holding.recv().expect("fence held");
+            let runtime = &runtime;
+            scope.spawn(move || {
+                for sql in statements {
+                    runtime.execute_query(sql).expect(sql);
+                }
+                done.send(()).expect("statements finished");
+            });
+            let outcome = finished.recv_timeout(std::time::Duration::from_secs(20));
+            release.send(()).expect("release the fence");
+            outcome.expect("a statement waited for the publication fence");
+        });
     }
 
     #[test]

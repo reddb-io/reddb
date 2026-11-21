@@ -505,34 +505,32 @@ fn is_versioned(store: &UnifiedStore, name: &str) -> RedDBResult<bool> {
     if name.starts_with("red_") || name.starts_with("red.") {
         return Ok(false);
     }
-    let Some(manager) = store.get_collection(vc::SETTINGS) else {
-        return Ok(false);
-    };
-    let _publication = manager
-        .has_backing()
-        .then(|| store.vault_publication_lock.lock());
-    let mut versioned = false;
-    super::function_budget::try_scan(
-        |visit| manager.try_for_each_entity(usize::MAX, visit),
-        |entity| {
-            versioned = entity.data.as_row().is_some_and(|row| {
-                row.get_field("id")
-                    .is_some_and(|id| matches!(id, Value::Text(id) if id.as_ref() == name))
-                    && matches!(row.get_field("versioned"), Some(Value::Boolean(true)))
-            });
-            !versioned
-        },
-    )?;
-    Ok(versioned)
+    Ok(versioned_collections_shared(store)?
+        .iter()
+        .any(|versioned| versioned == name))
 }
 
 /// Enumerate every user collection currently opted in. Order
 /// undefined — callers that need a deterministic iteration should
 /// sort the returned list.
 fn versioned_collections(store: &UnifiedStore) -> RedDBResult<Vec<String>> {
+    Ok(versioned_collections_shared(store)?.to_vec())
+}
+
+fn versioned_collections_shared(store: &UnifiedStore) -> RedDBResult<Arc<Vec<String>>> {
     let Some(manager) = store.get_collection(vc::SETTINGS) else {
-        return Ok(Vec::new());
+        return Ok(Arc::new(Vec::new()));
     };
+    // Every statement asks this. The answer only changes with the settings
+    // collection, so it is read once per state of it instead of walking that
+    // collection under the publication fence each time.
+    store.versioned_collections_cached(&manager, || scan_versioned_collections(store, &manager))
+}
+
+fn scan_versioned_collections(
+    store: &UnifiedStore,
+    manager: &Arc<crate::storage::SegmentManager>,
+) -> RedDBResult<Vec<String>> {
     let _publication = manager
         .has_backing()
         .then(|| store.vault_publication_lock.lock());
@@ -795,7 +793,7 @@ fn ensure_no_pending_merge(store: &UnifiedStore, connection_id: u64) -> RedDBRes
 
 impl RedDBRuntime {
     pub(crate) fn vcs_has_versioned_collections(&self) -> RedDBResult<bool> {
-        Ok(!versioned_collections(&self.db().store())?.is_empty())
+        Ok(!versioned_collections_shared(&self.db().store())?.is_empty())
     }
 
     pub(crate) fn vcs_reject_destructive_ddl(&self, collection: &str) -> RedDBResult<()> {
