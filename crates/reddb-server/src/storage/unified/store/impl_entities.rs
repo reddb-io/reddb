@@ -1265,18 +1265,32 @@ impl UnifiedStore {
         let Some(manager) = self.get_collection(collection) else {
             return Ok(());
         };
-        manager.try_for_each_entity(usize::MAX, |entity| {
-            if !matches!(entity.kind, EntityKind::TableRow { .. })
-                || entity.logical_id() != logical_id
-            {
+        // The walk passes every row of the collection, not only this one.
+        // Hints live in memory, so after a restart every row whose live
+        // version sits in the disk base has none: without this, each of them
+        // costs its own walk the next time it is resolved.
+        let mut walked = Vec::new();
+        let result = manager.try_for_each_entity(usize::MAX, |entity| {
+            if !matches!(entity.kind, EntityKind::TableRow { .. }) {
+                return true;
+            }
+            let row = entity.logical_id();
+            let live_elsewhere =
+                entity.id != row && entity.xmax == 0 && entity.branch_version().is_none();
+            if row != logical_id {
+                if live_elsewhere && walked.len() < SegmentManager::WALKED_LIVE_ROW_VERSIONS_MAX {
+                    walked.push((row, entity.id));
+                }
                 return true;
             }
             // The walk just paid for this; spare the next reader.
-            if entity.id != logical_id && entity.xmax == 0 && entity.branch_version().is_none() {
+            if live_elsewhere {
                 manager.remember_live_row_version(logical_id, entity.id);
             }
             visit(entity)
-        })
+        });
+        manager.remember_walked_live_row_versions(walked);
+        result
     }
 
     /// Head of a row's version chain without walking the collection: the
