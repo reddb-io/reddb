@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.39.14
+
+### Patch Changes
+
+- [#2945](https://github.com/reddb-io/reddb/pull/2945) [`39eb6ea`](https://github.com/reddb-io/reddb/commit/39eb6ea68df3e19734f1d7ab48c6962938e496fa) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Concurrent INSERTs no longer turn indexed reads into table scans. A reader gave up on every index whenever any statement was in flight or had started since its snapshot, including autocommit inserts on other tables: with four connections inserting, a lookup by id on a 45k-row table went from 2 ms to 650 ms. An insert adds index entries and removes none, so it now only covers the window between publishing its row and its index entries, on its own collection, and a reader waits a few milliseconds for the inserts it can see to finish instead of scanning. Updates, deletes, explicit transactions and replayed changes keep the previous rule.
+
 ## 1.39.13
 
 ### Patch Changes

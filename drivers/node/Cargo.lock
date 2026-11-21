@@ -2171,7 +2171,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io"
-version = "1.39.13"
+version = "1.39.14"
 dependencies = [
  "reddb-io-client",
  "reddb-io-engine",
@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-client"
-version = "1.39.13"
+version = "1.39.14"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2207,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-crypto"
-version = "1.39.13"
+version = "1.39.14"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2217,7 +2217,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-engine"
-version = "1.39.13"
+version = "1.39.14"
 dependencies = [
  "crc32fast",
  "hex",
@@ -2234,7 +2234,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-file"
-version = "1.39.13"
+version = "1.39.14"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -2252,7 +2252,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-grpc-proto"
-version = "1.39.13"
+version = "1.39.14"
 dependencies = [
  "bytes",
  "prost",
@@ -2265,7 +2265,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-node"
-version = "1.39.13"
+version = "1.39.14"
 dependencies = [
  "napi",
  "napi-build",
@@ -2275,14 +2275,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-rql"
-version = "1.39.13"
+version = "1.39.14"
 dependencies = [
  "reddb-io-types",
 ]
 
 [[package]]
 name = "reddb-io-server"
-version = "1.39.13"
+version = "1.39.14"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2344,7 +2344,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-tonic"
-version = "1.39.13"
+version = "1.39.14"
 dependencies = [
  "async-trait",
  "axum",
@@ -2375,7 +2375,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-tonic-prost"
-version = "1.39.13"
+version = "1.39.14"
 dependencies = [
  "bytes",
  "prost",
@@ -2384,14 +2384,14 @@ dependencies = [
 
 [[package]]
 name = "reddb-io-types"
-version = "1.39.13"
+version = "1.39.14"
 dependencies = [
  "zstd",
 ]
 
 [[package]]
 name = "reddb-io-wire"
-version = "1.39.13"
+version = "1.39.14"
 dependencies = [
  "hmac",
  "reddb-io-types",
