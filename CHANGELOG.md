@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.39.17
+
+### Patch Changes
+
+- [#2952](https://github.com/reddb-io/reddb/pull/2952) [`3c7218a`](https://github.com/reddb-io/reddb/commit/3c7218a0bcae93a219e39ca0cab46bebe3864272) Thanks [@filipeforattini](https://github.com/filipeforattini)! - History reclamation no longer stalls a table behind a long read of it. Removing a row from a collection's disk base excludes a walk of that base. The reclamation tick waited for the walk while holding the publication fence, so every UPDATE queued on the fence and every new read of the collection queued behind the waiting writer until the walk ended. Reclamation now gives a row five milliseconds and leaves the rest for a later pass.
+
+- [#2951](https://github.com/reddb-io/reddb/pull/2951) [`4af1e0c`](https://github.com/reddb-io/reddb/commit/4af1e0cfdb449856045a3f208707a25770d5395b) Thanks [@filipeforattini](https://github.com/filipeforattini)! - A read no longer waits for the WAL to cache its result. When writes had been quiet, a cacheable SELECT published its own result to the durable cache tier: a WAL append that waited for an fsync, taken under the publication fence. The statement now keeps its result in memory and the cache sweeper promotes it to the durable tier, as it already did for results cached while writes were in flight. A lookup by key on a disk-resident table went from 2.6 ms to 1.1 ms.
+
+- [#2953](https://github.com/reddb-io/reddb/pull/2953) [`4328e42`](https://github.com/reddb-io/reddb/commit/4328e4251290f3242fe947dab17d512a08957a37) Thanks [@filipeforattini](https://github.com/filipeforattini)! - After a restart, an UPDATE of a row that had been updated before no longer walks its whole table. The location of a row's live version is a hint kept in memory, so after a restart no row whose live version sits in the disk base had one, and each such row cost a walk of the collection the first time a statement resolved it, with other UPDATEs of the table queued behind. The first walk now records the live version of every row it passes, so a table pays for one walk after a restart instead of one per row.
+
 ## 1.39.16
 
 ### Patch Changes
