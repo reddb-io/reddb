@@ -17,10 +17,12 @@ pub(crate) struct AutocommitUpdate {
 }
 
 impl AutocommitUpdate {
+    /// An autocommit update of rows of `collection` and of nothing else.
     pub(crate) fn new(
         manager: Arc<crate::storage::transaction::snapshot::SnapshotManager>,
+        collection: &str,
     ) -> Arc<Self> {
-        let xid = manager.begin_cache_coherent_update();
+        let xid = manager.begin_cache_coherent_update_in(collection);
         Arc::new(Self {
             manager,
             xid,

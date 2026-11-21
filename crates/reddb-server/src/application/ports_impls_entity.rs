@@ -1117,8 +1117,9 @@ impl RedDBRuntime {
         // in persist installs the new row and tombstones the old one;
         // `record_pending_versioned_update` arms first-committer-wins.
         let current_xid = self.current_xid();
-        let autocommit_update = (patch_versions && current_xid.is_none())
-            .then(|| crate::application::entity::AutocommitUpdate::new(self.snapshot_manager()));
+        let autocommit_update = (patch_versions && current_xid.is_none()).then(|| {
+            crate::application::entity::AutocommitUpdate::new(self.snapshot_manager(), &collection)
+        });
         let versioned_update_xid = if patch_versions {
             current_xid.or_else(|| autocommit_update.as_ref().map(|update| update.xid))
         } else {
@@ -1337,9 +1338,9 @@ impl RedDBRuntime {
             .as_secs();
 
         let current_xid = self.current_xid();
-        let autocommit_update = current_xid
-            .is_none()
-            .then(|| crate::application::entity::AutocommitUpdate::new(self.snapshot_manager()));
+        let autocommit_update = current_xid.is_none().then(|| {
+            crate::application::entity::AutocommitUpdate::new(self.snapshot_manager(), &collection)
+        });
         let versioned_update_xid =
             current_xid.or_else(|| autocommit_update.as_ref().map(|update| update.xid));
         if let Some(xid) = versioned_update_xid {

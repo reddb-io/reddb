@@ -598,6 +598,7 @@ fn shared_entity_reads_use_native_persisted_rows_and_timestamps() {
             manager: runtime.snapshot_manager(),
             own_xids: HashSet::new(),
             requires_index_fallback: false,
+            hidden_writers_only: false,
             serializable_reader: None,
         };
         let store = runtime.db().store();
@@ -642,6 +643,7 @@ fn native_moderation_gate_stays_ahead_of_shared_mvcc_reads() {
         manager: runtime.snapshot_manager(),
         own_xids: HashSet::new(),
         requires_index_fallback: false,
+        hidden_writers_only: false,
         serializable_reader: None,
     };
     for status in ["pending", "rejected", ""] {

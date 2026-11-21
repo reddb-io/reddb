@@ -51,6 +51,7 @@ fn context(state: &TransactionState, connection: u64, serializable: bool) -> Sna
         manager: state.snapshot_manager(),
         own_xids: state.own_xids(connection),
         requires_index_fallback: true,
+        hidden_writers_only: false,
         serializable_reader: serializable
             .then(|| state.writer_xid(connection).expect("active reader")),
     }

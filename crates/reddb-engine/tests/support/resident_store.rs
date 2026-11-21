@@ -79,6 +79,7 @@ fn cross_collection_snapshot() {
         manager: Arc::new(SnapshotManager::new()),
         own_xids: HashSet::new(),
         requires_index_fallback: true,
+        hidden_writers_only: false,
         serializable_reader: None,
     };
     let ids = |rows: Vec<(String, UnifiedEntity)>| {

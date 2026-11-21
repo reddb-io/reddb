@@ -966,6 +966,7 @@ fn cold_key_projection_keeps_snapshot_history_and_masks_replaced_base_rows() {
         manager: Arc::new(SnapshotManager::new()),
         own_xids: HashSet::new(),
         requires_index_fallback: false,
+        hidden_writers_only: false,
         serializable_reader: None,
     };
     let lookup = |key, snapshot| {
@@ -1165,6 +1166,7 @@ fn indexed_cold_keys_bound_reads_preserve_versions_and_verify_candidates() {
         manager: Arc::new(SnapshotManager::new()),
         own_xids: HashSet::new(),
         requires_index_fallback: false,
+        hidden_writers_only: false,
         serializable_reader: None,
     };
     assert_eq!(
@@ -1282,6 +1284,7 @@ fn owned_key_history_freezes_metadata_and_masks_renamed_or_deleted_base_rows() {
         manager: Arc::new(reddb_engine::transaction::snapshot::SnapshotManager::new()),
         own_xids: Default::default(),
         requires_index_fallback: false,
+        hidden_writers_only: false,
         serializable_reader: None,
     };
     let historical: Vec<_> = manager
