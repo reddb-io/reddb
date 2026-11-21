@@ -134,13 +134,6 @@ impl<'rt> MutationEngine<'rt> {
         self.runtime
             .apply_sync_moderation_gate(&collection, &mut rows)?;
 
-        // Storage and secondary-index publication must be observed as a
-        // single generation by concurrent indexed SQL and wire readers.
-        let _indexed_mutation = self
-            .runtime
-            .index_store_ref()
-            .begin_indexed_mutation(&collection);
-
         let topology_lock = self
             .runtime
             .index_store_ref()
@@ -336,6 +329,14 @@ impl<'rt> MutationEngine<'rt> {
                     )
                 })
             });
+        // A plain insert only has to cover the window between its row and its
+        // index entries. A keyed write replaces a row and its entries.
+        let index_store = self.runtime.index_store_ref();
+        let publication = if self.keyed_previous.is_some() {
+            index_store.begin_indexed_mutation(&collection)
+        } else {
+            index_store.begin_insert_publication(&collection, writer_xid)
+        };
         let id = if let Some(previous) = self.keyed_previous {
             let metadata = (!row.metadata.is_empty())
                 .then(|| Metadata::with_fields(row.metadata.iter().cloned().collect()));
@@ -373,6 +374,7 @@ impl<'rt> MutationEngine<'rt> {
             .index_store_ref()
             .index_entity_insert(&collection, id, &row.fields)
             .map_err(RedDBError::Internal)?;
+        drop(publication);
 
         // Callbacks may write again, including to this collection.
         drop(topology_guard);
@@ -497,6 +499,10 @@ impl<'rt> MutationEngine<'rt> {
             entities.push(entity);
         }
 
+        let publication = self
+            .runtime
+            .index_store_ref()
+            .begin_insert_publication(&collection, current_xid);
         // Single lock acquisition for the entire batch.
         let ids = self
             .store
@@ -556,6 +562,7 @@ impl<'rt> MutationEngine<'rt> {
                 .index_entity_insert_batch(&collection, &index_rows)
                 .map_err(RedDBError::Internal)?;
         }
+        drop(publication);
 
         drop(topology_guard);
 

@@ -463,7 +463,9 @@ impl StatementExecutionFrame {
             || tx_context.is_some()
             || graph_insert_xid.is_some()
             || branch.is_some()
-            || runtime.snapshot_manager().snapshot_hides_writers(&snapshot);
+            || runtime
+                .snapshot_manager()
+                .snapshot_hides_real_writers(&snapshot);
         let (cache_key, is_volatile_query) = match identity_source {
             StatementIdentity::Text(_) if uses_result_cache => (
                 result_cache_key(query),

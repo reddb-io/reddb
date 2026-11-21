@@ -452,7 +452,12 @@ impl RedDBRuntime {
         query: &InsertQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
-        let _indexed_mutation = self.index_store_ref().begin_indexed_mutation(&query.table);
+        // A plain INSERT adds rows and index entries and removes none, so it
+        // leaves no index behind a concurrent reader. An upsert can update.
+        let _indexed_mutation = query
+            .on_conflict
+            .is_some()
+            .then(|| self.index_store_ref().begin_indexed_mutation(&query.table));
         let branch_store = self.db().store();
         let _branch_publication = (self.vcs_is_versioned(&query.table)?
             || self.has_graph_contract(&query.table))
@@ -2271,7 +2276,8 @@ impl RedDBRuntime {
                     });
                 ctx.snapshot = ctx.manager.fresh_read_snapshot();
                 ctx.branch = self.vcs_branch_read_view(&ctx.snapshot, None)?;
-                ctx.requires_index_fallback |= ctx.manager.snapshot_hides_writers(&ctx.snapshot);
+                ctx.requires_index_fallback |=
+                    ctx.manager.snapshot_hides_real_writers(&ctx.snapshot);
                 Some(crate::runtime::impl_core::CurrentSnapshotGuard::install(
                     ctx,
                 ))

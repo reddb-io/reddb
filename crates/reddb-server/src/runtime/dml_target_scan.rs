@@ -28,13 +28,6 @@ pub(super) struct DmlTargetScan<'a> {
     declared_table: bool,
 }
 
-fn dml_snapshot_index_is_stale(snapshot: &crate::runtime::impl_core::SnapshotContext) -> bool {
-    let current = snapshot.manager.fresh_read_snapshot();
-    snapshot.manager.oldest_active_xid().is_some()
-        || snapshot.snapshot.xid != current.xid
-        || snapshot.snapshot.in_progress != current.in_progress
-}
-
 fn dml_filter_can_retry(filter: &Filter) -> bool {
     match filter {
         Filter::Compare { .. }
@@ -178,7 +171,11 @@ impl<'a> DmlTargetScan<'a> {
             || !can_retry
             || !query_exec::runtime_indexes_queryable(self.table, index_store)
             || index_store.indexed_mutation_active_for(self.table)
-            || snapshot.as_ref().is_some_and(dml_snapshot_index_is_stale);
+            || !index_store
+                .await_insert_publications(self.table, snapshot.as_ref().map(|ctx| &ctx.snapshot))
+            || snapshot
+                .as_ref()
+                .is_some_and(|ctx| ctx.manager.real_writer_began_after(&ctx.snapshot));
         if !scan_required {
             if let Some(filter) = self.filter {
                 #[cfg(test)]
@@ -202,7 +199,7 @@ impl<'a> DmlTargetScan<'a> {
                         && generation == index_store.indexed_mutation_generation_for(self.table)
                         && snapshot
                             .as_ref()
-                            .is_none_or(|ctx| !dml_snapshot_index_is_stale(ctx))
+                            .is_none_or(|ctx| !ctx.manager.real_writer_began_after(&ctx.snapshot))
                     {
                         return result;
                     }
