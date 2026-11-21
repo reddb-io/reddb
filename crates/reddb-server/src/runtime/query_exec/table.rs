@@ -684,43 +684,100 @@ pub(crate) fn h3_cover_cells_for_geo_predicate(
     crate::geo::h3::grid_disk(cell, k)
 }
 
-/// How long a statement waits for the writers of its table before it scans.
-const TABLE_WRITERS_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+/// How long a statement keeps looking for a moment without writers of its
+/// table before it scans instead.
+const TABLE_WRITERS_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// [`execute_runtime_canonical_table_query_indexed`] for a statement that
 /// reads this one table and nothing else.
 ///
-/// When its snapshot hides a writer of the table, the indexes are behind that
-/// snapshot and the read would have to scan the collection. Outside a
-/// transaction any committed state since the statement began is a valid
-/// answer, so it waits the few milliseconds the writer takes and reads a
-/// snapshot taken after it.
+/// While an UPDATE or DELETE of the table is in flight its indexes are behind
+/// the statement's snapshot, and the read would have to scan the collection.
+/// Outside a transaction any committed state since the statement began is a
+/// valid answer, so it waits the few milliseconds such a writer takes and
+/// reads again from a snapshot taken after it, for as long as
+/// [`TABLE_WRITERS_WAIT`]. The scan costs far more than the wait.
 pub(crate) fn execute_runtime_canonical_table_query_current(
     db: &RedDB,
     query: &TableQuery,
     index_store: Option<&super::index_store::IndexStore>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
-    if let Some(mut snapshot) = crate::runtime::impl_core::capture_current_snapshot() {
-        if snapshot.requires_index_fallback
-            && snapshot.hidden_writers_only
-            && snapshot
-                .manager
-                .snapshot_hides_real_writers_of(&snapshot.snapshot, &query.table)
-            && snapshot
-                .manager
-                .await_real_writers_of(&query.table, TABLE_WRITERS_WAIT)
-        {
-            snapshot.snapshot = snapshot.manager.fresh_read_snapshot();
-            let hides = snapshot
-                .manager
-                .snapshot_hides_real_writers(&snapshot.snapshot);
-            snapshot.requires_index_fallback = hides;
-            snapshot.hidden_writers_only = hides;
-            let _guard = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot);
-            return execute_runtime_canonical_table_query_indexed(db, query, index_store);
+    let queryable =
+        index_store.filter(|store| super::runtime_indexes_queryable(&query.table, store));
+    let (Some(store), Some(mut snapshot)) = (
+        queryable,
+        crate::runtime::impl_core::capture_current_snapshot(),
+    ) else {
+        return execute_runtime_canonical_table_query_indexed(db, query, index_store);
+    };
+    // A transaction, AS OF or a branch pins the snapshot: nothing to wait for.
+    if (snapshot.requires_index_fallback && !snapshot.hidden_writers_only)
+        || !indexed_query_can_retry(query)
+        || crate::runtime::function_budget::stored_function_active()
+    {
+        return execute_runtime_canonical_table_query_indexed(db, query, index_store);
+    }
+    let deadline = std::time::Instant::now() + TABLE_WRITERS_WAIT;
+    loop {
+        if let Some(result) = try_indexed_table_query(db, query, store, snapshot.clone()) {
+            return result;
         }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        snapshot
+            .manager
+            .await_real_writers_of(&query.table, deadline - now);
+        snapshot.snapshot = snapshot.manager.fresh_read_snapshot();
+        let hides = snapshot
+            .manager
+            .snapshot_hides_real_writers(&snapshot.snapshot);
+        snapshot.requires_index_fallback = hides;
+        snapshot.hidden_writers_only = hides;
     }
     execute_runtime_canonical_table_query_indexed(db, query, index_store)
+}
+
+/// One optimistic indexed read under `snapshot`. `None` when a writer raced
+/// it or the indexes of the table are behind the snapshot: the caller scans
+/// or tries again.
+fn try_indexed_table_query(
+    db: &RedDB,
+    query: &TableQuery,
+    index_store: &super::index_store::IndexStore,
+    mut snapshot: crate::runtime::impl_core::SnapshotContext,
+) -> Option<RedDBResult<Vec<UnifiedRecord>>> {
+    if crate::runtime::dml_target_scan::snapshot_requires_index_fallback_for(
+        &snapshot,
+        &query.table,
+    ) {
+        return None;
+    }
+    // Any hidden writers change other collections: for this read the indexes
+    // are current. The executor consults the installed snapshot.
+    snapshot.requires_index_fallback = false;
+    snapshot.hidden_writers_only = false;
+    let _installed = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot.clone());
+    // Only mutations of this collection (and those that name none) can leave
+    // its indexes behind this read.
+    let start = index_store.indexed_mutation_generation_for(&query.table);
+    if !indexed_query_can_retry(query)
+        || crate::runtime::function_budget::stored_function_active()
+        || index_store.indexed_mutation_active_for(&query.table)
+        || !index_store.await_insert_publications(&query.table, Some(&snapshot.snapshot))
+        || snapshot_index_is_stale(&snapshot, &query.table)
+    {
+        return None;
+    }
+    let result = execute_runtime_canonical_table_query_inner(db, query, Some(index_store));
+    if index_store.indexed_mutation_active_for(&query.table)
+        || start != index_store.indexed_mutation_generation_for(&query.table)
+        || snapshot_index_is_stale(&snapshot, &query.table)
+    {
+        return None;
+    }
+    Some(result)
 }
 
 pub(crate) fn execute_runtime_canonical_table_query_indexed(
@@ -734,45 +791,16 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     let Some(mut snapshot) = snapshot else {
         return execute_runtime_canonical_table_query_inner(db, query, index_store);
     };
-    if crate::runtime::dml_target_scan::snapshot_requires_index_fallback_for(
-        &snapshot,
-        &query.table,
-    ) {
-        return execute_runtime_canonical_table_query_inner(db, query, index_store);
-    }
     let Some(index_store) = index_store else {
         return execute_runtime_canonical_table_query_inner(db, query, None);
     };
-    // The hidden writers change other collections: for this read the indexes
-    // are current. The executor consults the installed snapshot.
-    let _relaxed = snapshot.requires_index_fallback.then(|| {
-        snapshot.requires_index_fallback = false;
-        snapshot.hidden_writers_only = false;
-        crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot.clone())
-    });
-    // Only mutations of this collection (and those that name none) can leave
-    // its indexes behind this read.
-    let start = index_store.indexed_mutation_generation_for(&query.table);
-    if !indexed_query_can_retry(query)
-        || crate::runtime::function_budget::stored_function_active()
-        || index_store.indexed_mutation_active_for(&query.table)
-        || !index_store.await_insert_publications(&query.table, Some(&snapshot.snapshot))
-        || snapshot_index_is_stale(&snapshot, &query.table)
-    {
-        snapshot.requires_index_fallback = true;
-        let _guard = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot);
-        return execute_runtime_canonical_table_query_inner(db, query, Some(index_store));
+    if let Some(result) = try_indexed_table_query(db, query, index_store, snapshot.clone()) {
+        return result;
     }
-    let result = execute_runtime_canonical_table_query_inner(db, query, Some(index_store));
-    if index_store.indexed_mutation_active_for(&query.table)
-        || start != index_store.indexed_mutation_generation_for(&query.table)
-        || snapshot_index_is_stale(&snapshot, &query.table)
-    {
-        snapshot.requires_index_fallback = true;
-        let _guard = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot);
-        return execute_runtime_canonical_table_query_inner(db, query, Some(index_store));
-    }
-    result
+    // The indexes cannot answer for this snapshot: read the collection.
+    snapshot.requires_index_fallback = true;
+    let _guard = crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot);
+    execute_runtime_canonical_table_query_inner(db, query, Some(index_store))
 }
 
 // The optimistic path may repeat a read when a writer races it. Never repeat
