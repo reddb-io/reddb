@@ -27,6 +27,9 @@ impl MvccReclaimCursor {
     }
 }
 
+/// How long a maintenance tick waits for the publication fence.
+const MAINTENANCE_FENCE_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
 impl UnifiedStore {
     pub(crate) fn mvcc_reclaim_cursor(&self, collection: String) -> Option<MvccReclaimCursor> {
         let manager = self.get_collection(&collection)?;
@@ -44,12 +47,24 @@ impl UnifiedStore {
 
     /// Inventory at most `budget` physical positions for retention. The caller
     /// must recheck the current row and retention predicate before deletion.
+    /// The publication fence for one background maintenance tick.
+    ///
+    /// A tick that only tried the fence lost to foreground statements almost
+    /// every time on a busy node: retention and version reclaim stopped while
+    /// the load lasted and their backlog grew without bound. A short wait is
+    /// enough to take a turn between statements; a checkpoint holding the
+    /// fence for longer still makes the tick give up until the next one.
+    fn maintenance_fence(&self) -> Option<parking_lot::ReentrantMutexGuard<'_, ()>> {
+        self.vault_publication_lock
+            .try_lock_for(MAINTENANCE_FENCE_WAIT)
+    }
+
     pub(crate) fn retention_scan_tick(
         &self,
         cursor: &mut MvccReclaimCursor,
         budget: usize,
     ) -> Result<(Vec<EntityId>, usize), StoreError> {
-        let Some(_publication) = self.vault_publication_lock.try_lock() else {
+        let Some(_publication) = self.maintenance_fence() else {
             return Ok((Vec::new(), 0));
         };
         let Some(manager) = self.get_collection(&cursor.collection) else {
@@ -149,7 +164,7 @@ impl UnifiedStore {
         scan_budget: usize,
         reclaim_budget: usize,
     ) -> Result<usize, StoreError> {
-        let Some(_publication) = self.vault_publication_lock.try_lock() else {
+        let Some(_publication) = self.maintenance_fence() else {
             return Ok(0);
         };
         let Some(manager) = self.get_collection(&cursor.collection) else {
@@ -403,6 +418,38 @@ mod tests {
             .execute_query("CREATE TABLE reclaim_rows (id INTEGER, n INTEGER)")
             .expect("create table");
         runtime
+    }
+
+    #[test]
+    fn maintenance_ticks_take_their_turn_on_a_busy_fence() {
+        let runtime = fixture();
+        runtime
+            .execute_query("INSERT INTO reclaim_rows (id, n) VALUES (1, 0), (2, 0), (3, 0)")
+            .expect("seed rows");
+        let store = runtime.db().store();
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            // Foreground statements: the fence is free only between them.
+            scope.spawn(|| {
+                while !stop.load(Ordering::Acquire) {
+                    let _fence = store.vault_publication_lock.lock();
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            });
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let mut worked = 0;
+            for _ in 0..20 {
+                let mut cursor = store
+                    .mvcc_reclaim_cursor("reclaim_rows".to_string())
+                    .expect("open cursor");
+                let (_, scanned) = store
+                    .retention_scan_tick(&mut cursor, 8)
+                    .expect("retention tick");
+                worked += usize::from(scanned > 0);
+            }
+            stop.store(true, Ordering::Release);
+            assert_eq!(worked, 20, "a tick must take its turn instead of skipping");
+        });
     }
 
     #[test]
