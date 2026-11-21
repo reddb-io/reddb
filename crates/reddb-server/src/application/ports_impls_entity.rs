@@ -1998,9 +1998,9 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
     runtime.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
     runtime.check_batch_size(rows.len())?;
     runtime.check_db_size()?;
-    let _indexed_mutation = runtime
+    let _insert_publication = runtime
         .index_store_ref()
-        .begin_indexed_mutation(&collection);
+        .begin_insert_publication(&collection);
 
     let db = runtime.db();
     let contract = CollectionContractWriteEnforcer::new(runtime, &db, &collection);

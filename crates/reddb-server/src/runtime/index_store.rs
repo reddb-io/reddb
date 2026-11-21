@@ -1140,7 +1140,12 @@ pub struct IndexStore {
 
 /// Covers the interval in which storage and secondary indexes are published.
 /// Scoped to one runtime so unrelated databases do not affect each other.
-pub(crate) struct IndexedMutationGuard<'a>(&'a IndexStore, std::sync::Arc<CollectionMutationState>);
+pub(crate) struct IndexedMutationGuard<'a>(
+    &'a IndexStore,
+    std::sync::Arc<CollectionMutationState>,
+    /// Only the window in which an inserted row is stored but not yet indexed.
+    bool,
+);
 
 /// Not a valid collection name; see `begin_unscoped_indexed_mutation`.
 const UNSCOPED_MUTATION: &str = "\0unscoped";
@@ -1149,10 +1154,16 @@ const UNSCOPED_MUTATION: &str = "\0unscoped";
 struct CollectionMutationState {
     active: AtomicUsize,
     generation: AtomicU64,
+    /// Inserts between publishing their row and publishing its index entries.
+    inserting: AtomicUsize,
 }
 
 impl Drop for IndexedMutationGuard<'_> {
     fn drop(&mut self) {
+        if self.2 {
+            self.1.inserting.fetch_sub(1, Ordering::SeqCst);
+            return;
+        }
         self.1.generation.fetch_add(1, Ordering::SeqCst);
         self.1.active.fetch_sub(1, Ordering::SeqCst);
         self.0
@@ -1207,7 +1218,22 @@ impl IndexStore {
             .fetch_add(1, Ordering::SeqCst);
         state.active.fetch_add(1, Ordering::SeqCst);
         state.generation.fetch_add(1, Ordering::SeqCst);
-        IndexedMutationGuard(self, state)
+        IndexedMutationGuard(self, state, false)
+    }
+
+    /// The window in which an inserted row is in storage and its index
+    /// entries are not yet. A reader arriving inside it must not trust the
+    /// indexes of `collection`, or the row would be missing from an indexed
+    /// read that a scan answers.
+    ///
+    /// Unlike [`begin_indexed_mutation`](Self::begin_indexed_mutation) it
+    /// moves no generation: an insert adds entries and removes none, so a
+    /// read that started before or finished after the window is never behind
+    /// because of it.
+    pub(crate) fn begin_insert_publication(&self, collection: &str) -> IndexedMutationGuard<'_> {
+        let state = self.collection_mutation_state(collection);
+        state.inserting.fetch_add(1, Ordering::SeqCst);
+        IndexedMutationGuard(self, state, true)
     }
 
     /// A mutation whose collections are not known up front (replicated
@@ -1220,9 +1246,10 @@ impl IndexStore {
     pub(crate) fn indexed_mutation_active_for(&self, collection: &str) -> bool {
         let states = self.collection_mutations.read();
         [collection, UNSCOPED_MUTATION].iter().any(|key| {
-            states
-                .get(*key)
-                .is_some_and(|state| state.active.load(Ordering::SeqCst) != 0)
+            states.get(*key).is_some_and(|state| {
+                state.active.load(Ordering::SeqCst) != 0
+                    || state.inserting.load(Ordering::SeqCst) != 0
+            })
         })
     }
 

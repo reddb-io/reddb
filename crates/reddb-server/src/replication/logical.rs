@@ -668,9 +668,11 @@ impl LogicalChangeApplier {
                     let mut tombstone = entity.clone();
                     if tombstone.xmax == 0 || runtime.snapshot_manager().is_aborted(tombstone.xmax)
                     {
-                        tombstone.set_xmax(transaction_xid.unwrap_or_else(|| {
-                            runtime.snapshot_manager().allocate_committed_xid()
-                        }));
+                        tombstone.set_xmax(
+                            transaction_xid.unwrap_or_else(|| {
+                                runtime.snapshot_manager().allocate_replayed_xid()
+                            }),
+                        );
                         let manager = store
                             .get_collection(&record.collection)
                             .expect("existing row collection");
@@ -783,7 +785,7 @@ impl LogicalChangeApplier {
                             entity.set_xmin(
                                 entity
                                     .xmin
-                                    .max(runtime.snapshot_manager().allocate_committed_xid()),
+                                    .max(runtime.snapshot_manager().allocate_replayed_xid()),
                             );
                         }
                     }

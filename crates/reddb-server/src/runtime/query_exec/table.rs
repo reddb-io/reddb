@@ -705,6 +705,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     if !indexed_query_can_retry(query)
         || crate::runtime::function_budget::stored_function_active()
         || index_store.indexed_mutation_active()
+        || index_store.indexed_mutation_active_for(&query.table)
         || snapshot_index_is_stale(&snapshot)
     {
         snapshot.requires_index_fallback = true;
@@ -786,11 +787,10 @@ fn indexed_pure_expr(expr: &reddb_rql::ast::Expr) -> bool {
     }
 }
 
+/// Whether writers that started after the snapshot was taken may have left
+/// the secondary indexes behind it.
 fn snapshot_index_is_stale(snapshot: &crate::runtime::impl_core::SnapshotContext) -> bool {
-    let current = snapshot.manager.fresh_read_snapshot();
-    snapshot.manager.oldest_active_xid().is_some()
-        || snapshot.snapshot.xid != current.xid
-        || snapshot.snapshot.in_progress != current.in_progress
+    snapshot.manager.real_writer_began_after(&snapshot.snapshot)
 }
 
 fn execute_runtime_canonical_table_query_inner(

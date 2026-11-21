@@ -114,6 +114,11 @@ impl TxnContext {
 /// `begin()/commit()` pair (which also leaves the xid in neither set).
 pub struct SnapshotManager {
     next_xid: AtomicU64,
+    /// Newest xid handed out by `begin`, never one from the autocommit pool.
+    last_real_xid: AtomicU64,
+    /// A replayed change used a pool xid: from then on the pool no longer
+    /// serves inserts alone and every hidden xid counts as a writer.
+    replays_changes: std::sync::atomic::AtomicBool,
     visibility_revision: AtomicU64,
     state: parking_lot::RwLock<ManagerState>,
     /// Reservation window for the autocommit pool. A single
@@ -143,6 +148,24 @@ struct SerializableTxnState {
 struct AutocommitPool {
     next: Xid,
     end: Xid,
+    /// First xid of each recent reservation, oldest first. Lets a snapshot
+    /// tell the insert slots in its `in_progress` from real writers. A batch
+    /// that fell off the end is forgotten, and its xids then count as real
+    /// writers: the answer only errs towards caution.
+    batches: std::collections::VecDeque<Xid>,
+}
+
+/// Reservations remembered by [`AutocommitPool::batches`].
+const AUTOCOMMIT_POOL_BATCH_HISTORY: usize = 4096;
+
+impl AutocommitPool {
+    fn reserved(&self, xid: Xid) -> bool {
+        let after = self.batches.partition_point(|start| *start <= xid);
+        after
+            .checked_sub(1)
+            .and_then(|index| self.batches.get(index))
+            .is_some_and(|start| xid - start < AUTOCOMMIT_POOL_BATCH)
+    }
 }
 
 #[derive(Default)]
@@ -199,6 +222,8 @@ impl SnapshotManager {
         Self {
             // Start at 1 so xid=0 keeps its pre-MVCC "everyone sees it" meaning.
             next_xid: AtomicU64::new(1),
+            last_real_xid: AtomicU64::new(0),
+            replays_changes: std::sync::atomic::AtomicBool::new(false),
             visibility_revision: AtomicU64::new(0),
             state: parking_lot::RwLock::new(ManagerState::default()),
             // Pool starts empty — first caller triggers a refill.
@@ -243,6 +268,7 @@ impl SnapshotManager {
         let mut pool = self.autocommit_pool.lock();
         pool.next = pool.end;
         let xid = self.next_xid.fetch_add(1, Ordering::Relaxed);
+        self.last_real_xid.fetch_max(xid, Ordering::Release);
         state.active.insert(xid);
         if cache_coherent {
             state.cache_coherent_updates.insert(xid);
@@ -295,6 +321,47 @@ impl SnapshotManager {
             .in_progress
             .iter()
             .any(|xid| !(pool.next..pool.end).contains(xid))
+    }
+
+    /// Whether `snapshot` hides a transaction that can have removed index
+    /// entries: one begun with [`begin`](Self::begin) and still in flight when
+    /// the snapshot was taken.
+    ///
+    /// An autocommit INSERT draws its xid from the reserved pool. It adds rows
+    /// and their index entries and removes none, so it cannot leave an index
+    /// behind this snapshot whether it ran before or after it was taken.
+    ///
+    /// Once a change was replayed with a pool xid
+    /// ([`allocate_replayed_xid`](Self::allocate_replayed_xid)) the pool no
+    /// longer serves inserts alone, and this answers like
+    /// [`snapshot_hides_writers`](Self::snapshot_hides_writers).
+    pub fn snapshot_hides_real_writers(&self, snapshot: &Snapshot) -> bool {
+        if self.replays_changes.load(Ordering::Acquire) {
+            return self.snapshot_hides_writers(snapshot);
+        }
+        let pool = self.autocommit_pool.lock();
+        snapshot.in_progress.iter().any(|xid| !pool.reserved(*xid))
+    }
+
+    /// Whether a transaction was begun with [`begin`](Self::begin) after
+    /// `snapshot` was taken. Autocommit inserts do not count; see
+    /// [`snapshot_hides_real_writers`](Self::snapshot_hides_real_writers).
+    pub fn real_writer_began_after(&self, snapshot: &Snapshot) -> bool {
+        if self.replays_changes.load(Ordering::Acquire) {
+            let current = self.fresh_read_snapshot();
+            return self.oldest_active_xid().is_some()
+                || snapshot.xid != current.xid
+                || snapshot.in_progress != current.in_progress;
+        }
+        self.last_real_xid.load(Ordering::Acquire) > snapshot.xid
+    }
+
+    /// [`allocate_committed_xid`](Self::allocate_committed_xid) for a
+    /// replayed change, which can be an update or a delete. See
+    /// [`snapshot_hides_real_writers`](Self::snapshot_hides_real_writers).
+    pub fn allocate_replayed_xid(&self) -> Xid {
+        self.replays_changes.store(true, Ordering::Release);
+        self.allocate_committed_xid()
     }
 
     /// Capture and register under the same lock used by GC cutoff selection.
@@ -413,6 +480,10 @@ impl SnapshotManager {
                 .fetch_add(AUTOCOMMIT_POOL_BATCH, Ordering::Relaxed);
             pool.next = start;
             pool.end = start + AUTOCOMMIT_POOL_BATCH;
+            if pool.batches.len() == AUTOCOMMIT_POOL_BATCH_HISTORY {
+                pool.batches.pop_front();
+            }
+            pool.batches.push_back(start);
         }
         let xid = pool.next;
         pool.next += 1;
@@ -914,6 +985,70 @@ mod tests {
         m.commit(writer);
         assert!(m.snapshot_hides_writers(&concurrent));
         assert!(!m.snapshot_hides_writers(&m.fresh_read_snapshot()));
+    }
+
+    #[test]
+    fn autocommit_inserts_are_not_real_writers() {
+        let m = SnapshotManager::new();
+        let _insert = m.allocate_committed_xid();
+        let quiet = m.fresh_read_snapshot();
+        assert!(!m.snapshot_hides_real_writers(&quiet));
+        assert!(!m.real_writer_began_after(&quiet));
+
+        // Inserts issued after the snapshot, across a pool refill, change
+        // nothing: they add rows and remove no index entry.
+        for _ in 0..3 * AUTOCOMMIT_POOL_BATCH {
+            m.allocate_committed_xid();
+        }
+        assert!(!m.snapshot_hides_real_writers(&quiet));
+        assert!(!m.real_writer_began_after(&quiet));
+        assert!(!m.snapshot_hides_real_writers(&m.fresh_read_snapshot()));
+
+        // A transaction in flight when the snapshot is taken is hidden by
+        // it, also after it commits.
+        let writer = m.begin();
+        let concurrent = m.fresh_read_snapshot();
+        assert!(m.snapshot_hides_real_writers(&concurrent));
+        assert!(!m.real_writer_began_after(&concurrent));
+        // One begun later is not in the older snapshot, but began after it.
+        assert!(!m.snapshot_hides_real_writers(&quiet));
+        assert!(m.real_writer_began_after(&quiet));
+        m.commit(writer);
+        assert!(m.snapshot_hides_real_writers(&concurrent));
+        assert!(m.real_writer_began_after(&quiet));
+        let after = m.fresh_read_snapshot();
+        assert!(!m.snapshot_hides_real_writers(&after));
+        assert!(!m.real_writer_began_after(&after));
+    }
+
+    #[test]
+    fn a_replayed_change_makes_every_hidden_xid_a_writer() {
+        let m = SnapshotManager::new();
+        m.allocate_committed_xid();
+        let before = m.fresh_read_snapshot();
+        assert!(!m.snapshot_hides_real_writers(&before));
+        // A replica replays an update with a pool xid.
+        let replayed = m.allocate_replayed_xid();
+        assert!(before.in_progress.contains(&replayed));
+        assert!(m.snapshot_hides_real_writers(&before));
+        assert!(m.real_writer_began_after(&before));
+        let after = m.fresh_read_snapshot();
+        assert!(!m.snapshot_hides_real_writers(&after));
+        assert!(!m.real_writer_began_after(&after));
+    }
+
+    #[test]
+    fn a_forgotten_insert_reservation_counts_as_a_writer() {
+        let m = SnapshotManager::new();
+        m.allocate_committed_xid();
+        let old = m.fresh_read_snapshot();
+        for _ in 0..(AUTOCOMMIT_POOL_BATCH_HISTORY as u64 + 2) * AUTOCOMMIT_POOL_BATCH {
+            m.allocate_committed_xid();
+        }
+        assert!(
+            m.snapshot_hides_real_writers(&old),
+            "a reservation that left the history must err towards a writer"
+        );
     }
 
     #[test]
