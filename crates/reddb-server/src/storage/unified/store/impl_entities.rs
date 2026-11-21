@@ -1590,6 +1590,30 @@ impl UnifiedStore {
         collection: &str,
         ids: &[EntityId],
     ) -> Result<Vec<EntityId>, StoreError> {
+        self.delete_batch_waiting(collection, ids, None)
+    }
+
+    /// [`delete_batch`](Self::delete_batch) for maintenance: rows of a
+    /// collection that is being walked are left for a later pass instead of
+    /// waiting for the walk under the publication fence.
+    pub(crate) fn delete_batch_between_walks(
+        &self,
+        collection: &str,
+        ids: &[EntityId],
+    ) -> Result<Vec<EntityId>, StoreError> {
+        self.delete_batch_waiting(
+            collection,
+            ids,
+            Some(super::mvcc_reclaim::MAINTENANCE_WALK_WAIT),
+        )
+    }
+
+    fn delete_batch_waiting(
+        &self,
+        collection: &str,
+        ids: &[EntityId],
+        between_walks: Option<std::time::Duration>,
+    ) -> Result<Vec<EntityId>, StoreError> {
         let collection = Self::canonical_collection(collection);
         if ids.is_empty() {
             return Ok(Vec::new());
@@ -1611,7 +1635,10 @@ impl UnifiedStore {
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
 
         let before = self.pager.as_ref().map(|_| manager.checkpoint_revisions());
-        let deleted_ids = manager.delete_batch(ids)?;
+        let deleted_ids = match between_walks {
+            Some(wait) => manager.delete_batch_between_walks(ids, wait)?,
+            None => manager.delete_batch(ids)?,
+        };
         if deleted_ids.is_empty() {
             return Ok(deleted_ids);
         }

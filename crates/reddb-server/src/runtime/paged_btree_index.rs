@@ -1317,6 +1317,61 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_removal_does_not_queue_behind_a_walk_of_the_collection() {
+        use std::time::{Duration, Instant};
+
+        let (_directory, runtime, _options) = fixture();
+        let store = runtime.db().store();
+        let manager = store.get_collection("ordered_rows").expect("collection");
+        let mut ids = Vec::new();
+        manager
+            .try_for_each_entity(usize::MAX, |entity| {
+                ids.push(entity.id);
+                true
+            })
+            .expect("row ids");
+        let victim = ids[0];
+        let (walking, started) = std::sync::mpsc::channel();
+        let (finish, finished) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            // A statement is part-way through walking the collection.
+            let walk = &manager;
+            scope.spawn(move || {
+                let mut reported = false;
+                walk.try_for_each_entity(usize::MAX, |_| {
+                    if !reported {
+                        reported = true;
+                        walking.send(()).expect("walk started");
+                        finished.recv().expect("walk released");
+                    }
+                    true
+                })
+                .expect("walk");
+            });
+            started.recv().expect("walk in flight");
+
+            // Maintenance gives up on the row instead of waiting for the walk.
+            let began = Instant::now();
+            let removed = store
+                .delete_batch_between_walks("ordered_rows", &[victim])
+                .expect("maintenance removal");
+            assert!(removed.is_empty(), "the walk still excludes the removal");
+            assert!(
+                began.elapsed() < Duration::from_secs(2),
+                "maintenance waited for the walk"
+            );
+            // No writer is left queued: other readers of the collection go on.
+            assert!(manager.try_get(victim, usize::MAX).expect("read").is_some());
+
+            finish.send(()).expect("release the walk");
+        });
+        let removed = store
+            .delete_batch_between_walks("ordered_rows", &[victim])
+            .expect("maintenance removal");
+        assert_eq!(removed, vec![victim]);
+    }
+
+    #[test]
     fn paged_btree_prepared_restore_and_ranges_never_scan_source() {
         let (_directory, runtime, options) = fixture();
         drop(runtime);
