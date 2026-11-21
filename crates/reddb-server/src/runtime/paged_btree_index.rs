@@ -1016,6 +1016,25 @@ impl RedDBRuntime {
                 &equality_storage_name(&index.name),
             )?;
         }
+        // The overlay speaks for every row the published tree is wrong
+        // about, so it starts from what recovery replayed from the WAL: the
+        // rows resident now, and the ones removed since the tree was
+        // published. Later changes reach it through the hooks.
+        let mut overlay = OverlayBtree::default();
+        if let Some(manager) = self.db().store().get_collection(&index.collection) {
+            for removed in manager.backing_removed_rows() {
+                overlay.remove(removed);
+            }
+            let mut key = [0; SECONDARY_KEY_BYTES_MAX];
+            manager.for_each_entity(|entity| {
+                match projection.project(entity, &mut key) {
+                    Ok(Some(length)) => overlay.insert(key[..length].to_vec(), entity.id),
+                    Ok(None) => overlay.remove(entity.id),
+                    Err(_) => overlay.insert(vec![SCAN_REQUIRED], entity.id),
+                }
+                true
+            });
+        }
         prepared.paged_btrees.write().insert(
             (index.collection.clone(), index.name.clone()),
             Arc::new(RuntimeBtreeIndex {
@@ -1024,7 +1043,7 @@ impl RedDBRuntime {
                 name: index.name.clone(),
                 identity,
                 projection,
-                overlay: parking_lot::RwLock::new(OverlayBtree::default()),
+                overlay: parking_lot::RwLock::new(overlay),
             }),
         );
         Ok(())

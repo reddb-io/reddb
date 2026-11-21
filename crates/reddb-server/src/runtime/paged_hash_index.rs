@@ -657,7 +657,11 @@ impl RedDBRuntime {
         // replayed from the WAL, and, for a collection without a disk base,
         // all of them. Later changes reach it through the index hooks.
         let mut overlay = OverlayHash::default();
+        // The rows removed before this open are retired too: the published
+        // postings still name them, and nothing else remembers they left.
+        let mut retired = std::collections::HashSet::new();
         if let Some(manager) = store.get_collection(&index.collection) {
+            retired.extend(manager.backing_removed_rows());
             manager.for_each_entity(|entity| {
                 match projection.raw_key(entity, projection.key_bytes_max) {
                     Ok(Some(key)) => overlay.insert(key, entity.id),
@@ -679,7 +683,7 @@ impl RedDBRuntime {
                 name: storage_name.to_string(),
                 identity,
                 projection,
-                retired: parking_lot::RwLock::new(std::collections::HashSet::new()),
+                retired: parking_lot::RwLock::new(retired),
                 overlay: parking_lot::RwLock::new(overlay),
             }),
         );
@@ -1343,6 +1347,111 @@ mod tests {
         assert_eq!(affected("DELETE FROM replayed WHERE id = 'fresh'"), 1);
         assert_eq!(rows("SELECT v FROM replayed WHERE id = 'fresh'"), 0);
         assert_eq!(rows("SELECT id FROM replayed"), 2);
+    }
+
+    const RANGE_REPLAY_CHILD: &str = "REDDB_RANGE_OVERLAY_REPLAY_PATH";
+    const RANGE_REPLAY_TEST: &str =
+        "runtime::paged_hash_index::tests::rows_replayed_after_a_crash_are_found_by_range";
+
+    #[test]
+    fn rows_replayed_after_a_crash_are_found_by_range() {
+        if let Some(path) = std::env::var_os(RANGE_REPLAY_CHILD) {
+            // The writer dies without a checkpoint: only the WAL has these.
+            let runtime = replay_runtime(std::path::Path::new(&path));
+            for sql in [
+                "INSERT INTO ranged (id, score) VALUES ('fresh', 15)",
+                "UPDATE ranged SET score = 25 WHERE id = 'b'",
+                "DELETE FROM ranged WHERE id = 'c'",
+            ] {
+                runtime.execute_query(sql).expect(sql);
+            }
+            // Maintenance removes the versions those statements retired.
+            let store = runtime.db().store();
+            let mut retired = Vec::new();
+            store
+                .get_collection("ranged")
+                .expect("collection")
+                .for_each_entity(|entity| {
+                    if entity.xmax != 0 {
+                        retired.push(entity.id);
+                    }
+                    true
+                });
+            let removed = store.delete_batch("ranged", &retired).expect("removal");
+            assert_eq!(removed.len(), 2, "the old version of b, and c");
+            std::process::exit(0);
+        }
+        let directory = tempfile::tempdir().expect("replay fixture");
+        let path = directory.path().join("replay.rdb");
+        {
+            let seed = replay_runtime(&path);
+            for sql in [
+                "CREATE TABLE ranged (id TEXT PRIMARY KEY, score INTEGER)",
+                "CREATE INDEX ranged_score ON ranged (score) USING BTREE",
+                "INSERT INTO ranged (id, score) VALUES ('a', 10), ('b', 20), ('c', 30)",
+            ] {
+                seed.execute_query(sql).expect(sql);
+            }
+            seed.flush().expect("publish the base");
+        }
+        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", RANGE_REPLAY_TEST, "--nocapture"])
+            .env(RANGE_REPLAY_CHILD, &path)
+            .status()
+            .expect("writer child");
+        assert!(status.success(), "writer child failed: {status}");
+
+        let runtime = replay_runtime(&path);
+        let ids = |sql: &str| {
+            let mut ids: Vec<String> = runtime
+                .execute_query(sql)
+                .expect(sql)
+                .result
+                .records
+                .iter()
+                .filter_map(|record| match record.get("id") {
+                    Some(Value::Text(id)) => Some(id.to_string()),
+                    _ => None,
+                })
+                .collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(ids("SELECT id FROM ranged"), ["a", "b", "fresh"]);
+        // The row inserted before the crash.
+        assert_eq!(
+            ids("SELECT id FROM ranged WHERE score BETWEEN 11 AND 19"),
+            ["fresh"]
+        );
+        // The row that moved is at its new key and not at its old one.
+        assert_eq!(
+            ids("SELECT id FROM ranged WHERE score BETWEEN 21 AND 29"),
+            ["b"]
+        );
+        assert!(ids("SELECT id FROM ranged WHERE score BETWEEN 19 AND 21").is_empty());
+        // The deleted row is gone.
+        assert!(ids("SELECT id FROM ranged WHERE score BETWEEN 29 AND 31").is_empty());
+
+        // The published postings of the removed versions do not send a
+        // statement back to walking the collection: the ordered index still
+        // answers the range, and the equality index the key.
+        let below = reddb_rql::ast::Filter::Compare {
+            field: reddb_rql::ast::FieldRef::column("ranged", "score"),
+            op: reddb_rql::ast::CompareOp::Lt,
+            value: Value::Integer(100),
+        };
+        assert_eq!(
+            runtime
+                .index_store_ref()
+                .paged_btree_lookup("ranged", &below)
+                .expect("lookup")
+                .map(|candidates| candidates.len()),
+            Some(3)
+        );
+        let before = SCANNING_LOOKUPS.with(std::cell::Cell::get);
+        assert_eq!(ids("SELECT id FROM ranged WHERE id = 'b'"), ["b"]);
+        assert!(ids("SELECT id FROM ranged WHERE id = 'c'").is_empty());
+        assert_eq!(SCANNING_LOOKUPS.with(std::cell::Cell::get), before);
     }
 
     #[test]
