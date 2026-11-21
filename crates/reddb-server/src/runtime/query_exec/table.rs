@@ -750,10 +750,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         snapshot.hidden_writers_only = false;
         crate::runtime::impl_core::CurrentSnapshotGuard::install(snapshot.clone())
     });
-    let start = index_store.indexed_mutation_generation();
+    // Only mutations of this collection (and those that name none) can leave
+    // its indexes behind this read.
+    let start = index_store.indexed_mutation_generation_for(&query.table);
     if !indexed_query_can_retry(query)
         || crate::runtime::function_budget::stored_function_active()
-        || index_store.indexed_mutation_active()
+        || index_store.indexed_mutation_active_for(&query.table)
         || !index_store.await_insert_publications(&query.table, Some(&snapshot.snapshot))
         || snapshot_index_is_stale(&snapshot, &query.table)
     {
@@ -762,8 +764,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         return execute_runtime_canonical_table_query_inner(db, query, Some(index_store));
     }
     let result = execute_runtime_canonical_table_query_inner(db, query, Some(index_store));
-    if index_store.indexed_mutation_active()
-        || start != index_store.indexed_mutation_generation()
+    if index_store.indexed_mutation_active_for(&query.table)
+        || start != index_store.indexed_mutation_generation_for(&query.table)
         || snapshot_index_is_stale(&snapshot, &query.table)
     {
         snapshot.requires_index_fallback = true;
