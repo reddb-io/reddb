@@ -650,15 +650,6 @@ impl RedDBRuntime {
         entry: RuntimeResultCacheEntry,
         revision: u64,
     ) {
-        let policy = crate::storage::cache::BlobCachePolicy::default()
-            .ttl_ms(self.result_cache_ttl_secs() * 1000)
-            .priority(200);
-        let dependencies = entry.scopes.iter().cloned().collect::<Vec<_>>();
-        let bytes = encode_result_cache_payload(&entry)
-            .unwrap_or_else(|| result_cache_fingerprint(&entry.result).into_bytes());
-        let put = crate::storage::cache::BlobCachePut::new(bytes)
-            .with_dependencies(dependencies)
-            .with_policy(policy);
         let store = self.inner.db.store();
         // Caching a result is optional. Every cacheable statement comes here:
         // one that finds a publication or a long index read in progress goes
@@ -673,32 +664,14 @@ impl RedDBRuntime {
         {
             return;
         }
-        let defer_l2 = self.inner.db.path().is_some() && store.pager().is_none();
-        if defer_l2 && cache.5.is_none() {
+        // The statement keeps its result in memory only. Writing it to the
+        // durable tier is a WAL append that waits for an fsync under the
+        // publication fence, which a read must not pay for; the sweeper
+        // promotes the entry once writes have been quiet.
+        if cache.5.is_none() {
             cache.5 = Some(std::time::Instant::now() + RESULT_CACHE_WRITE_QUIET_PERIOD);
         }
-        let volatile = defer_l2
-            || cache
-                .5
-                .is_some_and(|until| std::time::Instant::now() < until);
-        if !volatile
-            && self
-                .inner
-                .result_blob_cache
-                .put(RESULT_CACHE_BLOB_NAMESPACE, key, put)
-                .is_err()
-        {
-            // An unsuccessful L2 publication may have left an entry behind.
-            cache.2 = true;
-            cache.3 = cache.3.wrapping_add(1);
-            return;
-        }
-
-        if volatile {
-            cache.4.insert(key.to_string());
-        } else {
-            cache.4.remove(key);
-        }
+        cache.4.insert(key.to_string());
         let capacity = self.result_cache_capacity();
         let (ref mut map, ref mut order, ref mut untracked, ref mut revision, ..) = *cache;
         // Single hash lookup: drive the LRU-order push_back only on Vacant.
@@ -903,6 +876,66 @@ mod crash_tests {
         )
         .expect("native read frame");
         assert!(!runtime.db().store().result_cache_format_fenced());
+    }
+
+    #[test]
+    fn a_statement_leaves_the_durable_tier_to_the_sweeper() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+        for sql in [
+            "CREATE TABLE cached_rows (id INT)",
+            "INSERT INTO cached_rows (id) VALUES (1)",
+        ] {
+            runtime.execute_query(sql).expect(sql);
+        }
+        // Writes have been quiet: a read used to publish its own result to the
+        // durable tier here, waiting for the WAL under the publication fence.
+        std::thread::sleep(super::RESULT_CACHE_WRITE_QUIET_PERIOD + Duration::from_millis(50));
+        let sql = "SELECT id FROM cached_rows ORDER BY id";
+        runtime.execute_query(sql).expect("read");
+        assert_eq!(
+            runtime.inner.result_blob_entries.read().4.len(),
+            1,
+            "the result waits in memory for the sweeper"
+        );
+
+        let hits = runtime.inner.result_cache_hits.load(Ordering::Relaxed);
+        assert_eq!(
+            runtime
+                .execute_query(sql)
+                .expect("hit")
+                .result
+                .records
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime.inner.result_cache_hits.load(Ordering::Relaxed),
+            hits + 1,
+            "a result held in memory answers the next statement"
+        );
+
+        std::thread::sleep(super::RESULT_CACHE_WRITE_QUIET_PERIOD + Duration::from_millis(50));
+        runtime.promote_volatile_result_cache_entry();
+        assert!(
+            runtime.inner.result_blob_entries.read().4.is_empty(),
+            "the sweeper moves it to the durable tier"
+        );
+        assert_eq!(
+            runtime
+                .execute_query(sql)
+                .expect("hit")
+                .result
+                .records
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime.inner.result_cache_hits.load(Ordering::Relaxed),
+            hits + 2
+        );
     }
 
     #[test]
