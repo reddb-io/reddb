@@ -750,7 +750,12 @@ impl RedDBRuntime {
                         context_index_dirty = true;
                     }
                     if contract.requires_uniqueness_check(&modified_columns) {
-                        contract.enforce_row_uniqueness(&normalized_fields, Some(id))?;
+                        contract.enforce_updated_row_uniqueness(
+                            &normalized_fields,
+                            (!pre_mutation_fields.is_empty())
+                                .then_some(pre_mutation_fields.as_slice()),
+                            Some(id),
+                        )?;
                     }
                     if self
                         .index_store_ref()
@@ -1326,7 +1331,11 @@ impl RedDBRuntime {
             }
             if row_touches_unique_columns || expression_contract.is_some() {
                 let current_fields = collect_row_fields(row);
-                contract.enforce_row_uniqueness(&current_fields, Some(id))?;
+                contract.enforce_updated_row_uniqueness(
+                    &current_fields,
+                    (!pre_mutation_fields.is_empty()).then_some(pre_mutation_fields.as_slice()),
+                    Some(id),
+                )?;
             }
         }
 

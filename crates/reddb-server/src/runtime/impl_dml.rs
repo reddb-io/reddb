@@ -2418,7 +2418,13 @@ impl RedDBRuntime {
                             crate::application::ports::entity_row_fields_snapshot(&item.entity);
                         let previous_id =
                             item.replaced_entity.as_ref().map_or(item.id, |old| old.id);
-                        contract.enforce_row_uniqueness(&fields, Some(previous_id))?;
+                        let previous = (!item.pre_mutation_fields.is_empty())
+                            .then_some(item.pre_mutation_fields.as_slice());
+                        contract.enforce_updated_row_uniqueness(
+                            &fields,
+                            previous,
+                            Some(previous_id),
+                        )?;
                     }
                 }
                 self.persist_update_chunk(chunk)?;
@@ -2610,7 +2616,13 @@ impl RedDBRuntime {
                             crate::application::ports::entity_row_fields_snapshot(&item.entity);
                         let previous_id =
                             item.replaced_entity.as_ref().map_or(item.id, |old| old.id);
-                        contract.enforce_row_uniqueness(&fields, Some(previous_id))?;
+                        let previous = (!item.pre_mutation_fields.is_empty())
+                            .then_some(item.pre_mutation_fields.as_slice());
+                        contract.enforce_updated_row_uniqueness(
+                            &fields,
+                            previous,
+                            Some(previous_id),
+                        )?;
                     }
                 }
                 self.persist_update_chunk(chunk)?;

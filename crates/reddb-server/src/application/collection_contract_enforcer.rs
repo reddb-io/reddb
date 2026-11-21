@@ -186,6 +186,52 @@ mod write_adapter {
             enforce_row_uniqueness(self.runtime, self.db, self.collection, fields, exclude_id)
         }
 
+        /// Admit the post-image of an UPDATE whose pre-image is `previous`.
+        ///
+        /// A rule whose columns the update left as they were cannot be newly
+        /// violated by it, so it is not checked. A row keeps its key; refusing
+        /// the statement because some other row already shares that key (one
+        /// admitted by an engine that did not check rows on disk) would make
+        /// the row impossible to update at all, including to repair it.
+        pub(crate) fn enforce_updated_row_uniqueness(
+            &self,
+            fields: &[(String, Value)],
+            previous: Option<&[(String, Value)]>,
+            exclude_id: Option<crate::storage::EntityId>,
+        ) -> RedDBResult<()> {
+            let Some(previous) = previous else {
+                return self.enforce_row_uniqueness(fields, exclude_id);
+            };
+            let Some(contract) = self.db.collection_contract(self.collection) else {
+                return Ok(());
+            };
+            let value = |row: &[(String, Value)], column: &str| {
+                row.iter()
+                    .find(|(name, _)| name == column)
+                    .map(|(_, value)| value.clone())
+            };
+            for rule in resolved_uniqueness_rules(&contract) {
+                if rule
+                    .columns
+                    .iter()
+                    .all(|column| value(fields, column) == value(previous, column))
+                {
+                    continue;
+                }
+                if let Some(conflict) = find_row_uniqueness_conflict(
+                    self.runtime,
+                    self.db,
+                    self.collection,
+                    fields,
+                    Some(&rule.columns),
+                    exclude_id,
+                )? {
+                    return Err(row_uniqueness_error(&conflict.rule, self.collection).into());
+                }
+            }
+            Ok(())
+        }
+
         pub(crate) fn row_uniqueness_conflict_id(
             &self,
             fields: &[(String, Value)],

@@ -324,6 +324,73 @@ mod tests {
     }
 
     #[test]
+    fn an_update_that_keeps_its_key_is_not_refused_for_a_duplicate_it_did_not_create() {
+        let (_directory, runtime) = cold_table(&[
+            "CREATE TABLE snapshots (id TEXT PRIMARY KEY, seq INTEGER, payload TEXT)",
+            "INSERT INTO snapshots (id, seq, payload) VALUES ('0007', 7, 'first'), ('0008', 8, 'kept')",
+        ]);
+        // An engine that did not check keys against rows on disk let a second
+        // row with the same key in. Put one there below the constraint.
+        let store = runtime.db().store();
+        let manager = store.get_collection("snapshots").expect("collection");
+        let mut duplicate = None;
+        manager
+            .try_for_each_entity(usize::MAX, |entity| {
+                let is_seven = entity.data.as_row().is_some_and(|row| {
+                    matches!(row.get_field("id"), Some(Value::Text(id)) if id.as_ref() == "0007")
+                });
+                if is_seven {
+                    duplicate = Some(entity.clone());
+                }
+                !is_seven
+            })
+            .expect("find the row");
+        let mut duplicate = duplicate.expect("row 0007");
+        // A row of its own, not another version of the first: its own
+        // physical and logical identity.
+        let own_id = crate::storage::EntityId::new(900_000);
+        duplicate.id = own_id;
+        duplicate.set_logical_id(own_id);
+        if let crate::storage::EntityKind::TableRow { row_id, .. } = &mut duplicate.kind {
+            *row_id = own_id.raw();
+        }
+        store
+            .insert_auto("snapshots", duplicate)
+            .expect("legacy duplicate");
+        assert_eq!(
+            values(&runtime, "SELECT id FROM snapshots WHERE seq = 7", "id").len(),
+            2,
+            "two rows share the key"
+        );
+
+        // The statement leaves `id` as it is on every row it touches.
+        let updated = runtime
+            .execute_query(
+                "UPDATE snapshots SET id = id, payload = NULL WHERE seq < 8 AND payload IS NOT NULL",
+            )
+            .expect("an unchanged key cannot newly violate its constraint");
+        assert_eq!(updated.affected_rows, 2);
+        assert!(values(
+            &runtime,
+            "SELECT payload FROM snapshots WHERE seq = 7",
+            "payload"
+        )
+        .iter()
+        .all(|payload| matches!(payload, Value::Null)),);
+
+        // Moving a row onto a key another row holds is still refused,
+        let error = runtime
+            .execute_query("UPDATE snapshots SET id = '0008' WHERE seq = 7")
+            .expect_err("an update must not take a key in use");
+        assert!(error.to_string().contains("primary key"), "{error}");
+        // and so is inserting the duplicate key again.
+        let error = runtime
+            .execute_query("INSERT INTO snapshots (id, seq, payload) VALUES ('0007', 7, 'again')")
+            .expect_err("the key is taken");
+        assert!(error.to_string().contains("primary key"), "{error}");
+    }
+
+    #[test]
     fn primary_key_still_rejects_duplicates_of_rows_on_disk() {
         let (_directory, runtime) = cold_table(&[
             "CREATE TABLE accounts (id TEXT PRIMARY KEY, v TEXT)",
