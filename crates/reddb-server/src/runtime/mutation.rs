@@ -335,7 +335,7 @@ impl<'rt> MutationEngine<'rt> {
         let publication = if self.keyed_previous.is_some() {
             index_store.begin_indexed_mutation(&collection)
         } else {
-            index_store.begin_insert_publication(&collection)
+            index_store.begin_insert_publication(&collection, writer_xid)
         };
         let id = if let Some(previous) = self.keyed_previous {
             let metadata = (!row.metadata.is_empty())
@@ -502,7 +502,7 @@ impl<'rt> MutationEngine<'rt> {
         let publication = self
             .runtime
             .index_store_ref()
-            .begin_insert_publication(&collection);
+            .begin_insert_publication(&collection, current_xid);
         // Single lock acquisition for the entire batch.
         let ids = self
             .store

@@ -2000,7 +2000,7 @@ fn create_rows_batch_prevalidated_columnar_with_outputs(
     runtime.check_db_size()?;
     let _insert_publication = runtime
         .index_store_ref()
-        .begin_insert_publication(&collection);
+        .begin_insert_publication(&collection, 0);
 
     let db = runtime.db();
     let contract = CollectionContractWriteEnforcer::new(runtime, &db, &collection);

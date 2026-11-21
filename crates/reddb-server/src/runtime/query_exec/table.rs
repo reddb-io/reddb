@@ -705,7 +705,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     if !indexed_query_can_retry(query)
         || crate::runtime::function_budget::stored_function_active()
         || index_store.indexed_mutation_active()
-        || index_store.indexed_mutation_active_for(&query.table)
+        || !index_store.await_insert_publications(&query.table, Some(&snapshot.snapshot))
         || snapshot_index_is_stale(&snapshot)
     {
         snapshot.requires_index_fallback = true;

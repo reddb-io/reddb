@@ -171,6 +171,8 @@ impl<'a> DmlTargetScan<'a> {
             || !can_retry
             || !query_exec::runtime_indexes_queryable(self.table, index_store)
             || index_store.indexed_mutation_active_for(self.table)
+            || !index_store
+                .await_insert_publications(self.table, snapshot.as_ref().map(|ctx| &ctx.snapshot))
             || snapshot
                 .as_ref()
                 .is_some_and(|ctx| ctx.manager.real_writer_began_after(&ctx.snapshot));
