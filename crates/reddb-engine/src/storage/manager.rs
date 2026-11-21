@@ -706,6 +706,27 @@ impl SegmentManager {
         hints.insert(logical_id, physical_id);
     }
 
+    /// Record the live versions a walk of the collection passed. A hint that
+    /// is already present was written when a newer version was inserted, so
+    /// it is kept. Nothing is recorded once the hints are full: a walk must
+    /// not throw away the hints of rows that are being written.
+    pub fn remember_walked_live_row_versions(&self, walked: Vec<(EntityId, EntityId)>) {
+        if walked.is_empty() {
+            return;
+        }
+        let mut hints = self.live_row_version_hints.write();
+        for (logical_id, physical_id) in walked {
+            if hints.len() >= LIVE_ROW_VERSION_HINTS_MAX {
+                break;
+            }
+            hints.entry(logical_id).or_insert(physical_id);
+        }
+    }
+
+    /// How many live versions one walk may hand to
+    /// [`remember_walked_live_row_versions`](Self::remember_walked_live_row_versions).
+    pub const WALKED_LIVE_ROW_VERSIONS_MAX: usize = LIVE_ROW_VERSION_HINTS_MAX;
+
     /// The live version of `logical_id`, if the hint still names one. Rows
     /// that never changed are found by their own id and need no hint.
     pub fn hinted_live_row_version(&self, logical_id: EntityId) -> Option<UnifiedEntity> {

@@ -1317,6 +1317,37 @@ mod tests {
     }
 
     #[test]
+    fn one_walk_after_a_restart_finds_the_live_version_of_every_row() {
+        let (_directory, runtime, options) = fixture();
+        // Rows 1..=4 each get a second version, which a checkpoint moves to
+        // the disk base. The hints to those versions do not survive a restart.
+        for id in 1..=4 {
+            runtime
+                .execute_query(&format!(
+                    "UPDATE ordered_rows SET payload = 'second' WHERE id = {id}"
+                ))
+                .expect("first update");
+        }
+        runtime.flush().expect("checkpoint");
+        drop(runtime);
+        let runtime = open(&options);
+
+        // The first statement to resolve such a row walks the collection...
+        runtime
+            .execute_query("UPDATE ordered_rows SET payload = 'third' WHERE id = 1")
+            .expect("update after restart");
+        // ...and that walk is the last one: the others are found directly.
+        deny_scan(&runtime);
+        for id in 2..=4 {
+            runtime
+                .execute_query(&format!(
+                    "UPDATE ordered_rows SET payload = 'third' WHERE id = {id}"
+                ))
+                .expect("update without another walk");
+        }
+    }
+
+    #[test]
     fn maintenance_removal_does_not_queue_behind_a_walk_of_the_collection() {
         use std::time::{Duration, Instant};
 
