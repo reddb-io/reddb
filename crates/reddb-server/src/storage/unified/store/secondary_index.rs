@@ -112,6 +112,10 @@ pub(super) struct SecondaryIndexSpec {
     pub(super) identity: SecondaryIndexIdentity,
     pub(super) projector: Arc<dyn SecondaryIndexProjector>,
     pub(super) deferred: bool,
+    /// Reads answer without it, by walking the collection. Its tree is built
+    /// by whichever checkpoint comes next, never by one taken for its sake
+    /// while the store is being opened.
+    pub(super) optional: bool,
 }
 
 pub(super) type SecondaryIndexSpecs = HashMap<String, BTreeMap<String, SecondaryIndexSpec>>;
@@ -252,6 +256,29 @@ impl UnifiedStore {
         identity: SecondaryIndexIdentity,
         projector: Arc<dyn SecondaryIndexProjector>,
     ) -> Result<(), StoreError> {
+        self.register_secondary_index_as(collection, name, identity, projector, false)
+    }
+
+    /// Register an index that statements can do without: one a user declared.
+    /// A missing tree for it does not hold up opening the store.
+    pub fn register_optional_secondary_index(
+        &self,
+        collection: &str,
+        name: &str,
+        identity: SecondaryIndexIdentity,
+        projector: Arc<dyn SecondaryIndexProjector>,
+    ) -> Result<(), StoreError> {
+        self.register_secondary_index_as(collection, name, identity, projector, true)
+    }
+
+    fn register_secondary_index_as(
+        &self,
+        collection: &str,
+        name: &str,
+        identity: SecondaryIndexIdentity,
+        projector: Arc<dyn SecondaryIndexProjector>,
+        optional: bool,
+    ) -> Result<(), StoreError> {
         let collection = Self::canonical_collection(collection);
         if name.is_empty() || name.len() > 1024 || identity.codec_version == 0 {
             return Err(StoreError::Serialization(
@@ -282,11 +309,18 @@ impl UnifiedStore {
                 identity,
                 projector,
                 deferred: false,
+                optional,
             },
         );
         Ok(())
     }
 
+    /// Opening the store waits for this only on behalf of projections the
+    /// runtime cannot read without. A checkpoint here covers everything the
+    /// WAL replayed, which on a large store is many minutes during which the
+    /// server answers nothing, not even its health probes; an index a user
+    /// declared is not worth that, and the next checkpoint builds it anyway.
+    ///
     /// Preparation is a full ownership/checkpoint epoch, not merely a catalog
     /// flush. Reopened compatible roots need no source scan or publication.
     pub(crate) fn checkpoint_missing_secondary_indices(&self) -> Result<(), StoreError> {
@@ -296,6 +330,7 @@ impl UnifiedStore {
             specs.iter().any(|(collection, indices)| {
                 indices.iter().any(|(name, spec)| {
                     !spec.deferred
+                        && !spec.optional
                         && self
                             .secondary_index(collection, name, &spec.identity)
                             .is_none()

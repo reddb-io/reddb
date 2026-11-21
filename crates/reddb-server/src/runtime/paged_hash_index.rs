@@ -646,7 +646,7 @@ impl RedDBRuntime {
             #[cfg(test)]
             forced_digest: None,
         });
-        store.register_secondary_index(
+        store.register_optional_secondary_index(
             &index.collection,
             storage_name,
             identity.clone(),
