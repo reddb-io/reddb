@@ -116,6 +116,8 @@ pub struct SnapshotManager {
     next_xid: AtomicU64,
     /// Newest xid handed out by `begin`, never one from the autocommit pool.
     last_real_xid: AtomicU64,
+    /// Newest of those that did not name the one collection it changes.
+    last_unscoped_xid: AtomicU64,
     /// A replayed change used a pool xid: from then on the pool no longer
     /// serves inserts alone and every hidden xid counts as a writer.
     replays_changes: std::sync::atomic::AtomicBool,
@@ -194,7 +196,16 @@ struct ManagerState {
     /// here so its row versions stay readable.
     pinned: HashMap<Xid, u32>,
     serializable: HashMap<Xid, SerializableTxnState>,
+    /// The one collection a real writer changes, for writers that said so
+    /// when they began. One that is not here may change any collection; a
+    /// bounded history only ever forgets towards that answer.
+    scopes: std::collections::BTreeMap<Xid, Arc<str>>,
+    /// Newest scoped writer of each collection.
+    last_scoped: HashMap<Arc<str>, Xid>,
 }
+
+/// Scoped writers remembered by [`ManagerState::scopes`].
+const SCOPED_WRITER_HISTORY: usize = 8192;
 
 /// Releases a statement's history requirement on every frame exit path.
 pub struct SnapshotRetentionGuard {
@@ -223,6 +234,7 @@ impl SnapshotManager {
             // Start at 1 so xid=0 keeps its pre-MVCC "everyone sees it" meaning.
             next_xid: AtomicU64::new(1),
             last_real_xid: AtomicU64::new(0),
+            last_unscoped_xid: AtomicU64::new(0),
             replays_changes: std::sync::atomic::AtomicBool::new(false),
             visibility_revision: AtomicU64::new(0),
             state: parking_lot::RwLock::new(ManagerState::default()),
@@ -249,7 +261,7 @@ impl SnapshotManager {
     /// `active` (or already finished), so `in_progress` is never short a
     /// concurrent writer.
     pub fn begin(&self) -> Xid {
-        self.begin_inner(false)
+        self.begin_inner(false, None)
     }
 
     /// Begin an autocommit update whose data publication is fenced by the
@@ -257,10 +269,25 @@ impl SnapshotManager {
     /// publication and finish the xid only after durable publication.
     #[doc(hidden)]
     pub fn begin_cache_coherent_update(&self) -> Xid {
-        self.begin_inner(true)
+        self.begin_inner(true, None)
     }
 
-    fn begin_inner(&self, cache_coherent: bool) -> Xid {
+    /// [`begin`](Self::begin) for a writer that changes rows of `collection`
+    /// only, such as an autocommit UPDATE or DELETE. A reader of another
+    /// collection does not have to treat it as a writer that can have left
+    /// its indexes behind.
+    pub fn begin_in(&self, collection: &str) -> Xid {
+        self.begin_inner(false, Some(collection))
+    }
+
+    /// [`begin_cache_coherent_update`](Self::begin_cache_coherent_update)
+    /// scoped like [`begin_in`](Self::begin_in).
+    #[doc(hidden)]
+    pub fn begin_cache_coherent_update_in(&self, collection: &str) -> Xid {
+        self.begin_inner(true, Some(collection))
+    }
+
+    fn begin_inner(&self, cache_coherent: bool, scope: Option<&str>) -> Xid {
         let mut state = self.state.write();
         // A real writer advances beyond the reserved autocommit range. Retire
         // its unused slots so later inserts cannot receive older identities
@@ -269,6 +296,22 @@ impl SnapshotManager {
         pool.next = pool.end;
         let xid = self.next_xid.fetch_add(1, Ordering::Relaxed);
         self.last_real_xid.fetch_max(xid, Ordering::Release);
+        match scope {
+            Some(collection) => {
+                let collection: Arc<str> = match state.last_scoped.get_key_value(collection) {
+                    Some((known, _)) => Arc::clone(known),
+                    None => Arc::from(collection),
+                };
+                state.last_scoped.insert(Arc::clone(&collection), xid);
+                if state.scopes.len() == SCOPED_WRITER_HISTORY {
+                    state.scopes.pop_first();
+                }
+                state.scopes.insert(xid, collection);
+            }
+            None => {
+                self.last_unscoped_xid.fetch_max(xid, Ordering::Release);
+            }
+        }
         state.active.insert(xid);
         if cache_coherent {
             state.cache_coherent_updates.insert(xid);
@@ -354,6 +397,65 @@ impl SnapshotManager {
                 || snapshot.in_progress != current.in_progress;
         }
         self.last_real_xid.load(Ordering::Acquire) > snapshot.xid
+    }
+
+    /// [`snapshot_hides_real_writers`](Self::snapshot_hides_real_writers)
+    /// for a reader of `collection`: a hidden writer that named another
+    /// collection when it began ([`begin_in`](Self::begin_in)) does not count.
+    pub fn snapshot_hides_real_writers_of(&self, snapshot: &Snapshot, collection: &str) -> bool {
+        if self.replays_changes.load(Ordering::Acquire) {
+            return self.snapshot_hides_writers(snapshot);
+        }
+        let state = self.state.read();
+        let pool = self.autocommit_pool.lock();
+        snapshot.in_progress.iter().any(|xid| {
+            !pool.reserved(*xid)
+                && state
+                    .scopes
+                    .get(xid)
+                    .is_none_or(|scope| &**scope == collection)
+        })
+    }
+
+    /// Waits, at most `wait`, until no real writer that can change
+    /// `collection` is in flight. Returns whether that was reached. A
+    /// statement that would otherwise scan the collection because such a
+    /// writer is hidden from its snapshot can wait the few milliseconds the
+    /// writer takes and read a fresh snapshot instead.
+    pub fn await_real_writers_of(&self, collection: &str, wait: std::time::Duration) -> bool {
+        let pending = || {
+            let state = self.state.read();
+            state.active.iter().any(|xid| {
+                state
+                    .scopes
+                    .get(xid)
+                    .is_none_or(|scope| &**scope == collection)
+            })
+        };
+        let deadline = std::time::Instant::now() + wait;
+        while pending() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+        true
+    }
+
+    /// [`real_writer_began_after`](Self::real_writer_began_after) for a
+    /// reader of `collection`; see
+    /// [`snapshot_hides_real_writers_of`](Self::snapshot_hides_real_writers_of).
+    pub fn real_writer_of_began_after(&self, snapshot: &Snapshot, collection: &str) -> bool {
+        if self.replays_changes.load(Ordering::Acquire) {
+            return self.real_writer_began_after(snapshot);
+        }
+        self.last_unscoped_xid.load(Ordering::Acquire) > snapshot.xid
+            || self
+                .state
+                .read()
+                .last_scoped
+                .get(collection)
+                .is_some_and(|xid| *xid > snapshot.xid)
     }
 
     /// [`allocate_committed_xid`](Self::allocate_committed_xid) for a
@@ -1019,6 +1121,72 @@ mod tests {
         let after = m.fresh_read_snapshot();
         assert!(!m.snapshot_hides_real_writers(&after));
         assert!(!m.real_writer_began_after(&after));
+    }
+
+    #[test]
+    fn a_writer_of_one_collection_is_not_a_writer_of_another() {
+        let m = SnapshotManager::new();
+        let quiet = m.fresh_read_snapshot();
+        let update = m.begin_in("orders");
+        let concurrent = m.fresh_read_snapshot();
+        // In flight when the snapshot was taken: hidden from it.
+        assert!(m.snapshot_hides_real_writers_of(&concurrent, "orders"));
+        assert!(!m.snapshot_hides_real_writers_of(&concurrent, "customers"));
+        assert!(m.snapshot_hides_real_writers(&concurrent));
+        // Begun after the older snapshot.
+        assert!(m.real_writer_of_began_after(&quiet, "orders"));
+        assert!(!m.real_writer_of_began_after(&quiet, "customers"));
+        m.commit(update);
+        assert!(m.snapshot_hides_real_writers_of(&concurrent, "orders"));
+        assert!(!m.snapshot_hides_real_writers_of(&concurrent, "customers"));
+
+        // A transaction that named no collection may change any of them.
+        let transaction = m.begin();
+        let during = m.fresh_read_snapshot();
+        assert!(m.snapshot_hides_real_writers_of(&during, "customers"));
+        assert!(m.real_writer_of_began_after(&quiet, "customers"));
+        m.commit(transaction);
+        let after = m.fresh_read_snapshot();
+        assert!(!m.snapshot_hides_real_writers_of(&after, "orders"));
+        assert!(!m.real_writer_of_began_after(&after, "orders"));
+    }
+
+    #[test]
+    fn waiting_for_writers_of_a_collection_ignores_other_collections() {
+        let m = Arc::new(SnapshotManager::new());
+        let orders = m.begin_in("orders");
+        let short = std::time::Duration::from_millis(5);
+        assert!(m.await_real_writers_of("customers", short));
+        assert!(!m.await_real_writers_of("orders", short));
+        let finisher = {
+            let m = Arc::clone(&m);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                m.commit(orders);
+            })
+        };
+        assert!(m.await_real_writers_of("orders", std::time::Duration::from_secs(5)));
+        finisher.join().expect("finisher");
+        let transaction = m.begin();
+        assert!(!m.await_real_writers_of("customers", short));
+        m.commit(transaction);
+    }
+
+    #[test]
+    fn a_forgotten_scope_counts_for_every_collection() {
+        let m = SnapshotManager::new();
+        let first = m.begin_in("orders");
+        let during = m.fresh_read_snapshot();
+        assert!(!m.snapshot_hides_real_writers_of(&during, "customers"));
+        for _ in 0..SCOPED_WRITER_HISTORY {
+            let later = m.begin_in("orders");
+            m.commit(later);
+        }
+        assert!(
+            m.snapshot_hides_real_writers_of(&during, "customers"),
+            "a writer whose scope left the history must count everywhere"
+        );
+        m.commit(first);
     }
 
     #[test]

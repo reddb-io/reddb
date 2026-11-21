@@ -119,6 +119,7 @@ pub(super) fn try_resolve_update_entity_by_logical_id(
             manager: Arc::clone(&base.manager),
             own_xids: base.own_xids.clone(),
             requires_index_fallback: true,
+            hidden_writers_only: false,
             serializable_reader: base.serializable_reader,
         };
         let resolver =

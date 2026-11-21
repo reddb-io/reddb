@@ -821,6 +821,7 @@ impl RedDBRuntime {
             manager: self.snapshot_manager(),
             own_xids: HashSet::new(),
             requires_index_fallback: true,
+            hidden_writers_only: false,
             serializable_reader: None,
         })
     }

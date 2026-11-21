@@ -225,7 +225,7 @@ fn execute_runtime_table_query_materialized(
     }
 
     let _ = take_last_segment_scan_stats();
-    let mut records = execute_runtime_canonical_table_query_indexed(db, query, index_store)?;
+    let mut records = table::execute_runtime_canonical_table_query_current(db, query, index_store)?;
     let segment_scan_stats = take_last_segment_scan_stats();
     // Issue #580 — DeclarativeRetention slice 1. Lazy-on-scan: drop
     // rows older than `now - retention_duration_ms` after the scan

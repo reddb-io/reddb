@@ -28,6 +28,20 @@ pub(super) struct DmlTargetScan<'a> {
     declared_table: bool,
 }
 
+/// Whether the snapshot's index fallback applies to a read of `table`. A
+/// fallback set only for hidden real writers does not when none of them
+/// changes `table`.
+pub(crate) fn snapshot_requires_index_fallback_for(
+    snapshot: &crate::runtime::impl_core::SnapshotContext,
+    table: &str,
+) -> bool {
+    snapshot.requires_index_fallback
+        && !(snapshot.hidden_writers_only
+            && !snapshot
+                .manager
+                .snapshot_hides_real_writers_of(&snapshot.snapshot, table))
+}
+
 fn dml_filter_can_retry(filter: &Filter) -> bool {
     match filter {
         Filter::Compare { .. }
@@ -167,15 +181,18 @@ impl<'a> DmlTargetScan<'a> {
             && !super::function_budget::stored_function_active();
         let scan_required = self.target.is_none() && self.limit.is_some()
             || matches!(self.target, Some(UpdateTarget::Documents))
-            || crate::runtime::impl_core::current_snapshot_requires_index_fallback()
+            || snapshot
+                .as_ref()
+                .is_some_and(|ctx| snapshot_requires_index_fallback_for(ctx, self.table))
             || !can_retry
             || !query_exec::runtime_indexes_queryable(self.table, index_store)
             || index_store.indexed_mutation_active_for(self.table)
             || !index_store
                 .await_insert_publications(self.table, snapshot.as_ref().map(|ctx| &ctx.snapshot))
-            || snapshot
-                .as_ref()
-                .is_some_and(|ctx| ctx.manager.real_writer_began_after(&ctx.snapshot));
+            || snapshot.as_ref().is_some_and(|ctx| {
+                ctx.manager
+                    .real_writer_of_began_after(&ctx.snapshot, self.table)
+            });
         if !scan_required {
             if let Some(filter) = self.filter {
                 #[cfg(test)]
@@ -197,9 +214,10 @@ impl<'a> DmlTargetScan<'a> {
                     let result = self.recheck_index_candidates(&ids, compiled_filter.as_ref());
                     if !index_store.indexed_mutation_active_for(self.table)
                         && generation == index_store.indexed_mutation_generation_for(self.table)
-                        && snapshot
-                            .as_ref()
-                            .is_none_or(|ctx| !ctx.manager.real_writer_began_after(&ctx.snapshot))
+                        && snapshot.as_ref().is_none_or(|ctx| {
+                            !ctx.manager
+                                .real_writer_of_began_after(&ctx.snapshot, self.table)
+                        })
                     {
                         return result;
                     }

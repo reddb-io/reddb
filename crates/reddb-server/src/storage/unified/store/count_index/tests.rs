@@ -706,6 +706,7 @@ fn context(manager: &Arc<SnapshotManager>) -> SnapshotContext {
         manager: Arc::clone(manager),
         own_xids: Default::default(),
         requires_index_fallback: true,
+        hidden_writers_only: false,
         serializable_reader: None,
     }
 }

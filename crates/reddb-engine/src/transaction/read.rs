@@ -23,6 +23,11 @@ pub struct SnapshotContext {
     pub manager: Arc<super::snapshot::SnapshotManager>,
     pub own_xids: std::collections::HashSet<super::snapshot::Xid>,
     pub requires_index_fallback: bool,
+    /// `requires_index_fallback` is set for no other reason than a real
+    /// writer hidden by `snapshot`. A reader that knows its collection can
+    /// ask whether that writer touches it
+    /// ([`SnapshotManager::snapshot_hides_real_writers_of`](super::snapshot::SnapshotManager::snapshot_hides_real_writers_of)).
+    pub hidden_writers_only: bool,
     pub serializable_reader: Option<super::snapshot::Xid>,
 }
 
@@ -131,6 +136,7 @@ mod branch_tests {
             manager: Arc::new(SnapshotManager::new()),
             own_xids: HashSet::new(),
             requires_index_fallback: true,
+            hidden_writers_only: false,
             serializable_reader: None,
         }
     }

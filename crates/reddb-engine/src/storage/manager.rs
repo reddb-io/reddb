@@ -3533,6 +3533,7 @@ mod tests {
                 manager: Arc::new(SnapshotManager::new()),
                 own_xids: HashSet::from([15]),
                 requires_index_fallback: false,
+                hidden_writers_only: false,
                 serializable_reader: None,
             };
             for snapshot in [Some(&snapshot), None] {
@@ -3796,6 +3797,7 @@ mod tests {
                 manager: Arc::new(SnapshotManager::new()),
                 own_xids: HashSet::new(),
                 requires_index_fallback: false,
+                hidden_writers_only: false,
                 serializable_reader: None,
             };
             let mut changed = false;
@@ -3922,6 +3924,7 @@ mod tests {
             manager: Arc::new(SnapshotManager::new()),
             own_xids: HashSet::new(),
             requires_index_fallback: false,
+            hidden_writers_only: false,
             serializable_reader: None,
         };
         let mut work = 0;
@@ -4016,6 +4019,7 @@ mod tests {
             manager: Arc::new(SnapshotManager::new()),
             own_xids: HashSet::new(),
             requires_index_fallback: false,
+            hidden_writers_only: false,
             serializable_reader: None,
         };
         std::thread::spawn(move || {
@@ -4134,6 +4138,7 @@ mod tests {
             manager: Arc::new(SnapshotManager::new()),
             own_xids: HashSet::new(),
             requires_index_fallback: false,
+            hidden_writers_only: false,
             serializable_reader: None,
         };
 
@@ -4372,6 +4377,7 @@ mod tests {
             manager: Arc::new(SnapshotManager::new()),
             own_xids: HashSet::new(),
             requires_index_fallback: false,
+            hidden_writers_only: false,
             serializable_reader: None,
         };
         std::thread::spawn(move || {

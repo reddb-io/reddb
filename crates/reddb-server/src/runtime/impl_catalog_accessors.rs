@@ -366,6 +366,7 @@ impl RedDBRuntime {
                 manager,
                 own_xids: self.own_transaction_xids(),
                 requires_index_fallback: true,
+                hidden_writers_only: false,
                 serializable_reader: context
                     .filter(|context| {
                         context.isolation

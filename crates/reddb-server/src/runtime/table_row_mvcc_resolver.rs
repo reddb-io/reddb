@@ -187,6 +187,7 @@ mod tests {
             manager: Arc::new(SnapshotManager::new()),
             own_xids: HashSet::new(),
             requires_index_fallback: false,
+            hidden_writers_only: false,
             serializable_reader: None,
         }
     }

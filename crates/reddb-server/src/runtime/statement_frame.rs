@@ -115,6 +115,7 @@ pub(crate) trait ReadFrame {
             manager: runtime.inner.transaction_state.snapshot_manager(),
             own_xids: HashSet::new(),
             requires_index_fallback: true,
+            hidden_writers_only: false,
             serializable_reader: None,
         }
     }
@@ -331,6 +332,7 @@ pub(super) struct StatementExecutionFrame {
     /// True when the statement snapshot can require tuple versions that
     /// current secondary indexes no longer contain.
     requires_index_fallback: bool,
+    hidden_writers_only: bool,
     /// Privilege class required by the statement, derived from the
     /// SQL text at frame-build time. Read/write dispatch sites
     /// consult this instead of re-classifying the parsed expression.
@@ -459,13 +461,18 @@ impl StatementExecutionFrame {
         // Reserved autocommit slots are in every snapshot's `in_progress` but
         // have written nothing: only a writer that may already have written
         // can leave the indexes behind this snapshot.
+        let hidden_writers_only = !(as_of_floor.is_some()
+            || tx_context.is_some()
+            || graph_insert_xid.is_some()
+            || branch.is_some())
+            && runtime
+                .snapshot_manager()
+                .snapshot_hides_real_writers(&snapshot);
         let requires_index_fallback = as_of_floor.is_some()
             || tx_context.is_some()
             || graph_insert_xid.is_some()
             || branch.is_some()
-            || runtime
-                .snapshot_manager()
-                .snapshot_hides_real_writers(&snapshot);
+            || hidden_writers_only;
         let (cache_key, is_volatile_query) = match identity_source {
             StatementIdentity::Text(_) if uses_result_cache => (
                 result_cache_key(query),
@@ -537,6 +544,7 @@ impl StatementExecutionFrame {
             identity,
             as_of_floor,
             requires_index_fallback,
+            hidden_writers_only,
             required_privilege,
             lock_intent,
             visible_collections,
@@ -567,6 +575,7 @@ impl StatementExecutionFrame {
                 manager: runtime.inner.transaction_state.snapshot_manager(),
                 own_xids: self.own_xids.clone(),
                 requires_index_fallback: self.requires_index_fallback,
+                hidden_writers_only: self.hidden_writers_only,
                 serializable_reader: self.serializable_reader,
             }),
         }
@@ -928,6 +937,7 @@ impl ReadFrame for StatementExecutionFrame {
             manager: runtime.inner.transaction_state.snapshot_manager(),
             own_xids: self.own_xids.clone(),
             requires_index_fallback: self.requires_index_fallback,
+            hidden_writers_only: self.hidden_writers_only,
             serializable_reader: self.serializable_reader,
         }
     }
@@ -1016,6 +1026,7 @@ impl ReadFrame for EffectiveScope {
                 manager: runtime.inner.transaction_state.snapshot_manager(),
                 own_xids: HashSet::new(),
                 requires_index_fallback: true,
+                hidden_writers_only: false,
                 serializable_reader: None,
             })
     }

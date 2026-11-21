@@ -174,6 +174,7 @@ impl RedDBRuntime {
             manager: self.snapshot_manager(),
             own_xids: self.own_transaction_xids(),
             requires_index_fallback: true,
+            hidden_writers_only: false,
             serializable_reader,
         })
     }

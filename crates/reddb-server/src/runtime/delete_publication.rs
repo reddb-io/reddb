@@ -177,7 +177,7 @@ impl DeletePublication {
     ) -> Self {
         let autocommit_xid = active_xid
             .is_none()
-            .then(|| runtime.snapshot_manager().begin());
+            .then(|| runtime.snapshot_manager().begin_in(collection));
         Self {
             runtime: runtime.clone(),
             collection: collection.into(),

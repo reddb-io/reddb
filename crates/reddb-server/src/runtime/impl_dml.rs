@@ -2271,13 +2271,23 @@ impl RedDBRuntime {
                             manager,
                             own_xids: std::collections::HashSet::new(),
                             requires_index_fallback: false,
+                            hidden_writers_only: false,
                             serializable_reader: None,
                         }
                     });
+                // A writer of this table still in flight would be hidden from
+                // the fresh snapshot and force a scan for the targets. It takes
+                // milliseconds; the scan takes far longer.
+                ctx.manager
+                    .await_real_writers_of(&query.table, std::time::Duration::from_millis(100));
                 ctx.snapshot = ctx.manager.fresh_read_snapshot();
                 ctx.branch = self.vcs_branch_read_view(&ctx.snapshot, None)?;
-                ctx.requires_index_fallback |=
-                    ctx.manager.snapshot_hides_real_writers(&ctx.snapshot);
+                if !ctx.requires_index_fallback
+                    && ctx.manager.snapshot_hides_real_writers(&ctx.snapshot)
+                {
+                    ctx.requires_index_fallback = true;
+                    ctx.hidden_writers_only = true;
+                }
                 Some(crate::runtime::impl_core::CurrentSnapshotGuard::install(
                     ctx,
                 ))
