@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.39.21
+
+### Patch Changes
+
+- [#2961](https://github.com/reddb-io/reddb/pull/2961) [`6307064`](https://github.com/reddb-io/reddb/commit/63070647a618aec68782370a80c53c919ecd2a4c) Thanks [@filipeforattini](https://github.com/filipeforattini)! - `SHOW CREATE TABLE` and `DESCRIBE` read only the table they name. Both built the whole catalog first, which on a disk-resident store decodes every row of every collection while other statements wait: on a 6 GiB store either statement took about 50 seconds, whatever the size of the table asked for.
+
 ## 1.39.20
 
 ### Patch Changes

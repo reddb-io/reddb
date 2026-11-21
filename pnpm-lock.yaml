@@ -18,7 +18,7 @@ importers:
   drivers/bun:
     dependencies:
       '@reddb-io/client':
-        specifier: 1.39.20
+        specifier: 1.39.21
         version: link:../js-client
 
   drivers/js: {}
