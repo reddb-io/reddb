@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.39.15
+
+### Patch Changes
+
+- [#2947](https://github.com/reddb-io/reddb/pull/2947) [`8a79194`](https://github.com/reddb-io/reddb/commit/8a79194ef27c6932109fec9f1a60b8c6e3ac8014) Thanks [@filipeforattini](https://github.com/filipeforattini)! - A statement in flight on one table no longer turns reads of other tables into scans, and a read of the same table waits for it instead of scanning. An autocommit UPDATE or DELETE now names the collection it changes, so only readers of that collection treat it as a writer their indexes may be behind. A single-table statement outside a transaction that finds such a writer hidden from its snapshot waits up to 100 ms for it to finish and reads a fresh snapshot, which takes milliseconds where the scan took seconds.
+
 ## 1.39.14
 
 ### Patch Changes
