@@ -321,6 +321,16 @@ impl SegmentManager {
             || self.get_with(id, |_| ()).is_some()
     }
 
+    /// The rows the published base still lists that have been physically
+    /// removed since it was published.
+    pub fn backing_removed_rows(&self) -> Vec<EntityId> {
+        self.backing
+            .read()
+            .as_ref()
+            .map(|base| base.removed.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
     /// Preserve I/O and decode failures instead of treating them as absent rows.
     pub fn try_get(
         &self,
