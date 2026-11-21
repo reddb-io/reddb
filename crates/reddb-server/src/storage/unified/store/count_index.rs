@@ -420,6 +420,7 @@ impl UnifiedStore {
                     identity: seed.identity.clone(),
                     projector: seed.projector,
                     deferred: false,
+                    optional: false,
                 },
             );
         self.count_projection_seeds.lock().insert(

@@ -1001,7 +1001,7 @@ impl RedDBRuntime {
             codec_version,
             definition: digest.finalize().into(),
         };
-        self.db().store().register_secondary_index(
+        self.db().store().register_optional_secondary_index(
             &index.collection,
             &index.name,
             identity.clone(),
@@ -1400,6 +1400,49 @@ mod tests {
             .delete_batch_between_walks("ordered_rows", &[victim])
             .expect("maintenance removal");
         assert_eq!(removed, vec![victim]);
+    }
+
+    #[test]
+    fn opening_the_store_does_not_checkpoint_for_an_index_a_user_declared() {
+        let (_directory, runtime, options) = fixture();
+        // Declared over rows that are already in the disk base: its tree is
+        // built by a checkpoint, and none has run when the store closes.
+        runtime
+            .execute_query("CREATE INDEX ordered_label_id ON ordered_rows (label, id) USING BTREE")
+            .expect("declare");
+        drop(runtime);
+
+        let runtime = open(&options);
+        let compare = |column: &str, value| Filter::Compare {
+            field: FieldRef::column("ordered_rows", column),
+            op: reddb_rql::ast::CompareOp::Eq,
+            value,
+        };
+        // Both columns: only the new index bounds the pair.
+        let pair = Filter::And(
+            Box::new(compare("label", Value::text("key-05"))),
+            Box::new(compare("id", Value::Integer(5))),
+        );
+        let lookup = |runtime: &RedDBRuntime| {
+            runtime
+                .index_store_ref()
+                .paged_btree_lookup("ordered_rows", &pair)
+                .expect("lookup")
+                .map(|candidates| candidates.len())
+        };
+        // Opening did not take a checkpoint to build it: the index declines
+        // and the statement reads the collection.
+        assert_eq!(lookup(&runtime), None);
+        assert_eq!(
+            ids(
+                &runtime,
+                "SELECT id FROM ordered_rows WHERE label = 'key-05' AND id = 5"
+            ),
+            vec![5]
+        );
+        // The next checkpoint builds it.
+        runtime.flush().expect("checkpoint");
+        assert_eq!(lookup(&runtime), Some(1));
     }
 
     #[test]
