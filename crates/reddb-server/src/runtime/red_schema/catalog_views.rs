@@ -152,8 +152,9 @@ pub(super) fn describe_snapshot(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     let collection = describe_target_collection(query)?;
     let db = runtime.db();
+    // Only the named collection: the whole catalog decodes every stored row.
     let exists = runtime
-        .try_catalog()?
+        .try_catalog_for_collections(Some(&HashSet::from([collection.clone()])), true)?
         .collections
         .into_iter()
         .any(|entry| entry.name == collection);
@@ -233,8 +234,9 @@ pub(super) fn show_create_snapshot(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     let collection = show_create_target_collection(query)?;
     let db = runtime.db();
+    // Only the named collection: the whole catalog decodes every stored row.
     let catalog_entry = runtime
-        .try_catalog()?
+        .try_catalog_for_collections(Some(&HashSet::from([collection.clone()])), true)?
         .collections
         .into_iter()
         .find(|entry| entry.name == collection);
@@ -2305,6 +2307,33 @@ mod scoped_collection_introspection_io_tests {
             read_bytes <= 64 * 1024,
             "filtered red.collections read {read_bytes} bytes from unrelated collection pages"
         );
+    }
+
+    #[test]
+    fn statements_naming_one_table_do_not_read_unrelated_collection_pages() {
+        let (_directory, runtime) = persistent_fixture();
+        for sql in ["SHOW CREATE TABLE target", "DESCRIBE target"] {
+            let (result, read_bytes) =
+                measure_pager_read_bytes(|| runtime.execute_query(sql).expect(sql));
+            assert!(!result.result.records.is_empty(), "{sql} answers");
+            assert!(
+                read_bytes <= 64 * 1024,
+                "{sql} read {read_bytes} bytes from unrelated collection pages"
+            );
+        }
+        for sql in ["SHOW CREATE TABLE absent", "DESCRIBE absent"] {
+            let error = runtime.execute_query(sql).expect_err(sql).to_string();
+            assert!(error.contains("COLLECTION_NOT_FOUND"), "{sql}: {error}");
+        }
+        // A collection without a declared schema is still told apart from a
+        // missing one.
+        for sql in [
+            "SHOW CREATE TABLE unrelated_payloads",
+            "DESCRIBE unrelated_payloads",
+        ] {
+            let error = runtime.execute_query(sql).expect_err(sql).to_string();
+            assert!(error.contains("NOT_APPLICABLE"), "{sql}: {error}");
+        }
     }
 
     #[test]
