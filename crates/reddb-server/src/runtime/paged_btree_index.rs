@@ -119,67 +119,98 @@ struct OverlayBtree {
     postings: BTreeMap<Vec<u8>, BTreeSet<EntityId>>,
     scan_required: BTreeSet<EntityId>,
     touched: std::collections::HashMap<EntityId, Option<Vec<u8>>>,
+    /// Bytes held, kept current by every change: memory accounting asks on
+    /// every statement and must not walk the overlay to answer.
+    bytes: usize,
 }
+
+/// Accounting weights of the overlay's entries.
+const OVERLAY_POSTING_BYTES: usize = 96;
+const OVERLAY_ROW_BYTES: usize = 48;
+const OVERLAY_ID_BYTES: usize = std::mem::size_of::<EntityId>();
 
 impl OverlayBtree {
     fn insert(&mut self, key: Vec<u8>, entity_id: EntityId) {
         self.remove_current(entity_id);
         if key.as_slice() == [SCAN_REQUIRED] {
-            self.scan_required.insert(entity_id);
+            if self.scan_required.insert(entity_id) {
+                self.bytes += OVERLAY_ID_BYTES + OVERLAY_ROW_BYTES;
+            }
         } else {
-            self.postings
+            if !self.postings.contains_key(&key) {
+                self.bytes += key.len() + OVERLAY_POSTING_BYTES;
+            }
+            if self
+                .postings
                 .entry(key.clone())
                 .or_default()
-                .insert(entity_id);
+                .insert(entity_id)
+            {
+                self.bytes += OVERLAY_ID_BYTES;
+            }
         }
+        self.bytes += OVERLAY_ROW_BYTES + key.len();
         self.touched.insert(entity_id, Some(key));
     }
 
     fn remove_current(&mut self, entity_id: EntityId) {
-        let Some(Some(key)) = self.touched.remove(&entity_id) else {
+        let Some(previous) = self.touched.remove(&entity_id) else {
             return;
         };
+        self.release(OVERLAY_ROW_BYTES);
+        let Some(key) = previous else {
+            return;
+        };
+        self.release(key.len());
         if key.as_slice() == [SCAN_REQUIRED] {
-            self.scan_required.remove(&entity_id);
+            if self.scan_required.remove(&entity_id) {
+                self.release(OVERLAY_ID_BYTES + OVERLAY_ROW_BYTES);
+            }
             return;
         }
-        let remove_key = self.postings.get_mut(&key).is_some_and(|ids| {
-            ids.remove(&entity_id);
-            ids.is_empty()
-        });
-        if remove_key {
-            self.postings.remove(&key);
+        let Some(ids) = self.postings.get_mut(&key) else {
+            return;
+        };
+        let removed = ids.remove(&entity_id);
+        let emptied = ids.is_empty();
+        if removed {
+            self.release(OVERLAY_ID_BYTES);
         }
+        if emptied {
+            self.postings.remove(&key);
+            self.release(key.len() + OVERLAY_POSTING_BYTES);
+        }
+    }
+
+    fn release(&mut self, bytes: usize) {
+        self.bytes = self.bytes.saturating_sub(bytes);
     }
 
     fn remove(&mut self, entity_id: EntityId) {
         self.remove_current(entity_id);
+        self.bytes += OVERLAY_ROW_BYTES;
         self.touched.insert(entity_id, None);
     }
 
     fn memory_bytes(&self) -> u64 {
+        self.bytes as u64
+    }
+
+    /// The same total, recounted from the entries.
+    #[cfg(test)]
+    fn recounted_bytes(&self) -> u64 {
         let postings = self
             .postings
             .iter()
-            .map(|(key, ids)| {
-                key.capacity()
-                    .saturating_add(ids.len().saturating_mul(std::mem::size_of::<EntityId>()))
-                    .saturating_add(96)
-            })
+            .map(|(key, ids)| key.len() + OVERLAY_POSTING_BYTES + ids.len() * OVERLAY_ID_BYTES)
             .sum::<usize>();
-        postings
-            .saturating_add(
-                self.scan_required
-                    .len()
-                    .saturating_mul(std::mem::size_of::<EntityId>() + 48),
-            )
-            .saturating_add(
-                self.touched
-                    .values()
-                    .map(|key| key.as_ref().map_or(0, Vec::capacity) + 48)
-                    .sum::<usize>(),
-            )
-            .min(u64::MAX as usize) as u64
+        let touched = self
+            .touched
+            .values()
+            .map(|key| key.as_ref().map_or(0, Vec::len) + OVERLAY_ROW_BYTES)
+            .sum::<usize>();
+        (postings + touched + self.scan_required.len() * (OVERLAY_ID_BYTES + OVERLAY_ROW_BYTES))
+            as u64
     }
 }
 
@@ -1052,6 +1083,38 @@ mod tests {
                 other => panic!("unexpected id {other:?}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn overlay_memory_is_kept_current_without_recounting() {
+        let mut overlay = super::OverlayBtree::default();
+        let mut state = 0x9e3779b97f4a7c15_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for step in 0..20_000 {
+            let id = EntityId::new(next() % 512);
+            let key = match next() % 5 {
+                0 => vec![super::SCAN_REQUIRED],
+                _ => vec![b'k'; 2 + (next() % 24) as usize],
+            };
+            match next() % 3 {
+                0 | 1 => overlay.insert(key, id),
+                _ => overlay.remove(id),
+            }
+            if step % 997 == 0 {
+                assert_eq!(
+                    overlay.memory_bytes(),
+                    overlay.recounted_bytes(),
+                    "step {step}"
+                );
+            }
+        }
+        assert_eq!(overlay.memory_bytes(), overlay.recounted_bytes());
+        assert!(overlay.memory_bytes() > 0);
     }
 
     #[test]
