@@ -1,6 +1,6 @@
 [package]
 name = "reddb-io-engine"
-version = "1.39.19"
+version = "1.39.20"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

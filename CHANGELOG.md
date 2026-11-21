@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.39.20
+
+### Patch Changes
+
+- [#2959](https://github.com/reddb-io/reddb/pull/2959) [`2894e19`](https://github.com/reddb-io/reddb/commit/2894e1959123a76546fc5e9b46aa2f6976cc6ff1) Thanks [@filipeforattini](https://github.com/filipeforattini)! - After a restart that replays the WAL, a range read through a BTREE index could miss rows written since the last checkpoint: the index started with no record of them and answered from the published tree alone. It now starts from what recovery replayed, as the HASH index already did. Both indexes also relearn the rows removed since the last checkpoint, so a lookup whose published postings name one of them no longer walks the whole collection.
+
 ## 1.39.19
 
 ### Patch Changes
