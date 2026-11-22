@@ -172,3 +172,113 @@ fn unrelated_insert_commits_and_recovers_during_primary_checkpoint() {
         assert_eq!(scrub.unclassified_pages, 0, "{mode}: leaked pages");
     }
 }
+
+thread_local! {
+    static PAUSE_CATALOG: RefCell<Option<mpsc::Sender<()>>> = const { RefCell::new(None) };
+}
+
+pub(super) fn pause_catalog_publication() {
+    PAUSE_CATALOG.with_borrow_mut(|slot| {
+        if let Some(ready) = slot.take() {
+            ready.send(()).unwrap();
+            loop {
+                thread::park();
+            }
+        }
+    });
+}
+
+#[test]
+fn unrelated_insert_recovers_while_sparse_catalog_publication_is_paused() {
+    const CHILD: &str = "REDDB_TEST_SPARSE_CATALOG_DATABASE";
+    if let Some(path) = std::env::var_os(CHILD) {
+        let db = Arc::new(open(Path::new(&path)));
+        for i in 0..8 {
+            let updated = db
+                .execute_query(&format!("UPDATE sparse_a SET v = v + 100 WHERE v = {i}"))
+                .unwrap();
+            assert_eq!(updated.affected_rows, 1);
+        }
+        let (ready, paused) = mpsc::channel();
+        let checkpoint = Arc::clone(&db);
+        thread::spawn(move || {
+            PAUSE_CATALOG.with_borrow_mut(|slot| *slot = Some(ready));
+            checkpoint.checkpoint().unwrap();
+        });
+        paused
+            .recv_timeout(Duration::from_secs(60))
+            .expect("catalog never reached publication");
+        let (committed, ack) = mpsc::channel();
+        thread::spawn(move || {
+            let result = db
+                .execute_query("INSERT INTO sparse_b (v) VALUES (42)")
+                .unwrap();
+            assert_eq!(result.affected_rows, 1);
+            committed.send(()).unwrap();
+        });
+        match ack.recv_timeout(Duration::from_secs(5)) {
+            Ok(()) => std::process::exit(72),
+            Err(mpsc::RecvTimeoutError::Timeout) => std::process::exit(73),
+            Err(error) => panic!("writer failed: {error}"),
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sparse.rdb");
+    {
+        let db = open(&path);
+        db.execute_query("CREATE TABLE sparse_a (v INTEGER)")
+            .unwrap();
+        db.execute_query("CREATE TABLE sparse_b (v INTEGER)")
+            .unwrap();
+        db.execute_query("INSERT INTO sparse_a (v) VALUES (0),(1),(2),(3),(4),(5),(6),(7)")
+            .unwrap();
+        db.checkpoint().unwrap();
+    }
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!(
+                "{}::unrelated_insert_recovers_while_sparse_catalog_publication_is_paused",
+                module_path!().split_once("::").unwrap().1
+            ),
+            "--nocapture",
+        ])
+        .env(CHILD, &path)
+        .output()
+        .unwrap();
+    assert_ne!(
+        child.status.code(),
+        Some(73),
+        "eight updates on A blocked a strict INSERT into B during catalog publication"
+    );
+    assert_eq!(
+        child.status.code(),
+        Some(72),
+        "{}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    let db = open(&path);
+    assert_eq!(
+        db.execute_query("SELECT v FROM sparse_b")
+            .unwrap()
+            .result
+            .records[0]
+            .get("v"),
+        Some(&reddb_types::Value::Integer(42))
+    );
+    let rows = db
+        .execute_query("SELECT v FROM sparse_a ORDER BY v")
+        .unwrap()
+        .result
+        .records;
+    let actual: Vec<_> = rows
+        .iter()
+        .map(|row| row.get("v").unwrap().clone())
+        .collect();
+    assert_eq!(
+        actual,
+        (100..108)
+            .map(reddb_types::Value::Integer)
+            .collect::<Vec<_>>()
+    );
+}
