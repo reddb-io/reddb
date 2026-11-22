@@ -115,8 +115,8 @@ impl UnifiedStore {
                 .header()
                 .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
                 .required_capabilities;
-            let required = reddb_file::FILE_CAPABILITY_TREE_PROOFS
-                | reddb_file::FILE_CAPABILITY_DWB_PUBLICATION;
+            let required = reddb_file::file_format::FILE_CAPABILITY_TREE_PROOFS
+                | reddb_file::file_format::FILE_CAPABILITY_DWB_PUBLICATION;
             if capabilities & required != required {
                 return Ok(None);
             }
