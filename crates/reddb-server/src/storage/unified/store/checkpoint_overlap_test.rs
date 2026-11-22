@@ -168,5 +168,6 @@ fn unrelated_insert_commits_and_recovers_during_primary_checkpoint() {
             scrub.trees.findings
         );
         assert!(scrub.assets_verified);
+        assert_eq!(scrub.unclassified_pages, 0, "{mode}: leaked pages");
     }
 }
