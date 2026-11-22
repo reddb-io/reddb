@@ -1666,7 +1666,7 @@ mod tests {
     #[test]
     fn paged_btree_page_errors_are_authoritative() {
         use crate::storage::engine::{Page, PageType};
-        let (_directory, runtime, _options) = fixture();
+        let (_directory, runtime, options) = fixture();
         let store = runtime.db().store();
         let provider = runtime
             .index_store_ref()
@@ -1688,13 +1688,20 @@ mod tests {
             .execute_query("SELECT id FROM ordered_rows WHERE id BETWEEN 9 AND 12")
             .expect_err("an unreadable range must not become an empty result or fallback scan");
         pager.write_page(root, original).expect("restore");
-        assert_eq!(
-            ids(
-                &runtime,
-                "SELECT id FROM ordered_rows WHERE id BETWEEN 9 AND 12 ORDER BY id"
-            ),
-            [9, 10, 11, 12]
+        let read = "SELECT id FROM ordered_rows WHERE id BETWEEN 9 AND 12 ORDER BY id";
+        let error = runtime
+            .execute_query(read)
+            .expect_err("failed proof stays fenced");
+        assert!(
+            error.to_string().contains("reopen before further access"),
+            "{error}"
         );
+        drop(index);
+        drop(provider);
+        drop(store);
+        drop(runtime);
+        let runtime = open(&options);
+        assert_eq!(ids(&runtime, read), [9, 10, 11, 12]);
     }
 
     #[test]
