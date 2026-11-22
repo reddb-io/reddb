@@ -86,6 +86,15 @@ impl RedDBRuntime {
             self.inner.checkpoint_columnar_emission_budget_chunks,
         )?;
         let store = self.inner.db.store();
+        let staging_budget =
+            (self.memory_accounting().budget().resolved_bytes / 16).min(32 * 1024 * 1024) as usize;
+        let (prepared, _reservation) = match self.try_reserve_query_buffer(staging_budget) {
+            Some(guard) => match store.prepare_paced_primary(staging_budget)? {
+                Some(prepared) => (Some(prepared), Some(guard)),
+                None => (None, None),
+            },
+            None => (None, None),
+        };
         let publication = store.vault_publication_lock.lock();
         // Collections created since startup need the compact visibility
         // inventory before their first resident-to-disk publication too.
@@ -93,7 +102,7 @@ impl RedDBRuntime {
         self.persist_probabilistic_snapshots()?;
         self.inner
             .db
-            .flush_local_after_runtime_snapshots()
+            .flush_local_after_runtime_snapshots(prepared.as_ref())
             .map_err(|err| {
                 // Issue #205 — local flush failure is a CheckpointFailed
                 // operator-grade event. The local-flush path also covers

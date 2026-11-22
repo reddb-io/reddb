@@ -849,18 +849,20 @@ impl RedDB {
     /// shutdown / checkpoint paths where the runtime decides whether
     /// the remote upload is allowed (lease, dry-run, read-only).
     pub fn flush_local_only(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.flush_local_only_inner(false)
+        self.flush_local_only_inner(false, None)
     }
 
     pub(crate) fn flush_local_after_runtime_snapshots(
         &self,
+        prepared: Option<&crate::storage::unified::store::PreparedPrimary>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.flush_local_only_inner(true)
+        self.flush_local_only_inner(true, prepared)
     }
 
     fn flush_local_only_inner(
         &self,
         runtime_snapshots_durable: bool,
+        prepared: Option<&crate::storage::unified::store::PreparedPrimary>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if self.options.read_only {
             return Ok(());
@@ -876,7 +878,7 @@ impl RedDB {
         if let Some(path) = &self.path {
             if self.paged_mode {
                 if runtime_snapshots_durable {
-                    self.store.persist_after_runtime_snapshots()?;
+                    self.store.persist_after_runtime_snapshots(prepared)?;
                 } else {
                     self.store.persist()?;
                 }
@@ -896,7 +898,7 @@ impl RedDB {
                 // every other collection is unchanged since the pass above
                 // and keeps its published tree.
                 if runtime_snapshots_durable {
-                    self.store.persist_after_runtime_snapshots()?;
+                    self.store.persist_after_runtime_snapshots(None)?;
                 } else {
                     self.store.persist()?;
                 }

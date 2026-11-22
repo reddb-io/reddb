@@ -425,6 +425,7 @@ mod impl_native_a;
 mod impl_native_b;
 mod impl_native_c;
 mod impl_pages;
+pub(crate) use impl_pages::paced_primary::PreparedPrimary;
 
 /// Identity of the `red.config` contents a cached read was taken from: the
 /// collection itself, its published base and that base's read allowance, its

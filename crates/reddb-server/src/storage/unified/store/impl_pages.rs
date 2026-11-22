@@ -4,6 +4,10 @@ use parking_lot::RwLock;
 const CHECKPOINT_BATCH_BYTES: usize = 1024 * 1024;
 const CHECKPOINT_BATCH_ROWS: usize = 512;
 
+#[path = "paced_primary.rs"]
+pub(super) mod paced_primary;
+use paced_primary::PreparedPrimary;
+
 fn restore_published_tree(
     pager: &Arc<Pager>,
     root: u32,
@@ -2719,14 +2723,21 @@ impl UnifiedStore {
     /// Writes all entities to B-tree pages and flushes to disk.
     /// This provides ACID durability guarantees.
     pub fn persist(&self) -> Result<(), StoreError> {
-        self.persist_inner(false)
+        self.persist_inner(false, None)
     }
 
-    pub(crate) fn persist_after_runtime_snapshots(&self) -> Result<(), StoreError> {
-        self.persist_inner(true)
+    pub(crate) fn persist_after_runtime_snapshots(
+        &self,
+        prepared: Option<&PreparedPrimary>,
+    ) -> Result<(), StoreError> {
+        self.persist_inner(true, prepared)
     }
 
-    fn persist_inner(&self, runtime_snapshots_durable: bool) -> Result<(), StoreError> {
+    fn persist_inner(
+        &self,
+        runtime_snapshots_durable: bool,
+        prepared: Option<&PreparedPrimary>,
+    ) -> Result<(), StoreError> {
         if self.is_read_only() {
             return Ok(());
         }
@@ -2846,6 +2857,16 @@ impl UnifiedStore {
                     version.deferred_rows = previous.deferred_rows.clone();
                     collection_roots.push((name.clone(), tree.root_page_id()));
                     rebuilt_indices.insert(name.clone(), Arc::clone(tree));
+                    checkpoint_versions.insert(name.clone(), version);
+                    continue;
+                }
+            }
+            if let Some(prepared) = prepared.filter(|p| p.collection == *name) {
+                if hidden_graph_ids.is_empty()
+                    && prepared.still_matches(self, manager, &excluded, &pending_vault_versions)
+                {
+                    collection_roots.push((name.clone(), prepared.tree.root_page_id()));
+                    rebuilt_indices.insert(name.clone(), Arc::clone(&prepared.tree));
                     checkpoint_versions.insert(name.clone(), version);
                     continue;
                 }

@@ -350,6 +350,22 @@ impl SegmentManager {
             .unwrap_or_default()
     }
 
+    pub fn checkpoint_backing_view(
+        &self,
+        max_removed: usize,
+    ) -> Option<(Option<Arc<dyn CollectionRead + Send + Sync>>, Vec<EntityId>)> {
+        let guard = self.backing.read();
+        let Some(base) = guard.as_ref() else {
+            return Some((None, Vec::new()));
+        };
+        (base.removed.len() <= max_removed).then(|| {
+            (
+                Some(Arc::clone(&base.source)),
+                base.removed.iter().copied().collect(),
+            )
+        })
+    }
+
     /// Preserve I/O and decode failures instead of treating them as absent rows.
     pub fn try_get(
         &self,
