@@ -161,12 +161,19 @@ impl UnifiedStore {
         current: &mut CheckpointVersion,
     ) -> Result<Option<Arc<BTree>>, StoreError> {
         if manager.has_backing() {
-            return self.sparse_cold_append_tree(collection, manager, tree, previous, current);
+            return self.sparse_cold_row_tree(collection, manager, tree, previous, current);
         }
         if Arc::strong_count(tree) != 1 || tree.has_retirement_readers() {
             return Ok(None);
         }
-        self.apply_sparse_checkpoint_tree(collection, manager, tree, previous, current)
+        self.apply_sparse_checkpoint_tree(
+            collection,
+            manager,
+            tree,
+            previous,
+            current,
+            &Default::default(),
+        )
     }
 
     pub(super) fn apply_sparse_checkpoint_tree(
@@ -176,6 +183,7 @@ impl UnifiedStore {
         tree: &Arc<BTree>,
         previous: &CheckpointVersion,
         current: &mut CheckpointVersion,
+        logged_removals: &std::collections::HashSet<EntityId>,
     ) -> Result<Option<Arc<BTree>>, StoreError> {
         if previous.untracked_visibility_revision != current.untracked_visibility_revision {
             return Ok(None);
@@ -202,6 +210,10 @@ impl UnifiedStore {
         let mut projected_bytes = 0_usize;
         let mut deferred = Vec::new();
         for id in ids {
+            // The cold path validates and applies these physical deletes with their postings.
+            if logged_removals.contains(&id) {
+                continue;
+            }
             let key = id.raw().to_be_bytes().to_vec();
             let existing = tree
                 .get(&key)

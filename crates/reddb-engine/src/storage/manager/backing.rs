@@ -18,6 +18,8 @@ pub(super) struct BackingRead {
     pub format_version: u32,
     pub read_bytes_max: usize,
     pub removed: HashSet<EntityId>,
+    // Bounded subset of tombstones whose physical delete was appended to the WAL.
+    logged_removals: HashSet<EntityId>,
 }
 
 /// Frozen base/overlay cursor for a lazy query source. The source generation
@@ -252,6 +254,7 @@ impl SegmentManager {
             format_version,
             read_bytes_max,
             removed: HashSet::new(),
+            logged_removals: HashSet::new(),
         });
     }
 
@@ -271,18 +274,34 @@ impl SegmentManager {
         root_page: u32,
         update: impl FnOnce() -> (T, Option<(u32, u64)>),
     ) -> Option<T> {
+        self.try_with_unshared_backing_delta(root_page, 0, |_| update())
+    }
+
+    /// Under the host's publication fence, allow a bounded set of WAL-confirmed
+    /// physical deletes alongside the resident changes. Unlogged removes and
+    /// borrowed generations require immutable replacement.
+    #[doc(hidden)]
+    pub fn try_with_unshared_backing_delta<T>(
+        &self,
+        root_page: u32,
+        max_removals: usize,
+        update: impl FnOnce(&HashSet<EntityId>) -> (T, Option<(u32, u64)>),
+    ) -> Option<T> {
         let mut backing = self.backing.try_write_for(UNSHARED_BACKING_WAIT)?;
         let backing = backing.as_mut()?;
         if backing.root_page != root_page
-            || !backing.removed.is_empty()
+            || backing.removed.len() > max_removals
+            || backing.removed.len() != backing.logged_removals.len()
             || Arc::get_mut(&mut backing.source).is_none()
         {
             return None;
         }
-        let (result, published) = update();
+        let (result, published) = update(&backing.removed);
         if let Some((root_page, total_entities)) = published {
             backing.root_page = root_page;
             backing.total_entities = total_entities;
+            backing.removed.clear();
+            backing.logged_removals.clear();
         }
         Some(result)
     }
@@ -906,6 +925,23 @@ impl SegmentManager {
     pub(super) fn remember_backing_delete(&self, id: EntityId) {
         if let Some(backing) = self.backing.write().as_mut() {
             backing.removed.insert(id);
+            backing.logged_removals.remove(&id);
+        }
+    }
+
+    /// Called under the publication fence after a successful WAL append.
+    #[doc(hidden)]
+    pub fn confirm_logged_removals(&self, ids: &[EntityId]) {
+        // Optional checkpoint proof. Do not make collection maintenance wait
+        // for a base reader under the host's publication fence.
+        let Some(mut backing) = self.backing.try_write() else {
+            return;
+        };
+        if let Some(base) = backing.as_mut() {
+            if base.removed.len() <= crate::storage::segment::CHECKPOINT_MUTATIONS_MAX {
+                base.logged_removals
+                    .extend(ids.iter().copied().filter(|id| base.removed.contains(id)));
+            }
         }
     }
 
