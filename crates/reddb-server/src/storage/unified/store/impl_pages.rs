@@ -116,6 +116,8 @@ impl CheckpointTreeBuilder {
         self.tree
             .bulk_insert_sorted(&self.records)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        #[cfg(test)]
+        checkpoint_overlap::after_primary_batch(&self.records);
         self.records.clear();
         self.bytes = 0;
         Ok(())
@@ -3104,6 +3106,10 @@ impl UnifiedStore {
         self.db_path.as_deref()
     }
 }
+
+#[cfg(test)]
+#[path = "checkpoint_overlap_test.rs"]
+mod checkpoint_overlap;
 
 #[cfg(test)]
 mod checkpoint_work_tests {
