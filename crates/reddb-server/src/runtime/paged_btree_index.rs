@@ -12,7 +12,9 @@ use reddb_rql::ast::{CompareOp, FieldRef, Filter, OrderByClause};
 use reddb_types::{value_to_canonical_key, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Bound::{self, Excluded, Included, Unbounded};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 // Every valid family tag is below 255. An unrepresentable key retains a
@@ -116,6 +118,8 @@ pub(super) struct RuntimeBtreeIndex {
 
 #[derive(Default)]
 struct OverlayBtree {
+    // A plan hint only. Even a fingerprint collision can only select the SQL scan.
+    last_broad_range: AtomicU64,
     postings: BTreeMap<Vec<u8>, BTreeSet<EntityId>>,
     scan_required: BTreeSet<EntityId>,
     touched: std::collections::HashMap<EntityId, Option<Vec<u8>>>,
@@ -160,6 +164,7 @@ impl OverlayBtree {
     }
 
     fn remove_current(&mut self, entity_id: EntityId) {
+        *self.last_broad_range.get_mut() = 0;
         let Some(previous) = self.touched.remove(&entity_id) else {
             return;
         };
@@ -227,6 +232,15 @@ struct Range {
     matched_columns: usize,
     order_start: usize,
     range_column: bool,
+}
+
+impl Range {
+    fn bounds_fingerprint(&self) -> u64 {
+        let mut hash = DefaultHasher::new();
+        self.lower.hash(&mut hash);
+        self.upper.hash(&mut hash);
+        hash.finish().max(1)
+    }
 }
 
 struct ScopedFamily {
@@ -633,7 +647,22 @@ impl RuntimeBtreeIndex {
             .map_err(|error| StoreError::Serialization(error.to_string()))?;
         // Admission precedes publication/source locks; the returned owner keeps
         // candidate memory charged through result assembly and error paths.
-        let _publication = store.vault_publication_lock.lock();
+        let _publication = match store.vault_publication_lock.try_lock() {
+            Some(guard) => guard,
+            None => {
+                // The normal plan already walks this range. Under contention skip
+                // the repeated selectivity probe, without opening any unfenced pages.
+                let broad = self.overlay.try_read().is_some_and(|overlay| {
+                    let last = overlay.last_broad_range.load(Ordering::Relaxed);
+                    last != 0 && last == range.bounds_fingerprint()
+                });
+                if broad {
+                    not_selective.set(true);
+                    return Ok(None);
+                }
+                store.vault_publication_lock.lock()
+            }
+        };
         let Some(index) = store.secondary_index(&self.collection, &self.name, &self.identity)
         else {
             return Ok(None);
@@ -754,6 +783,9 @@ impl RuntimeBtreeIndex {
         while count.next_posting(&mut posting)?.is_some() {
             counted += 1;
             if counted > candidates_max {
+                overlay
+                    .last_broad_range
+                    .store(range.bounds_fingerprint(), Ordering::Relaxed);
                 not_selective.set(true);
                 return Ok(None);
             }
@@ -765,6 +797,9 @@ impl RuntimeBtreeIndex {
         {
             counted += entity_ids.len();
             if counted > candidates_max {
+                overlay
+                    .last_broad_range
+                    .store(range.bounds_fingerprint(), Ordering::Relaxed);
                 not_selective.set(true);
                 return Ok(None);
             }
@@ -1237,6 +1272,22 @@ mod tests {
         };
         assert_eq!(lookup("key-05"), Some(1));
         assert_eq!(lookup("bulk"), None);
+
+        // A previous rejection lets the same range choose the authoritative
+        // walk while another thread owns publication. The selective key still
+        // resolves through the tree after that fence is released.
+        let store = runtime.db().store();
+        let publication = store.vault_publication_lock.lock();
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                done.send(lookup("bulk")).expect("broad range");
+                assert_eq!(lookup("key-05"), Some(1));
+            });
+            let broad = result.recv_timeout(std::time::Duration::from_secs(5));
+            drop(publication);
+            assert_eq!(broad.expect("broad probe waited for publication"), None);
+        });
     }
 
     #[test]
