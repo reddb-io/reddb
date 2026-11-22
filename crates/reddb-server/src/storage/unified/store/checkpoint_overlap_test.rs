@@ -159,7 +159,8 @@ fn unrelated_insert_commits_and_recovers_during_primary_checkpoint() {
                 .collect::<Vec<_>>(),
             "{mode}"
         );
-        db.checkpoint().unwrap();
+        db.graceful_shutdown(false)
+            .expect("quiesce workers before offline scrub");
         drop(db);
         let scrub = crate::storage::compact::scrub_paged(&path).expect("offline verification");
         assert!(
