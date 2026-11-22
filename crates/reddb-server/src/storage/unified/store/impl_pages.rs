@@ -264,8 +264,6 @@ fn publish_paged_metadata(pager: &Pager, meta_data: &[u8]) -> Result<(), PagerEr
     // Publish only after all children, data pages and proof paths are durable.
     pager.sync()?;
     #[cfg(test)]
-    checkpoint_overlap::pause_catalog_publication();
-    #[cfg(test)]
     if std::env::var_os("REDDB_TEST_EXIT_BEFORE_CATALOG_ROOT_PUBLICATION").is_some() {
         std::process::exit(197);
     }
