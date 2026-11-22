@@ -4035,6 +4035,13 @@ fn cold_dml_delete_late_point_failure_preserves_preimages_and_writer_horizon() {
 fn cold_dml_deferred_delete_abort_preserves_indexes_and_releases_admission() {
     for index in [None, Some("HASH"), Some("BTREE")] {
         let (directory, runtime) = cold_dml_fixture(index);
+        // The assertions below inspect the global snapshot horizon. A maintenance
+        // reader can legitimately retain a horizon after the tested DELETE aborts.
+        runtime
+            .background_tasks
+            .as_ref()
+            .expect("foreground workers")
+            .shutdown();
         runtime
             .db()
             .store()
