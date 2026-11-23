@@ -105,6 +105,16 @@ impl<P: PageStore> PagedCollection<P> {
         Self { tree, keys: None }
     }
 
+    pub(super) fn shares_primary_with(&self, source: &dyn CollectionRead) -> bool
+    where
+        P: 'static,
+    {
+        source
+            .as_paged_source()
+            .and_then(|base| base.downcast_ref::<Self>())
+            .is_some_and(|base| Arc::ptr_eq(&self.tree, &base.tree))
+    }
+
     pub(super) fn shares_trees_with(&self, source: &dyn CollectionRead) -> bool
     where
         P: 'static,

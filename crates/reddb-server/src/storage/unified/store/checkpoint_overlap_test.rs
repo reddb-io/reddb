@@ -36,6 +36,104 @@ fn open(path: &Path) -> RedDBRuntime {
 }
 
 #[test]
+fn cold_primary_cut_preserves_later_sql_rows_and_recovers() {
+    use reddb_engine::storage::collection_read::PagedCollection;
+    const CHILD: &str = "REDDB_TEST_COLD_PRIMARY_CUT_PATH";
+    const CHECKPOINT: &str = "REDDB_TEST_COLD_PRIMARY_CUT_FINISH";
+    let values = |db: &RedDBRuntime| -> Vec<_> {
+        db.execute_query("SELECT v FROM cut_rows ORDER BY v")
+            .unwrap()
+            .result
+            .records
+            .iter()
+            .map(|r| r.get("v").unwrap().clone())
+            .collect()
+    };
+    let expected = [20, 30].map(reddb_types::Value::Integer);
+    if let Some(path) = std::env::var_os(CHILD) {
+        let db = open(Path::new(&path));
+        let store = db.db().store();
+        let manager = store.get_collection("cut_rows").unwrap();
+        let (cut, tree, source, limit) = {
+            let _publication = store.vault_publication_lock.lock();
+            let cut = manager.clean_backing_cut().expect("clean primary");
+            let tree = store.btree_indices.read()["cut_rows"].clone();
+            let keys = store.key_indices.read();
+            let index = &keys["cut_rows"];
+            let source = if index.indexed {
+                PagedCollection::with_key_index(tree.clone(), index.tree.clone())
+            } else {
+                PagedCollection::new(tree.clone())
+            };
+            (cut, tree, source, manager.backing_read_bytes_max().unwrap())
+        };
+        for sql in [
+            "INSERT INTO cut_rows (v) VALUES (30)",
+            "UPDATE cut_rows SET v = 20 WHERE v = 2",
+            "DELETE FROM cut_rows WHERE v = 1",
+        ] {
+            assert_eq!(db.execute_query(sql).unwrap().affected_rows, 1);
+        }
+        {
+            let _publication = store.vault_publication_lock.lock();
+            let revisions = manager.checkpoint_revisions();
+            assert!(!revisions.is_empty());
+            assert!(manager
+                .publish_checkpoint_backing(
+                    Some(&cut),
+                    source,
+                    tree.root_page_id(),
+                    store.format_version(),
+                    limit
+                )
+                .is_none());
+            assert_eq!(manager.checkpoint_revisions(), revisions);
+        }
+        drop((cut, tree));
+        assert_eq!(values(&db), expected);
+        if std::env::var_os(CHECKPOINT).is_some() {
+            db.checkpoint().unwrap();
+        }
+        std::process::exit(72);
+    }
+    for finished in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cut.rdb");
+        {
+            let db = open(&path);
+            db.execute_query("CREATE TABLE cut_rows (v INTEGER)")
+                .unwrap();
+            db.execute_query("INSERT INTO cut_rows (v) VALUES (1),(2)")
+                .unwrap();
+            db.checkpoint().unwrap();
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                &format!(
+                    "{}::cold_primary_cut_preserves_later_sql_rows_and_recovers",
+                    module_path!().split_once("::").unwrap().1
+                ),
+                "--nocapture",
+            ])
+            .env(CHILD, &path)
+            .env_remove(CHECKPOINT);
+        if finished {
+            child.env(CHECKPOINT, "1");
+        }
+        let result = child.output().unwrap();
+        assert_eq!(
+            result.status.code(),
+            Some(72),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(values(&open(&path)), expected);
+    }
+}
+
+#[test]
 fn checkpoint_keeps_the_read_source_of_an_untouched_cold_table() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("table-b.rdb");

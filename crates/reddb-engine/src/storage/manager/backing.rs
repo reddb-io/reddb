@@ -22,6 +22,22 @@ pub(super) struct BackingRead {
     logged_removals: HashSet<EntityId>,
 }
 
+/// A cold collection with no resident changes at the checkpoint boundary.
+pub struct CleanBackingCut {
+    source: Arc<dyn CollectionRead + Send + Sync>,
+    physical_count: u64,
+}
+
+impl CleanBackingCut {
+    fn matches(&self, base: &BackingRead, root: u32, format: u32, read_limit: usize) -> bool {
+        Arc::ptr_eq(&base.source, &self.source)
+            && base.root_page == root
+            && base.format_version == format
+            && base.read_bytes_max == read_limit
+            && base.total_entities == self.physical_count
+    }
+}
+
 /// Frozen base/overlay cursor for a lazy query source. The source generation
 /// remains pinned through the owned page cursor, not a manager topology lock.
 pub struct PagedEntityCursor {
@@ -218,6 +234,67 @@ impl SegmentManager {
             .read()
             .as_ref()
             .map(|backing| backing.read_bytes_max)
+    }
+
+    /// Capture under the host write fence. Pinning the source also excludes
+    /// in-place modifications to the base until the decision to retain it.
+    pub fn clean_backing_cut(&self) -> Option<CleanBackingCut> {
+        let guard = self.backing.read();
+        let base = guard.as_ref()?;
+        (base.removed.is_empty()
+            && base.logged_removals.is_empty()
+            && base.total_entities == self.count() as u64
+            && self.consolidation.read().is_none()
+            && self.growing.read().is_none()
+            && self.sealed.read().is_empty())
+        .then(|| CleanBackingCut {
+            source: Arc::clone(&base.source),
+            physical_count: base.total_entities,
+        })
+    }
+
+    /// Install the checkpoint projection under the host write fence. Return
+    /// the installed segment revisions, or None when the captured base is still
+    /// current and the caller must retain its original revision boundary.
+    pub fn publish_checkpoint_backing<
+        P: crate::storage::page_store::PageStore + Send + Sync + 'static,
+    >(
+        &self,
+        cut: Option<&CleanBackingCut>,
+        source: crate::storage::collection_read::PagedCollection<P>,
+        root_page: u32,
+        format_version: u32,
+        read_bytes_max: usize,
+    ) -> Option<Vec<(u64, u64)>> {
+        if let Some(cut) = cut {
+            let backing = self.backing.read();
+            if backing
+                .as_ref()
+                .is_some_and(|base| cut.matches(base, root_page, format_version, read_bytes_max))
+                && source.shares_primary_with(cut.source.as_ref())
+            {
+                if source.shares_trees_with(cut.source.as_ref()) {
+                    return None;
+                }
+                // Only the lookup tree changed. Writers are fenced by the host,
+                // so releasing the shared guard here cannot replace the base.
+                drop(backing);
+                self.backing
+                    .write()
+                    .as_mut()
+                    .expect("fenced checkpoint base")
+                    .source = Arc::new(source);
+                return None;
+            }
+        }
+        self.install_paged_backing(
+            source,
+            root_page,
+            format_version,
+            read_bytes_max,
+            self.count() as u64,
+        );
+        Some(self.checkpoint_revisions())
     }
 
     /// Install a published base under the host's write fence. An untouched cold

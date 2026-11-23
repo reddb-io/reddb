@@ -94,6 +94,52 @@ fn checkpoint_reuses_only_identical_clean_paged_sources() {
 }
 
 #[test]
+fn publishing_a_new_key_tree_for_the_same_primary_preserves_later_physical_rows() {
+    use reddb_engine::storage::manager::SegmentManager;
+    let pages = Arc::new(Pages::default());
+    let tree = Arc::new(BTree::new(pages.clone()));
+    let keys = Arc::new(BTree::new(pages.clone()));
+    let manager = SegmentManager::new("cut");
+    let row = |id: u64| UnifiedEntity::table_row(EntityId::new(id), "cut", id, vec![]);
+    let cold = row(1);
+    tree.insert(
+        &1u64.to_be_bytes(),
+        &serialize_entity_record(&cold, None, 11),
+    )
+    .unwrap();
+    let root = tree.root_page_id();
+    manager.install_paged_backing(
+        PagedCollection::with_key_index(tree.clone(), keys),
+        root,
+        11,
+        128 * 1024,
+        1,
+    );
+    let initial = manager.current_backing_overlay().unwrap().0;
+    let cut = manager.clean_backing_cut().unwrap();
+    manager.insert(row(2)).unwrap();
+    assert!(manager.delete(EntityId::new(1)).unwrap());
+    assert!(manager.clean_backing_cut().is_none());
+    let next = PagedCollection::with_key_index(tree.clone(), Arc::new(BTree::new(pages)));
+    assert!(manager
+        .publish_checkpoint_backing(Some(&cut), next, root, 11, 128 * 1024)
+        .is_none());
+    assert!(!Arc::ptr_eq(
+        &initial,
+        &manager.current_backing_overlay().unwrap().0
+    ));
+    assert_eq!(manager.count(), 1);
+    assert!(manager
+        .try_get(EntityId::new(1), usize::MAX)
+        .unwrap()
+        .is_none());
+    assert!(manager
+        .try_get(EntityId::new(2), usize::MAX)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
 fn secondary_postings_cursor_is_lazy_and_pins_immutable_leaves() {
     use reddb_engine::storage::secondary_index_read::SecondaryIndexRead;
     let pages = Arc::new(Pages::default());

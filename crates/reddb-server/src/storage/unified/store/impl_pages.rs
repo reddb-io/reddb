@@ -2830,6 +2830,7 @@ impl UnifiedStore {
         let mut rebuilt_indices = HashMap::with_capacity(collections.len());
         let previous_versions = self.checkpoint_versions.read();
         let mut checkpoint_versions = HashMap::with_capacity(collections.len());
+        let mut unchanged_bases = HashMap::new();
         let pending_vault = Arc::new(pending_vault_versions.clone());
         let excluded = Arc::new(excluded);
         for (name, manager) in collections.iter() {
@@ -2858,6 +2859,11 @@ impl UnifiedStore {
                     && checkpoint_visibility_matches(previous, &version)
                 {
                     version.deferred_rows = previous.deferred_rows.clone();
+                    if version.segments.is_empty() {
+                        if let Some(cut) = manager.clean_backing_cut() {
+                            unchanged_bases.insert(name.as_str(), cut);
+                        }
+                    }
                     collection_roots.push((name.clone(), tree.root_page_id()));
                     rebuilt_indices.insert(name.clone(), Arc::clone(tree));
                     checkpoint_versions.insert(name.clone(), version);
@@ -3074,15 +3080,16 @@ impl UnifiedStore {
                                 PagedCollection::new(Arc::clone(tree))
                             }
                         };
-                        manager.install_paged_backing(
+                        if let Some(installed) = manager.publish_checkpoint_backing(
+                            unchanged_bases.get(name.as_str()),
                             source,
                             tree.root_page_id(),
                             self.format_version(),
                             usize::try_from(limit).unwrap_or(usize::MAX),
-                            manager.count() as u64,
-                        );
-                        if let Some(version) = versions.get_mut(name) {
-                            version.segments = manager.checkpoint_revisions();
+                        ) {
+                            if let Some(version) = versions.get_mut(name) {
+                                version.segments = installed;
+                            }
                         }
                     }
                 }
