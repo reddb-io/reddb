@@ -141,7 +141,12 @@ pub fn dwb_zone_offset() -> u64 {
 
 /// Clear the in-file DWB zone with valid reserved pages and sync it.
 pub fn clear_dwb_zone<F: VfsFile>(file: &mut F) -> Result<(), PagerIoError> {
-    for page_id in DWB_ZONE_START_PAGE..FIRST_ALLOCATABLE_PAGE {
+    clear_dwb_prefix(file, DWB_ZONE_PAGES)
+}
+
+fn clear_dwb_prefix<F: VfsFile>(file: &mut F, pages: u32) -> Result<(), PagerIoError> {
+    assert!(pages <= DWB_ZONE_PAGES, "DWB prefix fits its reserved zone");
+    for page_id in DWB_ZONE_START_PAGE..DWB_ZONE_START_PAGE + pages {
         let mut page = Page::new(PageType::Header, page_id);
         page.update_checksum();
         write_page(file, page_id, &page)?;
@@ -222,7 +227,12 @@ pub fn write_pages<F: VfsFile>(
         }
         file.sync_all()?;
         if let Some(publication) = publication {
-            dwb_publication::consume(file, publication)?;
+            // A live writer started with a recovered zone and overwrote only
+            // this prefix. Include the last partial page when restoring it.
+            let dirty_pages = publication
+                .frame_bytes
+                .div_ceil(u32::try_from(PAGE_SIZE).expect("page size fits u32"));
+            dwb_publication::consume(file, publication, dirty_pages)?;
         }
     }
     // Legacy frames' home pages are durable before the next frame replaces their
@@ -283,7 +293,7 @@ pub fn recover_from_dwb<F: VfsFile>(file: &mut F) -> Result<(), PagerIoError> {
             authority
         }
     };
-    dwb_publication::consume(file, authority)
+    dwb_publication::consume(file, authority, DWB_ZONE_PAGES)
 }
 
 /// Read a complete staged frame without consuming or repairing the source.

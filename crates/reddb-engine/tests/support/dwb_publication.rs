@@ -70,9 +70,24 @@ fn guarded_dwb_survives_each_write_sync_and_superblock_fallback() {
     let mut successful = memory(baseline.clone());
     pager_io::write_pages(&mut successful, &updated, true).expect("complete guarded write");
     let operations = successful.operations.borrow().clone();
+    let start = pager_io::dwb_zone_offset() as usize;
+    assert_eq!(
+        successful.durable.borrow()[start..start + pager_io::DWB_ZONE_BYTES],
+        baseline[start..start + pager_io::DWB_ZONE_BYTES],
+        "restore the entire reserved zone byte for byte"
+    );
     let first_home_write = operations.iter().position(|operation| {
         matches!(operation, Operation::Write(offset, _) if *offset == u64::from(HOME) * PAGE_SIZE as u64)
     }).expect("guarded home write") + 1;
+    let reserved = pager_io::dwb_zone_offset()..u64::from(HOME) * PAGE_SIZE as u64;
+    let bytes_cleared: usize = operations[first_home_write..]
+        .iter()
+        .filter_map(|op| match op {
+            Operation::Write(offset, bytes) if reserved.contains(offset) => Some(*bytes),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(bytes_cleared, 2 * PAGE_SIZE, "one payload plus its frame header");
     let staging_write = operations.iter().position(|operation| {
         matches!(operation, Operation::Write(offset, length) if *offset == pager_io::dwb_zone_offset() && *length > PAGE_SIZE)
     }).expect("complete staging write") + 1;
