@@ -732,7 +732,10 @@ impl StoreCommitCoordinator {
     /// across record kinds.
     pub(crate) fn append_single_record(&self, record: WalRecord) -> io::Result<()> {
         self.check_write_error()?;
-        if matches!(record, WalRecord::PageOwnership { .. }) {
+        if matches!(
+            record,
+            WalRecord::PageOwnership { .. } | WalRecord::FullPageImage { .. }
+        ) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "page ownership requires a durable append",
@@ -949,7 +952,7 @@ impl StoreCommitCoordinator {
             let mut protected = false;
             for item in reader.iter() {
                 match item {
-                    Ok((_, WalRecord::PageOwnership { .. })) => {
+                    Ok((_, WalRecord::PageOwnership { .. } | WalRecord::FullPageImage { .. })) => {
                         protected = true;
                         break;
                     }
@@ -1101,7 +1104,11 @@ impl StoreCommitCoordinator {
                     WalRecord::ProbabilisticDelta { .. } | WalRecord::VectorInsert { .. }
                 );
                 let keep = (runtime && retain_runtime)
-                    || (offset >= boundary && !matches!(record, WalRecord::PageOwnership { .. }));
+                    || (offset >= boundary
+                        && !matches!(
+                            record,
+                            WalRecord::PageOwnership { .. } | WalRecord::FullPageImage { .. }
+                        ));
                 has_runtime |= runtime && keep;
                 previous = Some((offset, keep));
             }
@@ -2458,6 +2465,22 @@ mod tests {
                 let stale = coordinator.checkpoint_boundary();
                 coordinator
                     .append_durable_page_ownership(PageOwnershipRecord::Begin { epoch: 1 })
+                    .unwrap();
+                let mut page = crate::storage::engine::Page::new(
+                    crate::storage::engine::PageType::BTreeLeaf,
+                    100,
+                );
+                page.update_checksum();
+                coordinator
+                    .append_durable_ownership_bytes(
+                        WalRecord::FullPageImage {
+                            tx_id: 0,
+                            page_id: 100,
+                            ckpt_epoch: 1,
+                            data: page.as_bytes().to_vec(),
+                        }
+                        .encode(),
+                    )
                     .unwrap();
                 let actions = [create("a"), create("b")];
                 coordinator.append_actions(&actions).unwrap();
