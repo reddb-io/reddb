@@ -71,6 +71,29 @@ fn noise(bytes: usize) -> Vec<u8> {
 }
 
 #[test]
+fn checkpoint_reuses_only_identical_clean_paged_sources() {
+    use reddb_engine::storage::manager::SegmentManager;
+    let pages = Arc::new(Pages::default());
+    let data = Arc::new(BTree::new(Arc::clone(&pages)));
+    let keys = Arc::new(BTree::new(Arc::clone(&pages)));
+    let replacement = Arc::new(BTree::new(pages));
+    let manager = SegmentManager::new("keys");
+    let install = |keys: &Arc<BTree<Pages>>| {
+        manager.install_paged_backing(
+            PagedCollection::with_key_index(Arc::clone(&data), Arc::clone(keys)),
+            data.root_page_id(),
+            11,
+            128 * 1024,
+            0,
+        );
+        manager.current_backing_overlay().unwrap().0
+    };
+    let initial = install(&keys);
+    assert!(Arc::ptr_eq(&initial, &install(&keys)));
+    assert!(!Arc::ptr_eq(&initial, &install(&replacement)));
+}
+
+#[test]
 fn secondary_postings_cursor_is_lazy_and_pins_immutable_leaves() {
     use reddb_engine::storage::secondary_index_read::SecondaryIndexRead;
     let pages = Arc::new(Pages::default());

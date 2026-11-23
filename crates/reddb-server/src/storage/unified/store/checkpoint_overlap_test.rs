@@ -36,6 +36,72 @@ fn open(path: &Path) -> RedDBRuntime {
 }
 
 #[test]
+fn checkpoint_keeps_the_read_source_of_an_untouched_cold_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("table-b.rdb");
+    let db = open(&path);
+    for sql in [
+        "CREATE TABLE changed_table (v INTEGER)",
+        "CREATE TABLE untouched_table (v INTEGER)",
+        "INSERT INTO changed_table (v) VALUES (1)",
+        "INSERT INTO untouched_table (v) VALUES (42)",
+    ] {
+        db.execute_query(sql).unwrap();
+    }
+    db.checkpoint().unwrap();
+    let manager = db.db().store().get_collection("untouched_table").unwrap();
+    let (before, overlay) = manager.current_backing_overlay().unwrap();
+    assert!(overlay.is_empty());
+    db.execute_query("UPDATE changed_table SET v = 2 WHERE v = 1")
+        .unwrap();
+    // Hold B's base read guard on an actual row until A finishes. A regression
+    // reaches the timeout, then releases the reader so the threads can join.
+    thread::scope(|scope| {
+        let (ready, reading) = mpsc::channel();
+        let (resume, released) = mpsc::channel();
+        let reader = Arc::clone(&manager);
+        scope.spawn(move || {
+            reader
+                .try_for_each_entity_unordered(1024 * 1024, |_| {
+                    ready.send(()).unwrap();
+                    released.recv().unwrap();
+                    false
+                })
+                .unwrap();
+        });
+        reading.recv_timeout(Duration::from_secs(30)).unwrap();
+        let (done, finished) = mpsc::channel();
+        let checkpoint = &db;
+        scope.spawn(move || done.send(checkpoint.checkpoint()).unwrap());
+        let result = finished.recv_timeout(Duration::from_secs(30));
+        resume.send(()).unwrap();
+        result
+            .expect("checkpoint waited for an unchanged table's reader")
+            .unwrap();
+    });
+    let (after, overlay) = manager.current_backing_overlay().unwrap();
+    assert!(overlay.is_empty());
+    assert!(
+        Arc::ptr_eq(&before, &after),
+        "checkpoint replaced table B's read source"
+    );
+    drop((before, after, manager, db));
+    let db = open(&path);
+    for (table, expected) in [("untouched_table", 42), ("changed_table", 2)] {
+        let rows = db
+            .execute_query(&format!("SELECT v FROM {table}"))
+            .unwrap()
+            .result
+            .records;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("v"),
+            Some(&reddb_types::Value::Integer(expected))
+        );
+    }
+}
+
+#[test]
 fn unrelated_insert_commits_and_recovers_during_primary_checkpoint() {
     const CHILD: &str = "REDDB_TEST_PAUSED_PRIMARY_DATABASE";
     const ACKNOWLEDGED: i32 = 72;

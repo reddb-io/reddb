@@ -68,6 +68,11 @@ pub trait CollectionCursor {
 }
 
 pub trait CollectionRead {
+    /// Native page-backed sources can be compared by their actual tree handles.
+    /// Borrowed overlays and other read implementations have no such identity.
+    fn as_paged_source(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
     fn get_record(
         &self,
         id: EntityId,
@@ -100,6 +105,23 @@ impl<P: PageStore> PagedCollection<P> {
         Self { tree, keys: None }
     }
 
+    pub(super) fn shares_trees_with(&self, source: &dyn CollectionRead) -> bool
+    where
+        P: 'static,
+    {
+        source
+            .as_paged_source()
+            .and_then(|base| base.downcast_ref::<Self>())
+            .is_some_and(|base| {
+                Arc::ptr_eq(&self.tree, &base.tree)
+                    && match (&self.keys, &base.keys) {
+                        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                        (None, None) => true,
+                        _ => false,
+                    }
+            })
+    }
+
     /// Hosts publish both roots atomically and retain their retirement fences.
     pub fn with_key_index(tree: Arc<BTree<P>>, keys: Arc<BTree<P>>) -> Self {
         Self {
@@ -120,6 +142,9 @@ impl<P: PageStore> PagedCollection<P> {
 }
 
 impl<P: PageStore + 'static> CollectionRead for PagedCollection<P> {
+    fn as_paged_source(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
     fn get_record(
         &self,
         id: EntityId,

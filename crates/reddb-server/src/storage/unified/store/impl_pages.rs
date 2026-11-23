@@ -3061,18 +3061,21 @@ impl UnifiedStore {
                     .is_some_and(|version| !version.has_unprojected_rows)
                 {
                     if let Some(tree) = btree_indices.get(name) {
-                        manager.install_backing(
-                            Arc::new(
-                                {
-                                    let keys = self.key_indices.read();
-                                    let index = keys.get(name).expect("invariant: prepared checkpoint classifies its key index");
-                                    if index.indexed {
-                                        reddb_engine::storage::collection_read::PagedCollection::with_key_index(Arc::clone(tree), Arc::clone(&index.tree))
-                                    } else {
-                                        reddb_engine::storage::collection_read::PagedCollection::new(Arc::clone(tree))
-                                    }
-                                },
-                            ),
+                        let source = {
+                            use reddb_engine::storage::collection_read::PagedCollection;
+                            let keys = self.key_indices.read();
+                            let index = keys.get(name).expect("published collection key index");
+                            if index.indexed {
+                                PagedCollection::with_key_index(
+                                    Arc::clone(tree),
+                                    Arc::clone(&index.tree),
+                                )
+                            } else {
+                                PagedCollection::new(Arc::clone(tree))
+                            }
+                        };
+                        manager.install_paged_backing(
+                            source,
                             tree.root_page_id(),
                             self.format_version(),
                             usize::try_from(limit).unwrap_or(usize::MAX),

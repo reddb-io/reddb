@@ -220,6 +220,41 @@ impl SegmentManager {
             .map(|backing| backing.read_bytes_max)
     }
 
+    /// Install a published base under the host's write fence. An untouched cold
+    /// table can keep serving base readers without taking the exclusive lock.
+    pub fn install_paged_backing<
+        P: crate::storage::page_store::PageStore + Send + Sync + 'static,
+    >(
+        &self,
+        source: crate::storage::collection_read::PagedCollection<P>,
+        root_page: u32,
+        format_version: u32,
+        read_bytes_max: usize,
+        total_entities: u64,
+    ) {
+        if self.backing.read().as_ref().is_some_and(|base| {
+            base.root_page == root_page
+                && base.format_version == format_version
+                && base.read_bytes_max == read_bytes_max
+                && base.total_entities == total_entities
+                && base.removed.is_empty()
+                && base.logged_removals.is_empty()
+                && source.shares_trees_with(base.source.as_ref())
+                && self.consolidation.read().is_none()
+                && self.growing.read().is_none()
+                && self.sealed.read().is_empty()
+        }) {
+            return;
+        }
+        self.install_backing(
+            Arc::new(source),
+            root_page,
+            format_version,
+            read_bytes_max,
+            total_entities,
+        );
+    }
+
     /// The host must fence writers and publish the new durable tree first.
     /// Captured resident readers retain their old sources through weak tracking.
     pub fn install_backing(
