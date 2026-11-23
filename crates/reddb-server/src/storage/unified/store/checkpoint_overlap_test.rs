@@ -36,6 +36,30 @@ fn open(path: &Path) -> RedDBRuntime {
 }
 
 #[test]
+fn checkpoint_publishes_one_data_catalog_and_one_metadata_catalog() {
+    let directory = tempfile::tempdir().expect("temporary database");
+    let db = open(&directory.path().join("catalog-count.rdb"));
+    db.execute_query("CREATE TABLE catalog_count (v INTEGER)")
+        .expect("create table");
+    db.checkpoint().expect("initialize data and metadata");
+    db.execute_query("INSERT INTO catalog_count (v) VALUES (42)")
+        .expect("commit row");
+    let store = db.db().store();
+    let _publication = store.vault_publication_lock.lock();
+    let before = store
+        .published_ownership_epoch()
+        .expect("read initial catalog");
+    db.checkpoint()
+        .expect("checkpoint row and physical metadata");
+    assert_eq!(
+        store
+            .published_ownership_epoch()
+            .expect("read final catalog"),
+        before + 2
+    );
+}
+
+#[test]
 fn cold_primary_cut_preserves_later_sql_rows_and_recovers() {
     use reddb_engine::storage::collection_read::PagedCollection;
     const CHILD: &str = "REDDB_TEST_COLD_PRIMARY_CUT_PATH";

@@ -718,6 +718,7 @@ mod checkpoint_cut_test {
     #[test]
     fn completed_metadata_pass_preserves_post_snapshot_sql_and_sketch() {
         const CHILD: &str = "REDDB_TEST_POST_SNAPSHOT_SQL_AND_SKETCH";
+        const INTERRUPT: &str = "REDDB_TEST_INTERRUPT_METADATA_PASS";
         if let Some(path) = std::env::var_os(CHILD) {
             let db = Arc::new(open(Path::new(&path)));
             for sql in [
@@ -743,36 +744,66 @@ mod checkpoint_cut_test {
                 1
             );
             db.execute_query("SKETCH ADD late_counts 'red' 4").unwrap();
+            if let Ok(point) = std::env::var(INTERRUPT) {
+                std::env::set_var(point, "1");
+            }
             resume.send(()).unwrap();
             builder.join().unwrap();
             std::process::exit(72);
         }
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("cut.rdb");
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "runtime::impl_catalog_accessors::checkpoint_cut_test::completed_metadata_pass_preserves_post_snapshot_sql_and_sketch", "--nocapture"])
-            .env(CHILD, &path).output().unwrap();
-        assert_eq!(
-            child.status.code(),
-            Some(72),
-            "{}",
-            String::from_utf8_lossy(&child.stderr)
-        );
-        let db = open(&path);
-        let rows = db
-            .execute_query("SELECT v FROM late_rows")
-            .unwrap()
-            .result
-            .records;
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].get("v"), Some(&reddb_types::Value::Integer(42)));
-        let counts = db.execute_query("SKETCH COUNT late_counts 'red'").unwrap();
-        assert_eq!(
-            counts.result.records[0]
-                .get("estimate")
+        for (interrupt, exit_code) in [
+            (None, 72),
+            (Some("REDDB_TEST_EXIT_BEFORE_CATALOG_ROOT_PUBLICATION"), 197),
+            (Some("REDDB_TEST_EXIT_AFTER_CATALOG_ROOT_PUBLICATION"), 198),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("cut.rdb");
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", "runtime::impl_catalog_accessors::checkpoint_cut_test::completed_metadata_pass_preserves_post_snapshot_sql_and_sketch", "--nocapture"])
+                .env(CHILD, &path).env_remove(INTERRUPT);
+            if let Some(point) = interrupt {
+                child.env(INTERRUPT, point);
+            }
+            let child = child.output().unwrap();
+            assert_eq!(
+                child.status.code(),
+                Some(exit_code),
+                "{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
+            let db = open(&path);
+            let physical = db
+                .db()
+                .physical_metadata()
+                .expect("recover physical metadata");
+            assert!(physical
+                .superblock
+                .collection_roots
+                .contains_key("late_rows"));
+            if interrupt.is_none() {
+                let header = db
+                    .db()
+                    .store()
+                    .physical_file_header()
+                    .expect("physical header");
+                assert_eq!(header.sequence, physical.superblock.sequence);
+            }
+            let rows = db
+                .execute_query("SELECT v FROM late_rows")
                 .unwrap()
-                .display_string(),
-            "7"
-        );
+                .result
+                .records;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get("v"), Some(&reddb_types::Value::Integer(42)));
+            let counts = db.execute_query("SKETCH COUNT late_counts 'red'").unwrap();
+            assert_eq!(
+                counts.result.records[0]
+                    .get("estimate")
+                    .unwrap()
+                    .display_string(),
+                "7"
+            );
+        }
     }
 }

@@ -283,6 +283,10 @@ impl UnifiedStore {
         Ok(Some((summary, bytes)))
     }
 
+    pub(crate) fn has_detached_native_blob_pages(&self) -> bool {
+        !self.detached_native_blob_pages.lock().is_empty()
+    }
+
     /// Call only after the native summary and physical header have been synced.
     /// A failed publication retains these pages; a crash before ledger admission
     /// can leave conservative garbage, but never returns a live page for reuse.

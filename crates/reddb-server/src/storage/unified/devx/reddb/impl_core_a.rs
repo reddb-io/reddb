@@ -908,7 +908,7 @@ impl RedDB {
             let _publication = self.store.vault_publication_lock.lock();
             #[cfg(test)]
             let qualification_started = std::time::Instant::now();
-            self.persist_metadata()?;
+            self.persist_metadata_with(super::impl_metadata::CatalogPublication::WithCheckpoint)?;
             if self.paged_mode {
                 // A writer may have committed after the runtime snapshot cut.
                 // Fold in the physical metadata but preserve runtime-only WAL
