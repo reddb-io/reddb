@@ -98,6 +98,7 @@ fn cold_primary_rejects_unrelated_slot_history_without_overwriting_it() {
         let before = runtime
             .primary_replica_timeline_history()
             .expect("original timeline");
+        assert_eq!(before, Some(reddb_file::TimelineHistory::new(0)));
         let error = runtime
             .record_failover_timeline_promotion("candidate", 0)
             .expect_err("foreign slots must also refuse promotion");

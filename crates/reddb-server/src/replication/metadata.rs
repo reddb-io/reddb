@@ -67,9 +67,11 @@ pub(crate) fn timeline(
     }
     match reddb_file::TimelineHistory::read_from_path(legacy_path) {
         Ok(history) => Ok(history),
-        Err(reddb_file::RdbFileError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(
-            reddb_file::TimelineHistory::new(crate::utils::now_unix_millis()),
-        ),
+        Err(reddb_file::RdbFileError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            // No creation timestamp was recorded for this implicit initial timeline.
+            // Its history must be identical on every read, including after restart.
+            Ok(reddb_file::TimelineHistory::new(0))
+        }
         Err(error) => Err(io::Error::other(error)),
     }
 }
