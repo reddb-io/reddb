@@ -41,6 +41,38 @@ use crate::storage::engine::{BTree, BTreeError, Pager, PagerConfig, PhysicalFile
 use crate::storage::primitives::encoding::read_varu64;
 use reddb_types::types::Value;
 
+#[cfg(not(test))]
+type PublicationLock = parking_lot::ReentrantMutex<()>;
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct PublicationLock(parking_lot::ReentrantMutex<()>);
+
+#[cfg(test)]
+impl std::ops::Deref for PublicationLock {
+    type Target = parking_lot::ReentrantMutex<()>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl PublicationLock {
+    #[track_caller]
+    pub(crate) fn lock(&self) -> parking_lot::ReentrantMutexGuard<'_, ()> {
+        if std::thread::current().name() == Some("sparse-catalog-writer") {
+            if let Some(guard) = self.0.try_lock() {
+                return guard;
+            }
+            eprintln!(
+                "SQL writer waiting for publication at {}",
+                std::panic::Location::caller()
+            );
+        }
+        self.0.lock()
+    }
+}
+
 pub(crate) fn trace_startup_phase(path: &Path, phase: &'static str, started: std::time::Instant) {
     tracing::debug!(
         target: "reddb::storage::startup",
@@ -380,7 +412,7 @@ pub struct UnifiedStore {
     /// Physical metadata and native header publication take it too (#2376).
     /// Reentrant because embedded checkpoint calls the snapshot encoder while
     /// holding the barrier, and storage maintenance may nest those calls.
-    pub(crate) vault_publication_lock: parking_lot::ReentrantMutex<()>,
+    pub(crate) vault_publication_lock: PublicationLock,
     row_publications: row_publication::RowPublicationQueue,
     /// Live-only vault rows excluded from a reentrant WAL-full compaction.
     pub(crate) pending_vault_versions: RwLock<std::collections::HashSet<EntityId>>,

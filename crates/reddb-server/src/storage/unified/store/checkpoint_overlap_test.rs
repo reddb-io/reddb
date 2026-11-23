@@ -314,10 +314,13 @@ fn sparse_catalog_recovery(test_name: &str, write: fn(&RedDBRuntime)) {
             .recv_timeout(Duration::from_secs(60))
             .expect("catalog never reached publication");
         let (committed, ack) = mpsc::channel();
-        thread::spawn(move || {
-            write(&db);
-            committed.send(()).unwrap();
-        });
+        thread::Builder::new()
+            .name("sparse-catalog-writer".into())
+            .spawn(move || {
+                write(&db);
+                committed.send(()).unwrap();
+            })
+            .unwrap();
         match ack.recv_timeout(Duration::from_secs(5)) {
             Ok(()) => std::process::exit(72),
             Err(mpsc::RecvTimeoutError::Timeout) => std::process::exit(73),
@@ -351,7 +354,8 @@ fn sparse_catalog_recovery(test_name: &str, write: fn(&RedDBRuntime)) {
     assert_ne!(
         child.status.code(),
         Some(73),
-        "{test_name}: the writer was blocked at catalog publication"
+        "{test_name}: the writer was blocked at catalog publication\n{}",
+        String::from_utf8_lossy(&child.stderr)
     );
     assert_eq!(
         child.status.code(),
