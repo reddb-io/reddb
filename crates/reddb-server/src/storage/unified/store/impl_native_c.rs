@@ -378,7 +378,18 @@ mod tests {
         let large = ("rows".into(), "text.fulltext".into(), vec![7; capacity * 4]);
         let small = ("rows".into(), "text.fulltext".into(), vec![9; capacity / 2]);
         publish_artifacts(&store, std::slice::from_ref(&large));
+        // The first publication has no previous allocatable catalog root.
+        // Prime the copy-on-write root swap before measuring blob churn.
+        let pager = store.pager().expect("pager");
+        let first_root = pager.manifest_page_id().expect("first catalog root");
+        let first_size = std::fs::metadata(&path).expect("first publication").len();
+        store.persist().expect("rotate catalog with unchanged blob");
+        assert_ne!(
+            pager.manifest_page_id().expect("second catalog root"),
+            first_root
+        );
         let size = std::fs::metadata(&path).expect("allocated file").len();
+        assert!(size <= first_size + crate::storage::engine::PAGE_SIZE as u64);
         let page = publish_artifacts(&store, std::slice::from_ref(&small));
         let (pending, published) = store
             .pager()
@@ -417,7 +428,10 @@ mod tests {
             publish_artifacts(&store, std::slice::from_ref(&large));
             publish_artifacts(&store, std::slice::from_ref(&small));
             let current_size = std::fs::metadata(&path).expect("reused allocation").len();
-            assert!(current_size <= maximum_size);
+            assert!(
+                current_size <= maximum_size,
+                "cycle {cycle}: allocated {current_size} bytes, maximum {maximum_size}"
+            );
             let free = store
                 .pager()
                 .expect("pager")
