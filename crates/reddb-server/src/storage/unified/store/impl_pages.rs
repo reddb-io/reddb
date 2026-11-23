@@ -2796,14 +2796,15 @@ impl UnifiedStore {
             pager,
             active: self.commit.is_some(),
         };
-        let epoch = if let Some(commit) = &self.commit {
+        let checkpoint = if let Some(commit) = &self.commit {
+            let boundary = commit.checkpoint_boundary();
             let epoch = commit
                 .next_page_ownership_epoch(self)
                 .map_err(StoreError::Io)?;
             commit
                 .begin_page_ownership_epoch(self, epoch)
                 .map_err(StoreError::Io)?;
-            Some(epoch)
+            Some((commit, epoch, boundary))
         } else {
             None
         };
@@ -3035,18 +3036,14 @@ impl UnifiedStore {
         drop(previous_versions);
         *self.checkpoint_versions.write() = checkpoint_versions;
 
-        if let Some(commit) = &self.commit {
+        if let Some((commit, epoch, boundary)) = checkpoint {
             commit
-                .finish_page_ownership_epoch(self, epoch.expect("WAL ownership epoch"))
+                .finish_page_ownership_epoch(self, epoch)
                 .map_err(StoreError::Io)?;
             ownership.active = false;
-            if runtime_snapshots_durable {
-                commit
-                    .truncate_after_runtime_checkpoint()
-                    .map_err(StoreError::Io)?;
-            } else {
-                commit.truncate().map_err(StoreError::Io)?;
-            }
+            commit
+                .truncate_through(boundary, runtime_snapshots_durable)
+                .map_err(StoreError::Io)?;
         }
         *self.checkpoint_durable_rows.write() = Default::default();
 

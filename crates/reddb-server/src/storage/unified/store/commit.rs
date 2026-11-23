@@ -318,6 +318,13 @@ impl WalAppendQueue {
     }
 }
 
+/// An end-of-frame position captured while the checkpoint owns publication.
+pub(super) struct CheckpointWalBoundary {
+    generation: u64,
+    end: u64,
+    ownership_bytes: u64,
+}
+
 pub(crate) struct StoreCommitCoordinator {
     mode: DurabilityMode,
     config: crate::api::GroupCommitOptions,
@@ -337,6 +344,9 @@ pub(crate) struct StoreCommitCoordinator {
     /// commits go through `force_sync` which also bumps this.
     fsync_count: Arc<AtomicU64>,
     wal_generation: AtomicU64,
+    /// Bytes admitted by the ownership recorder. Lets a quiet checkpoint
+    /// truncate directly even though it appended its own page journal.
+    ownership_bytes: AtomicU64,
     /// Includes recovered epochs that were never published in the catalog.
     ownership_last_epoch: AtomicU64,
     // 0: existing WAL not scanned; 1: no ownership records; 2: protected.
@@ -522,6 +532,7 @@ impl StoreCommitCoordinator {
             state,
             fsync_count,
             wal_generation: AtomicU64::new(0),
+            ownership_bytes: AtomicU64::new(0),
             ownership_last_epoch: AtomicU64::new(0),
             ownership_wal_state: AtomicU8::new(0),
             runtime_wal_state: AtomicU8::new(0),
@@ -787,13 +798,15 @@ impl StoreCommitCoordinator {
         // Set before writing: a failed or uncertain append must never allow
         // checkpoint truncation to discard the ownership journal.
         self.ownership_wal_state.store(2, Ordering::Release);
+        let length = bytes.len() as u64;
         if matches!(self.mode, DurabilityMode::Strict) {
             self.wal.lock().append_bytes(&bytes)?;
+            self.ownership_bytes.fetch_add(length, Ordering::Relaxed);
             return self.force_sync();
         }
 
-        let length = bytes.len() as u64;
         let target = self.queue.enqueue(bytes);
+        self.ownership_bytes.fetch_add(length, Ordering::Relaxed);
         let (state_lock, cond) = &*self.state;
         let mut state = state_lock.lock();
         state.pending_target_lsn = state.pending_target_lsn.max(target);
@@ -844,6 +857,7 @@ impl StoreCommitCoordinator {
             ));
         }
         let mut wal = self.wal.lock();
+        self.wal_generation.fetch_add(1, Ordering::AcqRel);
         wal.truncate_incomplete_tail(valid_lsn)?;
         let durable = wal.durable_lsn();
         drop(wal);
@@ -887,17 +901,37 @@ impl StoreCommitCoordinator {
         }
     }
 
+    pub(super) fn checkpoint_boundary(&self) -> CheckpointWalBoundary {
+        let _epoch = self.queue.epoch.write();
+        let end = if matches!(self.mode, DurabilityMode::Strict) {
+            self.wal.lock().current_lsn()
+        } else {
+            self.queue.pending.lock().next_lsn
+        };
+        CheckpointWalBoundary {
+            generation: self.wal_generation.load(Ordering::Acquire),
+            end,
+            ownership_bytes: self.ownership_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn truncate(&self) -> io::Result<()> {
-        self.truncate_inner(false)
+        self.truncate_through(self.checkpoint_boundary(), false)
     }
 
-    pub(super) fn truncate_after_runtime_checkpoint(&self) -> io::Result<()> {
-        self.truncate_inner(true)
-    }
-
-    fn truncate_inner(&self, runtime_snapshots_durable: bool) -> io::Result<()> {
+    pub(super) fn truncate_through(
+        &self,
+        boundary: CheckpointWalBoundary,
+        runtime_snapshots_durable: bool,
+    ) -> io::Result<()> {
         self.check_write_error()?;
         let _epoch = self.queue.epoch.write();
+        if self.wal_generation.load(Ordering::Acquire) != boundary.generation {
+            return Err(io::Error::other(
+                "checkpoint belongs to a previous WAL generation",
+            ));
+        }
         // Async appenders may have returned while their entries remain queued.
         // Drain them before deciding what the checkpoint may discard.
         {
@@ -951,8 +985,18 @@ impl StoreCommitCoordinator {
         let mut wal = self.wal.lock();
         let retain_runtime =
             !runtime_snapshots_durable && self.runtime_wal_state.load(Ordering::Acquire) == 2;
-        if retain_runtime {
-            self.retain_runtime_wal(&mut wal)?;
+        // Only completed ownership records can be discarded past the boundary.
+        // They were validated above. Every other frame belongs to a later write.
+        let ownership_end = self
+            .ownership_bytes
+            .load(Ordering::Relaxed)
+            .checked_sub(boundary.ownership_bytes)
+            .and_then(|bytes| boundary.end.checked_add(bytes));
+        let rewrite = retain_runtime || ownership_end != Some(wal.current_lsn());
+        if rewrite {
+            let has_runtime = self.retain_checkpoint_wal(&mut wal, boundary.end, retain_runtime)?;
+            self.runtime_wal_state
+                .store(if has_runtime { 2 } else { 1 }, Ordering::Release);
         } else {
             wal.truncate()?;
             self.runtime_wal_state.store(1, Ordering::Release);
@@ -977,7 +1021,7 @@ impl StoreCommitCoordinator {
         state.last_error = None;
         cond.notify_all();
         drop(state);
-        if retain_runtime {
+        if rewrite {
             use reddb_file::Vfs;
             let parent = self
                 .wal_path
@@ -989,10 +1033,15 @@ impl StoreCommitCoordinator {
         Ok(())
     }
 
-    /// Replace the checkpointed WAL with the exact runtime-owned frames. The
+    /// Keep later logical writes and any runtime frames absent from the snapshot. The
     /// temporary file is synced before atomic publication, so interruption
     /// leaves either the original WAL or a complete retained journal.
-    fn retain_runtime_wal(&self, wal: &mut WalWriter) -> io::Result<()> {
+    fn retain_checkpoint_wal(
+        &self,
+        wal: &mut WalWriter,
+        boundary: u64,
+        retain_runtime: bool,
+    ) -> io::Result<bool> {
         use std::io::{Read, Seek, SeekFrom, Write};
         static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
         let mut name = self
@@ -1014,7 +1063,8 @@ impl StoreCommitCoordinator {
             options.mode(0o600);
         }
         let mut temp_file = options.open(&temporary)?;
-        let result = (|| -> io::Result<()> {
+        let result = (|| -> io::Result<bool> {
+            let mut has_runtime = false;
             let mut source = std::fs::File::open(&self.wal_path)?;
             let mut header = [0u8; reddb_file::WAL_FILE_HEADER_BYTES];
             source.read_exact(&mut header)?;
@@ -1046,13 +1096,14 @@ impl StoreCommitCoordinator {
                 if let Some((start, true)) = previous.take() {
                     copy_frame(start, offset)?;
                 }
-                previous = Some((
-                    offset,
-                    matches!(
-                        record,
-                        WalRecord::ProbabilisticDelta { .. } | WalRecord::VectorInsert { .. }
-                    ),
-                ));
+                let runtime = matches!(
+                    record,
+                    WalRecord::ProbabilisticDelta { .. } | WalRecord::VectorInsert { .. }
+                );
+                let keep = (runtime && retain_runtime)
+                    || (offset >= boundary && !matches!(record, WalRecord::PageOwnership { .. }));
+                has_runtime |= runtime && keep;
+                previous = Some((offset, keep));
             }
             if let Some((start, true)) = previous {
                 copy_frame(start, end)?;
@@ -1069,7 +1120,7 @@ impl StoreCommitCoordinator {
                 std::process::exit(212);
             }
             *wal = retained;
-            Ok(())
+            Ok(has_runtime)
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&temporary);
@@ -2381,6 +2432,76 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_boundary_preserves_later_transactions_and_runtime_frames() {
+        use reddb_file::page_ownership_journal::PageOwnershipRecord;
+        for mode in [
+            DurabilityMode::Strict,
+            DurabilityMode::WalDurableGrouped,
+            DurabilityMode::Async,
+        ] {
+            for snapshot_durable in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let path = directory.path().join("data.wal");
+                let coordinator =
+                    StoreCommitCoordinator::open(&path, mode, GroupCommitOptions::default())
+                        .unwrap();
+                let delta = |value: u8| WalRecord::ProbabilisticDelta {
+                    kind: 1,
+                    operation: 1,
+                    name: "visitors".into(),
+                    operands: vec![vec![value]],
+                };
+                let create = |name: &str| StoreWalAction::CreateCollection { name: name.into() };
+                coordinator.append_actions(&[create("before")]).unwrap();
+                coordinator.append_single_record(delta(1)).unwrap();
+                let boundary = coordinator.checkpoint_boundary();
+                let stale = coordinator.checkpoint_boundary();
+                coordinator
+                    .append_durable_page_ownership(PageOwnershipRecord::Begin { epoch: 1 })
+                    .unwrap();
+                let actions = [create("a"), create("b")];
+                coordinator.append_actions(&actions).unwrap();
+                coordinator.append_single_record(delta(2)).unwrap();
+                coordinator
+                    .append_durable_page_ownership(PageOwnershipRecord::Finish { epoch: 1 })
+                    .unwrap();
+                coordinator.release_completed_ownership_wal().unwrap();
+                coordinator
+                    .truncate_through(boundary, snapshot_durable)
+                    .unwrap();
+
+                let bytes = std::fs::read(&path).unwrap();
+                assert!(coordinator.truncate_through(stale, true).is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                let mut records = WalReader::open(&path)
+                    .unwrap()
+                    .iter()
+                    .map(|entry| entry.unwrap().1);
+                if !snapshot_durable {
+                    assert_eq!(records.next(), Some(delta(1)));
+                }
+                let Some(WalRecord::TxCommitBatch {
+                    actions: retained, ..
+                }) = records.next()
+                else {
+                    panic!("later transaction missing");
+                };
+                assert_eq!(retained, actions.map(|action| action.encode()));
+                assert_eq!(records.next(), Some(delta(2)));
+                assert_eq!(records.next(), None);
+
+                coordinator.append_actions(&[create("after_trim")]).unwrap();
+                let next = coordinator.checkpoint_boundary();
+                coordinator.truncate_through(next, true).unwrap();
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    reddb_file::encode_wal_file_header()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn runtime_wal_retention_preserves_exact_frames_and_append_order() {
         use crate::storage::wal::record::WalRecordAuthority;
         for mode in [
@@ -2439,7 +2560,7 @@ mod tests {
                 .collect();
             assert_eq!(records, vec![record, later]);
             coordinator
-                .truncate_after_runtime_checkpoint()
+                .truncate_through(coordinator.checkpoint_boundary(), true)
                 .expect("runtime snapshot permits truncation");
             assert_eq!(
                 std::fs::read(&path).expect("checkpointed WAL"),
