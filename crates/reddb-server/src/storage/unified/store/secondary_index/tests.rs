@@ -148,6 +148,52 @@ fn cold_versioned_update_projects_only_changed_rows_and_recovers_count() {
 }
 
 #[test]
+fn cold_logged_removal_batch_projects_only_the_removed_keys() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reclaim_batch.rdb");
+    let visits = Arc::new(AtomicUsize::new(0));
+    let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+    store.create_collection("rows").unwrap();
+    register(&store, &visits, usize::MAX);
+    store.register_count_index("rows").unwrap();
+    for id in 1..=1024 {
+        insert(&store, id);
+    }
+    store.persist().unwrap();
+
+    let removed: Vec<_> = (1..=256).map(EntityId::new).collect();
+    assert_eq!(
+        store
+            .delete_batch_between_walks("rows", &removed)
+            .unwrap()
+            .len(),
+        256
+    );
+    let before = visits.load(Ordering::SeqCst);
+    store.persist().unwrap();
+    assert_eq!(visits.load(Ordering::SeqCst) - before, 256);
+    drop(store);
+
+    let reopened = UnifiedStore::open_with_config(&path, config()).unwrap();
+    register(&reopened, &visits, usize::MAX);
+    reopened.register_count_index("rows").unwrap();
+    assert_eq!(
+        reopened.try_count_from_index("rows", None).unwrap(),
+        Some(768)
+    );
+    let index = reopened
+        .secondary_index("rows", "by_remainder", &identity())
+        .unwrap();
+    let expected: std::collections::BTreeSet<_> = (257..=1024).map(|id| (id % 3, id)).collect();
+    assert_eq!(
+        postings(&index)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected
+    );
+}
+
+#[test]
 fn cold_logged_removal_recovers_before_and_after_catalog_publication() {
     const CHILD: &str = "REDDB_TEST_COLD_LOGGED_REMOVAL";
     const HOOK: &str = "REDDB_TEST_COLD_LOGGED_REMOVAL_HOOK";

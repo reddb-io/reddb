@@ -93,21 +93,23 @@ impl UnifiedStore {
                         }
                         let ids: std::collections::BTreeSet<_> =
                             ids.iter().chain(removed).copied().collect();
-                        // Bound both retained posting bytes and projection work before allocation.
-                        // Larger batches keep the existing bounded streaming replacement path.
+                        // Bound projection work separately from retained memory. Visibility
+                        // and equality keys are usually much shorter than the codec maximum.
+                        const POSTING_BUDGET: usize = 1024 * 1024;
                         let posting_count = ids.len().saturating_mul(keys.secondary.len());
-                        let posting_bytes = posting_count.saturating_mul(2).saturating_mul(
-                            super::secondary_index::SECONDARY_KEY_BYTES_MAX
-                                + 8
-                                + std::mem::size_of::<(&Arc<BTree>, Vec<u8>)>(),
-                        );
-                        if ids.len() > crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX
-                            || posting_bytes > 1024 * 1024
-                        {
+                        let max_changes =
+                            crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX;
+                        if ids.len() > max_changes || posting_count > max_changes {
                             return Ok(None);
                         }
                         let mut data_deletes = Vec::new();
                         let mut postings = Vec::with_capacity(posting_count);
+                        let mut retained_bytes = postings.capacity().saturating_mul(
+                            std::mem::size_of::<(&Arc<BTree>, Option<Vec<u8>>, Option<Vec<u8>>)>(),
+                        );
+                        if retained_bytes > POSTING_BUDGET {
+                            return Ok(None);
+                        }
                         for id in &ids {
                             let eligible = manager.get_with(*id, |entity| {
                                 changed_xid_high_water_mark =
@@ -163,6 +165,12 @@ impl UnifiedStore {
                                     };
                                     if before == after {
                                         continue;
+                                    }
+                                    retained_bytes = retained_bytes
+                                        .saturating_add(before.as_ref().map_or(0, Vec::capacity))
+                                        .saturating_add(after.as_ref().map_or(0, Vec::capacity));
+                                    if retained_bytes > POSTING_BUDGET {
+                                        return Ok(None);
                                     }
                                     for (key, expected) in
                                         [(before.as_ref(), true), (after.as_ref(), false)]
