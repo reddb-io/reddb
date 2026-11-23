@@ -101,9 +101,18 @@ impl RedDBRuntime {
         // inventory before their first resident-to-disk publication too.
         self.prepare_paged_counts()?;
         self.persist_probabilistic_snapshots()?;
+        let checkpoint_lsn = self.replication_commit_lsn();
         self.inner
             .db
-            .flush_local_after_runtime_snapshots(prepared.as_ref())
+            .flush_local_after_runtime_snapshots(prepared.as_ref(), || {
+                let retired_btrees = btree_checkpoint.publish();
+                self.index_store_ref().hash.clear_paged_retired();
+                self.inner.probabilistic.replayed_names.lock().clear();
+                parking_lot::ReentrantMutexGuard::unlock_fair(publication);
+                drop(retired_btrees);
+                #[cfg(test)]
+                checkpoint_cut_test::after_data_cut();
+            })
             .map_err(|err| {
                 // Issue #205 — local flush failure is a CheckpointFailed
                 // operator-grade event. The local-flush path also covers
@@ -122,15 +131,6 @@ impl RedDBRuntime {
                 .emit_global();
                 RedDBError::Engine(msg)
             })?;
-        // The checkpoint now contains every mutation fenced above. Rebase the
-        // ordered live overlay while publication is still exclusive so a
-        // concurrent writer cannot be cleared after its WAL change.
-        let retired_btrees = btree_checkpoint.publish();
-        self.index_store_ref().hash.clear_paged_retired();
-        self.inner.probabilistic.replayed_names.lock().clear();
-        drop(publication);
-        drop(retired_btrees);
-        let checkpoint_lsn = self.replication_commit_lsn();
         self.inner
             .checkpoint_projection_stats
             .record_checkpoint(checkpoint_lsn, started.elapsed().as_millis() as u64);
@@ -684,5 +684,95 @@ mod security_boundary_tests {
             assert_eq!(documents.total, 1);
             assert_eq!(documents.items.len(), 1);
         });
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_cut_test {
+    use crate::{api::DurabilityMode, RedDBOptions, RedDBRuntime};
+    use std::{cell::RefCell, path::Path, sync::mpsc, sync::Arc, thread, time::Duration};
+
+    thread_local! {
+        static CUT: RefCell<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn after_data_cut() {
+        if let Some((ready, resume)) = CUT.take() {
+            ready.send(()).unwrap();
+            resume
+                .recv_timeout(Duration::from_secs(30))
+                .expect("resume metadata publication");
+        }
+    }
+
+    fn open(path: &Path) -> RedDBRuntime {
+        RedDBRuntime::with_options(
+            RedDBOptions::persistent(path)
+                .with_memory_budget(64 * 1024 * 1024)
+                .with_bounded_disk_residency(true)
+                .with_durability_mode(DurabilityMode::Strict),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn completed_metadata_pass_preserves_post_snapshot_sql_and_sketch() {
+        const CHILD: &str = "REDDB_TEST_POST_SNAPSHOT_SQL_AND_SKETCH";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let db = Arc::new(open(Path::new(&path)));
+            for sql in [
+                "CREATE TABLE late_rows (v INTEGER)",
+                "CREATE SKETCH late_counts",
+                "SKETCH ADD late_counts 'red' 3",
+            ] {
+                db.execute_query(sql).unwrap();
+            }
+            let (ready, cut) = mpsc::channel();
+            let (resume, proceed) = mpsc::channel();
+            let checkpoint = Arc::clone(&db);
+            let builder = thread::spawn(move || {
+                CUT.set(Some((ready, proceed)));
+                checkpoint.checkpoint().unwrap();
+            });
+            cut.recv_timeout(Duration::from_secs(60))
+                .expect("durable data cut");
+            assert_eq!(
+                db.execute_query("INSERT INTO late_rows (v) VALUES (42)")
+                    .unwrap()
+                    .affected_rows,
+                1
+            );
+            db.execute_query("SKETCH ADD late_counts 'red' 4").unwrap();
+            resume.send(()).unwrap();
+            builder.join().unwrap();
+            std::process::exit(72);
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cut.rdb");
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "runtime::impl_catalog_accessors::checkpoint_cut_test::completed_metadata_pass_preserves_post_snapshot_sql_and_sketch", "--nocapture"])
+            .env(CHILD, &path).output().unwrap();
+        assert_eq!(
+            child.status.code(),
+            Some(72),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        let db = open(&path);
+        let rows = db
+            .execute_query("SELECT v FROM late_rows")
+            .unwrap()
+            .result
+            .records;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("v"), Some(&reddb_types::Value::Integer(42)));
+        let counts = db.execute_query("SKETCH COUNT late_counts 'red'").unwrap();
+        assert_eq!(
+            counts.result.records[0]
+                .get("estimate")
+                .unwrap()
+                .display_string(),
+            "7"
+        );
     }
 }

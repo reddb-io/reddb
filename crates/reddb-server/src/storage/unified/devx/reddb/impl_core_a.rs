@@ -849,29 +849,38 @@ impl RedDB {
     /// shutdown / checkpoint paths where the runtime decides whether
     /// the remote upload is allowed (lease, dry-run, read-only).
     pub fn flush_local_only(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.flush_local_only_inner(false, None)
+        if self.options.read_only {
+            return Ok(());
+        }
+        let _publication = self.store.vault_publication_lock.lock();
+        self.flush_local_data(false, None)?;
+        self.finish_local_flush()
     }
 
+    /// The caller owns publication through the first durable data cut. It
+    /// retires its runtime overlays and releases publication in finish_cut.
     pub(crate) fn flush_local_after_runtime_snapshots(
         &self,
         prepared: Option<&crate::storage::unified::store::PreparedPrimary>,
+        finish_cut: impl FnOnce(),
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.flush_local_only_inner(true, prepared)
+        if !self.paged_mode || self.options.read_only {
+            self.flush_local_only()?;
+            finish_cut();
+            return Ok(());
+        }
+        self.flush_local_data(true, prepared)?;
+        finish_cut();
+        self.finish_local_flush()
     }
 
-    fn flush_local_only_inner(
+    fn flush_local_data(
         &self,
         runtime_snapshots_durable: bool,
         prepared: Option<&crate::storage::unified::store::PreparedPrimary>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.options.read_only {
-            return Ok(());
-        }
         #[cfg(test)]
         let qualification_started = std::time::Instant::now();
-        let _vault_guard = self.store.vault_publication_lock.lock();
-        #[cfg(test)]
-        flush_local_only_qualification_phase(&qualification_started, "publication-lock");
         let _ = self.ec_consolidate_all();
         #[cfg(test)]
         flush_local_only_qualification_phase(&qualification_started, "ec-consolidation");
@@ -890,18 +899,21 @@ impl RedDB {
             }
             #[cfg(test)]
             flush_local_only_qualification_phase(&qualification_started, "store-persist");
+        }
+        Ok(())
+    }
+
+    fn finish_local_flush(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(path) = &self.path {
+            let _publication = self.store.vault_publication_lock.lock();
+            #[cfg(test)]
+            let qualification_started = std::time::Instant::now();
             self.persist_metadata()?;
             if self.paged_mode {
-                // Publishing the metadata appended its record to the WAL. A
-                // checkpoint leaves the WAL empty, which offline compaction
-                // and scrub require of their source, so fold that record in:
-                // every other collection is unchanged since the pass above
-                // and keeps its published tree.
-                if runtime_snapshots_durable {
-                    self.store.persist_after_runtime_snapshots(None)?;
-                } else {
-                    self.store.persist()?;
-                }
+                // A writer may have committed after the runtime snapshot cut.
+                // Fold in the physical metadata but preserve runtime-only WAL
+                // until its own snapshot is durable.
+                self.store.persist()?;
             }
             self.remove_imported_metadata_sidecars(path)?;
             #[cfg(test)]
