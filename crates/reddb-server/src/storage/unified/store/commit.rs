@@ -650,7 +650,7 @@ impl StoreCommitCoordinator {
         };
         let start_lsn = if matches!(self.mode, DurabilityMode::Strict) {
             let start = self.wal.lock().append_bytes(&blob)?;
-            self.force_sync()?;
+            self.sync_wal(Some(start + blob.len() as u64))?;
             start
         } else {
             let length = blob.len() as u64;
@@ -771,11 +771,8 @@ impl StoreCommitCoordinator {
         let blob = record.encode();
         let wal_bytes = blob.len() as u64;
         if matches!(self.mode, DurabilityMode::Strict) {
-            {
-                let mut wal = self.wal.lock();
-                wal.append(&record)?;
-            }
-            self.force_sync()?;
+            let start = self.wal.lock().append_bytes(&blob)?;
+            self.sync_wal(Some(start + wal_bytes))?;
             return Ok(());
         }
         let commit_lsn = self.queue.enqueue(blob);
@@ -823,9 +820,9 @@ impl StoreCommitCoordinator {
         self.ownership_wal_state.store(2, Ordering::Release);
         let length = bytes.len() as u64;
         if matches!(self.mode, DurabilityMode::Strict) {
-            self.wal.lock().append_bytes(&bytes)?;
+            let start = self.wal.lock().append_bytes(&bytes)?;
             self.ownership_bytes.fetch_add(length, Ordering::Relaxed);
-            return self.force_sync();
+            return self.sync_wal(Some(start + length));
         }
 
         let target = self.queue.enqueue(bytes);
@@ -849,19 +846,35 @@ impl StoreCommitCoordinator {
     }
 
     pub(crate) fn force_sync(&self) -> io::Result<()> {
+        self.sync_wal(None)
+    }
+
+    // A target belongs to an append whose caller still holds its epoch lease.
+    // A forced barrier also covers file metadata and must always reach the OS.
+    fn sync_wal(&self, end_lsn: Option<u64>) -> io::Result<()> {
         self.check_write_error()?;
         // Strict append already owns a read lease. Do not wait behind a
         // checkpoint that needs that append to finish before resetting.
         let _epoch = self.queue.epoch.read_recursive();
         {
             let mut wal = self.wal.lock();
-            wal.sync()?;
-            self.fsync_count.fetch_add(1, Ordering::Relaxed);
+            let synced = if let Some(end) = end_lsn {
+                let needs_sync = wal.durable_lsn() < end;
+                wal.flush_until(end)?;
+                needs_sync
+            } else {
+                wal.sync()?;
+                true
+            };
+            if synced {
+                self.fsync_count.fetch_add(1, Ordering::Relaxed);
+            }
             let durable = wal.durable_lsn();
             drop(wal);
             let (state_lock, cond) = &*self.state;
             let mut state = state_lock.lock();
-            state.durable_lsn = durable;
+            // Concurrent writers may publish their completed syncs out of order.
+            state.durable_lsn = state.durable_lsn.max(durable);
             state.pending_target_lsn = durable.max(state.pending_target_lsn);
             state.pending_statements = 0;
             state.pending_wal_bytes = 0;
@@ -2402,6 +2415,61 @@ mod tests {
     use crate::api::{DurabilityMode, GroupCommitOptions};
     use std::sync::{Barrier, Mutex as StdMutex, OnceLock};
     use std::time::SystemTime;
+
+    #[test]
+    fn strict_flush_covers_only_appends_within_the_durable_end() {
+        let directory = tempfile::tempdir().expect("temporary WAL directory");
+        let path = directory.path().join("strict.wal");
+        let coordinator = StoreCommitCoordinator::open(
+            &path,
+            DurabilityMode::Strict,
+            GroupCommitOptions::default(),
+        )
+        .expect("open strict WAL");
+        let _epoch = coordinator.queue.epoch.read();
+        let append = |tx_id| {
+            let mut wal = coordinator.wal.lock();
+            wal.append(&WalRecord::Commit { tx_id }).expect("append");
+            wal.current_lsn()
+        };
+
+        // Both callers append before either gets the writer lock back to sync.
+        let first = append(1);
+        let second = append(2);
+        coordinator.sync_wal(Some(first)).expect("first sync");
+        assert_eq!(coordinator.state.0.lock().durable_lsn, second);
+        coordinator.sync_wal(Some(second)).expect("already synced");
+        assert_eq!(coordinator.fsync_count(), 1);
+
+        drop(_epoch);
+        coordinator
+            .append_single_record(WalRecord::Commit { tx_id: 3 })
+            .expect("next record needs a new sync");
+        let third = coordinator.wal.lock().current_lsn();
+        assert_eq!(coordinator.fsync_count(), 2);
+        coordinator.force_sync().expect("explicit barrier");
+        assert_eq!(coordinator.fsync_count(), 3);
+        let records = WalReader::open(&path)
+            .expect("read strict WAL")
+            .iter()
+            .map(|item| item.map(|(_, record)| record))
+            .collect::<io::Result<Vec<_>>>()
+            .expect("decode commits");
+        assert_eq!(
+            records,
+            (1..=3)
+                .map(|tx_id| WalRecord::Commit { tx_id })
+                .collect::<Vec<_>>()
+        );
+
+        let _epoch = coordinator.queue.epoch.read();
+        let fourth = append(4);
+        coordinator.wal.lock().test_fail_flush_after(1);
+        assert!(coordinator.sync_wal(Some(fourth)).is_err());
+        assert!(coordinator.sync_wal(Some(third)).is_err());
+        assert_eq!(coordinator.state.0.lock().durable_lsn, third);
+        assert_eq!(coordinator.fsync_count(), 3);
+    }
 
     #[test]
     fn runtime_wal_retention_serializes_concurrent_appends() {
