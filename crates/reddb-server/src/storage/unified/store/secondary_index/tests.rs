@@ -203,6 +203,9 @@ fn cold_logged_removal_recovers_before_and_after_catalog_publication() {
         register(&store, &visits, usize::MAX);
         store.register_count_index("rows").unwrap();
         store.delete_batch("rows", &[EntityId::new(3)]).unwrap();
+        store
+            .try_set_config_tree("app.color", &crate::serde_json::json!("blue"))
+            .unwrap();
         std::env::set_var(std::env::var(HOOK).unwrap(), "1");
         store.persist().unwrap();
         panic!("checkpoint did not reach the selected publication phase");
@@ -220,6 +223,9 @@ fn cold_logged_removal_recovers_before_and_after_catalog_publication() {
         for id in 1..=64 {
             insert(&store, id);
         }
+        store
+            .try_set_config_tree("app.color", &crate::serde_json::json!("red"))
+            .unwrap();
         store.persist().unwrap();
         drop(store);
         let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -229,6 +235,11 @@ fn cold_logged_removal_recovers_before_and_after_catalog_publication() {
             .status().unwrap();
         assert_eq!(status.code(), Some(code), "{hook}");
         let reopened = UnifiedStore::open_with_config(&path, config()).unwrap();
+        assert_eq!(
+            reopened.try_get_config("app.color").unwrap(),
+            Some(reddb_types::Value::text("blue")),
+            "{hook}"
+        );
         assert!(reopened
             .try_get("rows", EntityId::new(3), 65536)
             .unwrap()
@@ -247,6 +258,87 @@ fn cold_logged_removal_recovers_before_and_after_catalog_publication() {
         assert_eq!(entries.len(), 63);
         assert!(!entries.contains(&(0, 3)));
     }
+}
+
+#[test]
+fn sparse_keyed_checkpoint_reuses_trees_and_replaces_physical_candidates() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("keyed.rdb");
+    let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+    let visits = Arc::new(AtomicUsize::new(0));
+    let register_index = |store: &UnifiedStore| {
+        store
+            .register_secondary_index(
+                "red.config",
+                "by_remainder",
+                identity(),
+                Arc::new(IdentityProjection {
+                    visits: Arc::clone(&visits),
+                    fail_at: usize::MAX,
+                }),
+            )
+            .unwrap();
+    };
+    for n in 0..128 {
+        store
+            .try_set_config_tree(&format!("app.key{n}"), &crate::serde_json::json!(n))
+            .unwrap();
+    }
+    let key = "app.color";
+    store
+        .try_set_config_tree(key, &crate::serde_json::json!("red"))
+        .unwrap();
+    register_index(&store);
+    store.persist().unwrap();
+    drop(store);
+
+    let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+    register_index(&store);
+    let old = store.try_get_config_entity(key).unwrap().unwrap().id;
+    let primary = Arc::downgrade(&store.btree_indices.read()["red.config"]);
+    let candidates = Arc::downgrade(&store.key_indices.read()["red.config"].tree);
+    store
+        .try_set_config_tree(key, &crate::serde_json::json!("blue"))
+        .unwrap();
+    let new = store.try_get_config_entity(key).unwrap().unwrap().id;
+    assert_ne!(old, new);
+    let before = visits.load(Ordering::SeqCst);
+    store.persist().unwrap();
+    assert_eq!(visits.load(Ordering::SeqCst) - before, 2);
+    assert!(primary.ptr_eq(&Arc::downgrade(&store.btree_indices.read()["red.config"])));
+    assert!(candidates.ptr_eq(&Arc::downgrade(
+        &store.key_indices.read()["red.config"].tree
+    )));
+    drop(store);
+
+    let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+    assert_eq!(
+        store.try_get_config(key).unwrap(),
+        Some(reddb_types::Value::text("blue"))
+    );
+    let keys = store.key_indices.read();
+    let tree = &keys["red.config"].tree;
+    let fingerprint = reddb_file::native_key_index::fingerprint(key);
+    for (id, present) in [(old, false), (new, true)] {
+        let candidate = reddb_file::native_key_index::encode_candidate(&fingerprint, id.raw());
+        assert_eq!(tree.get(&candidate).unwrap().is_some(), present);
+    }
+    let pinned = Arc::clone(tree);
+    drop(keys);
+    register_index(&store);
+    store
+        .try_set_config_tree(key, &crate::serde_json::json!("green"))
+        .unwrap();
+    let before = visits.load(Ordering::SeqCst);
+    store.persist().unwrap();
+    assert_eq!(visits.load(Ordering::SeqCst) - before, 129);
+    let blue = reddb_file::native_key_index::encode_candidate(&fingerprint, new.raw());
+    assert!(pinned.get(&blue).unwrap().is_some());
+    assert!(store.key_indices.read()["red.config"]
+        .tree
+        .get(&blue)
+        .unwrap()
+        .is_none());
 }
 
 #[test]

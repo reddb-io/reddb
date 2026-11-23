@@ -3,7 +3,7 @@ use super::*;
 use reddb_engine::storage::segment_key_lookup::SegmentKeyLookup;
 
 use super::secondary_index::{SecondaryIndexProjector, SECONDARY_KEY_BYTES_MAX};
-use reddb_engine::storage::collection_read::EncodedRecord;
+use reddb_engine::storage::collection_read::{EncodedRecord, PagedCollection};
 
 fn posting(
     projector: &dyn SecondaryIndexProjector,
@@ -22,11 +22,65 @@ fn posting(
     Ok(Some(posting))
 }
 
-fn unkeyed_row(entity: &UnifiedEntity) -> bool {
+fn classified_row(entity: &UnifiedEntity) -> bool {
     matches!(&entity.data, EntityData::Row(row)
         if row.named.is_some() || row.schema.is_some() || row.columns.is_empty())
-        && SegmentKeyLookup::key(entity).is_none()
         && entity.branch_version().is_none()
+}
+
+fn key_posting(row: &UnifiedEntity) -> Option<Vec<u8>> {
+    let key = SegmentKeyLookup::key(row)?;
+    let fingerprint = reddb_file::native_key_index::fingerprint(key);
+    Some(reddb_file::native_key_index::encode_candidate(&fingerprint, row.id.raw()).to_vec())
+}
+
+type PostingChange<'a> = (&'a Arc<BTree>, Option<Vec<u8>>, Option<Vec<u8>>);
+
+#[derive(Default)]
+struct PostingPlan<'a> {
+    changes: Vec<PostingChange<'a>>,
+    payload_bytes: usize,
+}
+
+impl<'a> PostingPlan<'a> {
+    fn add(
+        &mut self,
+        tree: &'a Arc<BTree>,
+        before: Option<Vec<u8>>,
+        after: Option<Vec<u8>>,
+    ) -> Result<bool, StoreError> {
+        if before == after {
+            return Ok(true);
+        }
+        if self.changes.len() >= crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX {
+            return Ok(false);
+        }
+        self.payload_bytes = self
+            .payload_bytes
+            .saturating_add(before.as_ref().map_or(0, Vec::capacity))
+            .saturating_add(after.as_ref().map_or(0, Vec::capacity));
+        self.changes.reserve(1);
+        let retained = self
+            .changes
+            .capacity()
+            .saturating_mul(std::mem::size_of::<PostingChange>())
+            .saturating_add(self.payload_bytes);
+        if retained > 1024 * 1024 {
+            return Ok(false);
+        }
+        for (key, expected) in [(before.as_ref(), true), (after.as_ref(), false)] {
+            if let Some(key) = key {
+                let found = tree
+                    .get(key)
+                    .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+                if found.is_some() != expected {
+                    return Ok(false);
+                }
+            }
+        }
+        self.changes.push((tree, before, after));
+        Ok(true)
+    }
 }
 
 impl UnifiedStore {
@@ -80,10 +134,10 @@ impl UnifiedStore {
         };
         let root_before = tree.root_page_id();
         manager
-            .try_with_unshared_backing_delta(
+            .try_with_unshared_backing_source_delta(
                 root_before,
                 crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX,
-                |removed| {
+                |source, removed| {
                     let mut changed_xid_high_water_mark = 0;
                     let result = (|| {
                         // The store and the sole backing source are the only tree owners.
@@ -91,11 +145,18 @@ impl UnifiedStore {
                         if Arc::strong_count(tree) != 2 || tree.has_retirement_readers() {
                             return Ok(None);
                         }
+                        let exclusive_keys = keys.indexed
+                            && Arc::strong_count(&keys.tree) == 2
+                            && !keys.tree.has_retirement_readers()
+                            && PagedCollection::with_key_index(
+                                Arc::clone(tree),
+                                Arc::clone(&keys.tree),
+                            )
+                            .shares_trees_with(source);
                         let ids: std::collections::BTreeSet<_> =
                             ids.iter().chain(removed).copied().collect();
                         // Bound projection work separately from retained memory. Visibility
                         // and equality keys are usually much shorter than the codec maximum.
-                        const POSTING_BUDGET: usize = 1024 * 1024;
                         let posting_count = ids.len().saturating_mul(keys.secondary.len());
                         let max_changes =
                             crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX;
@@ -103,18 +164,14 @@ impl UnifiedStore {
                             return Ok(None);
                         }
                         let mut data_deletes = Vec::new();
-                        let mut postings = Vec::with_capacity(posting_count);
-                        let mut retained_bytes = postings.capacity().saturating_mul(
-                            std::mem::size_of::<(&Arc<BTree>, Option<Vec<u8>>, Option<Vec<u8>>)>(),
-                        );
-                        if retained_bytes > POSTING_BUDGET {
-                            return Ok(None);
-                        }
+                        let mut postings = PostingPlan::default();
                         for id in &ids {
+                            let mut after_key = None;
                             let eligible = manager.get_with(*id, |entity| {
                                 changed_xid_high_water_mark =
                                     changed_xid_high_water_mark.max(entity.max_transaction_id());
-                                unkeyed_row(entity)
+                                after_key = key_posting(entity);
+                                classified_row(entity)
                                     && !current.excluded_xids.contains(&entity.xmin)
                                     && (entity.xmax == 0
                                         || !current.excluded_xids.contains(&entity.xmax))
@@ -130,7 +187,7 @@ impl UnifiedStore {
                                 Ok(Some(bytes)) => {
                                     let record = EncodedRecord { id: *id, bytes };
                                     match record.decode_with_budget(self.format_version(), limit) {
-                                        Ok((entity, _)) if unkeyed_row(&entity) => Some(entity),
+                                        Ok((entity, _)) if classified_row(&entity) => Some(entity),
                                         Ok(_) | Err(StoreError::ReadLimitExceeded { .. }) => {
                                             return Ok(None)
                                         }
@@ -148,6 +205,13 @@ impl UnifiedStore {
                             if deleting && old.is_some() {
                                 data_deletes.push(*id);
                             }
+                            let before_key = old.as_ref().and_then(key_posting);
+                            if before_key != after_key
+                                && (!exclusive_keys
+                                    || !postings.add(&keys.tree, before_key, after_key)?)
+                            {
+                                return Ok(None);
+                            }
                             if let Some(specs) = specs {
                                 for (name, index) in &keys.secondary {
                                     let projector = specs[name].projector.as_ref();
@@ -163,28 +227,9 @@ impl UnifiedStore {
                                             .get_with(*id, |row| posting(projector, row))
                                             .ok_or(StoreError::EntityNotFound(*id))??
                                     };
-                                    if before == after {
-                                        continue;
-                                    }
-                                    retained_bytes = retained_bytes
-                                        .saturating_add(before.as_ref().map_or(0, Vec::capacity))
-                                        .saturating_add(after.as_ref().map_or(0, Vec::capacity));
-                                    if retained_bytes > POSTING_BUDGET {
+                                    if !postings.add(&index.tree, before, after)? {
                                         return Ok(None);
                                     }
-                                    for (key, expected) in
-                                        [(before.as_ref(), true), (after.as_ref(), false)]
-                                    {
-                                        if let Some(key) = key {
-                                            let found = index.tree.get(key).map_err(|e| {
-                                                StoreError::Io(std::io::Error::other(e.to_string()))
-                                            })?;
-                                            if found.is_some() != expected {
-                                                return Ok(None);
-                                            }
-                                        }
-                                    }
-                                    postings.push((&index.tree, before, after));
                                 }
                             }
                         }
@@ -203,7 +248,7 @@ impl UnifiedStore {
                                     ));
                                 }
                             }
-                            for (index, before, after) in postings {
+                            for (index, before, after) in postings.changes {
                                 if let Some(key) = after {
                                     index.insert(&key, &[]).map_err(|e| {
                                         StoreError::Io(std::io::Error::other(e.to_string()))
@@ -215,7 +260,7 @@ impl UnifiedStore {
                                     })?;
                                     if !removed {
                                         return Err(StoreError::Serialization(
-                                            "validated secondary posting disappeared".into(),
+                                            "validated index posting disappeared".into(),
                                         ));
                                     }
                                 }

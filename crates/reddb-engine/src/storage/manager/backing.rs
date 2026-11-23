@@ -399,6 +399,19 @@ impl SegmentManager {
         max_removals: usize,
         update: impl FnOnce(&HashSet<EntityId>) -> (T, Option<(u32, u64)>),
     ) -> Option<T> {
+        self.try_with_unshared_backing_source_delta(root_page, max_removals, |_, removed| {
+            update(removed)
+        })
+    }
+
+    /// Check derived tree identity while the unique backing source is fenced.
+    #[doc(hidden)]
+    pub fn try_with_unshared_backing_source_delta<T>(
+        &self,
+        root_page: u32,
+        max_removals: usize,
+        update: impl FnOnce(&dyn CollectionRead, &HashSet<EntityId>) -> (T, Option<(u32, u64)>),
+    ) -> Option<T> {
         let mut backing = self.backing.try_write_for(UNSHARED_BACKING_WAIT)?;
         let backing = backing.as_mut()?;
         if backing.root_page != root_page
@@ -408,7 +421,7 @@ impl SegmentManager {
         {
             return None;
         }
-        let (result, published) = update(&backing.removed);
+        let (result, published) = update(backing.source.as_ref(), &backing.removed);
         if let Some((root_page, total_entities)) = published {
             backing.root_page = root_page;
             backing.total_entities = total_entities;

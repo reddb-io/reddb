@@ -115,7 +115,8 @@ impl<P: PageStore> PagedCollection<P> {
             .is_some_and(|base| Arc::ptr_eq(&self.tree, &base.tree))
     }
 
-    pub(super) fn shares_trees_with(&self, source: &dyn CollectionRead) -> bool
+    #[doc(hidden)]
+    pub fn shares_trees_with(&self, source: &dyn CollectionRead) -> bool
     where
         P: 'static,
     {
