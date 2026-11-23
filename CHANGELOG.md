@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.40.0
+
+### Minor Changes
+
+- [#2963](https://github.com/reddb-io/reddb/pull/2963) [`f13570b`](https://github.com/reddb-io/reddb/commit/f13570b7da4438c1d0500ba6a3d8bbc242a85f1e) Thanks [@filipeforattini](https://github.com/filipeforattini)! - In bounded disk residency mode, checkpoints can prepare a large changed SQL table in batches. Independent transactions can commit between batches. The checkpoint verifies the table is still current before publishing it. Small, WAL-backed row changes can update compatible cold indexes incrementally, and repeated broad range queries can avoid redundant index probes during publication.
+
+  Guarded page writes now clear only the double-write pages touched by the frame. Both superblock copies and the home pages still cross their durability barriers before cleanup.
+
 ## 1.39.21
 
 ### Patch Changes
