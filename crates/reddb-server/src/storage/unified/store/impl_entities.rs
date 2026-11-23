@@ -551,6 +551,10 @@ impl UnifiedStore {
         let Some(manager) = self.get_collection(collection) else {
             return Ok(None);
         };
+        #[cfg(test)]
+        if std::thread::current().name() == Some("sparse-catalog-writer") {
+            eprintln!("system collection lookup: {collection} key={key}");
+        }
         let _publication = manager
             .has_backing()
             .then(|| self.vault_publication_lock.lock());
