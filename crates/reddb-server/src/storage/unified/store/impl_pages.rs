@@ -240,14 +240,35 @@ fn verify_catalog_digest(pager: &Pager, digest: [u8; 32]) -> Result<(), PagerErr
 
 fn publish_paged_metadata(pager: &Pager, meta_data: &[u8]) -> Result<(), PagerError> {
     let _ownership = pager.lock_ownership_mutations();
-    let mut retired = existing_overflow_chain(pager)?;
+    let retired = switch_paged_catalog(pager, meta_data, Vec::new(), &[])?;
+    if !retired.is_empty() {
+        pager.free_retired_pages(&retired)?;
+        pager.sync()?;
+    }
+    Ok(())
+}
+
+// Caller holds the pager ownership fence until the old pages have been freed.
+// The old catalog, replaced trees and deferred pages all lose their references
+// at the same durable root switch. Journal the complete set before that switch.
+fn switch_paged_catalog(
+    pager: &Pager,
+    meta_data: &[u8],
+    mut retired: Vec<u32>,
+    released_deferred: &[u32],
+) -> Result<Vec<u32>, PagerError> {
+    retired.extend(existing_overflow_chain(pager)?);
     let previous_root = pager.manifest_page_id()?;
     if previous_root >= reddb_engine::storage::pager_io::FIRST_ALLOCATABLE_PAGE {
         retired.push(previous_root);
     }
+    let non_deferred = retired.len();
+    retired.extend_from_slice(released_deferred);
     if !retired.is_empty() {
         pager.record_retirement_intent(&retired)?;
     }
+    // The deferred-reclamation ledger returns its pages to the allocator.
+    retired.truncate(non_deferred);
     pager.fence_required_capabilities(reddb_file::FILE_CAPABILITY_CATALOG_ROOT)?;
     let root = pager
         .allocate_page(crate::storage::engine::PageType::Header)?
@@ -277,13 +298,7 @@ fn publish_paged_metadata(pager: &Pager, meta_data: &[u8]) -> Result<(), PagerEr
     if std::env::var_os("REDDB_TEST_EXIT_AFTER_CATALOG_ROOT_PUBLICATION").is_some() {
         std::process::exit(198);
     }
-    if !retired.is_empty() {
-        // Metadata readers hold the ownership fence. Both superblocks have
-        // forgotten these pages, so no reader or fallback can still name them.
-        pager.free_retired_pages(&retired)?;
-        pager.sync()?;
-    }
-    Ok(())
+    Ok(retired)
 }
 
 fn build_meta_page1_with_overflow(
@@ -925,18 +940,9 @@ impl UnifiedStore {
                 }
             });
         }
-        // Record the exact pages before the catalog can forget their owners.
-        // Recovery resolves this intent against the durable catalog epoch.
-        let mut retirement_intent = reclaim.clone();
-        retirement_intent.extend_from_slice(&released_pages);
-        if !retirement_intent.is_empty() {
-            pager
-                .record_retirement_intent(&retirement_intent)
-                .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-        }
-        // Do not mutate retirement state or the free list before both the new
-        // children and the manifest that forgets old roots have been synced.
-        publish_paged_metadata(pager, metadata)
+        #[cfg(test)]
+        let retires_trees = !reclaim.is_empty();
+        let reclaim = switch_paged_catalog(pager, metadata, reclaim, &released_pages)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
         // PAGE_RESULT_CACHE_FILE_VERSION predates the disk-resident cache
         // catalog. Publish the complete resume metadata first, then promote
@@ -958,7 +964,7 @@ impl UnifiedStore {
         self.ownership_catalog_epoch
             .store(catalog_epoch, Ordering::Release);
         #[cfg(test)]
-        if !reclaim.is_empty()
+        if retires_trees
             && std::env::var_os("REDDB_EXPERIMENTAL_EXIT_BEFORE_RETIRED_FREE").is_some()
         {
             eprintln!(
@@ -978,33 +984,33 @@ impl UnifiedStore {
             pager
                 .free_retired_pages(&reclaim)
                 .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-            #[cfg(test)]
-            if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_RETIRED_ENQUEUE").is_some() {
-                eprintln!(
-                    "experimental exit after retired enqueue pages={}",
-                    reclaim.len()
-                );
-                std::process::exit(186);
-            }
-            pager
-                .sync()
-                .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-            #[cfg(test)]
-            if std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_RETIRED_FREE").is_some() {
-                eprintln!(
-                    "experimental exit after retired free pages={}",
-                    reclaim.len()
-                );
-                std::process::exit(185);
-            }
         }
         pager
             .complete_deferred_publication(&retained_pages, &released_pages)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-        if !released_pages.is_empty() {
+        #[cfg(test)]
+        if retires_trees
+            && std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_RETIRED_ENQUEUE").is_some()
+        {
+            eprintln!(
+                "experimental exit after retired enqueue pages={}",
+                reclaim.len()
+            );
+            std::process::exit(186);
+        }
+        if !reclaim.is_empty() || !released_pages.is_empty() {
             pager
                 .sync()
                 .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        }
+        #[cfg(test)]
+        if retires_trees && std::env::var_os("REDDB_EXPERIMENTAL_EXIT_AFTER_RETIRED_FREE").is_some()
+        {
+            eprintln!(
+                "experimental exit after retired free pages={}",
+                reclaim.len()
+            );
+            std::process::exit(185);
         }
         Ok(())
     }
