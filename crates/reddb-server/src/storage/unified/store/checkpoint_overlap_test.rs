@@ -256,6 +256,45 @@ pub(super) fn pause_catalog_publication() {
 
 #[test]
 fn unrelated_insert_recovers_while_sparse_catalog_publication_is_paused() {
+    sparse_catalog_recovery(
+        "unrelated_insert_recovers_while_sparse_catalog_publication_is_paused",
+        |db| {
+            let result = db
+                .execute_query("INSERT INTO sparse_b (v) VALUES (42)")
+                .unwrap();
+            assert_eq!(result.affected_rows, 1);
+        },
+    );
+}
+
+#[test]
+fn unrelated_wal_commit_recovers_while_sparse_catalog_publication_is_paused() {
+    sparse_catalog_recovery(
+        "unrelated_wal_commit_recovers_while_sparse_catalog_publication_is_paused",
+        |db| {
+            use super::{EntityId, StoreWalAction, UnifiedEntity};
+            let store = db.db().store();
+            // Exercise the actual strict WAL barrier independently of SQL admission.
+            // Only recovery can make this row visible to the subsequent SQL SELECT.
+            let row = UnifiedEntity::table_row(
+                EntityId::new(4_000_000),
+                "sparse_b",
+                1,
+                vec![reddb_types::Value::Integer(42)],
+            );
+            let action =
+                StoreWalAction::upsert_entity("sparse_b", &row, None, store.format_version());
+            store
+                .commit
+                .as_ref()
+                .unwrap()
+                .append_actions(&[action])
+                .unwrap();
+        },
+    );
+}
+
+fn sparse_catalog_recovery(test_name: &str, write: fn(&RedDBRuntime)) {
     const CHILD: &str = "REDDB_TEST_SPARSE_CATALOG_DATABASE";
     if let Some(path) = std::env::var_os(CHILD) {
         let db = Arc::new(open(Path::new(&path)));
@@ -276,10 +315,7 @@ fn unrelated_insert_recovers_while_sparse_catalog_publication_is_paused() {
             .expect("catalog never reached publication");
         let (committed, ack) = mpsc::channel();
         thread::spawn(move || {
-            let result = db
-                .execute_query("INSERT INTO sparse_b (v) VALUES (42)")
-                .unwrap();
-            assert_eq!(result.affected_rows, 1);
+            write(&db);
             committed.send(()).unwrap();
         });
         match ack.recv_timeout(Duration::from_secs(5)) {
@@ -304,7 +340,7 @@ fn unrelated_insert_recovers_while_sparse_catalog_publication_is_paused() {
         .args([
             "--exact",
             &format!(
-                "{}::unrelated_insert_recovers_while_sparse_catalog_publication_is_paused",
+                "{}::{test_name}",
                 module_path!().split_once("::").unwrap().1
             ),
             "--nocapture",
@@ -315,7 +351,7 @@ fn unrelated_insert_recovers_while_sparse_catalog_publication_is_paused() {
     assert_ne!(
         child.status.code(),
         Some(73),
-        "eight updates on A blocked a strict INSERT into B during catalog publication"
+        "{test_name}: the writer was blocked at catalog publication"
     );
     assert_eq!(
         child.status.code(),
