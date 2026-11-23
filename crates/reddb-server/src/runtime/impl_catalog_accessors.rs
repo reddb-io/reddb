@@ -96,6 +96,7 @@ impl RedDBRuntime {
             None => (None, None),
         };
         let publication = store.vault_publication_lock.lock();
+        let btree_checkpoint = self.index_store_ref().paged_btree_checkpoint();
         // Collections created since startup need the compact visibility
         // inventory before their first resident-to-disk publication too.
         self.prepare_paged_counts()?;
@@ -124,10 +125,11 @@ impl RedDBRuntime {
         // The checkpoint now contains every mutation fenced above. Rebase the
         // ordered live overlay while publication is still exclusive so a
         // concurrent writer cannot be cleared after its WAL change.
-        self.index_store_ref().clear_paged_btree_overlays();
+        let retired_btrees = btree_checkpoint.publish();
         self.index_store_ref().hash.clear_paged_retired();
         self.inner.probabilistic.replayed_names.lock().clear();
         drop(publication);
+        drop(retired_btrees);
         let checkpoint_lsn = self.replication_commit_lsn();
         self.inner
             .checkpoint_projection_stats
