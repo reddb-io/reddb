@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Begin Testbox
-        uses: useblacksmith/begin-testbox@22ff2ea5697369864347140857d218e42815b33c # v2
+        uses: useblacksmith/begin-testbox@d5b883fecd6a7581c3f7467543b819abf8b80bbf # v2
         with:
           testbox_id: ${{ inputs.testbox_id }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -40,7 +40,7 @@ jobs:
         with:
           shared-key: testbox-rust-1.91.0-2vcpu
           cache-on-failure: 'true'
-      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2
         with:
           tool: nextest
       - name: Run Testbox
@@ -53,7 +53,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Begin Testbox
-        uses: useblacksmith/begin-testbox@22ff2ea5697369864347140857d218e42815b33c # v2
+        uses: useblacksmith/begin-testbox@d5b883fecd6a7581c3f7467543b819abf8b80bbf # v2
         with:
           testbox_id: ${{ inputs.testbox_id }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -67,7 +67,7 @@ jobs:
         with:
           shared-key: testbox-rust-1.91.0-4vcpu
           cache-on-failure: 'true'
-      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2
         with:
           tool: nextest
       - name: Run Testbox
@@ -80,7 +80,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Begin Testbox
-        uses: useblacksmith/begin-testbox@22ff2ea5697369864347140857d218e42815b33c # v2
+        uses: useblacksmith/begin-testbox@d5b883fecd6a7581c3f7467543b819abf8b80bbf # v2
         with:
           testbox_id: ${{ inputs.testbox_id }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -94,7 +94,7 @@ jobs:
         with:
           shared-key: testbox-rust-1.91.0-8vcpu
           cache-on-failure: 'true'
-      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2
         with:
           tool: nextest
       - name: Run Testbox
