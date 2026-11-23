@@ -254,15 +254,56 @@ pub(super) fn pause_catalog_publication() {
     });
 }
 
+fn insert_sparse_b(db: &RedDBRuntime) {
+    let result = db
+        .execute_query("INSERT INTO sparse_b (v) VALUES (42)")
+        .unwrap();
+    assert_eq!(result.affected_rows, 1);
+}
+
 #[test]
 fn unrelated_insert_recovers_while_sparse_catalog_publication_is_paused() {
     sparse_catalog_recovery(
         "unrelated_insert_recovers_while_sparse_catalog_publication_is_paused",
+        |_| {},
+        insert_sparse_b,
+    );
+}
+
+#[test]
+fn warm_kind_insert_recovers_while_sparse_catalog_publication_is_paused() {
+    sparse_catalog_recovery(
+        "warm_kind_insert_recovers_while_sparse_catalog_publication_is_paused",
         |db| {
-            let result = db
-                .execute_query("INSERT INTO sparse_b (v) VALUES (42)")
-                .unwrap();
-            assert_eq!(result.affected_rows, 1);
+            assert!(db
+                .db()
+                .store()
+                .try_get_config("collection.sparse_b.kind")
+                .unwrap()
+                .is_none())
+        },
+        insert_sparse_b,
+    );
+}
+
+fn sparse_b_row() -> super::UnifiedEntity {
+    super::UnifiedEntity::table_row(
+        super::EntityId::new(4_000_000),
+        "sparse_b",
+        1,
+        vec![reddb_types::Value::Integer(42)],
+    )
+}
+
+#[test]
+fn unrelated_store_insert_recovers_while_sparse_catalog_publication_is_paused() {
+    sparse_catalog_recovery(
+        "unrelated_store_insert_recovers_while_sparse_catalog_publication_is_paused",
+        |_| {},
+        |db| {
+            let row = sparse_b_row();
+            let id = row.id;
+            assert_eq!(db.db().store().insert_auto("sparse_b", row).unwrap(), id);
         },
     );
 }
@@ -271,17 +312,13 @@ fn unrelated_insert_recovers_while_sparse_catalog_publication_is_paused() {
 fn unrelated_wal_commit_recovers_while_sparse_catalog_publication_is_paused() {
     sparse_catalog_recovery(
         "unrelated_wal_commit_recovers_while_sparse_catalog_publication_is_paused",
+        |_| {},
         |db| {
-            use super::{EntityId, StoreWalAction, UnifiedEntity};
+            use super::StoreWalAction;
             let store = db.db().store();
             // Exercise the actual strict WAL barrier independently of SQL admission.
             // Only recovery can make this row visible to the subsequent SQL SELECT.
-            let row = UnifiedEntity::table_row(
-                EntityId::new(4_000_000),
-                "sparse_b",
-                1,
-                vec![reddb_types::Value::Integer(42)],
-            );
+            let row = sparse_b_row();
             let action =
                 StoreWalAction::upsert_entity("sparse_b", &row, None, store.format_version());
             store
@@ -294,7 +331,7 @@ fn unrelated_wal_commit_recovers_while_sparse_catalog_publication_is_paused() {
     );
 }
 
-fn sparse_catalog_recovery(test_name: &str, write: fn(&RedDBRuntime)) {
+fn sparse_catalog_recovery(test_name: &str, prepare: fn(&RedDBRuntime), write: fn(&RedDBRuntime)) {
     const CHILD: &str = "REDDB_TEST_SPARSE_CATALOG_DATABASE";
     if let Some(path) = std::env::var_os(CHILD) {
         let db = Arc::new(open(Path::new(&path)));
@@ -304,6 +341,7 @@ fn sparse_catalog_recovery(test_name: &str, write: fn(&RedDBRuntime)) {
                 .unwrap();
             assert_eq!(updated.affected_rows, 1);
         }
+        prepare(&db);
         let (ready, paused) = mpsc::channel();
         let checkpoint = Arc::clone(&db);
         thread::spawn(move || {
