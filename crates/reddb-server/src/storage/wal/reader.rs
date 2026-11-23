@@ -1,6 +1,6 @@
 use super::record::WalRecord;
 use std::fs::File;
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Reader for the Write-Ahead Log
@@ -75,6 +75,15 @@ pub struct WalIterator {
 impl WalIterator {
     pub(crate) fn next_record_lsn(&self) -> u64 {
         self.position
+    }
+
+    /// Inspect the frame that failed to decode at EOF, on this same WAL handle.
+    pub(crate) fn incomplete_frame_is_commit_batch(&mut self) -> io::Result<bool> {
+        self.reader.seek(SeekFrom::Start(self.position))?;
+        let mut tag = [0];
+        self.reader.read_exact(&mut tag)?;
+        Ok(reddb_file::MainWalRecordType::from_u8(tag[0])
+            == Some(reddb_file::MainWalRecordType::TxCommitBatch))
     }
 }
 

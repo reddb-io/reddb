@@ -11,6 +11,26 @@ use std::sync::{Arc, Condvar, Mutex};
 #[path = "checkpoint_undo.rs"]
 mod checkpoint_undo;
 
+fn validate_incomplete_wal_tail(
+    records: &mut crate::storage::wal::reader::WalIterator,
+    ownership_journal: &[u8],
+) -> io::Result<()> {
+    if ownership_journal.is_empty() {
+        return Ok(());
+    }
+    // A complete Finish closes the pager's obligations. A later torn SQL
+    // batch has no replayable actions and cannot contain a physical intent.
+    if reddb_file::page_ownership_journal::pending_epoch(ownership_journal)?.is_none()
+        && records.incomplete_frame_is_commit_batch()?
+    {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "incomplete WAL prevents ownership recovery",
+    ))
+}
+
 struct NativeReplayTarget<'a> {
     store: &'a UnifiedStore,
     update_btrees: bool,
@@ -1409,6 +1429,7 @@ impl StoreCommitCoordinator {
             let (lsn, record) = match record {
                 Ok(record) => record,
                 Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
+                    validate_incomplete_wal_tail(&mut records, &ownership_journal)?;
                     incomplete_wal_tail = Some(records.next_record_lsn());
                     break;
                 }
@@ -1490,12 +1511,6 @@ impl StoreCommitCoordinator {
             }
         }
 
-        if incomplete_wal_tail.is_some() && !ownership_journal.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "incomplete WAL prevents ownership recovery",
-            ));
-        }
         if let (Some(coordinator), Some(valid_lsn)) = (coordinator, incomplete_wal_tail) {
             coordinator.truncate_incomplete_tail(valid_lsn)?;
         }

@@ -52,13 +52,12 @@ impl StoreCommitCoordinator {
         let mut journal = Vec::new();
         let mut active_epoch = None;
         let mut images = roaring::RoaringBitmap::new();
-        for item in WalReader::open(wal_path)?.iter() {
+        let mut records = WalReader::open(wal_path)?.iter();
+        while let Some(item) = records.next() {
             let (_, record) = match item {
                 Ok(record) => record,
-                Err(error)
-                    if error.kind() == io::ErrorKind::UnexpectedEof && journal.is_empty() =>
-                {
-                    return Ok(());
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                    return validate_incomplete_wal_tail(&mut records, &journal);
                 }
                 Err(error) => {
                     return Err(invalid(&format!("incomplete checkpoint undo WAL: {error}")))
@@ -427,6 +426,19 @@ mod tests {
                 truncated.extend_from_slice(&frame[..frame.len() / 2]);
                 std::fs::write(&wal_path, truncated).expect("incomplete undo WAL");
                 assert!(UnifiedStore::open_with_config(&path, config()).is_err());
+                let mut partial_sql = baseline_wal.clone();
+                let sql_frame = WalRecord::TxCommitBatch {
+                    tx_id: 8,
+                    actions: vec![],
+                }
+                .encode();
+                partial_sql.extend_from_slice(&sql_frame[..17]);
+                std::fs::write(&wal_path, &partial_sql).expect("incomplete SQL during undo");
+                assert!(UnifiedStore::open_with_config(&path, config()).is_err());
+                assert_eq!(
+                    std::fs::read(&wal_path).expect("preserved WAL"),
+                    partial_sql
+                );
                 assert_eq!(
                     std::fs::read(&path).expect("unchanged pages"),
                     baseline_pages
