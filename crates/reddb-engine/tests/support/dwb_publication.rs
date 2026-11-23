@@ -87,7 +87,11 @@ fn guarded_dwb_survives_each_write_sync_and_superblock_fallback() {
             _ => None,
         })
         .sum();
-    assert_eq!(bytes_cleared, 2 * PAGE_SIZE, "one payload plus its frame header");
+    assert_eq!(
+        bytes_cleared,
+        2 * PAGE_SIZE,
+        "one payload plus its frame header"
+    );
     let staging_write = operations.iter().position(|operation| {
         matches!(operation, Operation::Write(offset, length) if *offset == pager_io::dwb_zone_offset() && *length > PAGE_SIZE)
     }).expect("complete staging write") + 1;

@@ -2502,6 +2502,60 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_boundary_recovers_later_batch_on_either_side_of_wal_replacement() {
+        const CHILD: &str = "REDDB_TEST_WAL_BOUNDARY_DATABASE";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let store = UnifiedStore::open(Path::new(&path)).unwrap();
+            let commit = store.commit.as_ref().unwrap();
+            let boundary = commit.checkpoint_boundary();
+            let rows = [101, 102].map(|id| {
+                let entity = UnifiedEntity::table_row(EntityId::new(id), "rows", id, vec![]);
+                StoreWalAction::UpsertEntityRecord {
+                    collection: "rows".into(),
+                    record: UnifiedStore::serialize_entity_record(
+                        &entity,
+                        None,
+                        store.format_version(),
+                    ),
+                }
+            });
+            commit.append_actions(&rows).unwrap();
+            commit.truncate_through(boundary, true).unwrap();
+            panic!("WAL publication interruption was not reached");
+        }
+        for (hook, code) in [
+            ("REDDB_TEST_EXIT_BEFORE_RUNTIME_WAL_RENAME", 211),
+            ("REDDB_TEST_EXIT_AFTER_RUNTIME_WAL_RENAME", 212),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("checkpoint.rdb");
+            {
+                let store = UnifiedStore::open(&path).unwrap();
+                store.create_collection("rows").unwrap();
+                store.persist().unwrap();
+            }
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "storage::unified::store::commit::tests::checkpoint_boundary_recovers_later_batch_on_either_side_of_wal_replacement"])
+                .env(CHILD, &path)
+                .env(hook, "1")
+                .output().unwrap();
+            assert_eq!(
+                child.status.code(),
+                Some(code),
+                "{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
+            let recovered = UnifiedStore::open(&path).unwrap();
+            for id in [101, 102] {
+                assert_eq!(
+                    recovered.get("rows", EntityId::new(id)).unwrap().id.raw(),
+                    id
+                );
+            }
+        }
+    }
+
+    #[test]
     fn runtime_wal_retention_preserves_exact_frames_and_append_order() {
         use crate::storage::wal::record::WalRecordAuthority;
         for mode in [
