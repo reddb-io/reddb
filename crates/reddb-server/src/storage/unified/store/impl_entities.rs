@@ -1687,6 +1687,14 @@ impl UnifiedStore {
             })
             .collect::<Vec<_>>();
         self.finish_paged_write(actions)?;
+        if self.config.resident_memory_bytes_max.is_some()
+            && self.commit.is_some()
+            && self.config.embedded_wal_path.is_none()
+            && !self.is_read_only()
+            && !Self::deferred_store_wal_capture_active()
+        {
+            manager.confirm_logged_removals(&deleted_ids);
+        }
 
         if updated_tree {
             if let Some(before) = before {

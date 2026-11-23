@@ -15,7 +15,7 @@
 #![allow(clippy::too_many_arguments)] // Relocated native host entrypoints.
 
 mod backing;
-pub use backing::PagedEntityCursor;
+pub use backing::{CleanBackingCut, PagedEntityCursor};
 mod graph_index_merge;
 
 use parking_lot::RwLock;

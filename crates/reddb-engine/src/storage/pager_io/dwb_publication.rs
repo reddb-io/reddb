@@ -125,8 +125,9 @@ pub(super) fn plan<F: VfsFile>(
 pub(super) fn consume<F: VfsFile>(
     file: &mut F,
     mut publication: DwbPublication,
+    clear_pages: u32,
 ) -> Result<(), PagerIoError> {
     publication.phase = DwbPhase::Consumed;
     publish(file, publication)?;
-    clear_dwb_zone(file)
+    clear_dwb_prefix(file, clear_pages)
 }

@@ -70,6 +70,278 @@ fn postings(tree: &SecondaryIndexRead) -> Vec<(u64, u64)> {
 }
 
 #[test]
+fn cold_versioned_update_projects_only_changed_rows_and_recovers_count() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("update.rdb");
+    let visits = Arc::new(AtomicUsize::new(0));
+    let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+    store.create_collection("rows").unwrap();
+    register(&store, &visits, usize::MAX);
+    store.register_count_index("rows").unwrap();
+    for id in 1..=256 {
+        insert(&store, id);
+    }
+    store.persist().unwrap();
+    drop(store);
+
+    let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+    register(&store, &visits, usize::MAX);
+    store.register_count_index("rows").unwrap();
+    let mut old = store
+        .try_get("rows", EntityId::new(3), 65536)
+        .unwrap()
+        .unwrap();
+    old.set_xmax(7);
+    let mut new = UnifiedEntity::table_row(EntityId::new(257), "rows", 3, vec![]);
+    new.set_xmin(7);
+    store
+        .install_versioned_table_row_update("rows", old, new, None)
+        .unwrap();
+    let before = visits.load(Ordering::SeqCst);
+    store.persist().unwrap();
+    assert_eq!(visits.load(Ordering::SeqCst) - before, 3);
+    drop(store);
+
+    let reopened = UnifiedStore::open_with_config(&path, config()).unwrap();
+    assert_eq!(
+        reopened.try_count_from_index("rows", None).unwrap(),
+        Some(256)
+    );
+    let index = reopened
+        .secondary_index("rows", "by_remainder", &identity())
+        .unwrap();
+    let entries = postings(&index);
+    assert_eq!(entries.len(), 257);
+    assert!(entries.contains(&(0, 3)) && entries.contains(&(2, 257)));
+    assert_eq!(
+        reopened
+            .try_get("rows", EntityId::new(3), 65536)
+            .unwrap()
+            .unwrap()
+            .xmax,
+        7
+    );
+    drop(index);
+    register(&reopened, &visits, usize::MAX);
+    reopened.register_count_index("rows").unwrap();
+    reopened.delete_batch("rows", &[EntityId::new(3)]).unwrap();
+    let before = visits.load(Ordering::SeqCst);
+    reopened.persist().unwrap();
+    assert_eq!(visits.load(Ordering::SeqCst) - before, 1);
+    drop(reopened);
+
+    let collected = UnifiedStore::open_with_config(&path, config()).unwrap();
+    assert_eq!(
+        collected.try_count_from_index("rows", None).unwrap(),
+        Some(256)
+    );
+    let index = collected
+        .secondary_index("rows", "by_remainder", &identity())
+        .unwrap();
+    let entries = postings(&index);
+    assert_eq!(entries.len(), 256);
+    assert!(!entries.contains(&(0, 3)) && entries.contains(&(2, 257)));
+    assert!(collected
+        .try_get("rows", EntityId::new(3), 65536)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn cold_logged_removal_batch_projects_only_the_removed_keys() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reclaim_batch.rdb");
+    let visits = Arc::new(AtomicUsize::new(0));
+    let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+    store.create_collection("rows").unwrap();
+    register(&store, &visits, usize::MAX);
+    store.register_count_index("rows").unwrap();
+    for id in 1..=1024 {
+        insert(&store, id);
+    }
+    store.persist().unwrap();
+
+    let removed: Vec<_> = (1..=256).map(EntityId::new).collect();
+    assert_eq!(
+        store
+            .delete_batch_between_walks("rows", &removed)
+            .unwrap()
+            .len(),
+        256
+    );
+    let before = visits.load(Ordering::SeqCst);
+    store.persist().unwrap();
+    assert_eq!(visits.load(Ordering::SeqCst) - before, 256);
+    drop(store);
+
+    let reopened = UnifiedStore::open_with_config(&path, config()).unwrap();
+    register(&reopened, &visits, usize::MAX);
+    reopened.register_count_index("rows").unwrap();
+    assert_eq!(
+        reopened.try_count_from_index("rows", None).unwrap(),
+        Some(768)
+    );
+    let index = reopened
+        .secondary_index("rows", "by_remainder", &identity())
+        .unwrap();
+    let expected: std::collections::BTreeSet<_> = (257..=1024).map(|id| (id % 3, id)).collect();
+    assert_eq!(
+        postings(&index)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected
+    );
+}
+
+#[test]
+fn cold_logged_removal_recovers_before_and_after_catalog_publication() {
+    const CHILD: &str = "REDDB_TEST_COLD_LOGGED_REMOVAL";
+    const HOOK: &str = "REDDB_TEST_COLD_LOGGED_REMOVAL_HOOK";
+    let visits = Arc::new(AtomicUsize::new(0));
+    if let Some(path) = std::env::var_os(CHILD) {
+        let store = UnifiedStore::open_with_config(PathBuf::from(path), config()).unwrap();
+        register(&store, &visits, usize::MAX);
+        store.register_count_index("rows").unwrap();
+        store.delete_batch("rows", &[EntityId::new(3)]).unwrap();
+        store
+            .try_set_config_tree("app.color", &crate::serde_json::json!("blue"))
+            .unwrap();
+        std::env::set_var(std::env::var(HOOK).unwrap(), "1");
+        store.persist().unwrap();
+        panic!("checkpoint did not reach the selected publication phase");
+    }
+    for (hook, code) in [
+        ("REDDB_TEST_EXIT_AFTER_SECONDARY_INDEX_BUILD", 196),
+        ("REDDB_TEST_EXIT_AFTER_UNDO_CATALOG_PUBLICATION", 195),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("removal.rdb");
+        let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+        store.create_collection("rows").unwrap();
+        register(&store, &visits, usize::MAX);
+        store.register_count_index("rows").unwrap();
+        for id in 1..=64 {
+            insert(&store, id);
+        }
+        store
+            .try_set_config_tree("app.color", &crate::serde_json::json!("red"))
+            .unwrap();
+        store.persist().unwrap();
+        drop(store);
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "storage::unified::store::secondary_index::tests::cold_logged_removal_recovers_before_and_after_catalog_publication"])
+            .env(CHILD, &path)
+            .env(HOOK, hook)
+            .status().unwrap();
+        assert_eq!(status.code(), Some(code), "{hook}");
+        let reopened = UnifiedStore::open_with_config(&path, config()).unwrap();
+        assert_eq!(
+            reopened.try_get_config("app.color").unwrap(),
+            Some(reddb_types::Value::text("blue")),
+            "{hook}"
+        );
+        assert!(reopened
+            .try_get("rows", EntityId::new(3), 65536)
+            .unwrap()
+            .is_none());
+        register(&reopened, &visits, usize::MAX);
+        reopened.register_count_index("rows").unwrap();
+        reopened.persist().unwrap();
+        assert_eq!(
+            reopened.try_count_from_index("rows", None).unwrap(),
+            Some(63)
+        );
+        let index = reopened
+            .secondary_index("rows", "by_remainder", &identity())
+            .unwrap();
+        let entries = postings(&index);
+        assert_eq!(entries.len(), 63);
+        assert!(!entries.contains(&(0, 3)));
+    }
+}
+
+#[test]
+fn sparse_keyed_checkpoint_reuses_trees_and_replaces_physical_candidates() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("keyed.rdb");
+    let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+    let visits = Arc::new(AtomicUsize::new(0));
+    let register_index = |store: &UnifiedStore| {
+        store
+            .register_secondary_index(
+                "red.config",
+                "by_remainder",
+                identity(),
+                Arc::new(IdentityProjection {
+                    visits: Arc::clone(&visits),
+                    fail_at: usize::MAX,
+                }),
+            )
+            .unwrap();
+    };
+    for n in 0..128 {
+        store
+            .try_set_config_tree(&format!("app.key{n}"), &crate::serde_json::json!(n))
+            .unwrap();
+    }
+    let key = "app.color";
+    store
+        .try_set_config_tree(key, &crate::serde_json::json!("red"))
+        .unwrap();
+    register_index(&store);
+    store.persist().unwrap();
+    drop(store);
+
+    let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+    register_index(&store);
+    let old = store.try_get_config_entity(key).unwrap().unwrap().id;
+    let primary = Arc::downgrade(&store.btree_indices.read()["red.config"]);
+    let candidates = Arc::downgrade(&store.key_indices.read()["red.config"].tree);
+    store
+        .try_set_config_tree(key, &crate::serde_json::json!("blue"))
+        .unwrap();
+    let new = store.try_get_config_entity(key).unwrap().unwrap().id;
+    assert_ne!(old, new);
+    let before = visits.load(Ordering::SeqCst);
+    store.persist().unwrap();
+    assert_eq!(visits.load(Ordering::SeqCst) - before, 2);
+    assert!(primary.ptr_eq(&Arc::downgrade(&store.btree_indices.read()["red.config"])));
+    assert!(candidates.ptr_eq(&Arc::downgrade(
+        &store.key_indices.read()["red.config"].tree
+    )));
+    drop(store);
+
+    let store = UnifiedStore::open_with_config(&path, config()).unwrap();
+    assert_eq!(
+        store.try_get_config(key).unwrap(),
+        Some(reddb_types::Value::text("blue"))
+    );
+    let keys = store.key_indices.read();
+    let tree = &keys["red.config"].tree;
+    let fingerprint = reddb_file::native_key_index::fingerprint(key);
+    for (id, present) in [(old, false), (new, true)] {
+        let candidate = reddb_file::native_key_index::encode_candidate(&fingerprint, id.raw());
+        assert_eq!(tree.get(&candidate).unwrap().is_some(), present);
+    }
+    let pinned = Arc::clone(tree);
+    drop(keys);
+    register_index(&store);
+    store
+        .try_set_config_tree(key, &crate::serde_json::json!("green"))
+        .unwrap();
+    let before = visits.load(Ordering::SeqCst);
+    store.persist().unwrap();
+    assert_eq!(visits.load(Ordering::SeqCst) - before, 129);
+    let blue = reddb_file::native_key_index::encode_candidate(&fingerprint, new.raw());
+    assert!(pinned.get(&blue).unwrap().is_some());
+    assert!(store.key_indices.read()["red.config"]
+        .tree
+        .get(&blue)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn secondary_sparse_append_projects_only_new_rows_and_preserves_count() {
     let directory = tempfile::tempdir().expect("fixture");
     let path = directory.path().join("append.rdb");
@@ -313,6 +585,8 @@ fn secondary_empty_reopen_drop_and_definition_change_are_not_stale_hits() {
         .secondary_index("rows", "by_remainder", &replacement)
         .is_none());
     store.persist().expect("publish new definition");
+    let indexed_version = store.pager().unwrap().header().unwrap().version;
+    assert!(indexed_version >= reddb_file::file_format::PAGE_SECONDARY_INDEX_FILE_VERSION);
     assert!(store
         .secondary_index("rows", "by_remainder", &identity())
         .is_none());
@@ -333,7 +607,7 @@ fn secondary_empty_reopen_drop_and_definition_change_are_not_stale_hits() {
             .header()
             .expect("header")
             .version,
-        reddb_file::file_format::PAGE_SECONDARY_INDEX_FILE_VERSION
+        indexed_version
     );
 }
 

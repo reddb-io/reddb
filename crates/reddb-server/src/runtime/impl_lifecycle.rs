@@ -136,13 +136,15 @@ impl RedDBRuntime {
     pub fn flush(&self) -> RedDBResult<()> {
         let store = self.inner.db.store();
         let publication = store.vault_publication_lock.lock();
+        let btree_checkpoint = self.index_store_ref().paged_btree_checkpoint();
         self.inner
             .db
             .flush_local_only()
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
-        self.index_store_ref().clear_paged_btree_overlays();
+        let retired_btrees = btree_checkpoint.publish();
         self.index_store_ref().hash.clear_paged_retired();
         drop(publication);
+        drop(retired_btrees);
         if let Err(err) = self.assert_remote_write_allowed("flush") {
             tracing::warn!(
                 target: "reddb::serverless::lease",

@@ -399,7 +399,7 @@ impl<V: Vfs> WalWriter<V> {
     /// guaranteed to be on disk before the page itself.
     pub fn flush_until(&mut self, target: u64) -> io::Result<()> {
         if self.durable_lsn >= target {
-            return Ok(());
+            return self.file.check_write_error();
         }
         self.file.flush()?;
         self.sync_flushed_file()?;

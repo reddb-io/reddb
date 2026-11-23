@@ -3,6 +3,12 @@ use crate::storage::unified::metadata::MetadataValue;
 
 const PHYSICAL_METADATA_KEY: &str = "physical";
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CatalogPublication {
+    Immediate,
+    WithCheckpoint,
+}
+
 #[cfg(test)]
 fn metadata_qualification_phase(started: &std::time::Instant, name: &str) {
     if std::env::var_os("REDDB_QUALIFICATION_CHECKPOINT_PHASES").is_some() {
@@ -458,6 +464,13 @@ impl RedDB {
     }
 
     pub(crate) fn persist_metadata(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.persist_metadata_with(CatalogPublication::Immediate)
+    }
+
+    pub(super) fn persist_metadata_with(
+        &self,
+        publication: CatalogPublication,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if self.options.mode != StorageMode::Persistent || self.options.read_only {
             return Ok(());
         }
@@ -542,7 +555,7 @@ impl RedDB {
         metadata.hypertables = self.hypertable_registry_snapshot();
         #[cfg(test)]
         metadata_qualification_phase(&qualification_started, "metadata-assembled");
-        self.persist_native_physical_header(&metadata)?;
+        self.write_physical_metadata(&metadata, publication)?;
         #[cfg(test)]
         metadata_qualification_phase(&qualification_started, "native-header");
         Ok(())
@@ -1427,6 +1440,14 @@ impl RedDB {
         &self,
         metadata: &PhysicalMetadataFile,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.write_physical_metadata(metadata, CatalogPublication::Immediate)
+    }
+
+    fn write_physical_metadata(
+        &self,
+        metadata: &PhysicalMetadataFile,
+        publication: CatalogPublication,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.paged_mode {
             return self.persist_physical_metadata_record(metadata);
         }
@@ -1563,6 +1584,14 @@ impl RedDB {
         header.vector_artifact_checksum = vector_artifact_checksum;
         self.persist_physical_metadata_record(metadata)?;
         self.store.update_physical_file_header(header)?;
+        // The checkpoint caller holds the publication fence until persist()
+        // seals the data roots and syncs this header. Detached blob pages need
+        // the earlier durable header before they can enter reclamation.
+        if publication == CatalogPublication::WithCheckpoint
+            && !self.store.has_detached_native_blob_pages()
+        {
+            return Ok(());
+        }
         self.store.flush_paged_registry()?;
         self.store.publish_detached_native_blob_pages()?;
         Ok(())

@@ -1,9 +1,90 @@
-//! Sparse publication for committed cold inserts, including SQL autocommit.
+//! WAL-proven, bounded checkpoint changes to rows in a published disk generation.
 use super::*;
 use reddb_engine::storage::segment_key_lookup::SegmentKeyLookup;
 
+use super::secondary_index::{SecondaryIndexProjector, SECONDARY_KEY_BYTES_MAX};
+use reddb_engine::storage::collection_read::{EncodedRecord, PagedCollection};
+
+fn posting(
+    projector: &dyn SecondaryIndexProjector,
+    entity: &UnifiedEntity,
+) -> Result<Option<Vec<u8>>, StoreError> {
+    let mut key = [0; SECONDARY_KEY_BYTES_MAX];
+    let Some(length) = projector.project(entity, &mut key)? else {
+        return Ok(None);
+    };
+    let bytes = key.get(..length).ok_or_else(|| {
+        StoreError::Serialization("secondary key exceeds its bounded buffer".into())
+    })?;
+    let mut posting = Vec::with_capacity(length + 8);
+    posting.extend_from_slice(bytes);
+    posting.extend_from_slice(&entity.id.raw().to_be_bytes());
+    Ok(Some(posting))
+}
+
+fn classified_row(entity: &UnifiedEntity) -> bool {
+    matches!(&entity.data, EntityData::Row(row)
+        if row.named.is_some() || row.schema.is_some() || row.columns.is_empty())
+        && entity.branch_version().is_none()
+}
+
+fn key_posting(row: &UnifiedEntity) -> Option<Vec<u8>> {
+    let key = SegmentKeyLookup::key(row)?;
+    let fingerprint = reddb_file::native_key_index::fingerprint(key);
+    Some(reddb_file::native_key_index::encode_candidate(&fingerprint, row.id.raw()).to_vec())
+}
+
+type PostingChange<'a> = (&'a Arc<BTree>, Option<Vec<u8>>, Option<Vec<u8>>);
+
+#[derive(Default)]
+struct PostingPlan<'a> {
+    changes: Vec<PostingChange<'a>>,
+    payload_bytes: usize,
+}
+
+impl<'a> PostingPlan<'a> {
+    fn add(
+        &mut self,
+        tree: &'a Arc<BTree>,
+        before: Option<Vec<u8>>,
+        after: Option<Vec<u8>>,
+    ) -> Result<bool, StoreError> {
+        if before == after {
+            return Ok(true);
+        }
+        if self.changes.len() >= crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX {
+            return Ok(false);
+        }
+        self.payload_bytes = self
+            .payload_bytes
+            .saturating_add(before.as_ref().map_or(0, Vec::capacity))
+            .saturating_add(after.as_ref().map_or(0, Vec::capacity));
+        self.changes.reserve(1);
+        let retained = self
+            .changes
+            .capacity()
+            .saturating_mul(std::mem::size_of::<PostingChange>())
+            .saturating_add(self.payload_bytes);
+        if retained > 1024 * 1024 {
+            return Ok(false);
+        }
+        for (key, expected) in [(before.as_ref(), true), (after.as_ref(), false)] {
+            if let Some(key) = key {
+                let found = tree
+                    .get(key)
+                    .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+                if found.is_some() != expected {
+                    return Ok(false);
+                }
+            }
+        }
+        self.changes.push((tree, before, after));
+        Ok(true)
+    }
+}
+
 impl UnifiedStore {
-    pub(super) fn sparse_cold_append_tree(
+    pub(super) fn sparse_cold_row_tree(
         &self,
         collection: &str,
         manager: &Arc<SegmentManager>,
@@ -11,12 +92,12 @@ impl UnifiedStore {
         previous: &CheckpointVersion,
         current: &mut CheckpointVersion,
     ) -> Result<Option<Arc<BTree>>, StoreError> {
-        // Updates, deletes, keyed rows and MVCC changes
-        // retain immutable replacement. This path reuses the existing durable
-        // page-undo epoch and exact WAL-image proof for new audit-style rows.
+        // An unpublished/normalized row can have a different set of postings.
+        // Only reconcile the projections of complete, committed row images.
         if self.commit.is_none()
             || self.ownership_active_epoch.load(Ordering::Acquire) == 0
             || !previous.segments.is_empty()
+            || previous.pending_vault != current.pending_vault
             || previous.has_unprojected_rows
             || previous
                 .deferred_rows
@@ -51,115 +132,161 @@ impl UnifiedStore {
         let Some(ids) = manager.checkpoint_mutations_since(&previous.segments) else {
             return Ok(None);
         };
-        // Bound both retained posting bytes and projection work before allocation.
-        // Larger batches keep the existing bounded streaming replacement path.
-        let posting_count = ids.len().saturating_mul(keys.secondary.len());
-        let posting_bytes = posting_count.saturating_mul(
-            super::secondary_index::SECONDARY_KEY_BYTES_MAX
-                + 8
-                + std::mem::size_of::<(&Arc<BTree>, Vec<u8>)>(),
-        );
-        if posting_bytes > 1024 * 1024 {
-            return Ok(None);
-        }
         let root_before = tree.root_page_id();
         manager
-            .try_with_unshared_backing(root_before, || {
-                let mut appended_xid_high_water_mark = 0;
-                let result = (|| {
-                    // The store and the sole backing source are the only tree owners.
-                    // Owned cursors can outlive their source: check their separate pin.
-                    if Arc::strong_count(tree) != 2 || tree.has_retirement_readers() {
-                        return Ok(None);
-                    }
-                    let mut postings = Vec::with_capacity(posting_count);
-                    for id in &ids {
-                        let eligible = manager.get_with(*id, |entity| {
-                            let EntityData::Row(row) = &entity.data else {
-                                return false;
-                            };
-                            appended_xid_high_water_mark =
-                                appended_xid_high_water_mark.max(entity.xmin);
-                            !current.excluded_xids.contains(&entity.xmin)
-                                && entity.xmax == 0
-                                && !current.pending_vault.contains(id)
-                                && SegmentKeyLookup::key(entity).is_none()
-                                && (row.named.is_some()
-                                    || row.schema.is_some()
-                                    || row.columns.is_empty())
-                        });
-                        if eligible != Some(true)
-                            || tree
-                                .get(&id.raw().to_be_bytes())
-                                .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
-                                .is_some()
-                        {
+            .try_with_unshared_backing_source_delta(
+                root_before,
+                crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX,
+                |source, removed| {
+                    let mut changed_xid_high_water_mark = 0;
+                    let result = (|| {
+                        // The store and the sole backing source are the only tree owners.
+                        // Owned cursors can outlive their source: check their separate pin.
+                        if Arc::strong_count(tree) != 2 || tree.has_retirement_readers() {
                             return Ok(None);
                         }
-                        if let Some(specs) = specs {
-                            for (name, index) in &keys.secondary {
-                                let spec = &specs[name];
-                                let mut key = [0; super::secondary_index::SECONDARY_KEY_BYTES_MAX];
-                                let length = manager
-                                    .get_with(*id, |entity| {
-                                        spec.projector.project(entity, &mut key)
-                                    })
-                                    .ok_or(StoreError::EntityNotFound(*id))??;
-                                let Some(length) = length else { continue };
-                                if length > key.len() {
-                                    return Err(StoreError::Serialization(
-                                        "secondary key exceeds its bounded buffer".into(),
-                                    ));
+                        let exclusive_keys = keys.indexed
+                            && Arc::strong_count(&keys.tree) == 2
+                            && !keys.tree.has_retirement_readers()
+                            && PagedCollection::with_key_index(
+                                Arc::clone(tree),
+                                Arc::clone(&keys.tree),
+                            )
+                            .shares_trees_with(source);
+                        let ids: std::collections::BTreeSet<_> =
+                            ids.iter().chain(removed).copied().collect();
+                        // Bound projection work separately from retained memory. Visibility
+                        // and equality keys are usually much shorter than the codec maximum.
+                        let posting_count = ids.len().saturating_mul(keys.secondary.len());
+                        let max_changes =
+                            crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX;
+                        if ids.len() > max_changes || posting_count > max_changes {
+                            return Ok(None);
+                        }
+                        let mut data_deletes = Vec::new();
+                        let mut postings = PostingPlan::default();
+                        for id in &ids {
+                            let mut after_key = None;
+                            let eligible = manager.get_with(*id, |entity| {
+                                changed_xid_high_water_mark =
+                                    changed_xid_high_water_mark.max(entity.max_transaction_id());
+                                after_key = key_posting(entity);
+                                classified_row(entity)
+                                    && !current.excluded_xids.contains(&entity.xmin)
+                                    && (entity.xmax == 0
+                                        || !current.excluded_xids.contains(&entity.xmax))
+                                    && !current.pending_vault.contains(id)
+                            });
+                            let deleting = removed.contains(id);
+                            if eligible != (if deleting { None } else { Some(true) }) {
+                                return Ok(None);
+                            }
+                            // Keep the old image only while comparing this row's projections.
+                            let limit = 1024 * 1024;
+                            let old = match tree.get_with_budget(&id.raw().to_be_bytes(), limit) {
+                                Ok(Some(bytes)) => {
+                                    let record = EncodedRecord { id: *id, bytes };
+                                    match record.decode_with_budget(self.format_version(), limit) {
+                                        Ok((entity, _)) if classified_row(&entity) => Some(entity),
+                                        Ok(_) | Err(StoreError::ReadLimitExceeded { .. }) => {
+                                            return Ok(None)
+                                        }
+                                        Err(error) => return Err(error),
+                                    }
                                 }
-                                let mut posting = Vec::with_capacity(length + 8);
-                                posting.extend_from_slice(&key[..length]);
-                                posting.extend_from_slice(&id.raw().to_be_bytes());
-                                if index
-                                    .tree
-                                    .get(&posting)
-                                    .map_err(|e| {
-                                        StoreError::Io(std::io::Error::other(e.to_string()))
-                                    })?
-                                    .is_some()
-                                {
-                                    return Ok(None);
+                                Ok(None) => None,
+                                Err(BTreeError::ReadLimitExceeded { .. }) => return Ok(None),
+                                Err(error) => {
+                                    return Err(StoreError::Io(std::io::Error::other(
+                                        error.to_string(),
+                                    )))
                                 }
-                                postings.push((&index.tree, posting));
+                            };
+                            if deleting && old.is_some() {
+                                data_deletes.push(*id);
+                            }
+                            let before_key = old.as_ref().and_then(key_posting);
+                            if before_key != after_key
+                                && (!exclusive_keys
+                                    || !postings.add(&keys.tree, before_key, after_key)?)
+                            {
+                                return Ok(None);
+                            }
+                            if let Some(specs) = specs {
+                                for (name, index) in &keys.secondary {
+                                    let projector = specs[name].projector.as_ref();
+                                    let before = old
+                                        .as_ref()
+                                        .map(|row| posting(projector, row))
+                                        .transpose()?
+                                        .flatten();
+                                    let after = if deleting {
+                                        None
+                                    } else {
+                                        manager
+                                            .get_with(*id, |row| posting(projector, row))
+                                            .ok_or(StoreError::EntityNotFound(*id))??
+                                    };
+                                    if !postings.add(&index.tree, before, after)? {
+                                        return Ok(None);
+                                    }
+                                }
                             }
                         }
-                    }
-                    let applied = self.apply_sparse_checkpoint_tree(
-                        collection, manager, tree, previous, current,
-                    )?;
-                    if applied.is_some() {
-                        // Data and projections share the active page-undo epoch;
-                        // their roots publish together in the existing catalog fence.
-                        for (index, posting) in postings {
-                            index.insert(&posting, &[]).map_err(|e| {
-                                StoreError::Io(std::io::Error::other(e.to_string()))
-                            })?;
+                        let applied = self.apply_sparse_checkpoint_tree(
+                            collection, manager, tree, previous, current, removed,
+                        )?;
+                        if applied.is_some() {
+                            // Data and projections share the active page-undo epoch;
+                            // their roots publish together in the existing catalog fence.
+                            for id in data_deletes {
+                                if !tree.delete(&id.raw().to_be_bytes()).map_err(|e| {
+                                    StoreError::Io(std::io::Error::other(e.to_string()))
+                                })? {
+                                    return Err(StoreError::Serialization(
+                                        "validated physical row disappeared".into(),
+                                    ));
+                                }
+                            }
+                            for (index, before, after) in postings.changes {
+                                if let Some(key) = after {
+                                    index.insert(&key, &[]).map_err(|e| {
+                                        StoreError::Io(std::io::Error::other(e.to_string()))
+                                    })?;
+                                }
+                                if let Some(key) = before {
+                                    let removed = index.delete(&key).map_err(|e| {
+                                        StoreError::Io(std::io::Error::other(e.to_string()))
+                                    })?;
+                                    if !removed {
+                                        return Err(StoreError::Serialization(
+                                            "validated index posting disappeared".into(),
+                                        ));
+                                    }
+                                }
+                            }
                         }
-                    }
-                    Ok(applied)
-                })();
-                let published = if result.as_ref().is_ok_and(Option::is_some) {
-                    let root = tree.root_page_id();
-                    // Carry the appended headers into the existing upper bound
-                    // even when an in-place update retains the same root page.
-                    // Publish the exact count without recounting old payloads.
-                    if let Some(summary) = self.recovery_xid_summary.write().as_mut() {
-                        if summary.roots.get(collection) == Some(&root_before) {
-                            summary.high_water_mark =
-                                summary.high_water_mark.max(appended_xid_high_water_mark);
-                            summary.roots.insert(collection.to_owned(), root);
+                        Ok(applied)
+                    })();
+                    let published = if result.as_ref().is_ok_and(Option::is_some) {
+                        let root = tree.root_page_id();
+                        // Carry the changed headers into the existing upper bound
+                        // even when an in-place update retains the same root page.
+                        // Publish the exact count without recounting old payloads.
+                        if let Some(summary) = self.recovery_xid_summary.write().as_mut() {
+                            if summary.roots.get(collection) == Some(&root_before) {
+                                summary.high_water_mark =
+                                    summary.high_water_mark.max(changed_xid_high_water_mark);
+                                summary.roots.insert(collection.to_owned(), root);
+                            }
                         }
-                    }
-                    Some((root, manager.count() as u64))
-                } else {
-                    None
-                };
-                (result, published)
-            })
+                        Some((root, manager.count() as u64))
+                    } else {
+                        None
+                    };
+                    (result, published)
+                },
+            )
             .unwrap_or(Ok(None))
     }
 }

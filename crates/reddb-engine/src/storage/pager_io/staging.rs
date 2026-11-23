@@ -163,13 +163,7 @@ fn apply_frame<F: VfsFile>(
         write_page(file, id, &page)?;
     }
     file.sync_all()?;
-    for id in DWB_ZONE_START_PAGE..DWB_ZONE_START_PAGE + clear_pages {
-        let mut page = Page::new(PageType::Header, id);
-        page.update_checksum();
-        write_page(file, id, &page)?;
-    }
-    file.sync_all()?;
-    Ok(())
+    clear_dwb_prefix(file, clear_pages)
 }
 
 pub(super) fn read_pages<F: VfsFile>(file: &mut F) -> Result<Vec<(u32, Page)>, PagerIoError> {

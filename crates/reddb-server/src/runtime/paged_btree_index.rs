@@ -12,7 +12,9 @@ use reddb_rql::ast::{CompareOp, FieldRef, Filter, OrderByClause};
 use reddb_types::{value_to_canonical_key, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Bound::{self, Excluded, Included, Unbounded};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 // Every valid family tag is below 255. An unrepresentable key retains a
@@ -116,9 +118,12 @@ pub(super) struct RuntimeBtreeIndex {
 
 #[derive(Default)]
 struct OverlayBtree {
+    // A plan hint only. Even a fingerprint collision can only select the SQL scan.
+    last_broad_range: AtomicU64,
     postings: BTreeMap<Vec<u8>, BTreeSet<EntityId>>,
     scan_required: BTreeSet<EntityId>,
-    touched: std::collections::HashMap<EntityId, Option<Vec<u8>>>,
+    revision: u64,
+    touched: std::collections::HashMap<EntityId, (u64, Option<Vec<u8>>)>,
     /// Bytes held, kept current by every change: memory accounting asks on
     /// every statement and must not walk the overlay to answer.
     bytes: usize,
@@ -133,6 +138,7 @@ const RANGE_SELECTIVITY: usize = 32;
 const RANGE_CANDIDATES_MIN: usize = 64;
 const OVERLAY_POSTING_BYTES: usize = 96;
 const OVERLAY_ROW_BYTES: usize = 48;
+const OVERLAY_REVISION_BYTES: usize = std::mem::size_of::<u64>();
 const OVERLAY_ID_BYTES: usize = std::mem::size_of::<EntityId>();
 
 impl OverlayBtree {
@@ -155,26 +161,31 @@ impl OverlayBtree {
                 self.bytes += OVERLAY_ID_BYTES;
             }
         }
-        self.bytes += OVERLAY_ROW_BYTES + key.len();
-        self.touched.insert(entity_id, Some(key));
+        self.bytes += key.len();
+        self.touch(entity_id, Some(key));
     }
 
     fn remove_current(&mut self, entity_id: EntityId) {
-        let Some(previous) = self.touched.remove(&entity_id) else {
+        *self.last_broad_range.get_mut() = 0;
+        let Some((_, previous)) = self.touched.remove(&entity_id) else {
             return;
         };
-        self.release(OVERLAY_ROW_BYTES);
+        self.release_touch(entity_id, previous.as_deref());
+    }
+
+    fn release_touch(&mut self, entity_id: EntityId, previous: Option<&[u8]>) {
+        self.release(OVERLAY_ROW_BYTES + OVERLAY_REVISION_BYTES);
         let Some(key) = previous else {
             return;
         };
         self.release(key.len());
-        if key.as_slice() == [SCAN_REQUIRED] {
+        if key == [SCAN_REQUIRED] {
             if self.scan_required.remove(&entity_id) {
                 self.release(OVERLAY_ID_BYTES + OVERLAY_ROW_BYTES);
             }
             return;
         }
-        let Some(ids) = self.postings.get_mut(&key) else {
+        let Some(ids) = self.postings.get_mut(key) else {
             return;
         };
         let removed = ids.remove(&entity_id);
@@ -183,7 +194,7 @@ impl OverlayBtree {
             self.release(OVERLAY_ID_BYTES);
         }
         if emptied {
-            self.postings.remove(&key);
+            self.postings.remove(key);
             self.release(key.len() + OVERLAY_POSTING_BYTES);
         }
     }
@@ -194,8 +205,40 @@ impl OverlayBtree {
 
     fn remove(&mut self, entity_id: EntityId) {
         self.remove_current(entity_id);
-        self.bytes += OVERLAY_ROW_BYTES;
-        self.touched.insert(entity_id, None);
+        self.touch(entity_id, None);
+    }
+
+    fn touch(&mut self, id: EntityId, key: Option<Vec<u8>>) {
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .expect("B-tree overlay revision exhausted");
+        self.bytes += OVERLAY_ROW_BYTES + OVERLAY_REVISION_BYTES;
+        self.touched.insert(id, (self.revision, key));
+    }
+
+    fn retire_through(&mut self, cut: u64) -> Option<Self> {
+        if self.revision == cut {
+            // Return the old allocations for destruction outside the publication lock.
+            return Some(std::mem::replace(
+                self,
+                Self {
+                    revision: cut,
+                    ..Default::default()
+                },
+            ));
+        }
+        *self.last_broad_range.get_mut() = 0;
+        let mut touched = std::mem::take(&mut self.touched);
+        touched.retain(|id, (revision, key)| {
+            if *revision > cut {
+                return true;
+            }
+            self.release_touch(*id, key.as_deref());
+            false
+        });
+        self.touched = touched;
+        None
     }
 
     fn memory_bytes(&self) -> u64 {
@@ -213,7 +256,9 @@ impl OverlayBtree {
         let touched = self
             .touched
             .values()
-            .map(|key| key.as_ref().map_or(0, Vec::len) + OVERLAY_ROW_BYTES)
+            .map(|(_, key)| {
+                key.as_ref().map_or(0, Vec::len) + OVERLAY_ROW_BYTES + OVERLAY_REVISION_BYTES
+            })
             .sum::<usize>();
         (postings + touched + self.scan_required.len() * (OVERLAY_ID_BYTES + OVERLAY_ROW_BYTES))
             as u64
@@ -227,6 +272,15 @@ struct Range {
     matched_columns: usize,
     order_start: usize,
     range_column: bool,
+}
+
+impl Range {
+    fn bounds_fingerprint(&self) -> u64 {
+        let mut hash = DefaultHasher::new();
+        self.lower.hash(&mut hash);
+        self.upper.hash(&mut hash);
+        hash.finish().max(1)
+    }
 }
 
 struct ScopedFamily {
@@ -633,7 +687,22 @@ impl RuntimeBtreeIndex {
             .map_err(|error| StoreError::Serialization(error.to_string()))?;
         // Admission precedes publication/source locks; the returned owner keeps
         // candidate memory charged through result assembly and error paths.
-        let _publication = store.vault_publication_lock.lock();
+        let _publication = match store.vault_publication_lock.try_lock() {
+            Some(guard) => guard,
+            None => {
+                // The normal plan already walks this range. Under contention skip
+                // the repeated selectivity probe, without opening any unfenced pages.
+                let broad = self.overlay.try_read().is_some_and(|overlay| {
+                    let last = overlay.last_broad_range.load(Ordering::Relaxed);
+                    last != 0 && last == range.bounds_fingerprint()
+                });
+                if broad {
+                    not_selective.set(true);
+                    return Ok(None);
+                }
+                store.vault_publication_lock.lock()
+            }
+        };
         let Some(index) = store.secondary_index(&self.collection, &self.name, &self.identity)
         else {
             return Ok(None);
@@ -754,6 +823,9 @@ impl RuntimeBtreeIndex {
         while count.next_posting(&mut posting)?.is_some() {
             counted += 1;
             if counted > candidates_max {
+                overlay
+                    .last_broad_range
+                    .store(range.bounds_fingerprint(), Ordering::Relaxed);
                 not_selective.set(true);
                 return Ok(None);
             }
@@ -765,6 +837,9 @@ impl RuntimeBtreeIndex {
         {
             counted += entity_ids.len();
             if counted > candidates_max {
+                overlay
+                    .last_broad_range
+                    .store(range.bounds_fingerprint(), Ordering::Relaxed);
                 not_selective.set(true);
                 return Ok(None);
             }
@@ -820,6 +895,17 @@ impl RuntimeBtreeIndex {
     }
 }
 
+pub(super) struct BtreeCheckpoint(Vec<(Arc<RuntimeBtreeIndex>, u64)>);
+
+impl BtreeCheckpoint {
+    pub(super) fn publish(self) -> impl Drop {
+        self.0
+            .into_iter()
+            .filter_map(|(provider, cut)| provider.overlay.write().retire_through(cut))
+            .collect::<Vec<_>>()
+    }
+}
+
 impl IndexStore {
     /// The indexes of `collection` that can bound `filter`, most columns
     /// matched first. When the range of one covers too much of the collection
@@ -847,11 +933,17 @@ impl IndexStore {
         choices
     }
 
-    pub(crate) fn clear_paged_btree_overlays(&self) {
-        let providers: Vec<_> = self.paged_btrees.read().values().cloned().collect();
-        for provider in providers {
-            *provider.overlay.write() = OverlayBtree::default();
-        }
+    pub(super) fn paged_btree_checkpoint(&self) -> BtreeCheckpoint {
+        let cuts = self
+            .paged_btrees
+            .read()
+            .values()
+            .map(|provider| {
+                let revision = provider.overlay.read().revision;
+                (Arc::clone(provider), revision)
+            })
+            .collect();
+        BtreeCheckpoint(cuts)
     }
 
     pub(crate) fn paged_btree_overlay_insert(
@@ -1167,6 +1259,79 @@ mod tests {
     }
 
     #[test]
+    fn later_sql_writes_remain_searchable_after_an_older_index_cut_is_retired() {
+        let (_directory, runtime, _options) = fixture();
+        let cut = runtime.index_store_ref().paged_btree_checkpoint();
+        for stmt in [
+            "UPDATE ordered_rows SET id = 40 WHERE id = 1",
+            "DELETE FROM ordered_rows WHERE id = 2",
+            "INSERT INTO ordered_rows (id, label, payload) VALUES (50, 'new', 'new')",
+        ] {
+            runtime.execute_query(stmt).expect(stmt);
+        }
+        drop(cut.publish());
+        for key in [40, 50] {
+            let filter = Filter::Between {
+                field: FieldRef::column("ordered_rows", "id"),
+                low: Value::Integer(key),
+                high: Value::Integer(key),
+            };
+            let candidates = runtime
+                .index_store_ref()
+                .paged_btree_lookup("ordered_rows", &filter)
+                .expect("index lookup")
+                .expect("ordered index must answer without a scan");
+            assert_eq!(candidates.len(), 1, "missing key {key}");
+        }
+        assert_eq!(
+            ids(
+                &runtime,
+                "SELECT id FROM ordered_rows WHERE id >= 40 ORDER BY id"
+            ),
+            [40, 50]
+        );
+        assert!(ids(
+            &runtime,
+            "SELECT id FROM ordered_rows WHERE id BETWEEN 1 AND 2"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn checkpoint_keeps_index_changes_after_its_cut() {
+        let mut overlay = super::OverlayBtree::default();
+        let ids = [1, 2, 3, 4, 5].map(EntityId::new);
+        for id in ids[..3].iter().copied() {
+            overlay.insert(vec![1], id);
+        }
+        let cut = overlay.revision;
+        overlay.remove(ids[1]);
+        overlay.insert(vec![2], ids[2]);
+        overlay.insert(vec![2], ids[3]);
+        overlay.insert(vec![super::SCAN_REQUIRED], ids[4]);
+
+        assert!(overlay.retire_through(cut).is_none());
+        assert!(!overlay.touched.contains_key(&ids[0]));
+        assert!(overlay.touched[&ids[1]].1.is_none());
+        assert!(!overlay.postings.contains_key(&vec![1]));
+        assert_eq!(
+            overlay.postings[&vec![2]]
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            ids[2..4]
+        );
+        assert!(overlay.scan_required.contains(&ids[4]));
+        assert_eq!(overlay.memory_bytes(), overlay.recounted_bytes());
+        let next = overlay.revision;
+        drop(overlay.retire_through(next));
+        assert_eq!(overlay.memory_bytes(), 0);
+        overlay.insert(vec![3], ids[0]);
+        assert!(overlay.retire_through(next).is_none());
+        assert!(overlay.postings[&vec![3]].contains(&ids[0]));
+    }
+
+    #[test]
     fn overlay_memory_is_kept_current_without_recounting() {
         let mut overlay = super::OverlayBtree::default();
         let mut state = 0x9e3779b97f4a7c15_u64;
@@ -1237,6 +1402,22 @@ mod tests {
         };
         assert_eq!(lookup("key-05"), Some(1));
         assert_eq!(lookup("bulk"), None);
+
+        // A previous rejection lets the same range choose the authoritative
+        // walk while another thread owns publication. The selective key still
+        // resolves through the tree after that fence is released.
+        let store = runtime.db().store();
+        let publication = store.vault_publication_lock.lock();
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                done.send(lookup("bulk")).expect("broad range");
+                assert_eq!(lookup("key-05"), Some(1));
+            });
+            let broad = result.recv_timeout(std::time::Duration::from_secs(5));
+            drop(publication);
+            assert_eq!(broad.expect("broad probe waited for publication"), None);
+        });
     }
 
     #[test]
@@ -1615,7 +1796,7 @@ mod tests {
     #[test]
     fn paged_btree_page_errors_are_authoritative() {
         use crate::storage::engine::{Page, PageType};
-        let (_directory, runtime, _options) = fixture();
+        let (_directory, runtime, options) = fixture();
         let store = runtime.db().store();
         let provider = runtime
             .index_store_ref()
@@ -1637,13 +1818,20 @@ mod tests {
             .execute_query("SELECT id FROM ordered_rows WHERE id BETWEEN 9 AND 12")
             .expect_err("an unreadable range must not become an empty result or fallback scan");
         pager.write_page(root, original).expect("restore");
-        assert_eq!(
-            ids(
-                &runtime,
-                "SELECT id FROM ordered_rows WHERE id BETWEEN 9 AND 12 ORDER BY id"
-            ),
-            [9, 10, 11, 12]
+        let read = "SELECT id FROM ordered_rows WHERE id BETWEEN 9 AND 12 ORDER BY id";
+        let error = runtime
+            .execute_query(read)
+            .expect_err("failed proof stays fenced");
+        assert!(
+            error.to_string().contains("reopen before further access"),
+            "{error}"
         );
+        drop(index);
+        drop(provider);
+        drop(store);
+        drop(runtime);
+        let runtime = open(&options);
+        assert_eq!(ids(&runtime, read), [9, 10, 11, 12]);
     }
 
     #[test]

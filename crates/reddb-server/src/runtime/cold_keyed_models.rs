@@ -1632,16 +1632,16 @@ fn disk_full_checkpoint_recovers_pages_catalog_and_indexes() {
         ] {
             runtime.execute_query(sql).expect(sql);
         }
-        let offset = match std::env::var(CHILD_TARGET).expect("target").as_str() {
-            "catalog" => Some(crate::storage::engine::PAGE_SIZE as u64),
-            "page" => None,
+        let prefix = std::env::var(CHILD_PREFIX).expect("prefix");
+        match std::env::var(CHILD_TARGET).expect("target").as_str() {
+            // The catalog is published to a newly allocated root on each generation.
+            "catalog" => std::env::set_var("REDDB_TEST_CATALOG_HOME_IO_PREFIX", &prefix),
+            "page" => crate::storage::engine::pager::test_fail_next_pager_write(
+                None,
+                prefix.parse().expect("prefix bytes"),
+            ),
             target => panic!("unknown checkpoint target {target}"),
-        };
-        let prefix_bytes = std::env::var(CHILD_PREFIX)
-            .expect("prefix")
-            .parse()
-            .expect("prefix bytes");
-        crate::storage::engine::pager::test_fail_next_pager_write(offset, prefix_bytes);
+        }
         let error = runtime
             .checkpoint()
             .expect_err("disk full must fail checkpoint");
@@ -1649,6 +1649,7 @@ fn disk_full_checkpoint_recovers_pages_catalog_and_indexes() {
             error.to_string().contains("injected pager disk full"),
             "{error}"
         );
+        std::env::remove_var("REDDB_TEST_CATALOG_HOME_IO_PREFIX");
         let fenced = runtime
             .checkpoint()
             .expect_err("failed writeback requires reopen");
@@ -4034,6 +4035,13 @@ fn cold_dml_delete_late_point_failure_preserves_preimages_and_writer_horizon() {
 fn cold_dml_deferred_delete_abort_preserves_indexes_and_releases_admission() {
     for index in [None, Some("HASH"), Some("BTREE")] {
         let (directory, runtime) = cold_dml_fixture(index);
+        // The assertions below inspect the global snapshot horizon. A maintenance
+        // reader can legitimately retain a horizon after the tested DELETE aborts.
+        runtime
+            .background_tasks
+            .as_ref()
+            .expect("foreground workers")
+            .shutdown();
         runtime
             .db()
             .store()

@@ -18,6 +18,24 @@ pub(super) struct BackingRead {
     pub format_version: u32,
     pub read_bytes_max: usize,
     pub removed: HashSet<EntityId>,
+    // Bounded subset of tombstones whose physical delete was appended to the WAL.
+    logged_removals: HashSet<EntityId>,
+}
+
+/// A cold collection with no resident changes at the checkpoint boundary.
+pub struct CleanBackingCut {
+    source: Arc<dyn CollectionRead + Send + Sync>,
+    physical_count: u64,
+}
+
+impl CleanBackingCut {
+    fn matches(&self, base: &BackingRead, root: u32, format: u32, read_limit: usize) -> bool {
+        Arc::ptr_eq(&base.source, &self.source)
+            && base.root_page == root
+            && base.format_version == format
+            && base.read_bytes_max == read_limit
+            && base.total_entities == self.physical_count
+    }
 }
 
 /// Frozen base/overlay cursor for a lazy query source. The source generation
@@ -218,6 +236,102 @@ impl SegmentManager {
             .map(|backing| backing.read_bytes_max)
     }
 
+    /// Capture under the host write fence. Pinning the source also excludes
+    /// in-place modifications to the base until the decision to retain it.
+    pub fn clean_backing_cut(&self) -> Option<CleanBackingCut> {
+        let guard = self.backing.read();
+        let base = guard.as_ref()?;
+        (base.removed.is_empty()
+            && base.logged_removals.is_empty()
+            && base.total_entities == self.count() as u64
+            && self.consolidation.read().is_none()
+            && self.growing.read().is_none()
+            && self.sealed.read().is_empty())
+        .then(|| CleanBackingCut {
+            source: Arc::clone(&base.source),
+            physical_count: base.total_entities,
+        })
+    }
+
+    /// Install the checkpoint projection under the host write fence. Return
+    /// the installed segment revisions, or None when the captured base is still
+    /// current and the caller must retain its original revision boundary.
+    pub fn publish_checkpoint_backing<
+        P: crate::storage::page_store::PageStore + Send + Sync + 'static,
+    >(
+        &self,
+        cut: Option<&CleanBackingCut>,
+        source: crate::storage::collection_read::PagedCollection<P>,
+        root_page: u32,
+        format_version: u32,
+        read_bytes_max: usize,
+    ) -> Option<Vec<(u64, u64)>> {
+        if let Some(cut) = cut {
+            let backing = self.backing.read();
+            if backing
+                .as_ref()
+                .is_some_and(|base| cut.matches(base, root_page, format_version, read_bytes_max))
+                && source.shares_primary_with(cut.source.as_ref())
+            {
+                if source.shares_trees_with(cut.source.as_ref()) {
+                    return None;
+                }
+                // Only the lookup tree changed. Writers are fenced by the host,
+                // so releasing the shared guard here cannot replace the base.
+                drop(backing);
+                self.backing
+                    .write()
+                    .as_mut()
+                    .expect("fenced checkpoint base")
+                    .source = Arc::new(source);
+                return None;
+            }
+        }
+        self.install_paged_backing(
+            source,
+            root_page,
+            format_version,
+            read_bytes_max,
+            self.count() as u64,
+        );
+        Some(self.checkpoint_revisions())
+    }
+
+    /// Install a published base under the host's write fence. An untouched cold
+    /// table can keep serving base readers without taking the exclusive lock.
+    pub fn install_paged_backing<
+        P: crate::storage::page_store::PageStore + Send + Sync + 'static,
+    >(
+        &self,
+        source: crate::storage::collection_read::PagedCollection<P>,
+        root_page: u32,
+        format_version: u32,
+        read_bytes_max: usize,
+        total_entities: u64,
+    ) {
+        if self.backing.read().as_ref().is_some_and(|base| {
+            base.root_page == root_page
+                && base.format_version == format_version
+                && base.read_bytes_max == read_bytes_max
+                && base.total_entities == total_entities
+                && base.removed.is_empty()
+                && base.logged_removals.is_empty()
+                && source.shares_trees_with(base.source.as_ref())
+                && self.consolidation.read().is_none()
+                && self.growing.read().is_none()
+                && self.sealed.read().is_empty()
+        }) {
+            return;
+        }
+        self.install_backing(
+            Arc::new(source),
+            root_page,
+            format_version,
+            read_bytes_max,
+            total_entities,
+        );
+    }
+
     /// The host must fence writers and publish the new durable tree first.
     /// Captured resident readers retain their old sources through weak tracking.
     pub fn install_backing(
@@ -252,6 +366,7 @@ impl SegmentManager {
             format_version,
             read_bytes_max,
             removed: HashSet::new(),
+            logged_removals: HashSet::new(),
         });
     }
 
@@ -271,18 +386,47 @@ impl SegmentManager {
         root_page: u32,
         update: impl FnOnce() -> (T, Option<(u32, u64)>),
     ) -> Option<T> {
+        self.try_with_unshared_backing_delta(root_page, 0, |_| update())
+    }
+
+    /// Under the host's publication fence, allow a bounded set of WAL-confirmed
+    /// physical deletes alongside the resident changes. Unlogged removes and
+    /// borrowed generations require immutable replacement.
+    #[doc(hidden)]
+    pub fn try_with_unshared_backing_delta<T>(
+        &self,
+        root_page: u32,
+        max_removals: usize,
+        update: impl FnOnce(&HashSet<EntityId>) -> (T, Option<(u32, u64)>),
+    ) -> Option<T> {
+        self.try_with_unshared_backing_source_delta(root_page, max_removals, |_, removed| {
+            update(removed)
+        })
+    }
+
+    /// Check derived tree identity while the unique backing source is fenced.
+    #[doc(hidden)]
+    pub fn try_with_unshared_backing_source_delta<T>(
+        &self,
+        root_page: u32,
+        max_removals: usize,
+        update: impl FnOnce(&dyn CollectionRead, &HashSet<EntityId>) -> (T, Option<(u32, u64)>),
+    ) -> Option<T> {
         let mut backing = self.backing.try_write_for(UNSHARED_BACKING_WAIT)?;
         let backing = backing.as_mut()?;
         if backing.root_page != root_page
-            || !backing.removed.is_empty()
+            || backing.removed.len() > max_removals
+            || backing.removed.len() != backing.logged_removals.len()
             || Arc::get_mut(&mut backing.source).is_none()
         {
             return None;
         }
-        let (result, published) = update();
+        let (result, published) = update(backing.source.as_ref(), &backing.removed);
         if let Some((root_page, total_entities)) = published {
             backing.root_page = root_page;
             backing.total_entities = total_entities;
+            backing.removed.clear();
+            backing.logged_removals.clear();
         }
         Some(result)
     }
@@ -329,6 +473,22 @@ impl SegmentManager {
             .as_ref()
             .map(|base| base.removed.iter().copied().collect())
             .unwrap_or_default()
+    }
+
+    pub fn checkpoint_backing_view(
+        &self,
+        max_removed: usize,
+    ) -> Option<(Option<Arc<dyn CollectionRead + Send + Sync>>, Vec<EntityId>)> {
+        let guard = self.backing.read();
+        let Some(base) = guard.as_ref() else {
+            return Some((None, Vec::new()));
+        };
+        (base.removed.len() <= max_removed).then(|| {
+            (
+                Some(Arc::clone(&base.source)),
+                base.removed.iter().copied().collect(),
+            )
+        })
     }
 
     /// Preserve I/O and decode failures instead of treating them as absent rows.
@@ -906,6 +1066,23 @@ impl SegmentManager {
     pub(super) fn remember_backing_delete(&self, id: EntityId) {
         if let Some(backing) = self.backing.write().as_mut() {
             backing.removed.insert(id);
+            backing.logged_removals.remove(&id);
+        }
+    }
+
+    /// Called under the publication fence after a successful WAL append.
+    #[doc(hidden)]
+    pub fn confirm_logged_removals(&self, ids: &[EntityId]) {
+        // Optional checkpoint proof. Do not make collection maintenance wait
+        // for a base reader under the host's publication fence.
+        let Some(mut backing) = self.backing.try_write() else {
+            return;
+        };
+        if let Some(base) = backing.as_mut() {
+            if base.removed.len() <= crate::storage::segment::CHECKPOINT_MUTATIONS_MAX {
+                base.logged_removals
+                    .extend(ids.iter().copied().filter(|id| base.removed.contains(id)));
+            }
         }
     }
 
