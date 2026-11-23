@@ -1270,7 +1270,19 @@ mod tests {
             runtime.execute_query(stmt).expect(stmt);
         }
         drop(cut.publish());
-        deny_scan(&runtime);
+        for key in [40, 50] {
+            let filter = Filter::Between {
+                field: FieldRef::column("ordered_rows", "id"),
+                low: Value::Integer(key),
+                high: Value::Integer(key),
+            };
+            let candidates = runtime
+                .index_store_ref()
+                .paged_btree_lookup("ordered_rows", &filter)
+                .expect("index lookup")
+                .expect("ordered index must answer without a scan");
+            assert_eq!(candidates.len(), 1, "missing key {key}");
+        }
         assert_eq!(
             ids(
                 &runtime,
