@@ -266,6 +266,20 @@ impl SecondaryIndexProjector for HashProjection {
     }
 }
 
+/// The schemas a collection can have had before columns were appended to
+/// reach `schema`: none, and every shorter prefix. A row's key is the same
+/// under each of them. Rows that carry their own names do not consult the
+/// shared schema, and a positional row keeps its columns at the same offsets,
+/// with nothing where an appended column would be.
+pub(super) fn earlier_schemas(schema: Option<&[String]>) -> Vec<Option<&[String]>> {
+    let Some(schema) = schema else {
+        return Vec::new();
+    };
+    std::iter::once(None)
+        .chain((1..schema.len()).map(|columns| Some(&schema[..columns])))
+        .collect()
+}
+
 fn projection_identity(columns: &[String], schema: Option<&[String]>) -> SecondaryIndexIdentity {
     let codec_version =
         crate::storage::unified::store::secondary_index::runtime_secondary_index_codec_version();
@@ -637,6 +651,12 @@ impl RedDBRuntime {
             .and_then(|m| m.column_schema());
         // Encoding and schema bind the root to the complete immutable projection.
         let identity = projection_identity(&index.columns, schema.as_deref().map(Vec::as_slice));
+        // Declaring a column changes the schema and with it the identity; the
+        // tree published before still holds every row's key.
+        let predecessors = earlier_schemas(schema.as_deref().map(Vec::as_slice))
+            .into_iter()
+            .map(|earlier| projection_identity(&index.columns, earlier))
+            .collect();
         let projection = Arc::new(HashProjection {
             columns: index.columns.clone(),
             key_bytes_max: usize::try_from(self.memory_accounting().budget().resolved_bytes / 16)
@@ -646,10 +666,11 @@ impl RedDBRuntime {
             #[cfg(test)]
             forced_digest: None,
         });
-        store.register_optional_secondary_index(
+        store.register_optional_secondary_index_after(
             &index.collection,
             storage_name,
             identity.clone(),
+            predecessors,
             projection.clone(),
         )?;
         // The overlay speaks for every row that is not in the published
@@ -1452,6 +1473,81 @@ mod tests {
         assert_eq!(ids("SELECT id FROM ranged WHERE id = 'b'"), ["b"]);
         assert!(ids("SELECT id FROM ranged WHERE id = 'c'").is_empty());
         assert_eq!(SCANNING_LOOKUPS.with(std::cell::Cell::get), before);
+    }
+
+    #[test]
+    fn indexes_keep_answering_after_a_column_is_declared() {
+        let directory = tempfile::tempdir().expect("declared column fixture");
+        let path = directory.path().join("declared.rdb");
+        {
+            let seed = replay_runtime(&path);
+            for sql in [
+                "CREATE TABLE declared (id TEXT PRIMARY KEY, email TEXT, score INTEGER)",
+                "CREATE INDEX declared_email ON declared (email) USING HASH",
+                "CREATE INDEX declared_score ON declared (score) USING BTREE",
+                "INSERT INTO declared (id, email, score) VALUES \
+                 ('a', 'a@x', 10), ('b', 'b@x', 20), ('c', 'c@x', 30)",
+                // A collection that never had a declared schema.
+                "INSERT INTO legacy (id, v) VALUES ('k1', '1'), ('k2', '2'), ('k3', '3')",
+                "CREATE INDEX idx_id ON legacy (id) USING HASH",
+            ] {
+                seed.execute_query(sql).expect(sql);
+            }
+            seed.flush().expect("publish the base");
+        }
+        // The trees are published under the identity a reopened store computes.
+        replay_runtime(&path).flush().expect("settle");
+        {
+            let runtime = replay_runtime(&path);
+            for sql in [
+                "ALTER TABLE declared ADD COLUMN note TEXT",
+                "ALTER TABLE legacy ADD COLUMN id TEXT",
+                "INSERT INTO declared (id, email, score, note) VALUES ('d', 'd@x', 25, 'new')",
+                "INSERT INTO legacy (id, v) VALUES ('k4', '4')",
+            ] {
+                runtime.execute_query(sql).expect(sql);
+            }
+        }
+
+        let runtime = replay_runtime(&path);
+        let rows = |sql: &str| runtime.execute_query(sql).expect(sql).result.records.len();
+        let scans = || SCANNING_LOOKUPS.with(std::cell::Cell::get);
+        let before = scans();
+        assert_eq!(rows("SELECT id FROM declared WHERE email = 'b@x'"), 1);
+        assert_eq!(rows("SELECT id FROM declared WHERE email = 'd@x'"), 1);
+        assert_eq!(rows("SELECT id FROM declared WHERE email = 'nobody@x'"), 0);
+        assert_eq!(rows("SELECT v FROM legacy WHERE id = 'k2'"), 1);
+        assert_eq!(rows("SELECT v FROM legacy WHERE id = 'k4'"), 1);
+        assert_eq!(rows("SELECT v FROM legacy WHERE id = 'k9'"), 0);
+        assert_eq!(
+            scans(),
+            before,
+            "declaring a column sent lookups back to walking the collection"
+        );
+        let range = reddb_rql::ast::Filter::Between {
+            field: reddb_rql::ast::FieldRef::column("declared", "score"),
+            low: Value::Integer(15),
+            high: Value::Integer(26),
+        };
+        assert_eq!(
+            runtime
+                .index_store_ref()
+                .paged_btree_lookup("declared", &range)
+                .expect("lookup")
+                .map(|candidates| candidates.len()),
+            Some(2),
+            "the ordered index stopped answering after a column was declared"
+        );
+
+        // The next checkpoint publishes the trees under the current identity.
+        runtime.flush().expect("republish");
+        drop(runtime);
+        let runtime = replay_runtime(&path);
+        let rows = |sql: &str| runtime.execute_query(sql).expect(sql).result.records.len();
+        let before = scans();
+        assert_eq!(rows("SELECT id FROM declared WHERE email = 'd@x'"), 1);
+        assert_eq!(rows("SELECT v FROM legacy WHERE id = 'k4'"), 1);
+        assert_eq!(scans(), before);
     }
 
     #[test]
