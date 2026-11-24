@@ -110,6 +110,11 @@ pub trait SecondaryIndexProjector: Send + Sync {
 #[derive(Clone)]
 pub(super) struct SecondaryIndexSpec {
     pub(super) identity: SecondaryIndexIdentity,
+    /// Identities under which the same index was published before columns
+    /// were appended to the collection's schema. Every row has the same key
+    /// under them as under `identity`, so such a tree answers reads until the
+    /// next checkpoint publishes this index under `identity`.
+    pub(super) predecessors: Vec<SecondaryIndexIdentity>,
     pub(super) projector: Arc<dyn SecondaryIndexProjector>,
     pub(super) deferred: bool,
     /// Reads answer without it, by walking the collection. Its tree is built
@@ -256,7 +261,7 @@ impl UnifiedStore {
         identity: SecondaryIndexIdentity,
         projector: Arc<dyn SecondaryIndexProjector>,
     ) -> Result<(), StoreError> {
-        self.register_secondary_index_as(collection, name, identity, projector, false)
+        self.register_secondary_index_as(collection, name, identity, Vec::new(), projector, false)
     }
 
     /// Register an index that statements can do without: one a user declared.
@@ -268,7 +273,24 @@ impl UnifiedStore {
         identity: SecondaryIndexIdentity,
         projector: Arc<dyn SecondaryIndexProjector>,
     ) -> Result<(), StoreError> {
-        self.register_secondary_index_as(collection, name, identity, projector, true)
+        self.register_secondary_index_as(collection, name, identity, Vec::new(), projector, true)
+    }
+
+    /// As [`Self::register_optional_secondary_index`], for an index whose
+    /// identity moved because columns were appended to the collection's
+    /// schema. A tree published under one of `predecessors` holds the same
+    /// key for every row and keeps answering reads; without this, declaring a
+    /// column leaves every index of the collection unread after the next
+    /// restart until a checkpoint completes.
+    pub fn register_optional_secondary_index_after(
+        &self,
+        collection: &str,
+        name: &str,
+        identity: SecondaryIndexIdentity,
+        predecessors: Vec<SecondaryIndexIdentity>,
+        projector: Arc<dyn SecondaryIndexProjector>,
+    ) -> Result<(), StoreError> {
+        self.register_secondary_index_as(collection, name, identity, predecessors, projector, true)
     }
 
     fn register_secondary_index_as(
@@ -276,6 +298,7 @@ impl UnifiedStore {
         collection: &str,
         name: &str,
         identity: SecondaryIndexIdentity,
+        predecessors: Vec<SecondaryIndexIdentity>,
         projector: Arc<dyn SecondaryIndexProjector>,
         optional: bool,
     ) -> Result<(), StoreError> {
@@ -307,6 +330,7 @@ impl UnifiedStore {
             name.to_owned(),
             SecondaryIndexSpec {
                 identity,
+                predecessors,
                 projector,
                 deferred: false,
                 optional,
@@ -344,7 +368,9 @@ impl UnifiedStore {
     }
 
     /// Pin an immutable index only if both the data generation and definition
-    /// still match. A miss requires rebuilding or a correct scan fallback.
+    /// still match, or the tree was published under a definition this one
+    /// declares as a predecessor. A miss requires rebuilding or a correct scan
+    /// fallback.
     /// This is a physical base index: callers must merge the live WAL overlay.
     pub fn secondary_index(
         &self,
@@ -362,8 +388,16 @@ impl UnifiedStore {
             return None;
         }
         let index = generation.secondary.get(name)?;
-        (index.identity == *identity)
-            .then(|| SecondaryIndexRead::with_source(Arc::clone(&index.tree), Arc::clone(data)))
+        let readable = index.identity == *identity
+            || self
+                .secondary_index_specs
+                .read()
+                .get(collection)
+                .and_then(|indices| indices.get(name))
+                .is_some_and(|spec| {
+                    spec.identity == *identity && spec.predecessors.contains(&index.identity)
+                });
+        readable.then(|| SecondaryIndexRead::with_source(Arc::clone(&index.tree), Arc::clone(data)))
     }
 
     /// The next checkpoint publishes the removal. Already-pinned readers keep

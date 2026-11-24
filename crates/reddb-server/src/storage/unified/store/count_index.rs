@@ -418,6 +418,7 @@ impl UnifiedStore {
                 NAME.to_owned(),
                 super::secondary_index::SecondaryIndexSpec {
                     identity: seed.identity.clone(),
+                    predecessors: Vec::new(),
                     projector: seed.projector,
                     deferred: false,
                     optional: false,

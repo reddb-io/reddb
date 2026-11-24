@@ -107,6 +107,30 @@ impl SecondaryIndexProjector for BtreeProjection {
     }
 }
 
+/// The definition a BTREE tree is published under: encoding, uniqueness, the
+/// indexed columns and the collection schema the projection read them with.
+fn ordered_identity(index: &RegisteredIndex, schema: Option<&[String]>) -> SecondaryIndexIdentity {
+    let codec_version =
+        crate::storage::unified::store::secondary_index::runtime_secondary_index_codec_version();
+    let mut digest = Sha256::new();
+    digest.update(match codec_version {
+        2 => b"runtime-btree-current-ordered-v2".as_slice(),
+        _ => b"runtime-btree-current-ordered-v3".as_slice(),
+    });
+    digest.update([u8::from(index.unique), u8::from(schema.is_some())]);
+    for names in [index.columns.as_slice(), schema.unwrap_or(&[])] {
+        digest.update((names.len() as u64).to_le_bytes());
+        for name in names {
+            digest.update((name.len() as u64).to_le_bytes());
+            digest.update(name.as_bytes());
+        }
+    }
+    SecondaryIndexIdentity {
+        codec_version,
+        definition: digest.finalize().into(),
+    }
+}
+
 pub(super) struct RuntimeBtreeIndex {
     runtime: Weak<RuntimeInner>,
     collection: String,
@@ -1063,40 +1087,19 @@ impl RedDBRuntime {
             columns: index.columns.clone(),
             schema,
         });
-        let codec_version =
-            crate::storage::unified::store::secondary_index::runtime_secondary_index_codec_version(
-            );
-        let mut digest = Sha256::new();
-        digest.update(match codec_version {
-            2 => b"runtime-btree-current-ordered-v2".as_slice(),
-            _ => b"runtime-btree-current-ordered-v3".as_slice(),
-        });
-        digest.update([
-            u8::from(index.unique),
-            u8::from(projection.schema.is_some()),
-        ]);
-        for names in [
-            index.columns.as_slice(),
-            projection
-                .schema
-                .as_deref()
-                .map(Vec::as_slice)
-                .unwrap_or(&[]),
-        ] {
-            digest.update((names.len() as u64).to_le_bytes());
-            for name in names {
-                digest.update((name.len() as u64).to_le_bytes());
-                digest.update(name.as_bytes());
-            }
-        }
-        let identity = SecondaryIndexIdentity {
-            codec_version,
-            definition: digest.finalize().into(),
-        };
-        self.db().store().register_optional_secondary_index(
+        let schema = projection.schema.as_deref().map(Vec::as_slice);
+        let identity = ordered_identity(index, schema);
+        // Declaring a column changes the schema and with it the identity; the
+        // tree published before still holds every row's key.
+        let predecessors = super::paged_hash_index::earlier_schemas(schema)
+            .into_iter()
+            .map(|earlier| ordered_identity(index, earlier))
+            .collect();
+        self.db().store().register_optional_secondary_index_after(
             &index.collection,
             &index.name,
             identity.clone(),
+            predecessors,
             projection.clone(),
         )?;
         if index.columns.len() == 1 || index.unique {
