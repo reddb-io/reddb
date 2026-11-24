@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.40.1
+
+### Patch Changes
+
+- [#2969](https://github.com/reddb-io/reddb/pull/2969) [`3521176`](https://github.com/reddb-io/reddb/commit/3521176630213b5293bad921651ddda6d6bba65b) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Declaring a column no longer leaves a table's indexes unread after the next restart. The identity of a HASH or BTREE index includes the collection's declared schema, so `ALTER TABLE … ADD COLUMN` (or declaring a first column on a collection that had none) moved it; the running process kept answering, and after a restart every lookup through the index walked the whole table until a checkpoint republished it. The tree published under the schema as it was before the columns were appended holds the same key for every row and is now read until the next checkpoint publishes the index under its current identity.
+
 ## 1.40.0
 
 ### Minor Changes
