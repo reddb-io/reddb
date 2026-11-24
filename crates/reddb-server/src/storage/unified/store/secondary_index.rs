@@ -380,24 +380,34 @@ impl UnifiedStore {
     ) -> Option<SecondaryIndexRead> {
         let collection = Self::canonical_collection(collection);
         let _publication = self.vault_publication_lock.lock();
-        let trees = self.btree_indices.read();
-        let data = trees.get(collection)?;
-        let keys = self.key_indices.read();
-        let generation = keys.get(collection)?;
-        if !generation.source.ptr_eq(&Arc::downgrade(data)) {
-            return None;
-        }
-        let index = generation.secondary.get(name)?;
-        let readable = index.identity == *identity
+        let (published, tree, data) = {
+            let trees = self.btree_indices.read();
+            let data = trees.get(collection)?;
+            let keys = self.key_indices.read();
+            let generation = keys.get(collection)?;
+            if !generation.source.ptr_eq(&Arc::downgrade(data)) {
+                return None;
+            }
+            let index = generation.secondary.get(name)?;
+            (
+                index.identity.clone(),
+                Arc::clone(&index.tree),
+                Arc::clone(data),
+            )
+        };
+        // The publication lock keeps the registration and the published
+        // generation consistent. The spec table is read on its own, so this
+        // path adds no ordering between it and the generation locks.
+        let readable = published == *identity
             || self
                 .secondary_index_specs
                 .read()
                 .get(collection)
                 .and_then(|indices| indices.get(name))
                 .is_some_and(|spec| {
-                    spec.identity == *identity && spec.predecessors.contains(&index.identity)
+                    spec.identity == *identity && spec.predecessors.contains(&published)
                 });
-        readable.then(|| SecondaryIndexRead::with_source(Arc::clone(&index.tree), Arc::clone(data)))
+        readable.then(|| SecondaryIndexRead::with_source(tree, data))
     }
 
     /// The next checkpoint publishes the removal. Already-pinned readers keep
