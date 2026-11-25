@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.40.3
+
+### Patch Changes
+
+- [#2973](https://github.com/reddb-io/reddb/pull/2973) [`6fa52f3`](https://github.com/reddb-io/reddb/commit/6fa52f3b17d4d9b4de56bd9d6192a361ae8806c3) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Memory accounting no longer waits for segment locks. Every reservation and release samples the resident bytes of all collections, including from inside the callbacks of a scan that already holds a collection's read locks; with a writer queued on one of them the sample parked behind the writer while the writer waited for the scan. The sample now takes the locks only if they are free for it and otherwise reports the last value it measured, so it cannot join a lock cycle or wait behind a long write.
+
 ## 1.40.2
 
 ### Patch Changes
