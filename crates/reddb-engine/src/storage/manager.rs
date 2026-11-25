@@ -318,6 +318,9 @@ pub struct SegmentManager {
     sealed: RwLock<Vec<Arc<RwLock<GrowingSegment>>>>,
     /// Retired sources still owned by readers. Weak handles never prolong payload lifetime.
     retired: RwLock<Vec<Weak<RwLock<GrowingSegment>>>>,
+    /// Payload and resident bytes of the last sample `memory_usage` could
+    /// take without waiting for a lock.
+    memory_sample: (AtomicU64, AtomicU64),
     /// Archived segment IDs (stored externally)
     archived: RwLock<Vec<SegmentId>>,
     /// Entity to segment mapping (for fast lookups by individually-inserted entities).
@@ -379,6 +382,7 @@ impl SegmentManager {
             growing: RwLock::new(None),
             sealed: RwLock::new(Vec::new()),
             retired: RwLock::new(Vec::new()),
+            memory_sample: (AtomicU64::new(0), AtomicU64::new(0)),
             archived: RwLock::new(Vec::new()),
             entity_segment: RwLock::new(HashMap::new()),
             live_row_version_hints: RwLock::new(HashMap::new()),
@@ -519,11 +523,30 @@ impl SegmentManager {
     /// Sample payload and resident bytes under the publication lock order:
     /// consolidation, growing, sealed, retired. No entity scan or strong handle
     /// is retained beyond this call; expired weak entries are pruned in place.
+    ///
+    /// Memory accounting calls this wherever a statement reserves or releases
+    /// memory, including from inside the callbacks of a scan that holds this
+    /// manager's read guards, and it visits every collection. It therefore
+    /// never waits: a reader that already holds a lock must not park behind a
+    /// writer queued on it, and a writer must not wait for itself. When a lock
+    /// is not available it reports the last sample it could take.
     fn memory_usage(&self) -> (u64, u64) {
-        let consolidation = self.consolidation.read();
-        let growing = self.growing.read();
-        let sealed = self.sealed.read();
-        let mut retired = self.retired.write();
+        if let Some((payload, resident)) = self.try_memory_usage() {
+            self.memory_sample.0.store(payload, Ordering::Relaxed);
+            self.memory_sample.1.store(resident, Ordering::Relaxed);
+            return (payload, resident);
+        }
+        (
+            self.memory_sample.0.load(Ordering::Relaxed),
+            self.memory_sample.1.load(Ordering::Relaxed),
+        )
+    }
+
+    fn try_memory_usage(&self) -> Option<(u64, u64)> {
+        let consolidation = self.consolidation.try_read_recursive()?;
+        let growing = self.growing.try_read_recursive()?;
+        let sealed = self.sealed.try_read_recursive()?;
+        let mut retired = self.retired.try_write()?;
         let mut payload = 0u64;
         let mut resident = 0u64;
         {
@@ -532,16 +555,23 @@ impl SegmentManager {
                 resident = resident.saturating_add(segment.resident_bytes());
             };
             for segment in growing.iter().chain(sealed.iter()) {
-                add(&segment.read());
+                add(&*segment.try_read_recursive()?);
             }
+            let mut busy = false;
             retired.retain(|source| {
                 if let Some(source) = source.upgrade() {
-                    add(&source.read());
+                    match source.try_read_recursive() {
+                        Some(source) => add(&source),
+                        None => busy = true,
+                    }
                     true
                 } else {
                     false
                 }
             });
+            if busy {
+                return None;
+            }
             if let Some(run) = consolidation.as_ref() {
                 add(&run.merged);
             }
@@ -562,10 +592,10 @@ impl SegmentManager {
                 );
             }
         }
-        (
+        Some((
             payload.saturating_add(bookkeeping),
             resident.saturating_add(bookkeeping),
-        )
+        ))
     }
 
     /// Bytes a pressure-triggered consolidation could plausibly return.
@@ -4588,6 +4618,81 @@ mod tests {
             writer.join().unwrap();
             assert!(manager.get_metadata(id).unwrap().has("os"));
         }
+    }
+
+    /// Memory accounting samples a manager from inside its own scan callbacks
+    /// and while one of its segments is being written.
+    #[test]
+    fn memory_sample_never_waits_for_a_segment_lock() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let manager = Arc::new(SegmentManager::new("test"));
+        let id = manager
+            .insert(UnifiedEntity::table_row(
+                manager.next_entity_id(),
+                "hosts",
+                1,
+                vec![Value::text("192.168.1.1".to_string())],
+            ))
+            .unwrap();
+        let settled = manager.resident_bytes();
+        assert!(settled > 0);
+
+        // Inside a scan, with a writer queued for the visited segment.
+        let (visiting, writer_may_queue) = mpsc::channel();
+        let (done, finished) = mpsc::channel();
+        let scan = {
+            let manager = Arc::clone(&manager);
+            std::thread::spawn(move || {
+                let mut sampled = 0;
+                manager.for_each_entity(|_| {
+                    visiting.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(300));
+                    sampled = manager.resident_bytes();
+                    true
+                });
+                done.send(sampled).unwrap();
+            })
+        };
+        writer_may_queue.recv().unwrap();
+        let writer = {
+            let manager = Arc::clone(&manager);
+            std::thread::spawn(move || {
+                let mut meta = Metadata::new();
+                meta.set("os", MetadataValue::String("bsd".to_string()));
+                manager.set_metadata(id, meta).unwrap();
+            })
+        };
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(20)),
+            Ok(settled),
+            "the sample taken inside the scan and the queued writer wait for each other"
+        );
+        scan.join().unwrap();
+        writer.join().unwrap();
+
+        // While another thread holds the segment exclusively: the last sample.
+        let last = manager.resident_bytes();
+        let segment = manager.growing.read().as_ref().map(Arc::clone).unwrap();
+        let held = segment.write();
+        let (sampled, result) = mpsc::channel();
+        let sampler = {
+            let manager = Arc::clone(&manager);
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                sampled
+                    .send((manager.resident_bytes(), started.elapsed()))
+                    .unwrap();
+            })
+        };
+        let (bytes, waited) = result
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the sample waited for the segment's writer");
+        drop(held);
+        sampler.join().unwrap();
+        assert_eq!(bytes, last);
+        assert!(waited < Duration::from_secs(5), "waited {waited:?}");
     }
 
     #[test]
