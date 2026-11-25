@@ -1717,39 +1717,48 @@ impl SegmentManager {
     }
 
     /// Get metadata for an entity
+    ///
+    /// Callbacks of the entity scans call this for the row they are visiting,
+    /// on the thread that already holds the read guards the scan took. A plain
+    /// `read()` parks behind any writer that queued in between, while that
+    /// writer waits for the scan's guards: neither ever proceeds. These are
+    /// point reads, so they take the locks without yielding to a queued writer.
     pub fn get_metadata(&self, id: EntityId) -> Option<Metadata> {
         // Fast path: probe growing segment directly (no entity_segment needed).
-        if let Some(growing_arc) = self.growing.read().as_ref() {
-            let growing = growing_arc.read();
+        if let Some(growing_arc) = self.growing.read_recursive().as_ref() {
+            let growing = growing_arc.read_recursive();
             if growing.contains(id) {
                 return growing.get_metadata(id);
             }
         }
 
         // Fallback: entity_segment map (for pre-existing or sealed entities)
-        let segment_id = self.entity_segment.read().get(&id).copied();
+        let segment_id = self.entity_segment.read_recursive().get(&id).copied();
 
+        let sealed = self.sealed.read_recursive();
         if let Some(seg_id) = segment_id {
-            if let Some(growing_arc) = self.growing.read().as_ref() {
-                let growing = growing_arc.read();
+            if let Some(growing_arc) = self.growing.read_recursive().as_ref() {
+                let growing = growing_arc.read_recursive();
                 if growing.id() == seg_id {
                     return growing.get_metadata(id);
                 }
             }
 
-            let sealed = self.sealed.read();
             for segment in sealed.iter() {
+                let segment = segment.read_recursive();
                 if segment.id() == seg_id {
                     return segment.get_metadata(id);
                 }
             }
         }
 
-        if let Some(segment_arc) = self.find_sealed_segment_arc(id) {
-            return segment_arc.read().get_metadata(id);
-        }
-
-        None
+        sealed
+            .iter()
+            .find_map(|segment| {
+                let segment = segment.read_recursive();
+                segment.contains(id).then(|| segment.get_metadata(id))
+            })
+            .flatten()
     }
 
     /// Set metadata for an entity
@@ -4519,6 +4528,66 @@ mod tests {
         assert!(manager.get(id).is_some());
         assert!(manager.delete(id).unwrap());
         assert!(manager.get(id).is_none());
+    }
+
+    /// A scan callback reads the metadata of the row it is visiting while a
+    /// writer queues for the same segment.
+    #[test]
+    fn metadata_read_inside_a_scan_does_not_wait_for_a_queued_writer() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        for sealed in [false, true] {
+            let manager = Arc::new(SegmentManager::new("test"));
+            let id = manager
+                .insert(UnifiedEntity::table_row(
+                    manager.next_entity_id(),
+                    "hosts",
+                    1,
+                    vec![Value::text("192.168.1.1".to_string())],
+                ))
+                .unwrap();
+            let mut meta = Metadata::new();
+            meta.set("os", MetadataValue::String("linux".to_string()));
+            manager.set_metadata(id, meta).unwrap();
+            if sealed {
+                manager.force_seal().unwrap();
+            }
+
+            let (visiting, writer_may_queue) = mpsc::channel();
+            let (done, finished) = mpsc::channel();
+            let scan = {
+                let manager = Arc::clone(&manager);
+                std::thread::spawn(move || {
+                    let mut seen = None;
+                    manager.for_each_entity(|entity| {
+                        visiting.send(()).unwrap();
+                        // Long enough for the writer to queue behind this scan.
+                        std::thread::sleep(Duration::from_millis(300));
+                        seen = manager.get_metadata(entity.id);
+                        true
+                    });
+                    done.send(seen.is_some_and(|meta| meta.has("os"))).unwrap();
+                })
+            };
+            writer_may_queue.recv().unwrap();
+            let writer = {
+                let manager = Arc::clone(&manager);
+                std::thread::spawn(move || {
+                    let mut meta = Metadata::new();
+                    meta.set("os", MetadataValue::String("bsd".to_string()));
+                    manager.set_metadata(id, meta).unwrap();
+                })
+            };
+            assert_eq!(
+                finished.recv_timeout(Duration::from_secs(20)),
+                Ok(true),
+                "sealed={sealed}: the scan callback and the queued writer wait for each other"
+            );
+            scan.join().unwrap();
+            writer.join().unwrap();
+            assert!(manager.get_metadata(id).unwrap().has("os"));
+        }
     }
 
     #[test]
