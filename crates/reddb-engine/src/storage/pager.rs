@@ -207,8 +207,18 @@ pub trait WalBarrier {
         Ok(())
     }
 
-    /// Called before pages are removed from allocator ownership.
+    /// Called before pages are removed from allocator ownership. A host may
+    /// only queue the record here: `flush_page_ownership` is its durability
+    /// point.
     fn reserve_pages(&self, _start: u32, _count: u32) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Called before any page image or allocator state reaches the file. Must
+    /// make every reservation recorded so far durable or return an error, so a
+    /// reserved page is never written, and the header never names it, ahead of
+    /// its ownership record.
+    fn flush_page_ownership(&self) -> std::io::Result<()> {
         Ok(())
     }
 
@@ -512,6 +522,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
+        self.record_ownership(|wal| wal.flush_page_ownership())?;
         let mut file = self.file_lock()?;
         self.ensure_writeback_available()?;
         Ok(pager_io::write_superblock_slot(
@@ -893,6 +904,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
+        self.record_ownership(|wal| wal.flush_page_ownership())?;
         let mut file = self.file_lock()?;
         self.ensure_writeback_available()?;
         if let Some(batch) = self
@@ -1914,6 +1926,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }
+        self.record_ownership(|wal| wal.flush_page_ownership())?;
         // Keep the file locked through staging, home writes and clearing so
         // another page writer cannot interleave with a protected batch.
         let _publication = self
