@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.40.4
+
+### Patch Changes
+
+- [#2977](https://github.com/reddb-io/reddb/pull/2977) [`7adb726`](https://github.com/reddb-io/reddb/commit/7adb726f76499823e6030fd13489a89bf5ba20b0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Checkpoints no longer fill rebuilt indexes one posting at a time: the key index and secondary indexes are loaded from sorted runs, and page reservations and captured page images are made durable once before the first page reaches the file instead of once per page. A checkpoint that took 97 s on a 120k-row indexed table takes 10 s, and an incremental checkpoint about half as long.
+
 ## 1.40.3
 
 ### Patch Changes
