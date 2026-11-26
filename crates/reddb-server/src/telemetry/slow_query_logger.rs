@@ -198,23 +198,35 @@ impl SlowQueryLogger {
         sql_redacted: String,
         scope: &EffectiveScope,
     ) {
+        if self.should_record(duration_ms) {
+            self.emit(kind, duration_ms, sql_redacted, scope);
+        }
+    }
+
+    /// Build the log payload only for statements that pass both gates.
+    pub(crate) fn record_lazy(
+        &self,
+        kind: QueryKind,
+        duration_ms: u64,
+        details: impl FnOnce() -> (String, EffectiveScope),
+    ) {
+        if self.should_record(duration_ms) {
+            let (sql_redacted, scope) = details();
+            self.emit(kind, duration_ms, sql_redacted, &scope);
+        }
+    }
+
+    fn should_record(&self, duration_ms: u64) -> bool {
         // Hot path: threshold gate — single relaxed atomic load.
         if duration_ms < self.threshold_ms.load(Ordering::Relaxed) {
-            return;
+            return false;
         }
 
         // Sampling: deterministic round-robin counter.
         // `above_count % 100 < sample_pct` gives exactly sample_pct% over
         // long runs without any floating-point or RNG overhead.
         let pct = u64::from(self.sample_pct.load(Ordering::Relaxed));
-        if pct < 100 {
-            let n = self.above_count.fetch_add(1, Ordering::Relaxed);
-            if (n % 100) >= pct {
-                return;
-            }
-        }
-
-        self.emit(kind, duration_ms, sql_redacted, scope);
+        pct == 100 || self.above_count.fetch_add(1, Ordering::Relaxed) % 100 < pct
     }
 
     fn emit(
@@ -394,6 +406,18 @@ mod tests {
     // -----------------------------------------------------------------------
     // Below-threshold: zero writes, fast
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn lazy_slow_log_skips_details_for_filtered_queries() {
+        let dir = tmp_dir();
+        let log = logger(&dir, 10, 1);
+        let store = super::super::slow_query_store::SlowQueryStore::new(4);
+        log.attach_store(Arc::clone(&store));
+        log.record_lazy(QueryKind::Select, 9, || panic!("below threshold"));
+        log.record_lazy(QueryKind::Select, 10, || ("SELECT ?".into(), empty_scope()));
+        log.record_lazy(QueryKind::Select, 11, || panic!("sampled out"));
+        assert_eq!(store.len(), 1);
+    }
 
     #[test]
     fn below_threshold_no_file_writes() {

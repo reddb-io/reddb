@@ -394,37 +394,27 @@ impl RedDBRuntime {
             Ok(value)
         });
         self.finish_collection_description_transaction(&result);
-        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let elapsed = started.elapsed();
 
-        // Build EffectiveScope from the same thread-locals frame-build
-        // consults — keeps the slow-log row consistent with the audit /
-        // RLS view of "this statement". `ai_scope()` is the canonical
-        // builder.
-        let scope = self.ai_scope();
-        let kind = match result
-            .as_ref()
-            .map(|r| r.statement_type)
-            .unwrap_or("select")
-        {
-            "select" => crate::telemetry::slow_query_logger::QueryKind::Select,
-            "insert" => crate::telemetry::slow_query_logger::QueryKind::Insert,
-            "update" => crate::telemetry::slow_query_logger::QueryKind::Update,
-            "delete" => crate::telemetry::slow_query_logger::QueryKind::Delete,
+        let kind = match result.as_ref().map(|r| r.statement_type) {
+            Ok("select") => crate::telemetry::slow_query_logger::QueryKind::Select,
+            Ok("insert") => crate::telemetry::slow_query_logger::QueryKind::Insert,
+            Ok("update") => crate::telemetry::slow_query_logger::QueryKind::Update,
+            Ok("delete") => crate::telemetry::slow_query_logger::QueryKind::Delete,
             _ => crate::telemetry::slow_query_logger::QueryKind::Internal,
         };
-        let logged_query = redact_sql_for_slow_log(query);
         self.inner
             .slow_query_logger
-            .record(kind, elapsed_ms, logged_query, &scope);
+            .record_lazy(kind, elapsed.as_millis() as u64, || {
+                // Build the same scope the statement frame uses for RLS.
+                (redact_sql_for_slow_log(query), self.ai_scope())
+            });
 
         // Issue #1241 — record latency into the bounded per-`kind`
-        // histogram substrate (always, not only above the slow-query
-        // threshold). `started.elapsed()` is re-read here for sub-ms
-        // resolution; the cost is one `Instant::now` plus a handful of
-        // relaxed atomic adds (see `query_latency_telemetry` docs).
+        // histogram for all samples, excluding slow-log preparation.
         self.inner
             .query_latency_telemetry
-            .observe(kind, started.elapsed().as_secs_f64());
+            .observe(kind, elapsed.as_secs_f64());
 
         // Issue #1245 — decrement the active-query gauge. One relaxed
         // atomic sub; the matching increment happened at execute_query /
@@ -4016,6 +4006,40 @@ fn confine_copy_from_path(path: &str) -> RedDBResult<()> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod query_lifecycle_telemetry_tests {
+    use super::*;
+
+    #[test]
+    fn failed_queries_do_not_enter_the_select_histogram() {
+        let runtime = RedDBRuntime::in_memory().expect("runtime");
+        runtime
+            .execute_query("CREATE TABLE latency_probe (id INT, n INT)")
+            .expect("create probe table");
+        let count = |kind| {
+            runtime
+                .query_latency_snapshot()
+                .into_iter()
+                .find(|histogram| histogram.kind == kind)
+                .map_or(0, |histogram| histogram.count)
+        };
+        let before_select = count("select");
+        let before_internal = count("internal");
+
+        assert!(runtime.execute_query("INSERT INTO").is_err());
+        assert!(runtime
+            .execute_query_with_params("UPDATE latency_probe SET n = $2", &[Value::Integer(1)])
+            .is_err());
+        assert_eq!(count("select"), before_select);
+        assert_eq!(count("internal"), before_internal + 2);
+
+        runtime
+            .execute_query("SELECT n FROM latency_probe")
+            .expect("select probe table");
+        assert_eq!(count("select"), before_select + 1);
+    }
 }
 
 #[cfg(test)]
