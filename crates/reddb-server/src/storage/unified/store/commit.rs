@@ -830,7 +830,13 @@ impl StoreCommitCoordinator {
         let (state_lock, cond) = &*self.state;
         let mut state = state_lock.lock();
         state.pending_target_lsn = state.pending_target_lsn.max(target);
-        state.pending_statements = state.pending_statements.saturating_add(1);
+        // The pager holds the mutation fence while waiting for these
+        // intents. Drain the already queued records without another
+        // group-formation window, just as for a ready publication.
+        state.pending_statements = state
+            .pending_statements
+            .saturating_add(1)
+            .max(self.config.max_statements.max(1));
         state.pending_wal_bytes = state.pending_wal_bytes.saturating_add(length);
         state.first_pending_at.get_or_insert_with(Instant::now);
         cond.notify_all();
@@ -3145,6 +3151,50 @@ mod tests {
                 "reopen must rediscover ownership records"
             );
             assert_eq!(std::fs::read(&path).expect("preserved WAL"), before);
+        }
+    }
+
+    #[test]
+    fn ownership_intents_request_immediate_flush_and_wait_for_sync() {
+        use reddb_file::page_ownership_journal::PageOwnershipRecord;
+
+        for mode in [DurabilityMode::WalDurableGrouped, DurabilityMode::Async] {
+            let directory = tempfile::tempdir().expect("temporary WAL");
+            let options = GroupCommitOptions {
+                max_statements: 8,
+                window_ms: 1000,
+                ..Default::default()
+            };
+            let coordinator = Arc::new(
+                StoreCommitCoordinator::open(directory.path().join("ownership"), mode, options)
+                    .expect("open coordinator"),
+            );
+            let wal = coordinator.wal.lock();
+            let writer = {
+                let coordinator = Arc::clone(&coordinator);
+                std::thread::spawn(move || {
+                    coordinator
+                        .append_durable_page_ownership(PageOwnershipRecord::Begin { epoch: 1 })
+                })
+            };
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let state = coordinator.state.0.lock();
+                if state.pending_target_lsn > state.durable_lsn {
+                    assert_eq!(state.pending_statements, options.max_statements);
+                    break;
+                }
+                drop(state);
+                assert!(
+                    Instant::now() < deadline,
+                    "ownership intent did not enqueue"
+                );
+                std::thread::yield_now();
+            }
+            assert!(!writer.is_finished(), "must wait for WAL sync");
+            drop(wal);
+            writer.join().expect("writer").expect("durable intent");
+            assert_eq!(coordinator.fsync_count(), 1);
         }
     }
 
