@@ -53,6 +53,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         }
         let result = (|| {
             self.flush()?;
+            self.wal.flush_page_ownership().map_err(PagerError::Io)?;
             let mut file = self.file_lock()?;
             let batch = self
                 .staged_pages

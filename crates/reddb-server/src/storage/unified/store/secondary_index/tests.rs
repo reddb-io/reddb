@@ -778,3 +778,46 @@ fn secondary_constant_live_data_churn_reuses_pages() {
         }
     }
 }
+
+#[test]
+fn secondary_rebuild_larger_than_one_run_keeps_every_posting_in_key_order() {
+    let directory = tempfile::tempdir().expect("fixture");
+    let path = directory.path().join("runs.rdb");
+    let visits = Arc::new(AtomicUsize::new(0));
+    let store = UnifiedStore::open_with_config(&path, config()).expect("open");
+    store.create_collection("rows").expect("collection");
+    // The fixture's memory limit holds about twelve thousand postings a run:
+    // the first is loaded sorted, the rest land among it.
+    let rows = 30_000;
+    for id in 1..=rows {
+        insert(&store, id);
+    }
+    register(&store, &visits, usize::MAX);
+    store.persist().expect("checkpoint");
+    let expected: Vec<(u64, u64)> = (0..3)
+        .flat_map(|key| {
+            (1..=rows)
+                .filter(move |id| id % 3 == key)
+                .map(move |id| (key, id))
+        })
+        .collect();
+    assert_eq!(
+        postings(
+            &store
+                .secondary_index("rows", "by_remainder", &identity())
+                .expect("published index")
+        ),
+        expected
+    );
+    drop(store);
+    let store = UnifiedStore::open_with_config(&path, config()).expect("reopen");
+    register(&store, &visits, usize::MAX);
+    assert_eq!(
+        postings(
+            &store
+                .secondary_index("rows", "by_remainder", &identity())
+                .expect("reopened index")
+        ),
+        expected
+    );
+}

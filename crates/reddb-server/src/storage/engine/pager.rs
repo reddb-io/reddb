@@ -254,6 +254,11 @@ impl reddb_file::VfsFile for NativePagerFile {
 /// Durable ownership callbacks installed only while a fenced epoch is active.
 pub(crate) trait PageOwnershipRecorder: Send + Sync {
     fn reserve_pages(&self, start: u32, count: u32) -> std::io::Result<()>;
+    /// Makes every reservation recorded so far durable. A recorder that
+    /// records them durably has nothing to do.
+    fn flush_page_ownership(&self) -> std::io::Result<()> {
+        Ok(())
+    }
     fn detach_free_pages(&self, pages: &[u32]) -> std::io::Result<()>;
     fn retire_pages(&self, pages: &[u32]) -> std::io::Result<()>;
     fn needs_page_image(&self, _page_id: u32) -> std::io::Result<bool> {
@@ -343,6 +348,13 @@ impl WalBarrier for NativeWalBarrier {
     fn reserve_pages(&self, start: u32, count: u32) -> std::io::Result<()> {
         if let Some(recorder) = self.ownership_recorder()? {
             recorder.reserve_pages(start, count)?;
+        }
+        Ok(())
+    }
+
+    fn flush_page_ownership(&self) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.flush_page_ownership()?;
         }
         Ok(())
     }

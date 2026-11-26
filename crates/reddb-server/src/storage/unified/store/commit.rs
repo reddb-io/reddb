@@ -364,6 +364,10 @@ pub(crate) struct StoreCommitCoordinator {
     /// commits go through `force_sync` which also bumps this.
     fsync_count: Arc<AtomicU64>,
     wal_generation: AtomicU64,
+    /// WAL generation and end LSN of reservations and page images queued
+    /// without waiting for durability. The pager flushes them before any page
+    /// or allocator state reaches the file.
+    deferred_ownership: parking_lot::Mutex<Option<(u64, u64)>>,
     /// Bytes admitted by the ownership recorder. Lets a quiet checkpoint
     /// truncate directly even though it appended its own page journal.
     ownership_bytes: AtomicU64,
@@ -447,7 +451,10 @@ impl crate::storage::engine::pager::PageOwnershipRecorder for StoreOwnershipReco
             crate::storage::wal::record::WAL_DEFAULT_TERM,
             &mut bytes,
         )?;
-        self.coordinator.append_durable_ownership_bytes(bytes)?;
+        // The old image only has to be durable before the page is overwritten
+        // in the file, and `flush_page_ownership` precedes every such write.
+        // Waiting here cost one sync per page a checkpoint touched.
+        self.coordinator.append_deferred_ownership_bytes(bytes)?;
         images.captured.insert(page_id);
         Ok(())
     }
@@ -466,12 +473,19 @@ impl crate::storage::engine::pager::PageOwnershipRecorder for StoreOwnershipReco
                     page_id,
                 })
                 .collect();
+            // Queued, not awaited: a tree build reserves a page per leaf and
+            // waiting for each one made the reservation the cost of the build.
+            // `flush_page_ownership` is the durability point.
             self.coordinator
-                .append_durable_page_ownership_batch(&records)?;
+                .append_deferred_page_ownership_batch(&records)?;
             self.images.lock().reserved.insert_range(next..chunk_end);
             next = chunk_end;
         }
         Ok(())
+    }
+
+    fn flush_page_ownership(&self) -> io::Result<()> {
+        self.coordinator.flush_deferred_page_ownership()
     }
 
     fn detach_free_pages(&self, pages: &[u32]) -> io::Result<()> {
@@ -552,6 +566,7 @@ impl StoreCommitCoordinator {
             state,
             fsync_count,
             wal_generation: AtomicU64::new(0),
+            deferred_ownership: parking_lot::Mutex::new(None),
             ownership_bytes: AtomicU64::new(0),
             ownership_last_epoch: AtomicU64::new(0),
             ownership_wal_state: AtomicU8::new(0),
@@ -810,6 +825,89 @@ impl StoreCommitCoordinator {
                 .fetch_max(record.epoch(), Ordering::AcqRel);
         }
         self.append_durable_ownership_bytes(bytes)
+    }
+
+    /// Queue reservations behind the same ordered log without waiting for
+    /// them. Anything that is appended durably afterwards, and
+    /// `flush_deferred_page_ownership`, makes them durable first.
+    pub(super) fn append_deferred_page_ownership_batch(
+        &self,
+        records: &[reddb_file::page_ownership_journal::PageOwnershipRecord],
+    ) -> io::Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut bytes = Vec::new();
+        for &record in records {
+            reddb_file::page_ownership_journal::encode(record)?;
+            WalRecord::PageOwnership { record }.encode_into(&mut bytes);
+        }
+        for record in records {
+            self.ownership_last_epoch
+                .fetch_max(record.epoch(), Ordering::AcqRel);
+        }
+        self.append_deferred_ownership_bytes(bytes)
+    }
+
+    /// Queue ownership bytes, in log order, without waiting for them.
+    fn append_deferred_ownership_bytes(&self, bytes: Vec<u8>) -> io::Result<()> {
+        self.check_write_error()?;
+        let _epoch = self.queue.epoch.read();
+        self.ownership_wal_state.store(2, Ordering::Release);
+        let length = bytes.len() as u64;
+        let target = if matches!(self.mode, DurabilityMode::Strict) {
+            self.wal.lock().append_bytes(&bytes)? + length
+        } else {
+            let target = self.queue.enqueue(bytes);
+            let (state_lock, cond) = &*self.state;
+            let mut state = state_lock.lock();
+            state.pending_target_lsn = state.pending_target_lsn.max(target);
+            state.pending_statements = state.pending_statements.saturating_add(1);
+            state.pending_wal_bytes = state.pending_wal_bytes.saturating_add(length);
+            state.first_pending_at.get_or_insert_with(Instant::now);
+            cond.notify_all();
+            target
+        };
+        self.ownership_bytes.fetch_add(length, Ordering::Relaxed);
+        let generation = self.wal_generation.load(Ordering::Acquire);
+        let mut deferred = self.deferred_ownership.lock();
+        *deferred = Some(match *deferred {
+            Some((queued, lsn)) if queued == generation => (generation, lsn.max(target)),
+            _ => (generation, target),
+        });
+        Ok(())
+    }
+
+    /// Make every queued reservation and page image durable. A WAL that was
+    /// reset since they were queued had already made them durable: an epoch is
+    /// finished, durably, before its log can be released.
+    pub(super) fn flush_deferred_page_ownership(&self) -> io::Result<()> {
+        let Some((generation, target)) = *self.deferred_ownership.lock() else {
+            return Ok(());
+        };
+        if generation == self.wal_generation.load(Ordering::Acquire) {
+            if matches!(self.mode, DurabilityMode::Strict) {
+                self.sync_wal(Some(target))?;
+            } else {
+                self.check_write_error()?;
+                let _epoch = self.queue.epoch.read_recursive();
+                let (state_lock, cond) = &*self.state;
+                let mut state = state_lock.lock();
+                while state.durable_lsn < target
+                    && generation == self.wal_generation.load(Ordering::Acquire)
+                {
+                    if let Some(error) = state.last_error.clone() {
+                        return Err(io::Error::other(error));
+                    }
+                    cond.wait(&mut state);
+                }
+            }
+        }
+        let mut deferred = self.deferred_ownership.lock();
+        if *deferred == Some((generation, target)) {
+            *deferred = None;
+        }
+        Ok(())
     }
 
     fn append_durable_ownership_bytes(&self, bytes: Vec<u8>) -> io::Result<()> {
@@ -2897,6 +2995,100 @@ mod tests {
             coordinator.truncate().is_err(),
             "ownership WAL remains protected"
         );
+    }
+
+    #[test]
+    fn reservations_and_page_images_are_queued_and_durable_before_a_page_reaches_the_file() {
+        use reddb_file::page_ownership_journal::PageOwnershipRecord;
+
+        for mode in [DurabilityMode::Strict, DurabilityMode::WalDurableGrouped] {
+            let directory = tempfile::tempdir().expect("temporary store");
+            let path = directory.path().join("data.rdb");
+            let wal_path = reddb_file::layout::unified_wal_path(&path);
+            let pager = crate::storage::engine::Pager::open(&path, Default::default())
+                .expect("open native pager");
+            let coordinator = Arc::new(
+                StoreCommitCoordinator::open(&wal_path, mode, GroupCommitOptions::default())
+                    .expect("open WAL"),
+            );
+            // Pages of an earlier generation: overwriting one needs its image.
+            let published: Vec<_> = (0..8)
+                .map(|_| {
+                    pager
+                        .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+                        .expect("allocate")
+                })
+                .collect();
+            pager.flush().expect("publish earlier pages");
+            let recorder = Arc::new(
+                StoreOwnershipRecorder::begin(Arc::clone(&coordinator), 7).expect("begin epoch"),
+            );
+            pager
+                .install_ownership_recorder(recorder)
+                .expect("install recorder");
+            let syncs = coordinator.fsync_count();
+            for page in &published {
+                pager
+                    .write_page(page.page_id(), page.clone())
+                    .expect("overwrite");
+            }
+            let pages: Vec<u32> = (0..48)
+                .map(|_| {
+                    pager
+                        .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+                        .expect("allocate")
+                        .page_id()
+                })
+                .collect();
+            assert!(
+                coordinator.deferred_ownership.lock().is_some(),
+                "{mode:?}: reservations were not queued"
+            );
+            if mode == DurabilityMode::Strict {
+                assert_eq!(
+                    coordinator.fsync_count(),
+                    syncs,
+                    "a reservation or a page image waited for its own sync"
+                );
+            }
+
+            // The first page to reach the file takes every reservation with it.
+            pager.flush().expect("flush");
+            assert!(
+                coordinator.deferred_ownership.lock().is_none(),
+                "{mode:?}: a page reached the file ahead of its reservation"
+            );
+            let mut images = Vec::new();
+            let reserved: Vec<u32> = WalReader::open(&wal_path)
+                .expect("read WAL")
+                .iter()
+                .filter_map(|item| match item.expect("WAL record").1 {
+                    WalRecord::PageOwnership {
+                        record: PageOwnershipRecord::Reserve { epoch: 7, page_id },
+                    } => Some(page_id),
+                    WalRecord::FullPageImage { page_id, .. } => {
+                        images.push(page_id);
+                        None
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(reserved, pages, "{mode:?}");
+            assert_eq!(
+                images,
+                published
+                    .iter()
+                    .map(|page| page.page_id())
+                    .collect::<Vec<_>>(),
+                "{mode:?}"
+            );
+            if mode == DurabilityMode::Strict {
+                assert!(
+                    coordinator.fsync_count() - syncs < pages.len() as u64 / 4,
+                    "the reservations and images were not flushed together"
+                );
+            }
+        }
     }
 
     #[test]
