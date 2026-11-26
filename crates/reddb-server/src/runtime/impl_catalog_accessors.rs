@@ -14,6 +14,15 @@ fn runtime_pool_lock(runtime: &RedDBRuntime) -> std::sync::MutexGuard<'_, PoolSt
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn checkpoint_phase(started: std::time::Instant, phase: &'static str) {
+    tracing::debug!(
+        target: "reddb::checkpoint",
+        phase,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "checkpoint progress"
+    );
+}
+
 impl RedDBRuntime {
     pub fn acquire(&self) -> RedDBResult<RuntimeConnection> {
         self.acquire_connection(true)
@@ -82,12 +91,14 @@ impl RedDBRuntime {
 
     pub(super) fn checkpoint_local(&self) -> RedDBResult<()> {
         let started = std::time::Instant::now();
+        checkpoint_phase(started, "seal_hypertable_chunks");
         self.seal_hypertable_chunks_for_checkpoint(
             self.inner.checkpoint_columnar_emission_budget_chunks,
         )?;
         let store = self.inner.db.store();
         let staging_budget =
             (self.memory_accounting().budget().resolved_bytes / 16).min(32 * 1024 * 1024) as usize;
+        checkpoint_phase(started, "prepare_primary");
         let (prepared, _reservation) = match self.try_reserve_query_buffer(staging_budget) {
             Some(guard) => match store.prepare_paced_primary(staging_budget)? {
                 Some(prepared) => (Some(prepared), Some(guard)),
@@ -95,13 +106,18 @@ impl RedDBRuntime {
             },
             None => (None, None),
         };
+        checkpoint_phase(started, "wait_for_publication");
         let publication = store.vault_publication_lock.lock();
+        checkpoint_phase(started, "snapshot_indexes");
         let btree_checkpoint = self.index_store_ref().paged_btree_checkpoint();
         // Collections created since startup need the compact visibility
         // inventory before their first resident-to-disk publication too.
+        checkpoint_phase(started, "prepare_paged_counts");
         self.prepare_paged_counts()?;
+        checkpoint_phase(started, "persist_probabilistic_snapshots");
         self.persist_probabilistic_snapshots()?;
         let checkpoint_lsn = self.replication_commit_lsn();
+        checkpoint_phase(started, "persist_data");
         self.inner
             .db
             .flush_local_after_runtime_snapshots(prepared.as_ref(), || {
@@ -110,6 +126,7 @@ impl RedDBRuntime {
                 self.inner.probabilistic.replayed_names.lock().clear();
                 parking_lot::ReentrantMutexGuard::unlock_fair(publication);
                 drop(retired_btrees);
+                checkpoint_phase(started, "publish_catalog");
                 #[cfg(test)]
                 checkpoint_cut_test::after_data_cut();
             })
@@ -134,6 +151,7 @@ impl RedDBRuntime {
         self.inner
             .checkpoint_projection_stats
             .record_checkpoint(checkpoint_lsn, started.elapsed().as_millis() as u64);
+        checkpoint_phase(started, "complete");
         Ok(())
     }
 
