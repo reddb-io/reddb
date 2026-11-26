@@ -484,13 +484,15 @@ impl UnifiedStore {
         let source = PagedCollection::new(Arc::clone(data));
         let mut cursor = source.scan()?;
         let mut key = [0; SECONDARY_KEY_BYTES_MAX];
+        let run_bytes = (limit_bytes / 8).min(POSTING_RUNS_BYTES_MAX) / builds.len();
+        let mut runs: Vec<PostingRun> = builds.iter().map(|_| PostingRun::default()).collect();
         while let Some(record) = cursor.next_record(limit_bytes)? {
             let (entity, _) = record.decode_with_budget(self.format_version(), limit_bytes)?;
             #[cfg(test)]
             if checkpoint_skips_secondary_index_entity(collection, entity.id.raw()) {
                 continue;
             }
-            for (_, spec, tree) in &builds {
+            for ((_, spec, tree), run) in builds.iter().zip(&mut runs) {
                 let Some(length) = spec.projector.project(&entity, &mut key)? else {
                     continue;
                 };
@@ -502,9 +504,14 @@ impl UnifiedStore {
                 let mut posting = [0; SECONDARY_KEY_BYTES_MAX + 8];
                 posting[..length].copy_from_slice(&key[..length]);
                 posting[length..length + 8].copy_from_slice(&entity.id.raw().to_be_bytes());
-                tree.insert(&posting[..length + 8], &[])
-                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+                run.push(&posting[..length + 8]);
+                if run.bytes() >= run_bytes {
+                    run.load(tree)?;
+                }
             }
+        }
+        for ((_, _, tree), run) in builds.iter().zip(&mut runs) {
+            run.load(tree)?;
         }
         for (name, spec, tree) in builds {
             next.insert(
@@ -516,6 +523,64 @@ impl UnifiedStore {
             );
         }
         Ok(next)
+    }
+}
+
+/// Postings buffered for every index a checkpoint rebuilds, in total.
+pub(super) const POSTING_RUNS_BYTES_MAX: usize = 64 * 1024 * 1024;
+
+/// Postings of one derived tree, collected in row order and loaded in key order.
+///
+/// A tree filled one posting at a time pays a root-to-leaf walk and a leaf
+/// rewrite per posting, each page proven on the way: about a millisecond per
+/// posting, which made the rebuild the cost of the checkpoint. Sorted, the
+/// same postings fill each leaf once. A rebuild larger than its run keeps the
+/// old path for what follows the first run.
+#[derive(Default)]
+pub(super) struct PostingRun {
+    bytes: Vec<u8>,
+    spans: Vec<(u32, u16)>,
+    loaded: bool,
+}
+
+impl PostingRun {
+    pub(super) fn push(&mut self, posting: &[u8]) {
+        self.spans
+            .push((self.bytes.len() as u32, posting.len() as u16));
+        self.bytes.extend_from_slice(posting);
+    }
+
+    pub(super) fn bytes(&self) -> usize {
+        self.bytes.len() + self.spans.len() * std::mem::size_of::<(u32, u16)>()
+    }
+
+    pub(super) fn load(&mut self, tree: &BTree) -> Result<(), StoreError> {
+        let failed = |error: reddb_engine::storage::btree::BTreeError| {
+            StoreError::Io(std::io::Error::other(error.to_string()))
+        };
+        let bytes = &self.bytes;
+        let posting = |&(start, length): &(u32, u16)| {
+            &bytes[start as usize..start as usize + usize::from(length)]
+        };
+        self.spans
+            .sort_unstable_by(|a, b| posting(a).cmp(posting(b)));
+        if self.loaded {
+            for span in &self.spans {
+                tree.insert(posting(span), &[]).map_err(failed)?;
+            }
+        } else {
+            for chunk in self.spans.chunks(4096) {
+                let items: Vec<_> = chunk
+                    .iter()
+                    .map(|span| (posting(span).to_vec(), Vec::new()))
+                    .collect();
+                tree.bulk_insert_sorted(&items).map_err(failed)?;
+            }
+        }
+        self.loaded |= !self.spans.is_empty();
+        self.spans.clear();
+        self.bytes.clear();
+        Ok(())
     }
 }
 

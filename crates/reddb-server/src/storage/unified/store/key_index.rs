@@ -113,6 +113,8 @@ impl UnifiedStore {
             let source = PagedCollection::new(Arc::clone(data));
             let mut cursor = source.scan()?;
             let mut indexed = true;
+            let run_bytes = (limit / 8).min(super::secondary_index::POSTING_RUNS_BYTES_MAX);
+            let mut run = super::secondary_index::PostingRun::default();
             while let Some(record) = cursor.next_record(limit)? {
                 let (entity, _) = record.decode_with_budget(self.format_version(), limit)?;
                 // A legacy positional row has no durable column names. Never
@@ -129,10 +131,14 @@ impl UnifiedStore {
                         &fingerprint,
                         entity.id.raw(),
                     );
-                    keys.insert(&candidate, &[]).map_err(|error| {
-                        StoreError::Io(std::io::Error::other(error.to_string()))
-                    })?;
+                    run.push(&candidate);
+                    if run.bytes() >= run_bytes {
+                        run.load(&keys)?;
+                    }
                 }
+            }
+            if indexed {
+                run.load(&keys)?;
             }
             let keys = if indexed {
                 keys
