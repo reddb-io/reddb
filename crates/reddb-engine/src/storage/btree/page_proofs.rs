@@ -591,3 +591,165 @@ impl<P: PageStore> PageStore for TreePageStore<P> {
         self.inner.prefetch_hint(page_id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, AtomicUsize};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Pages {
+        next: AtomicU32,
+        pages: Mutex<HashMap<u32, Page>>,
+        node_writes: AtomicUsize,
+    }
+
+    impl PageStore for Pages {
+        fn read_page(&self, id: u32) -> Result<Page, PagerError> {
+            self.pages
+                .lock()
+                .expect("pages")
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| invalid(id, "missing page"))
+        }
+        fn write_page(&self, id: u32, page: Page) -> Result<(), PagerError> {
+            if page.page_type()? == PageType::NativeMeta {
+                self.node_writes.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            self.pages.lock().expect("pages").insert(id, page);
+            Ok(())
+        }
+        fn allocate_page(&self, kind: PageType) -> Result<Page, PagerError> {
+            let id = self.next.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+            Ok(Page::new(kind, id))
+        }
+        fn free_page(&self, id: u32) -> Result<(), PagerError> {
+            self.pages.lock().expect("pages").remove(&id);
+            Ok(())
+        }
+        fn page_count(&self) -> Result<u32, PagerError> {
+            Ok(self.next.load(AtomicOrdering::Relaxed) + 1)
+        }
+        fn enable_deferred_reclamation(&self) -> Result<(), PagerError> {
+            Ok(())
+        }
+    }
+
+    fn store(pages: &Arc<Pages>, root: PageProofRoot) -> TreePageStore<Pages> {
+        TreePageStore::verified(Arc::clone(pages), root).expect("proof store")
+    }
+
+    fn node_writes(pages: &Pages) -> usize {
+        pages.node_writes.load(AtomicOrdering::Relaxed)
+    }
+
+    fn leaf(store: &TreePageStore<Pages>) -> u32 {
+        store
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate")
+            .page_id()
+    }
+
+    fn rewrite(store: &TreePageStore<Pages>, id: u32, byte: u8) {
+        let mut page = store.read_page(id).expect("proven page");
+        page.content_mut()[..8].fill(byte);
+        store.write_page(id, page).expect("rewrite");
+    }
+
+    #[test]
+    fn a_page_rewritten_in_one_generation_reaches_its_proof_node_once() {
+        let pages = Arc::new(Pages::default());
+        let live = store(&pages, PageProofRoot::default());
+        let id = leaf(&live);
+        for byte in 1..=50 {
+            rewrite(&live, id, byte);
+        }
+        assert_eq!(node_writes(&pages), 0, "an entry reached a node early");
+        let root = live.seal().expect("seal").expect("proof");
+        assert_eq!(node_writes(&pages), 4, "one node per proof level");
+
+        // A store that remembers nothing proves the page from the nodes.
+        let cold = store(&pages, root);
+        assert_eq!(cold.read_page(id).expect("cold proof").content()[0], 50);
+
+        // The next generation copies each node once, however many rewrites.
+        for byte in 51..=60 {
+            rewrite(&live, id, byte);
+        }
+        let next = live.seal().expect("seal").expect("proof");
+        assert_eq!(node_writes(&pages), 8);
+        assert_eq!(
+            store(&pages, next).read_page(id).expect("next").content()[0],
+            60
+        );
+    }
+
+    #[test]
+    fn entries_that_share_a_proof_node_rewrite_it_together() {
+        let pages = Arc::new(Pages::default());
+        let live = store(&pages, PageProofRoot::default());
+        let ids: Vec<u32> = (0..300).map(|_| leaf(&live)).collect();
+        let root = live.seal().expect("seal").expect("proof");
+        // Pages 1..=255 share one leaf node and 256..=300 another; each group
+        // writes its leaf node and the three levels above it.
+        assert_eq!(node_writes(&pages), 8);
+        let cold = store(&pages, root);
+        for &id in &ids {
+            cold.read_page(id).expect("cold proof");
+        }
+    }
+
+    #[test]
+    fn a_stale_image_fails_a_remembered_digest() {
+        let pages = Arc::new(Pages::default());
+        let live = store(&pages, PageProofRoot::default());
+        let id = leaf(&live);
+        rewrite(&live, id, 1);
+        let old = pages.read_page(id).expect("first image");
+        rewrite(&live, id, 2);
+        live.read_page(id).expect("remembered and current");
+        // The file gives back the image it held before the last write.
+        pages.pages.lock().expect("pages").insert(id, old);
+        assert!(live.read_page(id).is_err(), "stale image was accepted");
+    }
+
+    #[test]
+    fn a_freed_page_leaves_the_tree_before_its_entry_reaches_a_node() {
+        let pages = Arc::new(Pages::default());
+        let live = store(&pages, PageProofRoot::default());
+        let (kept, freed) = (leaf(&live), leaf(&live));
+        live.free_page(freed).expect("free");
+        let root = live.seal().expect("seal").expect("proof");
+        let cold = store(&pages, root);
+        cold.read_page(kept).expect("kept page");
+        pages
+            .write_page(freed, Page::new(PageType::BTreeLeaf, freed))
+            .expect("reuse the address");
+        assert!(cold.read_page(freed).is_err(), "freed page was proven");
+    }
+
+    #[test]
+    fn forgetting_remembered_digests_loses_no_entry() {
+        let pages = Arc::new(Pages::default());
+        let live = store(&pages, PageProofRoot::default());
+        // More pages than the store remembers and than it holds back, so both
+        // limits are crossed with entries on every side of them.
+        let ids: Vec<u32> = (0..PENDING_ENTRIES_MAX + KNOWN_DIGESTS_MAX / 2)
+            .map(|_| leaf(&live))
+            .collect();
+        for &id in ids.iter().step_by(7) {
+            rewrite(&live, id, 9);
+        }
+        for &id in &ids {
+            live.read_page(id).expect("live proof");
+        }
+        let root = live.seal().expect("seal").expect("proof");
+        let cold = store(&pages, root);
+        for (index, &id) in ids.iter().enumerate() {
+            let page = cold.read_page(id).expect("cold proof");
+            assert_eq!(page.content()[0], if index % 7 == 0 { 9 } else { 0 });
+        }
+    }
+}
