@@ -215,9 +215,9 @@ pub trait WalBarrier {
     }
 
     /// Called before any page image or allocator state reaches the file. Must
-    /// make every reservation recorded so far durable or return an error, so a
-    /// reserved page is never written, and the header never names it, ahead of
-    /// its ownership record.
+    /// make every reservation and captured page image recorded so far durable
+    /// or return an error, so a page is never written, and the header never
+    /// names it, ahead of the record that lets recovery undo it.
     fn flush_page_ownership(&self) -> std::io::Result<()> {
         Ok(())
     }

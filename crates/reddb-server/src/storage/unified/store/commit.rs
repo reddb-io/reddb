@@ -364,9 +364,9 @@ pub(crate) struct StoreCommitCoordinator {
     /// commits go through `force_sync` which also bumps this.
     fsync_count: Arc<AtomicU64>,
     wal_generation: AtomicU64,
-    /// WAL generation and end LSN of reservations queued without waiting for
-    /// durability. The pager flushes them before any page or allocator state
-    /// reaches the file.
+    /// WAL generation and end LSN of reservations and page images queued
+    /// without waiting for durability. The pager flushes them before any page
+    /// or allocator state reaches the file.
     deferred_ownership: parking_lot::Mutex<Option<(u64, u64)>>,
     /// Bytes admitted by the ownership recorder. Lets a quiet checkpoint
     /// truncate directly even though it appended its own page journal.
@@ -451,7 +451,10 @@ impl crate::storage::engine::pager::PageOwnershipRecorder for StoreOwnershipReco
             crate::storage::wal::record::WAL_DEFAULT_TERM,
             &mut bytes,
         )?;
-        self.coordinator.append_durable_ownership_bytes(bytes)?;
+        // The old image only has to be durable before the page is overwritten
+        // in the file, and `flush_page_ownership` precedes every such write.
+        // Waiting here cost one sync per page a checkpoint touched.
+        self.coordinator.append_deferred_ownership_bytes(bytes)?;
         images.captured.insert(page_id);
         Ok(())
     }
@@ -843,6 +846,11 @@ impl StoreCommitCoordinator {
             self.ownership_last_epoch
                 .fetch_max(record.epoch(), Ordering::AcqRel);
         }
+        self.append_deferred_ownership_bytes(bytes)
+    }
+
+    /// Queue ownership bytes, in log order, without waiting for them.
+    fn append_deferred_ownership_bytes(&self, bytes: Vec<u8>) -> io::Result<()> {
         self.check_write_error()?;
         let _epoch = self.queue.epoch.read();
         self.ownership_wal_state.store(2, Ordering::Release);
@@ -870,8 +878,8 @@ impl StoreCommitCoordinator {
         Ok(())
     }
 
-    /// Make every queued reservation durable. A WAL that was reset since they
-    /// were queued had already made them durable: an ownership epoch is
+    /// Make every queued reservation and page image durable. A WAL that was
+    /// reset since they were queued had already made them durable: an epoch is
     /// finished, durably, before its log can be released.
     pub(super) fn flush_deferred_page_ownership(&self) -> io::Result<()> {
         let Some((generation, target)) = *self.deferred_ownership.lock() else {
@@ -2990,7 +2998,7 @@ mod tests {
     }
 
     #[test]
-    fn reservations_are_queued_and_made_durable_before_a_page_reaches_the_file() {
+    fn reservations_and_page_images_are_queued_and_durable_before_a_page_reaches_the_file() {
         use reddb_file::page_ownership_journal::PageOwnershipRecord;
 
         for mode in [DurabilityMode::Strict, DurabilityMode::WalDurableGrouped] {
@@ -3003,6 +3011,15 @@ mod tests {
                 StoreCommitCoordinator::open(&wal_path, mode, GroupCommitOptions::default())
                     .expect("open WAL"),
             );
+            // Pages of an earlier generation: overwriting one needs its image.
+            let published: Vec<_> = (0..8)
+                .map(|_| {
+                    pager
+                        .allocate_page(crate::storage::engine::PageType::BTreeLeaf)
+                        .expect("allocate")
+                })
+                .collect();
+            pager.flush().expect("publish earlier pages");
             let recorder = Arc::new(
                 StoreOwnershipRecorder::begin(Arc::clone(&coordinator), 7).expect("begin epoch"),
             );
@@ -3010,6 +3027,11 @@ mod tests {
                 .install_ownership_recorder(recorder)
                 .expect("install recorder");
             let syncs = coordinator.fsync_count();
+            for page in &published {
+                pager
+                    .write_page(page.page_id(), page.clone())
+                    .expect("overwrite");
+            }
             let pages: Vec<u32> = (0..48)
                 .map(|_| {
                     pager
@@ -3026,7 +3048,7 @@ mod tests {
                 assert_eq!(
                     coordinator.fsync_count(),
                     syncs,
-                    "a reservation waited for its own sync"
+                    "a reservation or a page image waited for its own sync"
                 );
             }
 
@@ -3036,6 +3058,7 @@ mod tests {
                 coordinator.deferred_ownership.lock().is_none(),
                 "{mode:?}: a page reached the file ahead of its reservation"
             );
+            let mut images = Vec::new();
             let reserved: Vec<u32> = WalReader::open(&wal_path)
                 .expect("read WAL")
                 .iter()
@@ -3043,14 +3066,26 @@ mod tests {
                     WalRecord::PageOwnership {
                         record: PageOwnershipRecord::Reserve { epoch: 7, page_id },
                     } => Some(page_id),
+                    WalRecord::FullPageImage { page_id, .. } => {
+                        images.push(page_id);
+                        None
+                    }
                     _ => None,
                 })
                 .collect();
             assert_eq!(reserved, pages, "{mode:?}");
+            assert_eq!(
+                images,
+                published
+                    .iter()
+                    .map(|page| page.page_id())
+                    .collect::<Vec<_>>(),
+                "{mode:?}"
+            );
             if mode == DurabilityMode::Strict {
                 assert!(
                     coordinator.fsync_count() - syncs < pages.len() as u64 / 4,
-                    "the reservations were not flushed together"
+                    "the reservations and images were not flushed together"
                 );
             }
         }
