@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.40.5
+
+### Patch Changes
+
+- [#2980](https://github.com/reddb-io/reddb/pull/2980) [`1244389`](https://github.com/reddb-io/reddb/commit/1244389d421d4e6fea2be711c9d6334e8ed47547) Thanks [@filipeforattini](https://github.com/filipeforattini)! - A checkpoint no longer copies a whole collection because a few hundred of its rows changed. The staged copy of a primary tree is made only when the incremental path lacks what it needs to apply the change in place (it was made past 512 changed rows), the WAL references that path relies on are budgeted from the page cache the store actually runs (about 660 row images store-wide before), it accepts up to 65,536 changed index entries, the pages of a replaced tree are returned from its proof inventory instead of being read one by one, and a collection that is republished in full is logged with the reason.
+
+- [#2979](https://github.com/reddb-io/reddb/pull/2979) [`143c4bb`](https://github.com/reddb-io/reddb/commit/143c4bb367f80d8362d601fe9850ee27dcd7a375) Thanks [@filipeforattini](https://github.com/filipeforattini)! - A tree with page proofs remembers the digests it has already proven and writes the proof entries of a generation once, when it is sealed, instead of walking and rewriting four proof pages on every page access. A checkpoint of a 120k-row indexed table goes from 10 s to under 5 s and an incremental checkpoint of 100 updated rows from 0.9 s to 0.4 s.
+
 ## 1.40.4
 
 ### Patch Changes
