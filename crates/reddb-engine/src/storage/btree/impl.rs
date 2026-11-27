@@ -86,7 +86,9 @@ impl<P: PageStore> BTree<P> {
         })
     }
 
-    /// The host must sync before publishing this pair in its catalog.
+    /// The host must sync before publishing this pair in its catalog. Sealing
+    /// writes the proof entries the generation set, so it can allocate and
+    /// free proof pages: take page inventories after it, not before.
     pub fn seal_page_proofs(
         &self,
     ) -> BTreeResult<Option<(u32, reddb_file::page_proof::PageProofRoot)>> {

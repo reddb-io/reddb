@@ -2,6 +2,7 @@
 //! A host publishes the sealed root with its data root after syncing both.
 use super::*;
 use reddb_file::page_proof::{self, PageProofRoot, PageReference, PROOF_LEVEL_MAX};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 pub(super) struct TreePageStore<P: PageStore> {
@@ -13,7 +14,20 @@ pub(super) struct TreePageStore<P: PageStore> {
 struct ProofState {
     root: PageProofRoot,
     sealed: bool,
+    /// Digests this state has already proven or set, by page. Without it every
+    /// page access walked the four proof levels again, copying and hashing a
+    /// node at each, and that was most of the cost of a tree operation.
+    known: parking_lot::Mutex<HashMap<u32, [u8; 32]>>,
+    /// Entries set since the proof nodes were last written. A page rewritten
+    /// many times in one generation reaches its node once, and entries that
+    /// share a node rewrite it together. Empty whenever the state is sealed.
+    pending: BTreeMap<u32, [u8; 32]>,
 }
+
+/// Digests remembered per tree: its interior pages and its recent leaves.
+const KNOWN_DIGESTS_MAX: usize = 2048;
+/// Entries held back from the proof nodes before they are written anyway.
+const PENDING_ENTRIES_MAX: usize = 4096;
 
 fn invalid(page_id: u32, detail: &str) -> PagerError {
     PagerError::InvalidDatabase(format!("page {page_id} generation proof: {detail}"))
@@ -90,10 +104,9 @@ fn expected_digest<P: PageStore>(
 
 fn verified_page<P: PageStore>(
     pager: &P,
-    root: PageProofRoot,
+    expected: [u8; 32],
     page_id: u32,
 ) -> Result<Page, PagerError> {
-    let expected = expected_digest(pager, root, page_id)?;
     let page = pager.read_page(page_id)?;
     if page.page_id() != page_id || page_proof::page_digest(page.as_bytes()) != expected {
         return Err(invalid(
@@ -104,23 +117,14 @@ fn verified_page<P: PageStore>(
     Ok(page)
 }
 
-fn verify_stored_page<P: PageStore>(
-    pager: &P,
-    root: PageProofRoot,
-    page_id: u32,
-) -> Result<(), PagerError> {
-    verified_page(pager, root, page_id).map(|_| ())
-}
-
 /// Copy a path on its first mutation after sealing. Later edits reuse private
 /// nodes of this generation; the pager's existing cache bounds dirty images.
-fn replace_entry<P: PageStore>(
+fn replace_entries<'a, P: PageStore>(
     pager: &P,
     root: PageProofRoot,
     level: u8,
     prefix: u32,
-    index: usize,
-    value: &[u8],
+    entries: impl Iterator<Item = (usize, &'a [u8])>,
 ) -> Result<PageReference, PagerError> {
     let PageProofRoot {
         reference,
@@ -140,8 +144,10 @@ fn replace_entry<P: PageStore>(
         replacement.content_mut()[16..24].copy_from_slice(&generation.to_le_bytes());
         page = replacement;
     }
-    let range = page_proof::entry_range(level, index);
-    page.content_mut()[range].copy_from_slice(value);
+    for (index, value) in entries {
+        let range = page_proof::entry_range(level, index);
+        page.content_mut()[range].copy_from_slice(value);
+    }
     page.update_checksum();
     let next = PageReference {
         page_id: page.page_id(),
@@ -155,12 +161,13 @@ fn replace_entry<P: PageStore>(
     Ok(next)
 }
 
+/// `entries` are pages of one leaf node: they differ only in their last byte.
 fn update_path<P: PageStore>(
     pager: &P,
     root: PageProofRoot,
-    page_id: u32,
-    digest: [u8; 32],
+    entries: &[(u32, [u8; 32])],
 ) -> Result<PageReference, PagerError> {
+    let page_id = entries[0].0;
     let mut path = [PageReference::default(); 4];
     let mut prefixes = [0_u32; 4];
     let mut reference = root.reference;
@@ -184,22 +191,20 @@ fn update_path<P: PageStore>(
     for level in 0..=PROOF_LEVEL_MAX {
         let index = usize::from(((page_id >> (u32::from(level) * 8)) & 255) as u8);
         page_proof::encode_reference(&mut encoded, child);
-        let value = if level == 0 {
-            digest.as_slice()
-        } else {
-            encoded.as_slice()
+        let node = PageProofRoot {
+            reference: path[usize::from(level)],
+            generation: root.generation,
         };
-        child = replace_entry(
-            pager,
-            PageProofRoot {
-                reference: path[usize::from(level)],
-                generation: root.generation,
-            },
-            level,
-            prefixes[usize::from(level)],
-            index,
-            value,
-        )?;
+        let prefix = prefixes[usize::from(level)];
+        child = if level == 0 {
+            let leaves = entries
+                .iter()
+                .map(|(id, digest)| (usize::from(*id as u8), digest.as_slice()));
+            replace_entries(pager, node, level, prefix, leaves)?
+        } else {
+            let link = std::iter::once((index, encoded.as_slice()));
+            replace_entries(pager, node, level, prefix, link)?
+        };
     }
     Ok(child)
 }
@@ -217,6 +222,40 @@ impl ProofState {
         Ok(())
     }
 
+    fn new(root: PageProofRoot) -> Self {
+        Self {
+            root,
+            sealed: true,
+            known: parking_lot::Mutex::new(HashMap::new()),
+            pending: BTreeMap::new(),
+        }
+    }
+
+    /// The digest the proof holds for a page: remembered, set and not yet
+    /// written to its node, or read from the nodes.
+    fn expected<P: PageStore>(&self, pager: &P, page_id: u32) -> Result<[u8; 32], PagerError> {
+        if let Some(digest) = self.known.lock().get(&page_id) {
+            return Ok(*digest);
+        }
+        let digest = match self.pending.get(&page_id) {
+            Some(digest) if *digest == [0; 32] => {
+                return Err(invalid(page_id, "page is outside this tree's ownership"))
+            }
+            Some(digest) => *digest,
+            None => expected_digest(pager, self.root, page_id)?,
+        };
+        let mut known = self.known.lock();
+        if known.len() >= KNOWN_DIGESTS_MAX {
+            known.clear();
+        }
+        known.insert(page_id, digest);
+        Ok(digest)
+    }
+
+    fn verified_page<P: PageStore>(&self, pager: &P, page_id: u32) -> Result<Page, PagerError> {
+        verified_page(pager, self.expected(pager, page_id)?, page_id)
+    }
+
     fn set<P: PageStore>(
         &mut self,
         pager: &P,
@@ -224,7 +263,29 @@ impl ProofState {
         digest: [u8; 32],
     ) -> Result<(), PagerError> {
         self.begin_mutation()?;
-        self.root.reference = update_path(pager, self.root, page_id, digest)?;
+        let known = self.known.get_mut();
+        if digest == [0; 32] {
+            known.remove(&page_id);
+        } else {
+            if known.len() >= KNOWN_DIGESTS_MAX {
+                known.clear();
+            }
+            known.insert(page_id, digest);
+        }
+        self.pending.insert(page_id, digest);
+        if self.pending.len() >= PENDING_ENTRIES_MAX {
+            self.write_pending(pager)?;
+        }
+        Ok(())
+    }
+
+    /// Write the entries held back by `set` into the proof nodes, one node at
+    /// a time. An error leaves the nodes partly written: the store fences.
+    fn write_pending<P: PageStore>(&mut self, pager: &P) -> Result<(), PagerError> {
+        let pending: Vec<_> = std::mem::take(&mut self.pending).into_iter().collect();
+        for node in pending.chunk_by(|left, right| left.0 >> 8 == right.0 >> 8) {
+            self.root.reference = update_path(pager, self.root, node)?;
+        }
         Ok(())
     }
 }
@@ -251,7 +312,7 @@ impl<P: PageStore> TreePageStore<P> {
         inner.enable_deferred_reclamation()?;
         Ok(Self {
             inner,
-            proof: Some(parking_lot::RwLock::new(ProofState { root, sealed: true })),
+            proof: Some(parking_lot::RwLock::new(ProofState::new(root))),
             failed: AtomicBool::new(false),
         })
     }
@@ -275,6 +336,7 @@ impl<P: PageStore> TreePageStore<P> {
                     page_proof::page_digest(page.as_bytes()),
                 )?;
             }
+            state.write_pending(self.inner.as_ref())?;
             state.sealed = true;
         }
         Ok(prepared)
@@ -304,6 +366,8 @@ impl<P: PageStore> TreePageStore<P> {
         let _ownership = self.inner.ownership_guard();
         let mut state = proof.write();
         self.available()?;
+        let written = state.write_pending(self.inner.as_ref());
+        self.finish(written)?;
         state.sealed = true;
         Ok(Some(state.root))
     }
@@ -321,8 +385,7 @@ impl<P: PageStore> TreePageStore<P> {
                 // The host's deferred fence retains all previously published paths.
                 self.inner.free_page(id)?;
             }
-            state.root = PageProofRoot::default();
-            state.sealed = true;
+            *state = ProofState::new(PageProofRoot::default());
             Ok(())
         })();
         self.finish(result)
@@ -454,7 +517,7 @@ impl<P: PageStore> PageStore for TreePageStore<P> {
                 inner: self.inner.as_ref(),
                 would_wait: std::cell::Cell::new(false),
             };
-            let result = verified_page(&cached, state.root, page_id);
+            let result = state.verified_page(&cached, page_id);
             if !cached.would_wait.get() {
                 return self.finish(result);
             }
@@ -462,7 +525,7 @@ impl<P: PageStore> PageStore for TreePageStore<P> {
         let _ownership = self.inner.ownership_guard();
         let state = proof.read();
         self.available()?;
-        self.finish(verified_page(self.inner.as_ref(), state.root, page_id))
+        self.finish(state.verified_page(self.inner.as_ref(), page_id))
     }
 
     fn write_page(&self, page_id: u32, mut page: Page) -> Result<(), PagerError> {
@@ -473,7 +536,7 @@ impl<P: PageStore> PageStore for TreePageStore<P> {
         let mut state = proof.write();
         self.available()?;
         let result = (|| {
-            verify_stored_page(self.inner.as_ref(), state.root, page_id)?;
+            state.verified_page(self.inner.as_ref(), page_id)?;
             if page.page_id() != page_id {
                 return Err(invalid(page_id, "write address mismatch"));
             }
@@ -514,7 +577,7 @@ impl<P: PageStore> PageStore for TreePageStore<P> {
         let mut state = proof.write();
         self.available()?;
         let result = (|| {
-            verify_stored_page(self.inner.as_ref(), state.root, page_id)?;
+            state.verified_page(self.inner.as_ref(), page_id)?;
             state.set(self.inner.as_ref(), page_id, [0; 32])?;
             self.inner.free_page(page_id)
         })();
@@ -526,5 +589,167 @@ impl<P: PageStore> PageStore for TreePageStore<P> {
     }
     fn prefetch_hint(&self, page_id: u32) {
         self.inner.prefetch_hint(page_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, AtomicUsize};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Pages {
+        next: AtomicU32,
+        pages: Mutex<HashMap<u32, Page>>,
+        node_writes: AtomicUsize,
+    }
+
+    impl PageStore for Pages {
+        fn read_page(&self, id: u32) -> Result<Page, PagerError> {
+            self.pages
+                .lock()
+                .expect("pages")
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| invalid(id, "missing page"))
+        }
+        fn write_page(&self, id: u32, page: Page) -> Result<(), PagerError> {
+            if page.page_type()? == PageType::NativeMeta {
+                self.node_writes.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            self.pages.lock().expect("pages").insert(id, page);
+            Ok(())
+        }
+        fn allocate_page(&self, kind: PageType) -> Result<Page, PagerError> {
+            let id = self.next.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+            Ok(Page::new(kind, id))
+        }
+        fn free_page(&self, id: u32) -> Result<(), PagerError> {
+            self.pages.lock().expect("pages").remove(&id);
+            Ok(())
+        }
+        fn page_count(&self) -> Result<u32, PagerError> {
+            Ok(self.next.load(AtomicOrdering::Relaxed) + 1)
+        }
+        fn enable_deferred_reclamation(&self) -> Result<(), PagerError> {
+            Ok(())
+        }
+    }
+
+    fn store(pages: &Arc<Pages>, root: PageProofRoot) -> TreePageStore<Pages> {
+        TreePageStore::verified(Arc::clone(pages), root).expect("proof store")
+    }
+
+    fn node_writes(pages: &Pages) -> usize {
+        pages.node_writes.load(AtomicOrdering::Relaxed)
+    }
+
+    fn leaf(store: &TreePageStore<Pages>) -> u32 {
+        store
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate")
+            .page_id()
+    }
+
+    fn rewrite(store: &TreePageStore<Pages>, id: u32, byte: u8) {
+        let mut page = store.read_page(id).expect("proven page");
+        page.content_mut()[..8].fill(byte);
+        store.write_page(id, page).expect("rewrite");
+    }
+
+    #[test]
+    fn a_page_rewritten_in_one_generation_reaches_its_proof_node_once() {
+        let pages = Arc::new(Pages::default());
+        let live = store(&pages, PageProofRoot::default());
+        let id = leaf(&live);
+        for byte in 1..=50 {
+            rewrite(&live, id, byte);
+        }
+        assert_eq!(node_writes(&pages), 0, "an entry reached a node early");
+        let root = live.seal().expect("seal").expect("proof");
+        assert_eq!(node_writes(&pages), 4, "one node per proof level");
+
+        // A store that remembers nothing proves the page from the nodes.
+        let cold = store(&pages, root);
+        assert_eq!(cold.read_page(id).expect("cold proof").content()[0], 50);
+
+        // The next generation copies each node once, however many rewrites.
+        for byte in 51..=60 {
+            rewrite(&live, id, byte);
+        }
+        let next = live.seal().expect("seal").expect("proof");
+        assert_eq!(node_writes(&pages), 8);
+        assert_eq!(
+            store(&pages, next).read_page(id).expect("next").content()[0],
+            60
+        );
+    }
+
+    #[test]
+    fn entries_that_share_a_proof_node_rewrite_it_together() {
+        let pages = Arc::new(Pages::default());
+        let live = store(&pages, PageProofRoot::default());
+        let ids: Vec<u32> = (0..300).map(|_| leaf(&live)).collect();
+        let root = live.seal().expect("seal").expect("proof");
+        // Pages 1..=255 share one leaf node and 256..=300 another; each group
+        // writes its leaf node and the three levels above it.
+        assert_eq!(node_writes(&pages), 8);
+        let cold = store(&pages, root);
+        for &id in &ids {
+            cold.read_page(id).expect("cold proof");
+        }
+    }
+
+    #[test]
+    fn a_stale_image_fails_a_remembered_digest() {
+        let pages = Arc::new(Pages::default());
+        let live = store(&pages, PageProofRoot::default());
+        let id = leaf(&live);
+        rewrite(&live, id, 1);
+        let old = pages.read_page(id).expect("first image");
+        rewrite(&live, id, 2);
+        live.read_page(id).expect("remembered and current");
+        // The file gives back the image it held before the last write.
+        pages.pages.lock().expect("pages").insert(id, old);
+        assert!(live.read_page(id).is_err(), "stale image was accepted");
+    }
+
+    #[test]
+    fn a_freed_page_leaves_the_tree_before_its_entry_reaches_a_node() {
+        let pages = Arc::new(Pages::default());
+        let live = store(&pages, PageProofRoot::default());
+        let (kept, freed) = (leaf(&live), leaf(&live));
+        live.free_page(freed).expect("free");
+        let root = live.seal().expect("seal").expect("proof");
+        let cold = store(&pages, root);
+        cold.read_page(kept).expect("kept page");
+        pages
+            .write_page(freed, Page::new(PageType::BTreeLeaf, freed))
+            .expect("reuse the address");
+        assert!(cold.read_page(freed).is_err(), "freed page was proven");
+    }
+
+    #[test]
+    fn forgetting_remembered_digests_loses_no_entry() {
+        let pages = Arc::new(Pages::default());
+        let live = store(&pages, PageProofRoot::default());
+        // More pages than the store remembers and than it holds back, so both
+        // limits are crossed with entries on every side of them.
+        let ids: Vec<u32> = (0..PENDING_ENTRIES_MAX + KNOWN_DIGESTS_MAX / 2)
+            .map(|_| leaf(&live))
+            .collect();
+        for &id in ids.iter().step_by(7) {
+            rewrite(&live, id, 9);
+        }
+        for &id in &ids {
+            live.read_page(id).expect("live proof");
+        }
+        let root = live.seal().expect("seal").expect("proof");
+        let cold = store(&pages, root);
+        for (index, &id) in ids.iter().enumerate() {
+            let page = cold.read_page(id).expect("cold proof");
+            assert_eq!(page.content()[0], if index % 7 == 0 { 9 } else { 0 });
+        }
     }
 }

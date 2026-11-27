@@ -736,36 +736,11 @@ impl UnifiedStore {
         roots.dedup();
         reddb_file::encode_native_paged_retired_trees(metadata, &roots)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
-        let (pending_pages, published_pages) = pager
-            .deferred_reclamation_pages()
-            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
-        let readers = live
-            .values()
-            .chain(keys.values().flat_map(PublishedKeyIndex::trees))
-            .any(|tree| tree.has_retirement_readers())
-            || retired
-                .iter()
-                .any(|entry| entry.tree.has_retirement_readers());
-        let released_pages = if readers { Vec::new() } else { published_pages };
-        let released: std::collections::HashSet<_> = released_pages.iter().copied().collect();
-        let retained_pages: Vec<_> = pending_pages
-            .into_iter()
-            .filter(|id| !released.contains(id))
-            .collect();
-        reddb_file::encode_native_paged_deferred_pages(metadata, &retained_pages)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
-        let active_epoch = self.ownership_active_epoch.load(Ordering::Acquire);
-        let catalog_epoch = if active_epoch == 0 {
-            self.ownership_catalog_epoch.load(Ordering::Acquire)
-        } else {
-            active_epoch
-        };
-        if catalog_epoch != 0 {
-            reddb_file::native_store::encode_native_paged_ownership_epoch(metadata, catalog_epoch)
-                .map_err(|e| StoreError::Serialization(e.to_string()))?;
-        }
+        // Sealing writes the proof entries a generation set, which copies its
+        // proof nodes and frees the ones they replace. Seal before reading the
+        // deferred pages below, or those freed nodes would belong to nobody.
+        let mut proofs = reddb_file::page_proof::CatalogProofs::new();
         if publishes_proofs {
-            let mut proofs = reddb_file::page_proof::CatalogProofs::new();
             for tree in live
                 .values()
                 .chain(keys.values().flat_map(PublishedKeyIndex::trees))
@@ -797,6 +772,36 @@ impl UnifiedStore {
             {
                 return Err(page_integrity(1, None, "live tree has no generation proof"));
             }
+        }
+        let (pending_pages, published_pages) = pager
+            .deferred_reclamation_pages()
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        let readers = live
+            .values()
+            .chain(keys.values().flat_map(PublishedKeyIndex::trees))
+            .any(|tree| tree.has_retirement_readers())
+            || retired
+                .iter()
+                .any(|entry| entry.tree.has_retirement_readers());
+        let released_pages = if readers { Vec::new() } else { published_pages };
+        let released: std::collections::HashSet<_> = released_pages.iter().copied().collect();
+        let retained_pages: Vec<_> = pending_pages
+            .into_iter()
+            .filter(|id| !released.contains(id))
+            .collect();
+        reddb_file::encode_native_paged_deferred_pages(metadata, &retained_pages)
+            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let active_epoch = self.ownership_active_epoch.load(Ordering::Acquire);
+        let catalog_epoch = if active_epoch == 0 {
+            self.ownership_catalog_epoch.load(Ordering::Acquire)
+        } else {
+            active_epoch
+        };
+        if catalog_epoch != 0 {
+            reddb_file::native_store::encode_native_paged_ownership_epoch(metadata, catalog_epoch)
+                .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        }
+        if publishes_proofs {
             reddb_file::page_proof::encode_catalog(metadata, &proofs)
                 .map_err(|error| StoreError::Serialization(error.to_string()))?;
         }
