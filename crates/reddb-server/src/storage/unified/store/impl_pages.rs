@@ -4112,6 +4112,37 @@ mod checkpoint_work_tests {
     }
 
     #[test]
+    fn a_config_value_survives_a_checkpoint_and_a_reopen_under_bounded_residency() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let config = UnifiedStoreConfig {
+            resident_memory_bytes_max: Some(2 * 1024 * 1024),
+            ..UnifiedStoreConfig::default()
+        };
+        let store = UnifiedStore::open_with_config(&path, config.clone()).expect("paged store");
+        store
+            .try_set_config_tree(
+                "repro.setting",
+                &crate::serde_json::Value::String("abc".into()),
+            )
+            .expect("set");
+        assert_eq!(store.get_config("repro.setting"), Some(Value::text("abc")));
+        store.persist().expect("checkpoint");
+        assert_eq!(
+            store.get_config("repro.setting"),
+            Some(Value::text("abc")),
+            "after the checkpoint"
+        );
+        drop(store);
+        let reopened = UnifiedStore::open_with_config(&path, config).expect("reopen");
+        assert_eq!(
+            reopened.get_config("repro.setting"),
+            Some(Value::text("abc")),
+            "after reopening"
+        );
+    }
+
+    #[test]
     fn completed_inline_insert_reuses_history_but_not_untracked_edits() {
         let directory = tempfile::tempdir().expect("temporary store");
         let path = directory.path().join("data.rdb");

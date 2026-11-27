@@ -1368,35 +1368,43 @@ impl RedDBRuntime {
                 let manager = store
                     .get_collection("red.config")
                     .ok_or_else(|| RedDBError::NotFound("red.config".to_string()))?;
-                let entities = manager.query_all(|_| true);
                 let mut latest = std::collections::BTreeMap::<String, (u64, Value, Value)>::new();
-                for entity in entities {
-                    if let EntityData::Row(ref row) = entity.data {
-                        if let Some(ref named) = row.named {
-                            let key_val = named.get("key").cloned().unwrap_or(Value::Null);
-                            let val = named.get("value").cloned().unwrap_or(Value::Null);
-                            let key_str = match &key_val {
-                                Value::Text(s) => s.as_ref(),
-                                _ => continue,
-                            };
-                            if key_str == super::function_catalog::REGISTRY_KEY {
-                                continue;
-                            }
-                            if let Some(ref pfx) = prefix {
-                                if !key_str.starts_with(pfx.as_str()) {
-                                    continue;
-                                }
-                            }
-                            let entity_id = entity.id.raw();
-                            match latest.get(key_str) {
-                                Some((prev_id, _, _)) if *prev_id > entity_id => {}
-                                _ => {
-                                    latest.insert(key_str.to_string(), (entity_id, key_val, val));
-                                }
+                // Under bounded disk residency a checkpointed row is on disk,
+                // and `query_all` only walks the resident ones: a value set
+                // before the last restart was missing from this listing while
+                // the engine still applied it.
+                manager
+                    .try_scan_for_each(None, usize::MAX, |entity| {
+                        let EntityData::Row(ref row) = entity.data else {
+                            return true;
+                        };
+                        let Some(ref named) = row.named else {
+                            return true;
+                        };
+                        let key_val = named.get("key").cloned().unwrap_or(Value::Null);
+                        let val = named.get("value").cloned().unwrap_or(Value::Null);
+                        let key_str = match &key_val {
+                            Value::Text(s) => s.as_ref(),
+                            _ => return true,
+                        };
+                        if key_str == super::function_catalog::REGISTRY_KEY {
+                            return true;
+                        }
+                        if let Some(ref pfx) = prefix {
+                            if !key_str.starts_with(pfx.as_str()) {
+                                return true;
                             }
                         }
-                    }
-                }
+                        let entity_id = entity.id.raw();
+                        match latest.get(key_str) {
+                            Some((prev_id, _, _)) if *prev_id > entity_id => {}
+                            _ => {
+                                latest.insert(key_str.to_string(), (entity_id, key_val, val));
+                            }
+                        }
+                        true
+                    })
+                    .map_err(RedDBError::from)?;
                 if as_json {
                     let mut tree = crate::serde_json::Value::Object(crate::serde_json::Map::new());
                     for (key, (_, _, val)) in latest {
