@@ -380,7 +380,7 @@ fn count_batch_does_not_hold_publication_lock_while_decoding() {
 }
 
 #[test]
-fn incremental_count_build_allows_writes_and_restarts_after_checkpoint() {
+fn incremental_count_build_allows_writes_and_survives_a_restart() {
     let (directory, store) = fixture();
     let rows = UNIFORM_BATCH_ROWS as u64 * 3;
     store
@@ -405,7 +405,7 @@ fn incremental_count_build_allows_writes_and_restarts_after_checkpoint() {
     assert!(!build.step(&store).unwrap());
     assert_eq!(store.try_count_from_index("rows", None).unwrap(), None);
     // Writes and reads proceed between batches while the partial tree is
-    // durable but invisible. A changed data root invalidates the builder.
+    // durable but invisible.
     store
         .insert(
             "rows",
@@ -416,13 +416,6 @@ fn incremental_count_build_allows_writes_and_restarts_after_checkpoint() {
         .try_get("rows", EntityId::new(rows + 1), 1024 * 1024)
         .unwrap()
         .is_some());
-    store.persist().unwrap();
-    assert!(
-        build.step(&store).unwrap(),
-        "replaced generation must cancel the old build"
-    );
-    drop(build);
-    let mut build = store.start_count_build("rows").unwrap().unwrap();
     while !build.step(&store).unwrap() {}
     compare(&store, None, rows + 1);
     drop(build);
@@ -456,6 +449,51 @@ fn incremental_count_build_allows_writes_and_restarts_after_checkpoint() {
         while !retry.step(&reopened).unwrap() {}
     }
     compare(&reopened, None, rows + 3);
+}
+
+#[test]
+fn a_checkpoint_during_a_count_build_cancels_it_and_publishes_the_projection() {
+    let (_directory, store) = fixture();
+    let rows = UNIFORM_BATCH_ROWS as u64 * 3;
+    store
+        .get_collection("rows")
+        .unwrap()
+        .bulk_insert(
+            (1..=rows)
+                .map(|id| {
+                    UnifiedEntity::table_row(
+                        EntityId::new(id),
+                        "rows",
+                        id,
+                        vec![Value::text("data")],
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+    store.persist().unwrap();
+    store.register_count_index_deferred("rows").unwrap();
+    let mut build = store.start_count_build("rows").unwrap().unwrap();
+    assert!(!build.step(&store).unwrap());
+    assert_eq!(store.try_count_from_index("rows", None).unwrap(), None);
+    store
+        .insert(
+            "rows",
+            UnifiedEntity::table_row(EntityId::new(rows + 1), "rows", rows + 1, vec![]),
+        )
+        .unwrap();
+    // A changed data root invalidates the builder.
+    store.persist().unwrap();
+    assert!(
+        build.step(&store).unwrap(),
+        "replaced generation must cancel the old build"
+    );
+    drop(build);
+    // The checkpoint that replaced the generation built the projection with
+    // it: nothing is left for a second background build, which the next
+    // checkpoint would have cancelled in the same way.
+    assert!(store.start_count_build("rows").unwrap().is_none());
+    compare(&store, None, rows + 1);
 }
 
 #[test]
