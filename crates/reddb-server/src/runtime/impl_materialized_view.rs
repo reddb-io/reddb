@@ -120,7 +120,7 @@ impl RedDBRuntime {
                 .retention_sweeper
                 .write()
                 .scan_tick(&store, name, remaining, ordered);
-            let (candidates, scanned) = match candidates {
+            let (candidates, scanned, all_expired) = match candidates {
                 Ok(result) => result,
                 Err(_) => {
                     self.inner
@@ -160,16 +160,64 @@ impl RedDBRuntime {
                 ts_column,
                 cutoff
             );
+            // When the scan read every candidate as expired, a statement that
+            // removes none of them is a fault. It used to go unseen: the
+            // ledger of a store kept every event.
+            let submitted = candidates.len();
+            let first = candidates.first().copied();
             let result = super::retention_sweeper::with_delete_candidates(
                 candidates,
                 name,
                 &ts_column,
                 || self.execute_query(&stmt),
             );
+            let unremoved = match &result {
+                Ok(r) if r.affected_rows == 0 && all_expired => Some(None),
+                Ok(_) => None,
+                Err(err) => Some(Some(err.to_string())),
+            };
+            if let Some(error) = unremoved {
+                if self.inner.retention_sweeper.write().report_unremoved(name) {
+                    let sample = first.map(|id| {
+                        super::retention_sweeper::describe_unremoved(
+                            &store, name, &ts_column, id, now_ms,
+                        )
+                    });
+                    tracing::warn!(
+                        target: "reddb::retention",
+                        collection = %name,
+                        candidates = submitted,
+                        error = error.as_deref().unwrap_or("none"),
+                        first_candidate = sample.as_deref().unwrap_or("none"),
+                        "retention removed none of the rows it submitted"
+                    );
+                }
+            }
             let (deleted, pending) = match result {
                 Ok(r) => (r.affected_rows, u64::from(scanned > 0)),
                 Err(_) => (0, 1),
             };
+            // What the sweeper costs and achieves was only visible through a
+            // view that scans. One line every ten minutes while it works.
+            let activity = self.inner.retention_sweeper.write().note_activity(
+                name,
+                scanned,
+                submitted,
+                deleted,
+                all_expired,
+            );
+            if let Some(activity) = activity {
+                tracing::info!(
+                    target: "reddb::retention",
+                    collection = %name,
+                    ticks = activity.ticks,
+                    positions = activity.positions,
+                    candidates = activity.candidates,
+                    removed = activity.removed,
+                    ordered_ticks = activity.ordered_ticks,
+                    "retention sweep activity"
+                );
+            }
 
             self.inner
                 .retention_sweeper

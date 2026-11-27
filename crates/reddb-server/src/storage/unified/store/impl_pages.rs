@@ -4,6 +4,10 @@ use parking_lot::RwLock;
 const CHECKPOINT_BATCH_BYTES: usize = 1024 * 1024;
 const CHECKPOINT_BATCH_ROWS: usize = 512;
 
+/// A checkpoint that held writers for at least this long logs where the time
+/// went. Shorter ones, such as the second pass of a flush, are not worth a line.
+const CHECKPOINT_PHASES_REPORTED_FROM_MS: u64 = 200;
+
 #[path = "paced_primary.rs"]
 pub(super) mod paced_primary;
 use paced_primary::PreparedPrimary;
@@ -2759,6 +2763,16 @@ impl UnifiedStore {
         }
         self.ensure_pager_writeback_available()?;
         let _vault_guard = self.vault_publication_lock.lock();
+        // Writers wait from here to the end. Each lap is one phase of that
+        // wait, reported below when the whole of it was long enough to feel.
+        let held = std::time::Instant::now();
+        let mut lap = held;
+        let mut phase = move || {
+            let now = std::time::Instant::now();
+            let spent = now.duration_since(lap);
+            lap = now;
+            spent.as_millis() as u64
+        };
         let pending_vault_versions = self.pending_vault_versions.read();
         let pager = match &self.pager {
             Some(p) => p,
@@ -2825,6 +2839,7 @@ impl UnifiedStore {
             None
         };
 
+        let wal_sync_ms = phase();
         let (visibility_revision, excluded, untracked_visibility_revision) =
             self.snapshot_manager.get().map_or_else(
                 || (0, Default::default(), 0),
@@ -2980,6 +2995,7 @@ impl UnifiedStore {
             collection_roots.push((name.clone(), btree.root_page_id()));
             rebuilt_indices.insert(name.clone(), btree);
         }
+        let collections_ms = phase();
 
         // Write collection metadata to page 1
         let mut meta_data = Vec::with_capacity(4096);
@@ -3049,7 +3065,9 @@ impl UnifiedStore {
             eprintln!("experimental checkpoint exit before manifest");
             std::process::exit(183);
         }
+        let catalog_ms = phase();
         let rebuilt_keys = self.checkpoint_key_indices(pager, &rebuilt_indices)?;
+        let indexes_ms = phase();
         #[cfg(test)]
         if std::env::var_os("REDDB_TEST_EXIT_AFTER_SECONDARY_INDEX_BUILD").is_some() {
             pager
@@ -3058,6 +3076,7 @@ impl UnifiedStore {
             std::process::exit(196);
         }
         self.publish_reclaimable_trees(pager, &mut meta_data, &rebuilt_indices, &rebuilt_keys)?;
+        let publication_ms = phase();
 
         #[cfg(test)]
         if std::env::var_os("REDDB_TEST_EXIT_AFTER_UNDO_CATALOG_PUBLICATION").is_some() {
@@ -3081,6 +3100,7 @@ impl UnifiedStore {
                 .map_err(StoreError::Io)?;
         }
         *self.checkpoint_durable_rows.write() = Default::default();
+        let wal_truncation_ms = phase();
 
         // The epoch is finished and nothing below allocates. Installing a base
         // waits for its readers, and a reader that has to load a page waits for
@@ -3121,6 +3141,23 @@ impl UnifiedStore {
                     }
                 }
             }
+        }
+        let bases_ms = phase();
+
+        let held_ms = held.elapsed().as_millis() as u64;
+        if held_ms >= CHECKPOINT_PHASES_REPORTED_FROM_MS {
+            tracing::info!(
+                held_ms,
+                wal_sync_ms,
+                collections_ms,
+                catalog_ms,
+                indexes_ms,
+                publication_ms,
+                wal_truncation_ms,
+                bases_ms,
+                collections = collections.len(),
+                "checkpoint held writers"
+            );
         }
 
         Ok(())
@@ -4072,6 +4109,37 @@ mod checkpoint_work_tests {
         // This fixture's rows make every checkpoint a republish. The
         // projection published by one is still there after the next.
         assert!(published(), "a republish dropped the projection");
+    }
+
+    #[test]
+    fn a_config_value_survives_a_checkpoint_and_a_reopen_under_bounded_residency() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let path = directory.path().join("data.rdb");
+        let config = UnifiedStoreConfig {
+            resident_memory_bytes_max: Some(2 * 1024 * 1024),
+            ..UnifiedStoreConfig::default()
+        };
+        let store = UnifiedStore::open_with_config(&path, config.clone()).expect("paged store");
+        store
+            .try_set_config_tree(
+                "repro.setting",
+                &crate::serde_json::Value::String("abc".into()),
+            )
+            .expect("set");
+        assert_eq!(store.get_config("repro.setting"), Some(Value::text("abc")));
+        store.persist().expect("checkpoint");
+        assert_eq!(
+            store.get_config("repro.setting"),
+            Some(Value::text("abc")),
+            "after the checkpoint"
+        );
+        drop(store);
+        let reopened = UnifiedStore::open_with_config(&path, config).expect("reopen");
+        assert_eq!(
+            reopened.get_config("repro.setting"),
+            Some(Value::text("abc")),
+            "after reopening"
+        );
     }
 
     #[test]

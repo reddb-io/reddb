@@ -122,6 +122,47 @@ mod tests {
     }
 
     #[test]
+    fn show_config_lists_values_that_are_on_disk() {
+        let directory = tempfile::tempdir().expect("config fixture");
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("config.rdb"))
+                .with_memory_budget(32 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .expect("runtime");
+        let shown = |runtime: &RedDBRuntime| -> Vec<Value> {
+            runtime
+                .execute_query("SHOW CONFIG probe.string")
+                .expect("show")
+                .result
+                .records
+                .iter()
+                .filter_map(|record| record.get("value").cloned())
+                .collect()
+        };
+        runtime
+            .execute_query("SET CONFIG probe.string = 'saved'")
+            .expect("set");
+        let store = runtime.db().store();
+        store.persist().expect("checkpoint");
+        let manager = store
+            .get_collection("red.config")
+            .expect("config collection");
+        assert!(manager.has_backing(), "fixture must read persisted rows");
+        assert!(
+            manager.query_all(|_| true).is_empty(),
+            "fixture must be cold"
+        );
+        assert_eq!(shown(&runtime), vec![Value::text("saved")]);
+
+        // A value set afterwards is resident and replaces the one on disk.
+        runtime
+            .execute_query("SET CONFIG probe.string = 'newer'")
+            .expect("replace");
+        assert_eq!(shown(&runtime), vec![Value::text("newer")]);
+    }
+
+    #[test]
     fn boot_defaults_and_overlay_preserve_cold_operator_configuration() {
         let directory = tempfile::tempdir().expect("config fixture");
         let runtime = RedDBRuntime::with_options(

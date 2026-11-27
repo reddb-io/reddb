@@ -33,6 +33,18 @@ impl MvccReclaimCursor {
     pub(crate) fn visited_every_position(&self) -> bool {
         !self.invalidated && self.scan.finished() && self.cold_finished
     }
+
+    /// Whether an ordered tick will read the disk base: only then is every
+    /// candidate it returns a row it read as expired.
+    pub(crate) fn reads_the_base_in_order(&self) -> bool {
+        !self.invalidated && !self.cold_finished && self.manager.has_backing()
+    }
+
+    /// Whether the pass went on to the resident rows, whose positions are all
+    /// listed whatever their age.
+    pub(crate) fn followed_into_resident_rows(&self) -> bool {
+        self.cold_finished
+    }
 }
 
 /// How long a maintenance tick waits for the publication fence.

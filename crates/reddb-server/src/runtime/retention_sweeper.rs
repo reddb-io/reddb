@@ -197,6 +197,69 @@ pub(crate) struct SweeperState {
 }
 
 /// Per-runtime sweeper state map. Keyed by collection name.
+/// What the sweeper did to one collection over a reporting interval.
+#[derive(Debug, Clone)]
+pub(crate) struct SweepActivity {
+    since: std::time::Instant,
+    pub(crate) ticks: u64,
+    /// Positions inspected.
+    pub(crate) positions: u64,
+    /// Rows handed to the removing statement.
+    pub(crate) candidates: u64,
+    pub(crate) removed: u64,
+    /// Ticks whose every candidate was read as expired.
+    pub(crate) ordered_ticks: u64,
+}
+
+impl SweepActivity {
+    fn starting(since: std::time::Instant) -> Self {
+        Self {
+            since,
+            ticks: 0,
+            positions: 0,
+            candidates: 0,
+            removed: 0,
+            ordered_ticks: 0,
+        }
+    }
+}
+
+/// How often a retention sweep that removes nothing is reported.
+const UNREMOVED_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// What stands between an expired row and its removal, for the log: whether
+/// the row can be read by id, whether it is already deleted, what kind of
+/// value its timestamp column holds, and its age. No row content.
+pub(crate) fn describe_unremoved(
+    store: &crate::storage::unified::store::UnifiedStore,
+    collection: &str,
+    column: &str,
+    id: crate::storage::EntityId,
+    now_ms: u64,
+) -> String {
+    let entity = match store.try_get(collection, id, usize::MAX) {
+        Ok(Some(entity)) => entity,
+        Ok(None) => return "row not found by id".to_string(),
+        Err(err) => return format!("row unreadable by id: {err}"),
+    };
+    let field = match entity.data.as_row().and_then(|row| row.get_field(column)) {
+        None => "absent",
+        Some(reddb_types::Value::TimestampMs(_)) => "TimestampMs",
+        Some(reddb_types::Value::Timestamp(_)) => "Timestamp",
+        Some(reddb_types::Value::BigInt(_)) => "BigInt",
+        Some(reddb_types::Value::Integer(_)) => "Integer",
+        Some(reddb_types::Value::UnsignedInteger(_)) => "UnsignedInteger",
+        Some(reddb_types::Value::Null) => "Null",
+        Some(_) => "other",
+    };
+    let age_days = (now_ms / 1_000).saturating_sub(entity.created_at) / 86_400;
+    format!(
+        "stored_in={} deleted={} {column}_field={field} age_days={age_days}",
+        entity.kind.collection(),
+        entity.xmax != 0,
+    )
+}
+
 /// How often the pass over a collection swept in id order visits every
 /// position instead, as the first pass after a start does. An event stamped
 /// ahead of time stops every ordered pass in front of it, and one stamped by
@@ -211,6 +274,10 @@ pub(crate) struct RetentionSweeperState {
     /// Collections swept in id order: when their last pass over every
     /// position ended, or `None` while one is under way.
     full_passes: HashMap<String, Option<std::time::Instant>>,
+    /// When a sweep that removed nothing was last reported, per collection.
+    reported: HashMap<String, std::time::Instant>,
+    /// What the sweeper did to each collection since its last summary.
+    activity: HashMap<String, SweepActivity>,
     ttl_projection_cursors: HashMap<String, crate::storage::unified::store::MvccReclaimCursor>,
     next_collection: Option<String>,
     next_ttl_collection: Option<String>,
@@ -222,6 +289,8 @@ impl RetentionSweeperState {
             states: HashMap::new(),
             cursors: HashMap::new(),
             full_passes: HashMap::new(),
+            reported: HashMap::new(),
+            activity: HashMap::new(),
             ttl_projection_cursors: HashMap::new(),
             next_collection: None,
             next_ttl_collection: None,
@@ -230,16 +299,18 @@ impl RetentionSweeperState {
 
     /// `ordered` is the expiry test of a collection whose rows expire in the
     /// order of their ids; its pass ends at the first row inside the window.
+    /// The last value says whether every candidate was read as expired, which
+    /// only an ordered pass can say: the others list every position.
     pub(crate) fn scan_tick(
         &mut self,
         store: &crate::storage::unified::store::UnifiedStore,
         collection: &str,
         budget: usize,
         ordered: Option<&dyn Fn(&crate::storage::UnifiedEntity) -> bool>,
-    ) -> Result<(Vec<crate::storage::EntityId>, usize), crate::storage::StoreError> {
+    ) -> Result<(Vec<crate::storage::EntityId>, usize, bool), crate::storage::StoreError> {
         if !self.cursors.contains_key(collection) {
             let Some(cursor) = store.mvcc_reclaim_cursor(collection.to_owned()) else {
-                return Ok((Vec::new(), 0));
+                return Ok((Vec::new(), 0, false));
             };
             self.cursors.insert(collection.to_owned(), cursor);
             let due = ordered.is_some()
@@ -258,10 +329,18 @@ impl RetentionSweeperState {
             .get_mut(collection)
             .expect("cursor was inserted");
         let full = self.full_passes.get(collection) == Some(&None);
-        let result = match ordered {
+        // An ordered tick on a collection with nothing on disk also lists
+        // every resident position.
+        let in_order = ordered.is_some() && !full && cursor.reads_the_base_in_order();
+        let (ids, scanned) = match ordered {
             Some(expired) if !full => store.retention_scan_ordered_tick(cursor, budget, expired)?,
             _ => store.retention_scan_tick(cursor, budget)?,
         };
+        let result = (
+            ids,
+            scanned,
+            in_order && !cursor.followed_into_resident_rows(),
+        );
         if cursor.finished() {
             if ordered.is_some() && full && cursor.visited_every_position() {
                 self.full_passes
@@ -274,6 +353,48 @@ impl RetentionSweeperState {
 
     pub(crate) fn next_collection(&self) -> Option<&str> {
         self.next_collection.as_deref()
+    }
+
+    /// Adds one tick to the collection's running summary and returns the
+    /// summary once [`UNREMOVED_REPORT_INTERVAL`] has passed, if the sweeper
+    /// submitted anything in it. An idle sweeper stays silent.
+    pub(crate) fn note_activity(
+        &mut self,
+        collection: &str,
+        positions: usize,
+        candidates: usize,
+        removed: u64,
+        in_order: bool,
+    ) -> Option<SweepActivity> {
+        let now = std::time::Instant::now();
+        let activity = self
+            .activity
+            .entry(collection.to_owned())
+            .or_insert_with(|| SweepActivity::starting(now));
+        activity.ticks += 1;
+        activity.positions += positions as u64;
+        activity.candidates += candidates as u64;
+        activity.removed += removed;
+        activity.ordered_ticks += u64::from(in_order);
+        if now.duration_since(activity.since) < UNREMOVED_REPORT_INTERVAL {
+            return None;
+        }
+        let summary = std::mem::replace(activity, SweepActivity::starting(now));
+        (summary.candidates != 0).then_some(summary)
+    }
+
+    /// Whether a sweep of `collection` that removed nothing is due a log line.
+    /// The sweeper ticks twice a second; a standing fault says so once every
+    /// [`UNREMOVED_REPORT_INTERVAL`].
+    pub(crate) fn report_unremoved(&mut self, collection: &str) -> bool {
+        let now = std::time::Instant::now();
+        match self.reported.get(collection) {
+            Some(last) if now.duration_since(*last) < UNREMOVED_REPORT_INTERVAL => false,
+            _ => {
+                self.reported.insert(collection.to_owned(), now);
+                true
+            }
+        }
     }
 
     /// Whether a pass over the collection is under way.
