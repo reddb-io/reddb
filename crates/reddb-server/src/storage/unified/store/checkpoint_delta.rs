@@ -30,27 +30,17 @@ pub(super) fn take_declined() -> Option<&'static str> {
     DECLINED.with(std::cell::Cell::take)
 }
 
-/// A delta rewrites a leaf and its index entries for every changed row, close
-/// to two milliseconds each; a republish streams the collection at about an
-/// eighth of a millisecond a row and leaves the old tree to be reclaimed. Past
-/// a thousand changed rows the delta is the cheaper of the two only while it
-/// touches a small share of the collection.
-pub(super) fn republish_is_cheaper(changed: usize, rows: usize) -> bool {
-    changed > 1024 && changed.saturating_mul(8) > rows
-}
-
 /// Index entries one incremental checkpoint may change across a collection.
 pub(super) const POSTING_CHANGES_MAX: usize =
     8 * crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX;
 
 /// Whether a delta of `changed` rows is one the incremental checkpoint takes:
-/// within the mutation journal, within the index entries it may change, and
-/// cheaper than a republish. Staging a replacement tree asks the same question
-/// so it copies a collection only when the delta would have been declined.
-pub(super) fn delta_fits(changed: usize, rows: usize, indexes: usize) -> bool {
+/// within the mutation journal and within the index entries it may change.
+/// Staging a replacement tree asks the same question, so it copies a
+/// collection only when the delta would have been declined.
+pub(super) fn delta_fits(changed: usize, indexes: usize) -> bool {
     changed <= crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX
         && changed.saturating_mul(indexes) <= POSTING_CHANGES_MAX
-        && !republish_is_cheaper(changed, rows)
 }
 
 #[derive(Default)]
@@ -153,6 +143,41 @@ impl DurableRows {
 }
 
 impl UnifiedStore {
+    /// Whether the incremental checkpoint is certain to have what it needs to
+    /// apply these changes in place: a published tree to apply them to, a
+    /// delta within its bounds, and a retained WAL image for every changed row
+    /// that still exists. It can still decline for other reasons, and then
+    /// publishes the collection again inside the checkpoint.
+    pub(super) fn delta_is_ready(
+        &self,
+        collection: &str,
+        manager: &SegmentManager,
+        changed: &[EntityId],
+    ) -> bool {
+        let indexes = self
+            .key_indices
+            .read()
+            .get(collection)
+            .map_or(0, |keys| keys.secondary.len());
+        if !delta_fits(changed.len(), indexes)
+            || !self
+                .btree_indices
+                .read()
+                .get(collection)
+                .is_some_and(|tree| tree.has_page_proofs() && tree.root_page_id() != 0)
+        {
+            return false;
+        }
+        let retained = self.checkpoint_durable_rows.read();
+        let mut key = (collection.to_owned(), EntityId::new(0));
+        changed.iter().all(|&id| {
+            key.1 = id;
+            manager.get_with(id, |_| ()).is_none()
+                || retained.rows.contains_key(&key)
+                || retained.references.get(collection, id).is_some()
+        })
+    }
+
     /// Called only after the WAL append succeeds. The ordinary inline KV path
     /// does not retain records here. The checkpoint's existing force_sync is
     /// the durability fence before any sparse projection changes pager pages.
@@ -251,9 +276,6 @@ impl UnifiedStore {
         );
         if ids.len() > crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX {
             return declined("more than 8192 changed rows");
-        }
-        if republish_is_cheaper(ids.len(), manager.count()) {
-            return declined("more than an eighth of the rows changed");
         }
         let retained = self.checkpoint_durable_rows.read();
         let mut upserts = Vec::new();

@@ -172,12 +172,6 @@ impl UnifiedStore {
                         let posting_count = ids.len().saturating_mul(keys.secondary.len());
                         let max_changes =
                             crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX;
-                        if super::checkpoint_delta::republish_is_cheaper(ids.len(), manager.count())
-                        {
-                            return super::checkpoint_delta::declined(
-                                "more than an eighth of the rows changed",
-                            );
-                        }
                         if ids.len() > max_changes
                             || posting_count > super::checkpoint_delta::POSTING_CHANGES_MAX
                         {
