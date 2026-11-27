@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.40.6
+
+### Patch Changes
+
+- [#2982](https://github.com/reddb-io/reddb/pull/2982) [`e0bcd01`](https://github.com/reddb-io/reddb/commit/e0bcd010554f2d3e44c30f8aa2b212ce0eff78ef) Thanks [@filipeforattini](https://github.com/filipeforattini)! - A delete of a disk-resident row no longer forces the next checkpoint to publish the whole collection again when a reader happened to hold the collection as the delete was logged. The confirmation that the removal is in the WAL was dropped in that case; it is now kept and applied by the next holder of the backing. The log line of a republished collection also names the exact reason the backing delta was refused.
+
 ## 1.40.5
 
 ### Patch Changes
