@@ -197,6 +197,33 @@ pub(crate) struct SweeperState {
 }
 
 /// Per-runtime sweeper state map. Keyed by collection name.
+/// What the sweeper did to one collection over a reporting interval.
+#[derive(Debug, Clone)]
+pub(crate) struct SweepActivity {
+    since: std::time::Instant,
+    pub(crate) ticks: u64,
+    /// Positions inspected.
+    pub(crate) positions: u64,
+    /// Rows handed to the removing statement.
+    pub(crate) candidates: u64,
+    pub(crate) removed: u64,
+    /// Ticks whose every candidate was read as expired.
+    pub(crate) ordered_ticks: u64,
+}
+
+impl SweepActivity {
+    fn starting(since: std::time::Instant) -> Self {
+        Self {
+            since,
+            ticks: 0,
+            positions: 0,
+            candidates: 0,
+            removed: 0,
+            ordered_ticks: 0,
+        }
+    }
+}
+
 /// How often a retention sweep that removes nothing is reported.
 const UNREMOVED_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
 
@@ -249,6 +276,8 @@ pub(crate) struct RetentionSweeperState {
     full_passes: HashMap<String, Option<std::time::Instant>>,
     /// When a sweep that removed nothing was last reported, per collection.
     reported: HashMap<String, std::time::Instant>,
+    /// What the sweeper did to each collection since its last summary.
+    activity: HashMap<String, SweepActivity>,
     ttl_projection_cursors: HashMap<String, crate::storage::unified::store::MvccReclaimCursor>,
     next_collection: Option<String>,
     next_ttl_collection: Option<String>,
@@ -261,6 +290,7 @@ impl RetentionSweeperState {
             cursors: HashMap::new(),
             full_passes: HashMap::new(),
             reported: HashMap::new(),
+            activity: HashMap::new(),
             ttl_projection_cursors: HashMap::new(),
             next_collection: None,
             next_ttl_collection: None,
@@ -323,6 +353,34 @@ impl RetentionSweeperState {
 
     pub(crate) fn next_collection(&self) -> Option<&str> {
         self.next_collection.as_deref()
+    }
+
+    /// Adds one tick to the collection's running summary and returns the
+    /// summary once [`UNREMOVED_REPORT_INTERVAL`] has passed, if the sweeper
+    /// submitted anything in it. An idle sweeper stays silent.
+    pub(crate) fn note_activity(
+        &mut self,
+        collection: &str,
+        positions: usize,
+        candidates: usize,
+        removed: u64,
+        in_order: bool,
+    ) -> Option<SweepActivity> {
+        let now = std::time::Instant::now();
+        let activity = self
+            .activity
+            .entry(collection.to_owned())
+            .or_insert_with(|| SweepActivity::starting(now));
+        activity.ticks += 1;
+        activity.positions += positions as u64;
+        activity.candidates += candidates as u64;
+        activity.removed += removed;
+        activity.ordered_ticks += u64::from(in_order);
+        if now.duration_since(activity.since) < UNREMOVED_REPORT_INTERVAL {
+            return None;
+        }
+        let summary = std::mem::replace(activity, SweepActivity::starting(now));
+        (summary.candidates != 0).then_some(summary)
     }
 
     /// Whether a sweep of `collection` that removed nothing is due a log line.

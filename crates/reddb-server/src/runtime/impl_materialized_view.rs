@@ -197,6 +197,27 @@ impl RedDBRuntime {
                 Ok(r) => (r.affected_rows, u64::from(scanned > 0)),
                 Err(_) => (0, 1),
             };
+            // What the sweeper costs and achieves was only visible through a
+            // view that scans. One line every ten minutes while it works.
+            let activity = self.inner.retention_sweeper.write().note_activity(
+                name,
+                scanned,
+                submitted,
+                deleted,
+                all_expired,
+            );
+            if let Some(activity) = activity {
+                tracing::info!(
+                    target: "reddb::retention",
+                    collection = %name,
+                    ticks = activity.ticks,
+                    positions = activity.positions,
+                    candidates = activity.candidates,
+                    removed = activity.removed,
+                    ordered_ticks = activity.ordered_ticks,
+                    "retention sweep activity"
+                );
+            }
 
             self.inner
                 .retention_sweeper
