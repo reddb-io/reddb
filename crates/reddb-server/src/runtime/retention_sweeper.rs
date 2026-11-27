@@ -197,10 +197,20 @@ pub(crate) struct SweeperState {
 }
 
 /// Per-runtime sweeper state map. Keyed by collection name.
+/// How often the pass over a collection swept in id order visits every
+/// position instead, as the first pass after a start does. An event stamped
+/// ahead of time stops every ordered pass in front of it, and one stamped by
+/// a clock that later stepped back sits behind newer ids; this pass reaches
+/// the expired rows behind both.
+const ORDERED_FULL_PASS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
 #[derive(Default)]
 pub(crate) struct RetentionSweeperState {
     states: HashMap<String, SweeperState>,
     cursors: HashMap<String, crate::storage::unified::store::MvccReclaimCursor>,
+    /// Collections swept in id order: when their last pass over every
+    /// position ended, or `None` while one is under way.
+    full_passes: HashMap<String, Option<std::time::Instant>>,
     ttl_projection_cursors: HashMap<String, crate::storage::unified::store::MvccReclaimCursor>,
     next_collection: Option<String>,
     next_ttl_collection: Option<String>,
@@ -211,30 +221,52 @@ impl RetentionSweeperState {
         Self {
             states: HashMap::new(),
             cursors: HashMap::new(),
+            full_passes: HashMap::new(),
             ttl_projection_cursors: HashMap::new(),
             next_collection: None,
             next_ttl_collection: None,
         }
     }
 
+    /// `ordered` is the expiry test of a collection whose rows expire in the
+    /// order of their ids; its pass ends at the first row inside the window.
     pub(crate) fn scan_tick(
         &mut self,
         store: &crate::storage::unified::store::UnifiedStore,
         collection: &str,
         budget: usize,
+        ordered: Option<&dyn Fn(&crate::storage::UnifiedEntity) -> bool>,
     ) -> Result<(Vec<crate::storage::EntityId>, usize), crate::storage::StoreError> {
         if !self.cursors.contains_key(collection) {
             let Some(cursor) = store.mvcc_reclaim_cursor(collection.to_owned()) else {
                 return Ok((Vec::new(), 0));
             };
             self.cursors.insert(collection.to_owned(), cursor);
+            let due = ordered.is_some()
+                && self
+                    .full_passes
+                    .get(collection)
+                    .copied()
+                    .flatten()
+                    .is_none_or(|ended| ended.elapsed() >= ORDERED_FULL_PASS_INTERVAL);
+            if due {
+                self.full_passes.insert(collection.to_owned(), None);
+            }
         }
         let cursor = self
             .cursors
             .get_mut(collection)
             .expect("cursor was inserted");
-        let result = store.retention_scan_tick(cursor, budget)?;
+        let full = self.full_passes.get(collection) == Some(&None);
+        let result = match ordered {
+            Some(expired) if !full => store.retention_scan_ordered_tick(cursor, budget, expired)?,
+            _ => store.retention_scan_tick(cursor, budget)?,
+        };
         if cursor.finished() {
+            if ordered.is_some() && full && cursor.visited_every_position() {
+                self.full_passes
+                    .insert(collection.to_owned(), Some(std::time::Instant::now()));
+            }
             self.cursors.remove(collection);
         }
         Ok(result)
@@ -242,6 +274,12 @@ impl RetentionSweeperState {
 
     pub(crate) fn next_collection(&self) -> Option<&str> {
         self.next_collection.as_deref()
+    }
+
+    /// Whether a pass over the collection is under way.
+    #[cfg(test)]
+    pub(crate) fn pass_in_progress(&self, collection: &str) -> bool {
+        self.cursors.contains_key(collection)
     }
 
     pub(crate) fn rebuild_ttl_projection_tick(

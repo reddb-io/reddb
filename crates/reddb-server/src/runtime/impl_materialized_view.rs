@@ -107,11 +107,19 @@ impl RedDBRuntime {
             }
             let cutoff = super::retention_sweeper::cutoff_ms(now_ms, retention_ms);
 
+            // The control-event ledger is insert-only and kept by the time
+            // each event was inserted, so its rows expire in id order.
+            let ledger_expired = |entity: &crate::storage::UnifiedEntity| {
+                super::control_events_retention::is_expired(entity, cutoff)
+            };
+            let ordered = (name == super::control_events::CONTROL_EVENTS_COLLECTION
+                && ts_column == "created_at")
+                .then_some(&ledger_expired as &dyn Fn(&crate::storage::UnifiedEntity) -> bool);
             let candidates = self
                 .inner
                 .retention_sweeper
                 .write()
-                .scan_tick(&store, name, remaining);
+                .scan_tick(&store, name, remaining, ordered);
             let (candidates, scanned) = match candidates {
                 Ok(result) => result,
                 Err(_) => {

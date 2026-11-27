@@ -274,6 +274,118 @@ mod tests {
         );
     }
 
+    fn swept_total(runtime: &RedDBRuntime) -> Option<Value> {
+        let swept = runtime
+            .execute_query(
+                "SELECT rows_swept_total FROM red.retention WHERE name = 'red.control_events'",
+            )
+            .expect("sweeper counters");
+        swept.result.records[0].get("rows_swept_total").cloned()
+    }
+
+    /// A ledger written by `seed`, reopened with every row of it on disk.
+    fn ledger_on_disk(
+        name: &str,
+        seed: impl FnOnce(&RedDBRuntime),
+    ) -> (tempfile::TempDir, RedDBRuntime) {
+        let directory = tempfile::tempdir().expect("ledger fixture");
+        let options = crate::RedDBOptions::persistent(directory.path().join(name))
+            .with_memory_budget(64 * 1024 * 1024)
+            .with_bounded_disk_residency(true);
+        {
+            let mut runtime = RedDBRuntime::with_options(options.clone()).expect("seed runtime");
+            drop(runtime.background_tasks.take());
+            runtime
+                .apply_control_events_retention()
+                .expect("boot policy");
+            seed(&runtime);
+            runtime.flush().expect("persist the ledger");
+        }
+        let mut runtime = crate::storage::RedDB::with_disk_residency_for_qualification(|| {
+            RedDBRuntime::with_options(options)
+        })
+        .expect("reopen disk-resident runtime");
+        drop(runtime.background_tasks.take());
+        (directory, runtime)
+    }
+
+    fn pass_in_progress(runtime: &RedDBRuntime) -> bool {
+        runtime
+            .inner
+            .retention_sweeper
+            .read()
+            .pass_in_progress(CONTROL_EVENTS_COLLECTION)
+    }
+
+    /// The first pass after a start visits every position. The events here
+    /// expire only once the window narrows, which leaves them to later passes.
+    fn narrow_the_window_after_the_first_pass(runtime: &RedDBRuntime) {
+        runtime.sweep_retention_tick(1_000);
+        assert!(!pass_in_progress(runtime), "the first pass has ended");
+        assert_eq!(swept_total(runtime), Some(Value::UnsignedInteger(0)));
+        runtime
+            .execute_query("SET CONFIG control_events.retention = '48h'")
+            .expect("narrow the window");
+    }
+
+    #[test]
+    fn a_pass_over_the_ledger_on_disk_ends_at_the_first_event_inside_the_window() {
+        let (_directory, runtime) = ledger_on_disk("ledger.rdb", |runtime| {
+            for n in 0..3 {
+                insert_event(runtime, &format!("stale-{n}"), 3 * 86_400);
+            }
+            for n in 0..400 {
+                insert_event(runtime, &format!("fresh-{n:03}"), 3_600);
+            }
+        });
+        narrow_the_window_after_the_first_pass(&runtime);
+
+        // Far fewer positions than the ledger holds.
+        runtime.sweep_retention_tick(16);
+        assert_eq!(swept_total(&runtime), Some(Value::UnsignedInteger(3)));
+        assert!(
+            !pass_in_progress(&runtime),
+            "the first event inside the window ends the pass"
+        );
+
+        // The removals wait in the base for a checkpoint. They are not
+        // candidates again, and the pass still ends at once.
+        runtime.sweep_retention_tick(16);
+        assert_eq!(swept_total(&runtime), Some(Value::UnsignedInteger(3)));
+        assert!(!pass_in_progress(&runtime));
+        assert_eq!(visible_ids(&runtime).len(), 400);
+    }
+
+    #[test]
+    fn a_ledger_expired_on_disk_is_followed_into_memory() {
+        let (_directory, runtime) = ledger_on_disk("ledger-expired.rdb", |runtime| {
+            for n in 0..3 {
+                insert_event(runtime, &format!("stale-{n}"), 3 * 86_400);
+            }
+        });
+        narrow_the_window_after_the_first_pass(&runtime);
+        insert_event(&runtime, "stale-resident", 3 * 86_400);
+        insert_event(&runtime, "fresh-resident", 3_600);
+
+        for _ in 0..4 {
+            runtime.sweep_retention_tick(1_000);
+        }
+        assert_eq!(swept_total(&runtime), Some(Value::UnsignedInteger(4)));
+        assert_eq!(visible_ids(&runtime), vec!["fresh-resident".to_string()]);
+    }
+
+    #[test]
+    fn the_first_pass_after_a_start_reaches_an_expired_event_behind_a_newer_one() {
+        let (_directory, runtime) = ledger_on_disk("ledger-unordered.rdb", |runtime| {
+            insert_event(runtime, "fresh", 3_600);
+            insert_event(runtime, "stale", 8 * 86_400);
+        });
+
+        runtime.sweep_retention_tick(1_000);
+        assert_eq!(swept_total(&runtime), Some(Value::UnsignedInteger(1)));
+        assert_eq!(visible_ids(&runtime), vec!["fresh".to_string()]);
+    }
+
     #[test]
     fn set_config_override_narrows_the_window_at_runtime() {
         let runtime = runtime();

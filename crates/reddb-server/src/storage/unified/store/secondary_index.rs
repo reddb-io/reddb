@@ -456,7 +456,12 @@ impl UnifiedStore {
             {
                 continue;
             }
-            if spec.deferred {
+            // The background worker builds a deferred projection over the
+            // generation it was declared on. A republished collection is a new
+            // generation: that build has just lost its source, and leaving the
+            // projection out would republish the collection at every
+            // checkpoint that comes before a new build ends.
+            if spec.deferred && same_generation.is_some() {
                 continue;
             }
             if name == super::count_index::NAME {

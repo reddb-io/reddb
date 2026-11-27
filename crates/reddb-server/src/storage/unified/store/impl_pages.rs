@@ -4020,6 +4020,61 @@ mod checkpoint_work_tests {
     }
 
     #[test]
+    fn a_republished_collection_takes_its_count_projection_with_it() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let config = UnifiedStoreConfig {
+            resident_memory_bytes_max: Some(2 * 1024 * 1024),
+            ..UnifiedStoreConfig::default()
+        };
+        let store = UnifiedStore::open_with_config(directory.path().join("data.rdb"), config)
+            .expect("paged store");
+        for id in 1..=2_000 {
+            store
+                .write_keyed_row("rows", row(id, 1), None, None)
+                .expect("seed");
+        }
+        store.persist().expect("baseline");
+
+        // Declared on a collection that already has rows on disk, the
+        // projection is left to the background worker, which is not running.
+        store
+            .register_count_index_deferred("rows")
+            .expect("declare the projection");
+        let identity = super::super::count_index::identity(None);
+        let published = || {
+            store
+                .secondary_index("rows", super::super::count_index::NAME, &identity)
+                .is_some()
+        };
+        assert!(!published());
+
+        store
+            .write_keyed_row("rows", row(2_001, 1), None, None)
+            .expect("first write");
+        CHECKPOINT_REPUBLISHED.with(|log| log.borrow_mut().clear());
+        store.persist().expect("republishing checkpoint");
+        assert_eq!(
+            CHECKPOINT_REPUBLISHED.with(|log| log.borrow().clone()),
+            vec!["an index of the collection is still being built"]
+        );
+        assert!(published(), "the republished collection has its projection");
+
+        store
+            .write_keyed_row("rows", row(2_002, 1), None, None)
+            .expect("second write");
+        CHECKPOINT_REPUBLISHED.with(|log| log.borrow_mut().clear());
+        store.persist().expect("next checkpoint");
+        let again = CHECKPOINT_REPUBLISHED.with(|log| log.borrow().clone());
+        assert!(
+            !again.contains(&"an index of the collection is still being built"),
+            "the projection republished its collection again: {again:?}"
+        );
+        // This fixture's rows make every checkpoint a republish. The
+        // projection published by one is still there after the next.
+        assert!(published(), "a republish dropped the projection");
+    }
+
+    #[test]
     fn completed_inline_insert_reuses_history_but_not_untracked_edits() {
         let directory = tempfile::tempdir().expect("temporary store");
         let path = directory.path().join("data.rdb");
