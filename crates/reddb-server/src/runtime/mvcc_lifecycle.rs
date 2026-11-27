@@ -1311,9 +1311,14 @@ impl RedDBRuntime {
         &self,
         collection: &str,
     ) -> RedDBResult<crate::storage::transaction::snapshot::Xid> {
-        let addressable_by_as_of = collection.starts_with("red_")
-            || collection.starts_with("red.")
-            || self.vcs_is_versioned(collection)?;
+        // The control-event ledger is outside the VCS, and its reads hide an
+        // expired event by the clock whatever they are `AS OF`: no read can
+        // address an event that retention removed. Honouring commit pins there
+        // kept every removed event on disk for as long as any commit existed.
+        let addressable_by_as_of = collection != super::control_events::CONTROL_EVENTS_COLLECTION
+            && (collection.starts_with("red_")
+                || collection.starts_with("red.")
+                || self.vcs_is_versioned(collection)?);
         Ok(self.mvcc_cutoff_xid(addressable_by_as_of))
     }
 

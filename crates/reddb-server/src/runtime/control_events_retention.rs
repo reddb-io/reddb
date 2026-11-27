@@ -386,6 +386,71 @@ mod tests {
         assert_eq!(visible_ids(&runtime), vec!["fresh".to_string()]);
     }
 
+    fn ledger_entities(runtime: &RedDBRuntime) -> usize {
+        runtime
+            .db()
+            .store()
+            .get_collection(CONTROL_EVENTS_COLLECTION)
+            .expect("ledger collection")
+            .count()
+    }
+
+    #[test]
+    fn an_event_already_removed_is_not_submitted_again() {
+        let (_directory, runtime) = ledger_on_disk("ledger-resubmit.rdb", |runtime| {
+            for n in 0..3 {
+                insert_event(runtime, &format!("stale-{n}"), 3 * 86_400);
+            }
+            insert_event(runtime, "fresh", 3_600);
+        });
+        narrow_the_window_after_the_first_pass(&runtime);
+        runtime.sweep_retention_tick(1_000);
+        assert_eq!(swept_total(&runtime), Some(Value::UnsignedInteger(3)));
+
+        // The three versions stay in the base until they are reclaimed. A pass
+        // that submitted them again would remove nothing and be reported.
+        for _ in 0..4 {
+            runtime.sweep_retention_tick(1_000);
+        }
+        assert_eq!(swept_total(&runtime), Some(Value::UnsignedInteger(3)));
+        assert!(!runtime
+            .inner
+            .retention_sweeper
+            .read()
+            .unremoved_reported(CONTROL_EVENTS_COLLECTION));
+    }
+
+    #[test]
+    fn removed_events_are_reclaimed_although_a_vcs_commit_pins_history() {
+        let (_directory, runtime) = ledger_on_disk("ledger-pinned.rdb", |runtime| {
+            for n in 0..3 {
+                insert_event(runtime, &format!("stale-{n}"), 8 * 86_400);
+            }
+            insert_event(runtime, "fresh", 3_600);
+        });
+        // A VCS commit pins the history of everything a commit can address.
+        runtime
+            .execute_query("CHECKPOINT 'pin history'")
+            .expect("vcs commit");
+        runtime.sweep_retention_tick(1_000);
+        assert_eq!(swept_total(&runtime), Some(Value::UnsignedInteger(3)));
+        let removed_logically = ledger_entities(&runtime);
+
+        // Every collection takes its turn; the ledger's comes within these.
+        for _ in 0..2_000 {
+            runtime.try_reclaim_history_tick();
+            if ledger_entities(&runtime) + 3 <= removed_logically {
+                break;
+            }
+        }
+        assert_eq!(
+            ledger_entities(&runtime) + 3,
+            removed_logically,
+            "the removed events are still on disk"
+        );
+        assert_eq!(visible_ids(&runtime), vec!["fresh".to_string()]);
+    }
+
     #[test]
     fn set_config_override_narrows_the_window_at_runtime() {
         let runtime = runtime();

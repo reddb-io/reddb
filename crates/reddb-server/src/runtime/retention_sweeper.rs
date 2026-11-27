@@ -276,6 +276,9 @@ pub(crate) struct RetentionSweeperState {
     full_passes: HashMap<String, Option<std::time::Instant>>,
     /// When a sweep that removed nothing was last reported, per collection.
     reported: HashMap<String, std::time::Instant>,
+    /// Where the last ordered pass over a collection ended. Everything before
+    /// it was expired then, so the next ordered pass starts there.
+    ordered_from: HashMap<String, Vec<u8>>,
     /// What the sweeper did to each collection since its last summary.
     activity: HashMap<String, SweepActivity>,
     ttl_projection_cursors: HashMap<String, crate::storage::unified::store::MvccReclaimCursor>,
@@ -290,6 +293,7 @@ impl RetentionSweeperState {
             cursors: HashMap::new(),
             full_passes: HashMap::new(),
             reported: HashMap::new(),
+            ordered_from: HashMap::new(),
             activity: HashMap::new(),
             ttl_projection_cursors: HashMap::new(),
             next_collection: None,
@@ -322,6 +326,16 @@ impl RetentionSweeperState {
                     .is_none_or(|ended| ended.elapsed() >= ORDERED_FULL_PASS_INTERVAL);
             if due {
                 self.full_passes.insert(collection.to_owned(), None);
+            } else if ordered.is_some() {
+                // Rows before this point were read as expired by an earlier
+                // pass. Walking them again on every pass re-read every
+                // removed event still waiting for its version to be reclaimed.
+                if let Some(from) = self.ordered_from.get(collection) {
+                    self.cursors
+                        .get_mut(collection)
+                        .expect("cursor was inserted")
+                        .resume_after(from.clone());
+                }
             }
         }
         let cursor = self
@@ -341,6 +355,9 @@ impl RetentionSweeperState {
             scanned,
             in_order && !cursor.followed_into_resident_rows(),
         );
+        if let Some(position) = cursor.ordered_position() {
+            self.ordered_from.insert(collection.to_owned(), position);
+        }
         if cursor.finished() {
             if ordered.is_some() && full && cursor.visited_every_position() {
                 self.full_passes
@@ -401,6 +418,13 @@ impl RetentionSweeperState {
     #[cfg(test)]
     pub(crate) fn pass_in_progress(&self, collection: &str) -> bool {
         self.cursors.contains_key(collection)
+    }
+
+    /// Whether a sweep of the collection was ever reported as removing none
+    /// of the rows it read as expired.
+    #[cfg(test)]
+    pub(crate) fn unremoved_reported(&self, collection: &str) -> bool {
+        self.reported.contains_key(collection)
     }
 
     pub(crate) fn rebuild_ttl_projection_tick(
