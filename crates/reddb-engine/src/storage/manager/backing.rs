@@ -503,6 +503,15 @@ impl SegmentManager {
             || self.get_with(id, |_| ()).is_some()
     }
 
+    /// Whether the published base still lists a row that has been physically
+    /// removed since it was published.
+    pub fn backing_row_is_removed(&self, id: EntityId) -> bool {
+        self.backing
+            .read()
+            .as_ref()
+            .is_some_and(|base| base.removed.contains(&id))
+    }
+
     /// The rows the published base still lists that have been physically
     /// removed since it was published.
     pub fn backing_removed_rows(&self) -> Vec<EntityId> {

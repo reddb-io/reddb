@@ -18,12 +18,20 @@ pub(crate) struct MvccReclaimCursor {
     cold_after: Option<Vec<u8>>,
     cold_is_visibility: Option<bool>,
     cold_finished: bool,
+    /// An ordered pass met a row still inside the window: nothing after it
+    /// has expired.
+    ordered_done: bool,
     invalidated: bool,
 }
 
 impl MvccReclaimCursor {
     pub(crate) fn finished(&self) -> bool {
-        self.invalidated || (self.scan.finished() && self.cold_finished)
+        self.invalidated || self.ordered_done || (self.scan.finished() && self.cold_finished)
+    }
+
+    /// Whether the pass ended because nothing was left to visit.
+    pub(crate) fn visited_every_position(&self) -> bool {
+        !self.invalidated && self.scan.finished() && self.cold_finished
     }
 }
 
@@ -46,6 +54,7 @@ impl UnifiedStore {
             cold_after: None,
             cold_is_visibility: None,
             cold_finished: false,
+            ordered_done: false,
             invalidated: false,
         })
     }
@@ -62,6 +71,112 @@ impl UnifiedStore {
     fn maintenance_fence(&self) -> Option<parking_lot::ReentrantMutexGuard<'_, ()>> {
         self.vault_publication_lock
             .try_lock_for(MAINTENANCE_FENCE_WAIT)
+    }
+
+    /// [`Self::retention_scan_tick`] for a collection whose rows expire in the
+    /// order of their ids: an insert-only ledger kept by its insertion time.
+    ///
+    /// The general inventory visits every position of the collection, pass
+    /// after pass, because an expired row can be anywhere. A ledger of 800,000
+    /// rows that loses 80 a minute was walked from end to end every few
+    /// minutes for them, through a page cache far smaller than the ledger.
+    /// Here the first row on disk still inside the window ends the pass: every
+    /// later id, on disk or resident, was inserted later.
+    ///
+    /// A clock that stepped can leave an expired row behind a live one. Reads
+    /// hide it at once; the caller's periodic pass over every position
+    /// removes it.
+    pub(crate) fn retention_scan_ordered_tick(
+        &self,
+        cursor: &mut MvccReclaimCursor,
+        budget: usize,
+        expired: &dyn Fn(&UnifiedEntity) -> bool,
+    ) -> Result<(Vec<EntityId>, usize), StoreError> {
+        let mut ids = Vec::new();
+        let mut work_left = budget;
+        {
+            let Some(_publication) = self.maintenance_fence() else {
+                return Ok((Vec::new(), 0));
+            };
+            let Some(manager) = self.get_collection(&cursor.collection) else {
+                cursor.invalidated = true;
+                return Ok((Vec::new(), 0));
+            };
+            if !Arc::ptr_eq(&manager, &cursor.manager) {
+                cursor.invalidated = true;
+                return Ok((Vec::new(), 0));
+            }
+            if !manager.has_backing() || cursor.cold_finished {
+                // Nothing on disk to go by: every resident position is inspected.
+                return self.retention_scan_tick(cursor, budget);
+            }
+            let tree = self
+                .btree_indices
+                .read()
+                .get(&cursor.collection)
+                .cloned()
+                .ok_or_else(|| {
+                    StoreError::Serialization("retention base has no published tree".into())
+                })?;
+            let start = match cursor.cold_after.as_deref() {
+                Some(after) => {
+                    let raw: [u8; 8] = after.try_into().map_err(|_| {
+                        StoreError::Serialization("invalid retention cursor identity".into())
+                    })?;
+                    u64::from_be_bytes(raw).saturating_add(1).to_be_bytes()
+                }
+                None => 0_u64.to_be_bytes(),
+            };
+            let mut native = tree
+                .cursor_seek(&start)
+                .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+            while work_left > 0 {
+                let Some(key) = native
+                    .peek_key()
+                    .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+                else {
+                    cursor.cold_finished = true;
+                    break;
+                };
+                work_left -= 1;
+                let raw: [u8; 8] = key.as_slice().try_into().map_err(|_| {
+                    StoreError::Serialization("invalid retention physical identity".into())
+                })?;
+                let id = EntityId::new(u64::from_be_bytes(raw));
+                // A removal stays in the base until the next checkpoint. Its
+                // record is passed over without being read.
+                if manager.backing_row_is_removed(id) {
+                    native
+                        .skip_next()
+                        .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+                    cursor.cold_after = Some(key);
+                    continue;
+                }
+                let Some((_, value)) = native
+                    .next()
+                    .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+                else {
+                    cursor.cold_finished = true;
+                    break;
+                };
+                let (entity, _) = Self::deserialize_entity_record(&value, self.format_version())?;
+                if !expired(&entity) {
+                    cursor.ordered_done = true;
+                    break;
+                }
+                cursor.cold_after = Some(key);
+                ids.push(id);
+            }
+            if cursor.ordered_done || !cursor.cold_finished {
+                return Ok((ids, budget - work_left));
+            }
+        }
+        // The whole base has expired, so resident rows may have too.
+        let (resident, scanned) = self.retention_scan_tick(cursor, work_left)?;
+        ids.extend(resident);
+        ids.sort_unstable();
+        ids.dedup();
+        Ok((ids, budget - work_left + scanned))
     }
 
     pub(crate) fn retention_scan_tick(
