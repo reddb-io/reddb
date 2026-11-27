@@ -3969,6 +3969,56 @@ mod checkpoint_work_tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_key_leaves_its_collection_a_checkpoint_delta() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let config = UnifiedStoreConfig {
+            resident_memory_bytes_max: Some(2 * 1024 * 1024),
+            ..UnifiedStoreConfig::default()
+        };
+        let store =
+            UnifiedStore::open_with_config(directory.path().join("data.rdb"), config.clone())
+                .expect("paged store");
+        let mut ids = Vec::new();
+        for id in 1..=2_000 {
+            ids.push(
+                store
+                    .write_keyed_row("rows", row(id, 1), None, None)
+                    .expect("seed"),
+            );
+        }
+        store.persist().expect("baseline");
+
+        // A keyed write removes the row it replaces while its WAL actions are
+        // still being captured, and appends them afterwards.
+        let replacement = store
+            .write_keyed_row("rows", row(1, 2), None, Some(ids[0]))
+            .expect("replace");
+        CHECKPOINT_REPUBLISHED.with(|log| log.borrow_mut().clear());
+        store.persist().expect("delta checkpoint");
+        let republished = CHECKPOINT_REPUBLISHED.with(|log| log.borrow().clone());
+        assert!(
+            !republished.contains(&"rows were removed without a WAL record"),
+            "one replaced key republished its collection: {republished:?}"
+        );
+        drop(store);
+        let reopened = UnifiedStore::open_with_config(directory.path().join("data.rdb"), config)
+            .expect("reopen");
+        assert!(reopened.get("rows", ids[0]).is_none());
+        assert_eq!(
+            reopened
+                .get("rows", replacement)
+                .expect("replacement")
+                .data
+                .as_row()
+                .expect("row")
+                .columns,
+            vec![Value::Integer(2)]
+        );
+        assert!(reopened.get("rows", ids[1]).is_some());
+    }
+
     #[test]
     fn completed_inline_insert_reuses_history_but_not_untracked_edits() {
         let directory = tempfile::tempdir().expect("temporary store");

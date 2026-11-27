@@ -19,7 +19,7 @@
 //! - "SIEVE is Simpler than LRU" (NSDI '24)
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::page::Page;
@@ -285,6 +285,10 @@ pub struct PageCacheShard {
     hand: Mutex<usize>,
     /// Cache statistics
     stats: Mutex<CacheStats>,
+    /// Dirty images this shard has given up to its caller. Counted before the
+    /// image stops being a hit, so a miss that reads it unchanged afterwards
+    /// knows no dirty image was on its way to the file meanwhile.
+    dirty_evictions: AtomicU64,
 }
 
 impl PageCacheShard {
@@ -302,12 +306,18 @@ impl PageCacheShard {
             free_slots: Mutex::new(Vec::new()),
             hand: Mutex::new(0),
             stats: Mutex::new(CacheStats::default()),
+            dirty_evictions: AtomicU64::new(0),
         }
     }
 
     /// Create a page cache with default capacity
     pub fn with_default_capacity() -> Self {
         Self::new(DEFAULT_CACHE_CAPACITY)
+    }
+
+    /// Dirty images evicted so far. See [`PageCache::dirty_evictions`].
+    pub fn dirty_evictions(&self) -> u64 {
+        self.dirty_evictions.load(Ordering::SeqCst)
     }
 
     /// Get the current number of cached pages
@@ -601,6 +611,10 @@ impl PageCacheShard {
                     "invariant: eviction owns the indexed slot"
                 );
                 let entry = entries[slot].take().expect("validated cache candidate");
+                if entry.dirty {
+                    // Still under the lock a hit reads through.
+                    self.dirty_evictions.fetch_add(1, Ordering::SeqCst);
+                }
                 (entry.page, entry.dirty)
             };
 
@@ -979,6 +993,16 @@ impl PageCache {
 
     pub fn get(&self, page_id: u32) -> Option<Page> {
         self.shard_for(page_id).get(page_id)
+    }
+
+    /// Dirty images evicted so far. Each is the only copy of its page's
+    /// newest image until its caller has written it, so a reader that takes a
+    /// page from the file compares this count before and after.
+    pub fn dirty_evictions(&self) -> u64 {
+        self.shards
+            .iter()
+            .map(PageCacheShard::dirty_evictions)
+            .sum()
     }
 
     pub fn insert(&self, page_id: u32, page: Page) -> Option<Page> {

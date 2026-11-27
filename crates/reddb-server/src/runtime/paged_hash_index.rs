@@ -1629,7 +1629,7 @@ mod tests {
     }
 
     #[test]
-    fn cold_scan_does_not_deadlock_with_a_checkpoint_appending_to_its_base() {
+    fn cold_scan_does_not_wait_for_a_checkpoint_appending_to_its_base() {
         // More rows than the reopened page cache can hold, so the scan has to
         // load pages whatever the boot already read.
         const ROWS: usize = 10_000;
@@ -1666,27 +1666,31 @@ mod tests {
         let pager = Arc::clone(store.pager().expect("pager"));
         let manager = store.get_collection("wide").expect("wide");
 
-        // The scan holds the collection's base while it reads; every page it
-        // has to load waits for the ownership epoch. A checkpoint holds that
-        // epoch throughout and must not wait for the base inside it.
+        // The scan holds the collection's base while it reads. A checkpoint
+        // holds the ownership epoch throughout and needs that base to itself
+        // to append to it, so a scan that waited for the epoch on every page
+        // it had to load kept the base from the checkpoint until it was over.
+        // The scan takes those pages from the file instead.
         let epoch = pager.lock_ownership_mutations();
         let scanned = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (scan_ended, scan_done) = std::sync::mpsc::channel();
         let reader = {
             let scanned = Arc::clone(&scanned);
             std::thread::spawn(move || {
-                manager
+                let result = manager
                     .try_for_each_entity(usize::MAX, |_| {
                         scanned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         true
                     })
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string());
+                scan_ended.send(()).expect("report scan");
+                result
             })
         };
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(
-            scanned.load(std::sync::atomic::Ordering::Relaxed) <= ROWS,
-            "the scan must be waiting for a page it has to load"
-        );
+        scan_done
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("a cold scan waited for another thread's ownership epoch");
+        assert_eq!(scanned.load(std::sync::atomic::Ordering::Relaxed), ROWS + 1);
         let (checkpointed, checkpoint_done) = std::sync::mpsc::channel();
         let checkpoint = {
             let runtime = runtime.clone();
@@ -1699,7 +1703,7 @@ mod tests {
         drop(epoch);
         checkpoint_done
             .recv_timeout(std::time::Duration::from_secs(60))
-            .expect("a checkpoint deadlocked with a cold scan of the base it was appending to")
+            .expect("a checkpoint did not finish after a cold scan of the base it appends to")
             .expect("checkpoint");
         checkpoint.join().expect("checkpoint thread");
         reader.join().expect("reader thread").expect("scan");

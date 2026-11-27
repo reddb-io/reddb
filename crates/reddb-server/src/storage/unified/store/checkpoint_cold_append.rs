@@ -128,16 +128,30 @@ impl UnifiedStore {
         // Missing/new definitions and pinned generations retain replacement.
         if keys.secondary.len() != specs.map_or(0, |s| s.len())
             || keys.secondary.iter().any(|(name, index)| {
-                specs.and_then(|s| s.get(name)).is_none_or(|spec| {
-                    spec.identity != index.identity
-                        || Arc::strong_count(&index.tree) != 1
-                        || index.tree.has_retirement_readers()
-                })
+                specs
+                    .and_then(|s| s.get(name))
+                    .is_none_or(|spec| spec.identity != index.identity)
             })
         {
-            return super::checkpoint_delta::declined(
-                "an index definition changed, or a reader holds an index tree",
-            );
+            // A projection built in the background is declared before it is
+            // published, and its build reads the data tree a delta would change.
+            let building = specs.is_some_and(|specs| {
+                specs
+                    .iter()
+                    .any(|(name, spec)| spec.deferred && !keys.secondary.contains_key(name))
+            });
+            return super::checkpoint_delta::declined(if building {
+                "an index of the collection is still being built"
+            } else {
+                "the published indexes are not the declared ones"
+            });
+        }
+        if !super::checkpoint_delta::readers_leave(|| {
+            keys.secondary.iter().any(|(_, index)| {
+                Arc::strong_count(&index.tree) != 1 || index.tree.has_retirement_readers()
+            })
+        }) {
+            return super::checkpoint_delta::declined("a reader holds an index tree");
         }
         let Some(ids) = manager.checkpoint_mutations_since(&previous.segments) else {
             return super::checkpoint_delta::declined(

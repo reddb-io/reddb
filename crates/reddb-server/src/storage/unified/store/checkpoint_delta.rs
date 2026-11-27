@@ -16,6 +16,23 @@ thread_local! {
 /// The incremental checkpoint gives up in many places and the collection is
 /// then republished in full, which is what makes a checkpoint long. Keep the
 /// first reason so the publication can say which bound a workload outgrew.
+/// How long a delta waits for a lookup in progress to let go of a tree. A
+/// lookup does not wait for the checkpoint, so it ends well inside this. A
+/// scan does not, and its tree is published again.
+const READER_PIN_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Whether the readers `pinned` reports have left within [`READER_PIN_WAIT`].
+pub(super) fn readers_leave(mut pinned: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + READER_PIN_WAIT;
+    while pinned() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+    true
+}
+
 pub(super) fn declined<T>(reason: &'static str) -> Result<Option<T>, StoreError> {
     refused(reason);
     Ok(None)
@@ -198,23 +215,44 @@ impl UnifiedStore {
             .unwrap_or_else(|| crate::storage::engine::PagerConfig::default().cache_size);
         let limit = (slots.saturating_mul(crate::storage::engine::PAGE_SIZE) / 32)
             .clamp(16 * 1024, 8 * 1024 * 1024);
-        let mut retained = self.checkpoint_durable_rows.write();
-        retained.references.remember(references, limit / 2);
-        let limit = limit / 2;
-        for action in actions {
-            match action {
-                StoreWalAction::UpsertEntityRecord { collection, record } => {
-                    retained.remember(&collection, record, limit)
-                }
-                StoreWalAction::BulkUpsertEntityRecords {
-                    collection,
-                    records,
-                } => {
-                    for record in records {
-                        retained.remember(&collection, record, limit);
+        let mut removed: Vec<(String, EntityId)> = Vec::new();
+        {
+            let mut retained = self.checkpoint_durable_rows.write();
+            retained.references.remember(references, limit / 2);
+            let limit = limit / 2;
+            for action in actions {
+                match action {
+                    StoreWalAction::UpsertEntityRecord { collection, record } => {
+                        retained.remember(&collection, record, limit)
                     }
+                    StoreWalAction::BulkUpsertEntityRecords {
+                        collection,
+                        records,
+                    } => {
+                        for record in records {
+                            retained.remember(&collection, record, limit);
+                        }
+                    }
+                    StoreWalAction::DeleteEntityRecord {
+                        collection,
+                        entity_id,
+                    } => removed.push((collection, EntityId::new(entity_id))),
+                    _ => {}
                 }
-                _ => {}
+            }
+        }
+        // A delete staged under a WAL capture (a keyed replacement, a
+        // transaction) removed its row before this append; nothing confirmed
+        // it afterwards, and the next checkpoint published the collection
+        // again for one replaced key.
+        if self.config.resident_memory_bytes_max.is_none() || self.is_read_only() {
+            return;
+        }
+        removed.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        for removals in removed.chunk_by(|left, right| left.0 == right.0) {
+            if let Some(manager) = self.get_collection(&removals[0].0) {
+                let ids: Vec<EntityId> = removals.iter().map(|(_, id)| *id).collect();
+                manager.confirm_logged_removals(&ids);
             }
         }
     }
