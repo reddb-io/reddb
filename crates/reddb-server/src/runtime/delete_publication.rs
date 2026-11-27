@@ -163,6 +163,8 @@ pub(super) struct DeletePublication {
     branch_epoch: Option<u64>,
     published: usize,
     finished: bool,
+    /// Held until the transaction has ended.
+    _admission: super::index_store::MutationAdmission,
 }
 
 impl DeletePublication {
@@ -175,6 +177,9 @@ impl DeletePublication {
         active_xid: Option<u64>,
         row_locks: DeleteRowLocks,
     ) -> Self {
+        // Before the transaction opens: a reader of the collection scans for
+        // as long as one it cannot see is open.
+        let admission = runtime.index_store_ref().admit_mutation();
         let autocommit_xid = active_xid
             .is_none()
             .then(|| runtime.snapshot_manager().begin_in(collection));
@@ -190,6 +195,7 @@ impl DeletePublication {
             branch_epoch: None,
             published: 0,
             finished: false,
+            _admission: admission,
         }
     }
 
