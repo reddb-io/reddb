@@ -4069,6 +4069,9 @@ mod checkpoint_work_tests {
             !again.contains(&"an index of the collection is still being built"),
             "the projection republished its collection again: {again:?}"
         );
+        // This fixture's rows make every checkpoint a republish. The
+        // projection published by one is still there after the next.
+        assert!(published(), "a republish dropped the projection");
     }
 
     #[test]
