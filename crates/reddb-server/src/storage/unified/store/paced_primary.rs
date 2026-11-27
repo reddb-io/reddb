@@ -139,9 +139,24 @@ impl UnifiedStore {
                 let before = versions
                     .get(&name)
                     .map_or(&[][..], |v| v.segments.as_slice());
+                // Copying a collection in durable batches is the expensive way
+                // to publish it: leave to the incremental checkpoint every
+                // delta it takes, however many rows that is.
+                let indexes = self
+                    .key_indices
+                    .read()
+                    .get(&name)
+                    .map_or(0, |keys| keys.secondary.len());
                 if manager
                     .checkpoint_mutations_since(before)
-                    .is_some_and(|ids| ids.len() <= CHECKPOINT_BATCH_ROWS)
+                    .is_some_and(|ids| {
+                        ids.len() <= CHECKPOINT_BATCH_ROWS
+                            || super::checkpoint_delta::delta_fits(
+                                ids.len(),
+                                manager.count(),
+                                indexes,
+                            )
+                    })
                 {
                     continue;
                 }

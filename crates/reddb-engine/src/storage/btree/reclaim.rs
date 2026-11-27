@@ -38,6 +38,23 @@ impl<P: PageStore> BTree<P> {
         Ok(pages)
     }
 
+    /// Every page of a retired generation, for the allocator. A sealed proof
+    /// already lists them, one proof node for 256 pages, so the generation is
+    /// not read page by page; without one the tree is walked.
+    pub fn reclaimable_pages(&self) -> BTreeResult<Vec<u32>> {
+        let Ok(Some(pages)) = self.published_owned_pages() else {
+            return self.retired_pages();
+        };
+        #[cfg(debug_assertions)]
+        {
+            let (mut proven, mut walked) = (pages.clone(), self.retired_pages()?);
+            proven.sort_unstable();
+            walked.sort_unstable();
+            debug_assert_eq!(proven, walked, "proof ownership differs from the tree walk");
+        }
+        Ok(pages)
+    }
+
     /// Enumerate a retired generation before changing the allocator. Never
     /// follow leaf sibling links as additional ownership edges: interior
     /// children already own every leaf. Validate overflow chains as well.
