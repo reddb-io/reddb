@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.40.8
+
+### Patch Changes
+
+- [#2986](https://github.com/reddb-io/reddb/pull/2986) [`e620236`](https://github.com/reddb-io/reddb/commit/e620236137c5f8c84073f410a449d5959e1564b0) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Retention of the control-event ledger no longer walks the whole ledger over and over: a pass reads the events on disk in the order they were written and ends at the first one still inside the window. A full pass still runs after a start and every six hours. A collection that a checkpoint has to publish again in full now gets its pending COUNT projection in the same pass, instead of being published in full at every checkpoint until a background build caught up.
+
 ## 1.40.7
 
 ### Patch Changes
