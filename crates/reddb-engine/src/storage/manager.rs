@@ -3554,6 +3554,58 @@ mod tests {
     }
 
     #[test]
+    fn a_delta_outwaits_a_scan_of_a_large_base_but_not_of_a_small_one() {
+        use crate::storage::collection_read::{CollectionCursor, CollectionRead, EncodedRecord};
+
+        struct Empty;
+        impl CollectionRead for Empty {
+            fn get_record(
+                &self,
+                _: EntityId,
+                _: usize,
+            ) -> Result<Option<EncodedRecord>, crate::storage::error::StoreError> {
+                Ok(None)
+            }
+            fn cursor(
+                &self,
+            ) -> Result<Box<dyn CollectionCursor + '_>, crate::storage::error::StoreError>
+            {
+                Err(std::io::Error::other("not read").into())
+            }
+            fn owned_cursor(
+                &self,
+            ) -> Result<Box<dyn CollectionCursor>, crate::storage::error::StoreError> {
+                Err(std::io::Error::other("not read").into())
+            }
+        }
+        // A reader that holds the base for longer than the shortest wait.
+        let scan = std::time::Duration::from_millis(250);
+        for (rows, outwaits) in [(40_000u64, true), (3, false)] {
+            let manager = Arc::new(SegmentManager::new("rows"));
+            manager.install_backing(Arc::new(Empty), 7, 1, 128 * 1024, rows);
+            assert_eq!(manager.count() as u64, rows);
+            let (reading, started) = std::sync::mpsc::channel();
+            let reader = {
+                let manager = Arc::clone(&manager);
+                std::thread::spawn(move || {
+                    let _base = manager.backing.read();
+                    reading.send(()).expect("announce");
+                    std::thread::sleep(scan);
+                })
+            };
+            started.recv().expect("reader holds the base");
+            let applied = manager.try_with_unshared_backing_delta(7, 8, |_| ((), None));
+            assert_eq!(
+                applied.is_some(),
+                outwaits,
+                "{rows} rows: {}",
+                manager.backing_delta_refusal(7, 8)
+            );
+            reader.join().expect("reader");
+        }
+    }
+
+    #[test]
     fn recovery_view_projection_keeps_schema_bounds_without_retaining_rows_or_identities() {
         for collection in ["rows", "red_internal"] {
             let manager = SegmentManager::new(collection);

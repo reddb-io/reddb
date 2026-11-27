@@ -10,6 +10,12 @@ use std::collections::HashSet;
 
 /// How long an in-place append waits for base readers that are merely busy.
 const UNSHARED_BACKING_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+/// A scan of the base holds it for as long as the collection is large, and the
+/// alternative to waiting for it is to publish every one of those rows again,
+/// at several times a scan's cost per row. So the wait grows with the rows at
+/// stake, up to a bound a caller holding a publication fence can afford.
+const UNSHARED_BACKING_WAIT_PER_ROW: std::time::Duration = std::time::Duration::from_micros(25);
+const UNSHARED_BACKING_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(3);
 
 pub(super) struct BackingRead {
     pub source: Arc<dyn CollectionRead + Send + Sync>,
@@ -379,8 +385,9 @@ impl SegmentManager {
     ///
     /// The host calls this inside the pager's ownership epoch. A base reader
     /// loads its pages without waiting for that epoch, so the bounded wait
-    /// here outlasts a read in progress; a base that stays in use longer is
-    /// declined like any other reader pin.
+    /// here outlasts a read in progress, and a scan of a collection in
+    /// proportion to its size; a base that stays in use longer is declined
+    /// like any other reader pin.
     #[doc(hidden)]
     pub fn try_with_unshared_backing<T>(
         &self,
@@ -413,7 +420,11 @@ impl SegmentManager {
         max_removals: usize,
         update: impl FnOnce(&dyn CollectionRead, &HashSet<EntityId>) -> (T, Option<(u32, u64)>),
     ) -> Option<T> {
-        let mut backing = self.backing.try_write_for(UNSHARED_BACKING_WAIT)?;
+        let rows = u32::try_from(self.count()).unwrap_or(u32::MAX);
+        let wait = UNSHARED_BACKING_WAIT_PER_ROW
+            .saturating_mul(rows)
+            .clamp(UNSHARED_BACKING_WAIT, UNSHARED_BACKING_WAIT_MAX);
+        let mut backing = self.backing.try_write_for(wait)?;
         let backing = backing.as_mut()?;
         self.fold_unconfirmed_removals(backing);
         if backing.root_page != root_page
