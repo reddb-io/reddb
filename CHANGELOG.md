@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.40.9
+
+### Patch Changes
+
+- [#2988](https://github.com/reddb-io/reddb/pull/2988) [`dcd73d3`](https://github.com/reddb-io/reddb/commit/dcd73d36a8534d1b0523dcbbb47862c7605b2442) Thanks [@filipeforattini](https://github.com/filipeforattini)! - A statement that changes rows now waits for a checkpoint in progress before it marks its table or opens its transaction, instead of waiting inside with both held. Reads by key of that table keep using the index during the checkpoint; they used to fall back to scanning the table, and a scan that outlasted the checkpoint made it publish the whole table again. Both waits are bounded, so a statement or a checkpoint that cannot get its turn goes ahead as before.
+
+- [#2989](https://github.com/reddb-io/reddb/pull/2989) [`cdd5c0d`](https://github.com/reddb-io/reddb/commit/cdd5c0db76bb17530a7aa6e7bc402aa8755cb108) Thanks [@filipeforattini](https://github.com/filipeforattini)! - A checkpoint that holds writers for 200 ms or more now logs how long each of its phases took (`checkpoint held writers`): WAL sync, collections, catalog, indexes, publication, WAL truncation and base installation.
+
+- [#2989](https://github.com/reddb-io/reddb/pull/2989) [`ebfe69e`](https://github.com/reddb-io/reddb/commit/ebfe69e920719a63a231dd661b440715956b2898) Thanks [@filipeforattini](https://github.com/filipeforattini)! - `SHOW CONFIG` lists values that are already on disk. Under bounded disk residency it only listed the rows still in memory, so a value set before the last restart was missing from the listing although the engine still applied it. A retention sweep that removes none of the rows it found expired, or whose statement fails, now says so in the log (at most once every ten minutes per collection); it used to fail silently.
+
 ## 1.40.8
 
 ### Patch Changes
