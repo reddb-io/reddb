@@ -30,12 +30,13 @@ pub(super) fn take_declined() -> Option<&'static str> {
     DECLINED.with(std::cell::Cell::take)
 }
 
-/// A delta rewrites a leaf and its index entries for every changed row, a few
-/// milliseconds each; a republish streams the collection at about a tenth of a
-/// millisecond a row. Past a thousand changed rows the delta is the cheaper of
-/// the two only while it touches a small share of the collection.
+/// A delta rewrites a leaf and its index entries for every changed row, close
+/// to two milliseconds each; a republish streams the collection at about an
+/// eighth of a millisecond a row and leaves the old tree to be reclaimed. Past
+/// a thousand changed rows the delta is the cheaper of the two only while it
+/// touches a small share of the collection.
 pub(super) fn republish_is_cheaper(changed: usize, rows: usize) -> bool {
-    changed > 1024 && changed.saturating_mul(16) > rows
+    changed > 1024 && changed.saturating_mul(8) > rows
 }
 
 /// Index entries one incremental checkpoint may change across a collection.
@@ -252,7 +253,7 @@ impl UnifiedStore {
             return declined("more than 8192 changed rows");
         }
         if republish_is_cheaper(ids.len(), manager.count()) {
-            return declined("more than a sixteenth of the rows changed");
+            return declined("more than an eighth of the rows changed");
         }
         let retained = self.checkpoint_durable_rows.read();
         let mut upserts = Vec::new();

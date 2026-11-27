@@ -3945,17 +3945,17 @@ mod checkpoint_work_tests {
             CHECKPOINT_REPUBLISHED.with(|log| log.borrow().clone())
         );
 
-        // A fifth of the collection is cheaper to republish, and says so.
-        change(&store, 1..=4_000, 7);
+        // A quarter of the collection is cheaper to republish, and says so.
+        change(&store, 1..=5_000, 7);
         store.persist().expect("republishing checkpoint");
         assert!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()) > 0);
         assert_eq!(
             CHECKPOINT_REPUBLISHED.with(|log| log.borrow().clone()),
-            vec!["more than a sixteenth of the rows changed"]
+            vec!["more than an eighth of the rows changed"]
         );
         drop(store);
         let reopened = UnifiedStore::open(&directory.path().join("data.rdb")).expect("reopen");
-        for (id, value) in [(1, 7), (4_000, 7), (4_001, 1), (20_000, 1)] {
+        for (id, value) in [(1, 7), (5_000, 7), (5_001, 1), (20_000, 1)] {
             assert_eq!(
                 reopened
                     .get("rows", EntityId::new(id))

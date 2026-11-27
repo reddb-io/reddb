@@ -175,7 +175,7 @@ impl UnifiedStore {
                         if super::checkpoint_delta::republish_is_cheaper(ids.len(), manager.count())
                         {
                             return super::checkpoint_delta::declined(
-                                "more than a sixteenth of the rows changed",
+                                "more than an eighth of the rows changed",
                             );
                         }
                         if ids.len() > max_changes
