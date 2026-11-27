@@ -95,6 +95,9 @@ impl RedDBRuntime {
             },
             None => (None, None),
         };
+        // Statements that would change rows wait outside from here on: one
+        // that waited inside, on the fence, kept its table's readers scanning.
+        let _admission = self.index_store_ref().admit_checkpoint();
         let publication = store.vault_publication_lock.lock();
         let btree_checkpoint = self.index_store_ref().paged_btree_checkpoint();
         // Collections created since startup need the compact visibility

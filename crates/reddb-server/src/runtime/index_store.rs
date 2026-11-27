@@ -1132,6 +1132,7 @@ pub struct IndexStore {
     // indexes are only published by mutations of that collection, so target
     // selection on one table must not lose its indexes to writes on another.
     collection_mutations: RwLock<HashMap<String, std::sync::Arc<CollectionMutationState>>>,
+    checkpoint_gate: std::sync::Arc<CheckpointGate>,
     #[cfg(test)]
     pub(super) before_build: parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
@@ -1146,7 +1147,135 @@ pub(crate) struct IndexedMutationGuard<'a>(
     /// The inserting xid when this only covers the window in which an
     /// inserted row is stored but not yet indexed.
     Option<u64>,
+    /// Released after the interval has been closed.
+    MutationAdmission,
 );
+
+/// How long a checkpoint waits for the statements that are publishing rows
+/// before it goes ahead without the gate.
+const CHECKPOINT_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long a statement waits for a checkpoint that holds the gate before it
+/// goes ahead as it did without one.
+const MUTATION_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+thread_local! {
+    /// How many admissions this thread holds. A statement nests them.
+    static MUTATION_ADMISSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Whether this thread is the checkpoint that holds the gate.
+    static HOLDS_CHECKPOINT_GATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Keeps statements that change rows from starting inside a checkpoint.
+///
+/// A statement marks its table for the interval in which storage and indexes
+/// are published, and a DELETE opens its transaction before that. Readers of
+/// the table scan it for as long as either lasts. A statement that arrived
+/// during a checkpoint held them for the whole checkpoint while it waited for
+/// the publication fence: every read by key of its table became a scan, and a
+/// scan that outlasted the checkpoint's wait for the table's base made the
+/// checkpoint publish the whole table again.
+///
+/// Here such a statement waits before it marks or opens anything, and the
+/// checkpoint first lets the statements already inside finish. Both waits are
+/// bounded, and when either runs out its side goes ahead as it did without the
+/// gate: the mark alone decides what a reader may trust.
+#[derive(Default)]
+struct CheckpointGate {
+    state: parking_lot::Mutex<CheckpointGateState>,
+    changed: parking_lot::Condvar,
+}
+
+#[derive(Default)]
+struct CheckpointGateState {
+    mutations: usize,
+    checkpoint: bool,
+}
+
+impl CheckpointGate {
+    fn admit_mutation(self: &std::sync::Arc<Self>, wait: std::time::Duration) -> MutationAdmission {
+        // A statement already inside, and the checkpoint itself, never wait:
+        // the checkpoint would be waiting for them.
+        let waits = MUTATION_ADMISSIONS.with(|held| held.get() == 0)
+            && !HOLDS_CHECKPOINT_GATE.with(std::cell::Cell::get);
+        let mut state = self.state.lock();
+        if waits && state.checkpoint {
+            let deadline = std::time::Instant::now() + wait;
+            while state.checkpoint {
+                if self.changed.wait_until(&mut state, deadline).timed_out() {
+                    break;
+                }
+            }
+        }
+        state.mutations += 1;
+        drop(state);
+        MUTATION_ADMISSIONS.with(|held| held.set(held.get() + 1));
+        MutationAdmission {
+            gate: std::sync::Arc::clone(self),
+            _same_thread: std::marker::PhantomData,
+        }
+    }
+
+    fn admit_checkpoint(
+        self: &std::sync::Arc<Self>,
+        wait: std::time::Duration,
+    ) -> Option<CheckpointAdmission> {
+        if MUTATION_ADMISSIONS.with(|held| held.get() != 0) {
+            return None;
+        }
+        let mut state = self.state.lock();
+        if state.checkpoint {
+            return None;
+        }
+        state.checkpoint = true;
+        let deadline = std::time::Instant::now() + wait;
+        while state.mutations != 0 {
+            if self.changed.wait_until(&mut state, deadline).timed_out() {
+                state.checkpoint = false;
+                self.changed.notify_all();
+                return None;
+            }
+        }
+        drop(state);
+        HOLDS_CHECKPOINT_GATE.with(|holds| holds.set(true));
+        Some(CheckpointAdmission {
+            gate: std::sync::Arc::clone(self),
+            _same_thread: std::marker::PhantomData,
+        })
+    }
+}
+
+/// A statement's place inside the checkpoint gate.
+pub(crate) struct MutationAdmission {
+    gate: std::sync::Arc<CheckpointGate>,
+    // The count of admissions is kept per thread.
+    _same_thread: std::marker::PhantomData<*const ()>,
+}
+
+impl Drop for MutationAdmission {
+    fn drop(&mut self) {
+        MUTATION_ADMISSIONS.with(|held| held.set(held.get().saturating_sub(1)));
+        let mut state = self.gate.state.lock();
+        state.mutations = state.mutations.saturating_sub(1);
+        if state.mutations == 0 {
+            self.gate.changed.notify_all();
+        }
+    }
+}
+
+/// The checkpoint's hold on the gate: no statement starts publishing rows.
+pub(crate) struct CheckpointAdmission {
+    gate: std::sync::Arc<CheckpointGate>,
+    _same_thread: std::marker::PhantomData<*const ()>,
+}
+
+impl Drop for CheckpointAdmission {
+    fn drop(&mut self) {
+        HOLDS_CHECKPOINT_GATE.with(|holds| holds.set(false));
+        self.gate.state.lock().checkpoint = false;
+        self.gate.changed.notify_all();
+    }
+}
 
 /// How long a reader waits for the inserts it can see to publish their index
 /// entries before it scans instead.
@@ -1198,6 +1327,7 @@ impl IndexStore {
             indexed_mutations_active: AtomicUsize::new(0),
             indexed_mutation_generation: AtomicU64::new(0),
             collection_mutations: RwLock::new(HashMap::new()),
+            checkpoint_gate: std::sync::Arc::default(),
             #[cfg(test)]
             before_build: parking_lot::Mutex::new(None),
             #[cfg(test)]
@@ -1220,14 +1350,29 @@ impl IndexStore {
         )
     }
 
+    /// A statement's turn to change rows: it waits here, before it marks a
+    /// table or opens a transaction, while a checkpoint holds the gate.
+    pub(crate) fn admit_mutation(&self) -> MutationAdmission {
+        self.checkpoint_gate.admit_mutation(MUTATION_ADMISSION_WAIT)
+    }
+
+    /// The checkpoint's turn: the statements publishing rows finish and no
+    /// other starts. `None` when they did not finish in time, or when this
+    /// thread is one of them; the checkpoint then runs as it did without it.
+    pub(crate) fn admit_checkpoint(&self) -> Option<CheckpointAdmission> {
+        self.checkpoint_gate
+            .admit_checkpoint(CHECKPOINT_ADMISSION_WAIT)
+    }
+
     pub(crate) fn begin_indexed_mutation(&self, collection: &str) -> IndexedMutationGuard<'_> {
+        let admission = self.admit_mutation();
         let state = self.collection_mutation_state(collection);
         self.indexed_mutations_active.fetch_add(1, Ordering::SeqCst);
         self.indexed_mutation_generation
             .fetch_add(1, Ordering::SeqCst);
         state.active.fetch_add(1, Ordering::SeqCst);
         state.generation.fetch_add(1, Ordering::SeqCst);
-        IndexedMutationGuard(self, state, None)
+        IndexedMutationGuard(self, state, None, admission)
     }
 
     /// The window in which the rows inserted by `xid` are in storage and
@@ -1245,9 +1390,10 @@ impl IndexStore {
         collection: &str,
         xid: u64,
     ) -> IndexedMutationGuard<'_> {
+        let admission = self.admit_mutation();
         let state = self.collection_mutation_state(collection);
         state.inserting.lock().push(xid);
-        IndexedMutationGuard(self, state, Some(xid))
+        IndexedMutationGuard(self, state, Some(xid), admission)
     }
 
     /// Waits, briefly, for the inserts `snapshot` can see to finish
@@ -3725,5 +3871,156 @@ mod tests {
             ids(&store.hash_lookup("users", "idx_email", b"a@b.com").unwrap()),
             vec![23]
         );
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_gate_tests {
+    use super::*;
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    const LONG: Duration = Duration::from_secs(5);
+    const SHORT: Duration = Duration::from_millis(60);
+
+    #[test]
+    fn a_statement_that_arrives_during_a_checkpoint_waits_before_it_marks_its_table() {
+        let index = Arc::new(IndexStore::new());
+        let checkpoint = index.admit_checkpoint().expect("no statement is inside");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (marked_tx, marked_rx) = mpsc::channel();
+        let writer = {
+            let index = Arc::clone(&index);
+            thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let _guard = index.begin_indexed_mutation("t");
+                marked_tx
+                    .send(index.indexed_mutation_active_for("t"))
+                    .unwrap();
+            })
+        };
+        started_rx.recv().unwrap();
+        assert!(
+            marked_rx.recv_timeout(Duration::from_millis(150)).is_err(),
+            "the statement marked its table inside the checkpoint"
+        );
+        assert!(!index.indexed_mutation_active_for("t"));
+        drop(checkpoint);
+        assert!(marked_rx.recv_timeout(LONG).expect("the statement runs"));
+        writer.join().unwrap();
+        assert!(!index.indexed_mutation_active_for("t"));
+    }
+
+    #[test]
+    fn an_insert_that_arrives_during_a_checkpoint_waits_before_it_opens_its_window() {
+        let index = Arc::new(IndexStore::new());
+        let checkpoint = index.admit_checkpoint().expect("no statement is inside");
+        let (opened_tx, opened_rx) = mpsc::channel();
+        let writer = {
+            let index = Arc::clone(&index);
+            thread::spawn(move || {
+                let _guard = index.begin_insert_publication("t", 0);
+                opened_tx.send(()).unwrap();
+            })
+        };
+        assert!(opened_rx.recv_timeout(Duration::from_millis(150)).is_err());
+        // No window is open: a reader does not have to wait for one or scan.
+        assert!(index.await_insert_publications("t", None));
+        drop(checkpoint);
+        opened_rx.recv_timeout(LONG).expect("the insert runs");
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn a_checkpoint_lets_the_statements_inside_finish_and_gives_up_on_one_that_does_not() {
+        let gate = Arc::new(CheckpointGate::default());
+        let inside = gate.admit_mutation(LONG);
+
+        let other = Arc::clone(&gate);
+        let (admitted, waited) = thread::spawn(move || {
+            let began = Instant::now();
+            (other.admit_checkpoint(SHORT).is_some(), began.elapsed())
+        })
+        .join()
+        .unwrap();
+        assert!(!admitted, "a statement was still inside");
+        assert!(waited >= SHORT);
+
+        // It gave the gate up: the next statement does not wait for it.
+        let other = Arc::clone(&gate);
+        let waited = thread::spawn(move || {
+            let began = Instant::now();
+            drop(other.admit_mutation(LONG));
+            began.elapsed()
+        })
+        .join()
+        .unwrap();
+        assert!(waited < Duration::from_secs(1), "waited {waited:?}");
+
+        let other = Arc::clone(&gate);
+        let checkpoint = thread::spawn(move || other.admit_checkpoint(LONG).is_some());
+        thread::sleep(Duration::from_millis(30));
+        drop(inside);
+        assert!(checkpoint.join().unwrap(), "the statement finished in time");
+    }
+
+    #[test]
+    fn a_statement_already_inside_and_the_checkpoint_itself_never_wait() {
+        let gate = Arc::new(CheckpointGate::default());
+        let outer = gate.admit_mutation(LONG);
+        let other = Arc::clone(&gate);
+        let (asked_tx, asked_rx) = mpsc::channel();
+        let checkpoint = thread::spawn(move || {
+            asked_tx.send(()).unwrap();
+            let admission = other.admit_checkpoint(LONG);
+            let holds = admission.is_some();
+            // The checkpoint runs index maintenance of its own.
+            let began = Instant::now();
+            drop(other.admit_mutation(LONG));
+            (holds, began.elapsed())
+        });
+        asked_rx.recv().unwrap();
+        thread::sleep(Duration::from_millis(30));
+
+        // The checkpoint is waiting for `outer`. A nested interval of the
+        // same statement must not wait for the checkpoint in turn.
+        let began = Instant::now();
+        let nested = gate.admit_mutation(LONG);
+        assert!(began.elapsed() < Duration::from_secs(1));
+        // Nor does a checkpoint this statement runs wait for the statement.
+        let began = Instant::now();
+        assert!(gate.admit_checkpoint(LONG).is_none());
+        assert!(began.elapsed() < Duration::from_secs(1));
+
+        drop(nested);
+        drop(outer);
+        let (holds, waited) = checkpoint.join().unwrap();
+        assert!(holds);
+        assert!(waited < Duration::from_secs(1), "waited {waited:?}");
+    }
+
+    #[test]
+    fn a_statement_goes_ahead_when_the_checkpoint_outlasts_its_wait() {
+        let gate = Arc::new(CheckpointGate::default());
+        let other = Arc::clone(&gate);
+        let (holds_tx, holds_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let checkpoint = thread::spawn(move || {
+            let _admission = other.admit_checkpoint(LONG).expect("nothing inside");
+            holds_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        holds_rx.recv().unwrap();
+        let began = Instant::now();
+        let admission = gate.admit_mutation(SHORT);
+        let waited = began.elapsed();
+        assert!(
+            waited >= SHORT && waited < Duration::from_secs(2),
+            "waited {waited:?}"
+        );
+        drop(admission);
+        release_tx.send(()).unwrap();
+        checkpoint.join().unwrap();
     }
 }
