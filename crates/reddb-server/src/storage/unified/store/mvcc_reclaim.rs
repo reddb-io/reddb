@@ -45,6 +45,17 @@ impl MvccReclaimCursor {
     pub(crate) fn followed_into_resident_rows(&self) -> bool {
         self.cold_finished
     }
+
+    /// Where an ordered pass ended: the last row of the base it read as
+    /// expired or already removed.
+    pub(crate) fn ordered_position(&self) -> Option<Vec<u8>> {
+        self.ordered_done.then(|| self.cold_after.clone()).flatten()
+    }
+
+    /// Starts the pass after `key` instead of at the first row of the base.
+    pub(crate) fn resume_after(&mut self, key: Vec<u8>) {
+        self.cold_after = Some(key);
+    }
 }
 
 /// How long a maintenance tick waits for the publication fence.
@@ -172,6 +183,13 @@ impl UnifiedStore {
                     break;
                 };
                 let (entity, _) = Self::deserialize_entity_record(&value, self.format_version())?;
+                // An event already removed stays in the base until its
+                // version is reclaimed. It is not a candidate again, and it
+                // does not end the pass: it was written before any live one.
+                if entity.xmax != 0 {
+                    cursor.cold_after = Some(key);
+                    continue;
+                }
                 if !expired(&entity) {
                     cursor.ordered_done = true;
                     break;
