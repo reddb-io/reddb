@@ -368,6 +368,7 @@ impl SegmentManager {
             removed: HashSet::new(),
             logged_removals: HashSet::new(),
         });
+        self.unconfirmed_removals.lock().clear();
     }
 
     /// Fence acquisition of new base readers while a host checks all native
@@ -414,6 +415,7 @@ impl SegmentManager {
     ) -> Option<T> {
         let mut backing = self.backing.try_write_for(UNSHARED_BACKING_WAIT)?;
         let backing = backing.as_mut()?;
+        self.fold_unconfirmed_removals(backing);
         if backing.root_page != root_page
             || backing.removed.len() > max_removals
             || backing.removed.len() != backing.logged_removals.len()
@@ -427,8 +429,33 @@ impl SegmentManager {
             backing.total_entities = total_entities;
             backing.removed.clear();
             backing.logged_removals.clear();
+            self.unconfirmed_removals.lock().clear();
         }
         Some(result)
+    }
+
+    /// Why `try_with_unshared_backing_source_delta` declined, for the host's
+    /// log. The host still holds its publication fence, so the answer is the
+    /// one that call saw unless a reader left in between.
+    #[doc(hidden)]
+    pub fn backing_delta_refusal(&self, root_page: u32, max_removals: usize) -> &'static str {
+        let Some(mut backing) = self.backing.try_write_for(UNSHARED_BACKING_WAIT) else {
+            return "a reader holds the backing lock";
+        };
+        let Some(backing) = backing.as_mut() else {
+            return "the collection has no backing";
+        };
+        if backing.root_page != root_page {
+            "the backing was published from another root"
+        } else if backing.removed.len() > max_removals {
+            "more rows were removed than one delta takes"
+        } else if backing.removed.len() != backing.logged_removals.len() {
+            "rows were removed without a WAL record"
+        } else if Arc::get_mut(&mut backing.source).is_none() {
+            "a reader holds the backing source"
+        } else {
+            "a reader held the backing and has left"
+        }
     }
 
     pub fn backing_count_at_root(&self, root_page: u32) -> Option<u64> {
@@ -1067,22 +1094,41 @@ impl SegmentManager {
         if let Some(backing) = self.backing.write().as_mut() {
             backing.removed.insert(id);
             backing.logged_removals.remove(&id);
+            // A confirmation still waiting belongs to an earlier removal of this row.
+            self.unconfirmed_removals
+                .lock()
+                .retain(|other| *other != id);
         }
     }
 
     /// Called under the publication fence after a successful WAL append.
     #[doc(hidden)]
     pub fn confirm_logged_removals(&self, ids: &[EntityId]) {
-        // Optional checkpoint proof. Do not make collection maintenance wait
-        // for a base reader under the host's publication fence.
+        // Do not make collection maintenance wait for a base reader under the
+        // host's publication fence: keep the confirmation for whoever takes
+        // the backing next. Dropping it made the next checkpoint treat the
+        // removal as unlogged and publish the whole collection again.
         let Some(mut backing) = self.backing.try_write() else {
+            let mut waiting = self.unconfirmed_removals.lock();
+            if waiting.len() + ids.len() <= crate::storage::segment::CHECKPOINT_MUTATIONS_MAX {
+                waiting.extend_from_slice(ids);
+            }
             return;
         };
         if let Some(base) = backing.as_mut() {
+            self.fold_unconfirmed_removals(base);
             if base.removed.len() <= crate::storage::segment::CHECKPOINT_MUTATIONS_MAX {
                 base.logged_removals
                     .extend(ids.iter().copied().filter(|id| base.removed.contains(id)));
             }
+        }
+    }
+
+    fn fold_unconfirmed_removals(&self, base: &mut BackingRead) {
+        let waiting = std::mem::take(&mut *self.unconfirmed_removals.lock());
+        if base.removed.len() <= crate::storage::segment::CHECKPOINT_MUTATIONS_MAX {
+            base.logged_removals
+                .extend(waiting.into_iter().filter(|id| base.removed.contains(id)));
         }
     }
 

@@ -301,6 +301,11 @@ impl UnifiedStore {
                     (result, published)
                 },
             )
-            .unwrap_or_else(|| super::checkpoint_delta::declined("the backing source is shared, or more than 8192 rows were removed"))
+            .unwrap_or_else(|| {
+                super::checkpoint_delta::declined(manager.backing_delta_refusal(
+                    root_before,
+                    crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX,
+                ))
+            })
     }
 }
