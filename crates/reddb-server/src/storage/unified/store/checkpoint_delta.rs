@@ -16,6 +16,23 @@ thread_local! {
 /// The incremental checkpoint gives up in many places and the collection is
 /// then republished in full, which is what makes a checkpoint long. Keep the
 /// first reason so the publication can say which bound a workload outgrew.
+/// How long a delta waits for a lookup in progress to let go of a tree. A
+/// lookup does not wait for the checkpoint, so it ends well inside this. A
+/// scan does not, and its tree is published again.
+const READER_PIN_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Whether the readers `pinned` reports have left within [`READER_PIN_WAIT`].
+pub(super) fn readers_leave(mut pinned: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + READER_PIN_WAIT;
+    while pinned() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+    true
+}
+
 pub(super) fn declined<T>(reason: &'static str) -> Result<Option<T>, StoreError> {
     refused(reason);
     Ok(None)
