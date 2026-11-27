@@ -139,9 +139,17 @@ impl UnifiedStore {
                 let before = versions
                     .get(&name)
                     .map_or(&[][..], |v| v.segments.as_slice());
+                // Copying a collection in durable batches is the expensive way
+                // to publish it. Leave to the incremental checkpoint every
+                // delta it is certain to have the means to apply, however
+                // many rows that is; anything else keeps the staged copy, so
+                // publishing it does not hold other collections' writers.
                 if manager
                     .checkpoint_mutations_since(before)
-                    .is_some_and(|ids| ids.len() <= CHECKPOINT_BATCH_ROWS)
+                    .is_some_and(|ids| {
+                        ids.len() <= CHECKPOINT_BATCH_ROWS
+                            || self.delta_is_ready(&name, &manager, &ids)
+                    })
                 {
                     continue;
                 }

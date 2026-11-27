@@ -145,6 +145,7 @@ impl CheckpointTreeBuilder {
 #[cfg(test)]
 thread_local! {
     static CHECKPOINT_SERIALIZED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CHECKPOINT_REPUBLISHED: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
     static REPLAY_SERIALIZED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CHECKPOINT_BUFFERED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -718,7 +719,7 @@ impl UnifiedStore {
                 reclaim.extend(
                     entry
                         .tree
-                        .retired_pages()
+                        .reclaimable_pages()
                         .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?,
                 );
                 remove.insert(index);
@@ -2847,6 +2848,7 @@ impl UnifiedStore {
         let pending_vault = Arc::new(pending_vault_versions.clone());
         let excluded = Arc::new(excluded);
         for (name, manager) in collections.iter() {
+            super::checkpoint_delta::take_declined();
             let mut version = CheckpointVersion {
                 manager: Arc::downgrade(manager),
                 segments: manager.checkpoint_revisions(),
@@ -2912,6 +2914,18 @@ impl UnifiedStore {
                         continue;
                     }
                 }
+            }
+            if previous_versions.contains_key(name) {
+                let reason = super::checkpoint_delta::take_declined()
+                    .unwrap_or("the incremental path was not attempted");
+                #[cfg(test)]
+                CHECKPOINT_REPUBLISHED.with(|log| log.borrow_mut().push(reason));
+                tracing::info!(
+                    collection = %name,
+                    rows = manager.count(),
+                    reason,
+                    "checkpoint republishes a whole collection"
+                );
             }
             let btree = self.checkpoint_tree(
                 pager,
@@ -3883,6 +3897,74 @@ mod checkpoint_work_tests {
                     .get(EntityId::new(id))
                     .expect("live row")
                     .sequence_id
+            );
+        }
+    }
+
+    fn change(store: &UnifiedStore, ids: std::ops::RangeInclusive<u64>, value: i64) {
+        let manager = store.get_collection("rows").expect("collection");
+        let mut actions = Vec::new();
+        for id in ids {
+            manager.update(row(id, value)).expect("update version");
+            let entity = manager.get(EntityId::new(id)).expect("changed entity");
+            actions.push(StoreWalAction::upsert_entity(
+                "rows",
+                &entity,
+                None,
+                store.format_version(),
+            ));
+        }
+        let references = store
+            .commit
+            .as_ref()
+            .expect("coordinator")
+            .append_checkpoint_actions(&actions)
+            .expect("durable WAL");
+        store.remember_checkpoint_rows(actions, references);
+    }
+
+    #[test]
+    fn a_thousand_changed_rows_stay_a_delta_and_a_republish_says_why() {
+        let directory = tempfile::tempdir().expect("temporary store");
+        let store = UnifiedStore::open(&directory.path().join("data.rdb")).expect("paged store");
+        for id in 1..=20_000 {
+            store.insert_auto("rows", row(id, 1)).expect("seed");
+        }
+        store.persist().expect("baseline");
+
+        // More rows than a store kept WAL proofs for while it budgeted them as
+        // if it had no page cache.
+        change(&store, 1..=1_000, 9);
+        CHECKPOINT_SERIALIZED_ROWS.with(|count| count.set(0));
+        CHECKPOINT_REPUBLISHED.with(|log| log.borrow_mut().clear());
+        store.persist().expect("delta checkpoint");
+        assert_eq!(
+            CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()),
+            0,
+            "a thousand changed rows republished the collection: {:?}",
+            CHECKPOINT_REPUBLISHED.with(|log| log.borrow().clone())
+        );
+
+        // More rows than the mutation journal holds republish, and say so.
+        change(&store, 1..=9_000, 7);
+        store.persist().expect("republishing checkpoint");
+        assert!(CHECKPOINT_SERIALIZED_ROWS.with(|count| count.get()) > 0);
+        assert_eq!(
+            CHECKPOINT_REPUBLISHED.with(|log| log.borrow().clone()),
+            vec!["the mutation journal no longer reaches the previous checkpoint"]
+        );
+        drop(store);
+        let reopened = UnifiedStore::open(&directory.path().join("data.rdb")).expect("reopen");
+        for (id, value) in [(1, 7), (9_000, 7), (9_001, 1), (20_000, 1)] {
+            assert_eq!(
+                reopened
+                    .get("rows", EntityId::new(id))
+                    .expect("row")
+                    .data
+                    .as_row()
+                    .expect("row")
+                    .columns,
+                vec![Value::Integer(value)]
             );
         }
     }

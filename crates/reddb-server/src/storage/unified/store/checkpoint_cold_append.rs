@@ -52,8 +52,10 @@ impl<'a> PostingPlan<'a> {
         if before == after {
             return Ok(true);
         }
-        if self.changes.len() >= crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX {
-            return Ok(false);
+        if self.changes.len() >= super::checkpoint_delta::POSTING_CHANGES_MAX {
+            return Ok(super::checkpoint_delta::refused(
+                "more than 65536 index entries changed",
+            ));
         }
         self.payload_bytes = self
             .payload_bytes
@@ -65,8 +67,10 @@ impl<'a> PostingPlan<'a> {
             .capacity()
             .saturating_mul(std::mem::size_of::<PostingChange>())
             .saturating_add(self.payload_bytes);
-        if retained > 1024 * 1024 {
-            return Ok(false);
+        if retained > 8 * 1024 * 1024 {
+            return Ok(super::checkpoint_delta::refused(
+                "the changed index entries exceed 8 MiB",
+            ));
         }
         for (key, expected) in [(before.as_ref(), true), (after.as_ref(), false)] {
             if let Some(key) = key {
@@ -74,7 +78,9 @@ impl<'a> PostingPlan<'a> {
                     .get(key)
                     .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
                 if found.is_some() != expected {
-                    return Ok(false);
+                    return Ok(super::checkpoint_delta::refused(
+                        "an index entry does not match its row",
+                    ));
                 }
             }
         }
@@ -104,14 +110,16 @@ impl UnifiedStore {
                 .as_ref()
                 .is_none_or(|ids| !ids.is_empty())
         {
-            return Ok(None);
+            return super::checkpoint_delta::declined("no ownership epoch, or the previous checkpoint left resident, deferred or vault rows");
         }
         let keys = self.key_indices.read();
         let Some(keys) = keys.get(collection) else {
-            return Ok(None);
+            return super::checkpoint_delta::declined("the collection has no published key index");
         };
         if !keys.source.ptr_eq(&Arc::downgrade(tree)) {
-            return Ok(None);
+            return super::checkpoint_delta::declined(
+                "the key index was built from another data tree",
+            );
         }
         let specs = self.secondary_index_specs.read();
         let specs = specs.get(collection);
@@ -127,10 +135,14 @@ impl UnifiedStore {
                 })
             })
         {
-            return Ok(None);
+            return super::checkpoint_delta::declined(
+                "an index definition changed, or a reader holds an index tree",
+            );
         }
         let Some(ids) = manager.checkpoint_mutations_since(&previous.segments) else {
-            return Ok(None);
+            return super::checkpoint_delta::declined(
+                "the mutation journal no longer reaches the previous checkpoint",
+            );
         };
         let root_before = tree.root_page_id();
         manager
@@ -143,7 +155,7 @@ impl UnifiedStore {
                         // The store and the sole backing source are the only tree owners.
                         // Owned cursors can outlive their source: check their separate pin.
                         if Arc::strong_count(tree) != 2 || tree.has_retirement_readers() {
-                            return Ok(None);
+                            return super::checkpoint_delta::declined("a reader holds the data tree");
                         }
                         let exclusive_keys = keys.indexed
                             && Arc::strong_count(&keys.tree) == 2
@@ -160,8 +172,10 @@ impl UnifiedStore {
                         let posting_count = ids.len().saturating_mul(keys.secondary.len());
                         let max_changes =
                             crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX;
-                        if ids.len() > max_changes || posting_count > max_changes {
-                            return Ok(None);
+                        if ids.len() > max_changes
+                            || posting_count > super::checkpoint_delta::POSTING_CHANGES_MAX
+                        {
+                            return super::checkpoint_delta::declined("more than 8192 changed rows, or 65536 index entries");
                         }
                         let mut data_deletes = Vec::new();
                         let mut postings = PostingPlan::default();
@@ -179,7 +193,7 @@ impl UnifiedStore {
                             });
                             let deleting = removed.contains(id);
                             if eligible != (if deleting { None } else { Some(true) }) {
-                                return Ok(None);
+                                return super::checkpoint_delta::declined("a changed row is uncommitted, in the vault, or not a classified table row");
                             }
                             // Keep the old image only while comparing this row's projections.
                             let limit = 1024 * 1024;
@@ -189,13 +203,13 @@ impl UnifiedStore {
                                     match record.decode_with_budget(self.format_version(), limit) {
                                         Ok((entity, _)) if classified_row(&entity) => Some(entity),
                                         Ok(_) | Err(StoreError::ReadLimitExceeded { .. }) => {
-                                            return Ok(None)
+                                            return super::checkpoint_delta::declined("a published row is unclassified or over 1 MiB")
                                         }
                                         Err(error) => return Err(error),
                                     }
                                 }
                                 Ok(None) => None,
-                                Err(BTreeError::ReadLimitExceeded { .. }) => return Ok(None),
+                                Err(BTreeError::ReadLimitExceeded { .. }) => return super::checkpoint_delta::declined("a published row is over 1 MiB"),
                                 Err(error) => {
                                     return Err(StoreError::Io(std::io::Error::other(
                                         error.to_string(),
@@ -210,7 +224,7 @@ impl UnifiedStore {
                                 && (!exclusive_keys
                                     || !postings.add(&keys.tree, before_key, after_key)?)
                             {
-                                return Ok(None);
+                                return super::checkpoint_delta::declined("the key index is shared with a reader");
                             }
                             if let Some(specs) = specs {
                                 for (name, index) in &keys.secondary {
@@ -228,7 +242,7 @@ impl UnifiedStore {
                                             .ok_or(StoreError::EntityNotFound(*id))??
                                     };
                                     if !postings.add(&index.tree, before, after)? {
-                                        return Ok(None);
+                                        return super::checkpoint_delta::declined("an index refused the change");
                                     }
                                 }
                             }
@@ -287,6 +301,6 @@ impl UnifiedStore {
                     (result, published)
                 },
             )
-            .unwrap_or(Ok(None))
+            .unwrap_or_else(|| super::checkpoint_delta::declined("the backing source is shared, or more than 8192 rows were removed"))
     }
 }

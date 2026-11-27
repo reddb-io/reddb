@@ -8,6 +8,41 @@ enum SparseCheckpointValue {
     Projected(Vec<u8>),
 }
 
+thread_local! {
+    /// Why the incremental checkpoint of the collection at hand gave up.
+    static DECLINED: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// The incremental checkpoint gives up in many places and the collection is
+/// then republished in full, which is what makes a checkpoint long. Keep the
+/// first reason so the publication can say which bound a workload outgrew.
+pub(super) fn declined<T>(reason: &'static str) -> Result<Option<T>, StoreError> {
+    refused(reason);
+    Ok(None)
+}
+
+pub(super) fn refused(reason: &'static str) -> bool {
+    DECLINED.with(|slot| slot.set(slot.get().or(Some(reason))));
+    false
+}
+
+pub(super) fn take_declined() -> Option<&'static str> {
+    DECLINED.with(std::cell::Cell::take)
+}
+
+/// Index entries one incremental checkpoint may change across a collection.
+pub(super) const POSTING_CHANGES_MAX: usize =
+    8 * crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX;
+
+/// Whether a delta of `changed` rows is one the incremental checkpoint takes:
+/// within the mutation journal and within the index entries it may change.
+/// Staging a replacement tree asks the same question, so it copies a
+/// collection only when the delta would have been declined.
+pub(super) fn delta_fits(changed: usize, indexes: usize) -> bool {
+    changed <= crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX
+        && changed.saturating_mul(indexes) <= POSTING_CHANGES_MAX
+}
+
 #[derive(Default)]
 pub(super) struct DurableRows {
     rows: HashMap<(String, EntityId), Vec<u8>>,
@@ -108,6 +143,41 @@ impl DurableRows {
 }
 
 impl UnifiedStore {
+    /// Whether the incremental checkpoint is certain to have what it needs to
+    /// apply these changes in place: a published tree to apply them to, a
+    /// delta within its bounds, and a retained WAL image for every changed row
+    /// that still exists. It can still decline for other reasons, and then
+    /// publishes the collection again inside the checkpoint.
+    pub(super) fn delta_is_ready(
+        &self,
+        collection: &str,
+        manager: &SegmentManager,
+        changed: &[EntityId],
+    ) -> bool {
+        let indexes = self
+            .key_indices
+            .read()
+            .get(collection)
+            .map_or(0, |keys| keys.secondary.len());
+        if !delta_fits(changed.len(), indexes)
+            || !self
+                .btree_indices
+                .read()
+                .get(collection)
+                .is_some_and(|tree| tree.has_page_proofs() && tree.root_page_id() != 0)
+        {
+            return false;
+        }
+        let retained = self.checkpoint_durable_rows.read();
+        let mut key = (collection.to_owned(), EntityId::new(0));
+        changed.iter().all(|&id| {
+            key.1 = id;
+            manager.get_with(id, |_| ()).is_none()
+                || retained.rows.contains_key(&key)
+                || retained.references.get(collection, id).is_some()
+        })
+    }
+
     /// Called only after the WAL append succeeds. The ordinary inline KV path
     /// does not retain records here. The checkpoint's existing force_sync is
     /// the durability fence before any sparse projection changes pager pages.
@@ -119,12 +189,14 @@ impl UnifiedStore {
         if self.pager.is_none() || self.commit.is_none() {
             return;
         }
-        let limit = self
+        // A store that does not size its page cache runs the pager's default
+        // one. Budgeting this as if it had none kept a few hundred rows, and
+        // every checkpoint of more than that republished its collection.
+        let slots = self
             .config
             .page_cache_slots
-            .map_or(256 * 1024, |slots| {
-                slots.saturating_mul(crate::storage::engine::PAGE_SIZE) / 32
-            })
+            .unwrap_or_else(|| crate::storage::engine::PagerConfig::default().cache_size);
+        let limit = (slots.saturating_mul(crate::storage::engine::PAGE_SIZE) / 32)
             .clamp(16 * 1024, 8 * 1024 * 1024);
         let mut retained = self.checkpoint_durable_rows.write();
         retained.references.remember(references, limit / 2);
@@ -164,7 +236,7 @@ impl UnifiedStore {
             return self.sparse_cold_row_tree(collection, manager, tree, previous, current);
         }
         if Arc::strong_count(tree) != 1 || tree.has_retirement_readers() {
-            return Ok(None);
+            return declined("a reader holds the data tree");
         }
         self.apply_sparse_checkpoint_tree(
             collection,
@@ -186,13 +258,13 @@ impl UnifiedStore {
         logged_removals: &std::collections::HashSet<EntityId>,
     ) -> Result<Option<Arc<BTree>>, StoreError> {
         if previous.untracked_visibility_revision != current.untracked_visibility_revision {
-            return Ok(None);
+            return declined("untracked visibility changed");
         }
         let Some(deferred) = previous.deferred_rows.as_ref() else {
-            return Ok(None);
+            return declined("the previous checkpoint recorded no deferred rows");
         };
         let Some(ids) = manager.checkpoint_mutations_since(&previous.segments) else {
-            return Ok(None);
+            return declined("the mutation journal no longer reaches the previous checkpoint");
         };
         let mut ids: std::collections::BTreeSet<_> = ids.into_iter().collect();
         ids.extend(deferred.iter().copied());
@@ -203,7 +275,7 @@ impl UnifiedStore {
                 .copied(),
         );
         if ids.len() > crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX {
-            return Ok(None);
+            return declined("more than 8192 changed rows");
         }
         let retained = self.checkpoint_durable_rows.read();
         let mut upserts = Vec::new();
@@ -258,13 +330,13 @@ impl UnifiedStore {
             }
             let Some(row) = row else {
                 if existing.is_some() {
-                    return Ok(None);
+                    return declined("a removed row is still published");
                 }
                 continue;
             };
             let Some((raw, projected)) = row else {
                 if existing.is_some() {
-                    return Ok(None);
+                    return declined("a removed row is still published");
                 }
                 continue;
             };
@@ -280,16 +352,16 @@ impl UnifiedStore {
                     .checkpoint_row_matches(reference, &raw)
                     .map_err(StoreError::Io)?
                 {
-                    return Ok(None);
+                    return declined("a changed row differs from its WAL record");
                 }
                 SparseCheckpointValue::Wal(reference)
             } else {
-                return Ok(None);
+                return declined("a changed row has no retained WAL record");
             };
             let source = if let Some(projected) = projected {
                 projected_bytes = projected_bytes.saturating_add(projected.capacity());
                 if projected_bytes > 8 * 1024 * 1024 {
-                    return Ok(None);
+                    return declined("normalized rows exceed 8 MiB");
                 }
                 SparseCheckpointValue::Projected(projected)
             } else {
@@ -298,7 +370,7 @@ impl UnifiedStore {
             upserts.push((id, source));
         }
         if manager.checkpoint_revisions() != current.segments {
-            return Ok(None);
+            return declined("rows changed while the checkpoint read them");
         }
         current.has_unprojected_rows = !deferred.is_empty();
         current.deferred_rows = Some(Arc::new(deferred));
