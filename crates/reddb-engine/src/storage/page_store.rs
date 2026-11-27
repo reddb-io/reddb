@@ -16,12 +16,15 @@ pub trait PageStore {
         ))
     }
     fn prefetch_hint(&self, _page_id: u32) {}
-    /// [`Self::read_page`] that never waits for another thread's ownership
-    /// epoch: `None` when the page is not cached and the epoch is taken.
+    /// [`Self::read_page`] that never waits: `None` only while a dirty image
+    /// another thread's ownership epoch evicted is on its way to the file.
     /// A store without such an epoch always answers.
     fn try_read_page(&self, page_id: u32) -> Result<Option<Page>, PagerError> {
         self.read_page(page_id).map(Some)
     }
+    /// Between two [`Self::try_read_page`] calls that declined. The caller
+    /// holds nothing the store's writers need.
+    fn wait_to_retry_read(&self) {}
     /// Enters the store's ownership epoch, if it has one. Callers that hold
     /// their own lock across store calls take this first, so they never wait
     /// for the epoch while holding what its owner needs.
@@ -48,6 +51,9 @@ impl<F: VfsFile, W: WalBarrier> PageStore for Pager<F, W> {
     }
     fn try_read_page(&self, id: u32) -> Result<Option<Page>, PagerError> {
         self.try_read_page(id)
+    }
+    fn wait_to_retry_read(&self) {
+        self.wait_to_retry_read()
     }
     fn ownership_guard(&self) -> Option<parking_lot::ReentrantMutexGuard<'_, ()>> {
         Some(self.lock_ownership_mutations())

@@ -538,6 +538,138 @@ impl Pager {
 mod tests {
     use super::*;
 
+    fn versioned(id: u32, version: u64) -> Page {
+        let mut page = Page::new(PageType::BTreeLeaf, id);
+        page.content_mut()[..8].copy_from_slice(&version.to_le_bytes());
+        page
+    }
+
+    fn version(page: &Page) -> u64 {
+        u64::from_le_bytes(page.content()[..8].try_into().expect("version"))
+    }
+
+    #[test]
+    fn a_miss_reads_the_published_page_while_another_thread_holds_the_epoch() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("data.rdb");
+        let writer = Pager::open(&path, Default::default()).expect("pager");
+        let id = writer
+            .allocate_page(PageType::BTreeLeaf)
+            .expect("allocate")
+            .page_id();
+        writer.write_page(id, versioned(id, 7)).expect("write");
+        writer.sync().expect("publish");
+        drop(writer);
+
+        // A fresh pager has nothing cached, so the read below is a miss.
+        let pager = Arc::new(
+            Pager::open(
+                &path,
+                PagerConfig {
+                    create: false,
+                    ..Default::default()
+                },
+            )
+            .expect("reopen"),
+        );
+        let epoch = pager.lock_ownership_mutations();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader_pager = Arc::clone(&pager);
+        let reader = std::thread::spawn(move || {
+            done_tx
+                .send(reader_pager.read_page(id).map(|page| version(&page)))
+                .expect("signal read");
+        });
+        let read = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a reader waited for another thread's ownership epoch");
+        assert_eq!(read.expect("read"), 7);
+        drop(epoch);
+        reader.join().expect("reader");
+    }
+
+    #[test]
+    fn a_miss_outside_the_epoch_never_misses_a_finished_write() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let pager = Arc::new(
+            Pager::open(
+                directory.path().join("data.rdb"),
+                PagerConfig {
+                    cache_size: 1,
+                    ..Default::default()
+                },
+            )
+            .expect("pager"),
+        );
+        // Several cache generations, so every round of writes evicts dirty
+        // images whose only copy is then on its way to the file.
+        let ids: Vec<u32> = (0..pager.cache_capacity() * 4)
+            .map(|_| {
+                pager
+                    .allocate_page(PageType::BTreeLeaf)
+                    .expect("allocate")
+                    .page_id()
+            })
+            .collect();
+        for &id in &ids {
+            pager.write_page(id, versioned(id, 0)).expect("seed");
+        }
+        pager.sync().expect("publish");
+
+        let written: Arc<Vec<AtomicU64>> =
+            Arc::new(ids.iter().map(|_| AtomicU64::new(0)).collect());
+        let done = Arc::new(AtomicBool::new(false));
+        let reads = Arc::new(AtomicU64::new(0));
+        let readers: Vec<_> = (0..3)
+            .map(|reader| {
+                let (pager, ids, written, done, reads) = (
+                    Arc::clone(&pager),
+                    ids.clone(),
+                    Arc::clone(&written),
+                    Arc::clone(&done),
+                    Arc::clone(&reads),
+                );
+                std::thread::spawn(move || {
+                    let mut at = reader;
+                    while !done.load(Ordering::Acquire) {
+                        at = (at + 7) % ids.len();
+                        // A write that has returned is the least this read may see.
+                        let floor = written[at].load(Ordering::SeqCst);
+                        let page = pager.read_page(ids[at]).expect("read");
+                        assert!(
+                            version(&page) >= floor,
+                            "page {} read at version {} after version {floor} was written",
+                            ids[at],
+                            version(&page)
+                        );
+                        reads.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            })
+            .collect();
+
+        // One epoch for every round, as a checkpoint holds it.
+        let epoch = pager.lock_ownership_mutations();
+        for round in 1..=40u64 {
+            for (at, &id) in ids.iter().enumerate() {
+                pager.write_page(id, versioned(id, round)).expect("write");
+                written[at].store(round, Ordering::SeqCst);
+            }
+        }
+        let during_epoch = reads.load(Ordering::Relaxed);
+        drop(epoch);
+        done.store(true, Ordering::Release);
+        for reader in readers {
+            reader.join().expect("reader saw a stale page");
+        }
+        assert!(
+            during_epoch > 0,
+            "no read finished while the epoch was held"
+        );
+    }
+
     #[test]
     fn ownership_scope_serializes_other_allocators_and_fences_errors() {
         let directory = tempfile::tempdir().expect("temporary directory");

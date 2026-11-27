@@ -467,8 +467,8 @@ impl<P: PageStore> TreePageStore<P> {
     }
 }
 
-/// Reads through a store without ever waiting for its ownership epoch, and
-/// records whether a read would have had to.
+/// Reads through a store without ever waiting, and records whether a read
+/// would have had to.
 struct WithoutWaiting<'a, P> {
     inner: &'a P,
     would_wait: std::cell::Cell<bool>,
@@ -502,30 +502,30 @@ impl<P: PageStore> PageStore for WithoutWaiting<'_, P> {
 //
 // A publication holds the epoch for its whole duration and takes the proof
 // lock inside it (to seal, or to write pages). So nobody may wait for the
-// epoch while holding the proof lock: a reader whose page is not cached must
-// let go of the proof lock, enter the epoch, and take the lock again. Holding
-// it across that wait deadlocks with a publication sealing the same tree.
+// epoch while holding the proof lock. A reader does not wait for the epoch at
+// all: the store answers a read outside it, except while the epoch's owner is
+// writing an evicted page. The reader lets go of the proof lock for that
+// write, because the owner may be writing it from inside this tree.
 impl<P: PageStore> PageStore for TreePageStore<P> {
     fn read_page(&self, page_id: u32) -> Result<Page, PagerError> {
         let Some(proof) = &self.proof else {
             return self.inner.read_page(page_id);
         };
-        {
-            let state = proof.read();
-            self.available()?;
-            let cached = WithoutWaiting {
-                inner: self.inner.as_ref(),
-                would_wait: std::cell::Cell::new(false),
-            };
-            let result = state.verified_page(&cached, page_id);
-            if !cached.would_wait.get() {
-                return self.finish(result);
+        loop {
+            {
+                let state = proof.read();
+                self.available()?;
+                let cached = WithoutWaiting {
+                    inner: self.inner.as_ref(),
+                    would_wait: std::cell::Cell::new(false),
+                };
+                let result = state.verified_page(&cached, page_id);
+                if !cached.would_wait.get() {
+                    return self.finish(result);
+                }
             }
+            self.inner.wait_to_retry_read();
         }
-        let _ownership = self.inner.ownership_guard();
-        let state = proof.read();
-        self.available()?;
-        self.finish(state.verified_page(self.inner.as_ref(), page_id))
     }
 
     fn write_page(&self, page_id: u32, mut page: Page) -> Result<(), PagerError> {

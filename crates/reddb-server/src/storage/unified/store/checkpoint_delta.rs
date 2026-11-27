@@ -198,23 +198,44 @@ impl UnifiedStore {
             .unwrap_or_else(|| crate::storage::engine::PagerConfig::default().cache_size);
         let limit = (slots.saturating_mul(crate::storage::engine::PAGE_SIZE) / 32)
             .clamp(16 * 1024, 8 * 1024 * 1024);
-        let mut retained = self.checkpoint_durable_rows.write();
-        retained.references.remember(references, limit / 2);
-        let limit = limit / 2;
-        for action in actions {
-            match action {
-                StoreWalAction::UpsertEntityRecord { collection, record } => {
-                    retained.remember(&collection, record, limit)
-                }
-                StoreWalAction::BulkUpsertEntityRecords {
-                    collection,
-                    records,
-                } => {
-                    for record in records {
-                        retained.remember(&collection, record, limit);
+        let mut removed: Vec<(String, EntityId)> = Vec::new();
+        {
+            let mut retained = self.checkpoint_durable_rows.write();
+            retained.references.remember(references, limit / 2);
+            let limit = limit / 2;
+            for action in actions {
+                match action {
+                    StoreWalAction::UpsertEntityRecord { collection, record } => {
+                        retained.remember(&collection, record, limit)
                     }
+                    StoreWalAction::BulkUpsertEntityRecords {
+                        collection,
+                        records,
+                    } => {
+                        for record in records {
+                            retained.remember(&collection, record, limit);
+                        }
+                    }
+                    StoreWalAction::DeleteEntityRecord {
+                        collection,
+                        entity_id,
+                    } => removed.push((collection, EntityId::new(entity_id))),
+                    _ => {}
                 }
-                _ => {}
+            }
+        }
+        // A delete staged under a WAL capture (a keyed replacement, a
+        // transaction) removed its row before this append; nothing confirmed
+        // it afterwards, and the next checkpoint published the collection
+        // again for one replaced key.
+        if self.config.resident_memory_bytes_max.is_none() || self.is_read_only() {
+            return;
+        }
+        removed.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        for removals in removed.chunk_by(|left, right| left.0 == right.0) {
+            if let Some(manager) = self.get_collection(&removals[0].0) {
+                let ids: Vec<EntityId> = removals.iter().map(|(_, id)| *id).collect();
+                manager.confirm_logged_removals(&ids);
             }
         }
     }

@@ -155,6 +155,10 @@ impl From<pager_io::PagerIoError> for PagerError {
     }
 }
 
+/// How long a miss lets an eviction write of another thread's epoch finish
+/// before it looks again.
+const EVICTION_WRITE_POLL: std::time::Duration = std::time::Duration::from_micros(500);
+
 /// Host-independent pager configuration. File creation and ownership are host policy.
 #[derive(Debug, Clone)]
 pub struct PagerConfig {
@@ -268,6 +272,9 @@ pub struct Pager<F: VfsFile, W: WalBarrier> {
     /// Store-managed frees stay unavailable until their removal from the
     /// durable catalog has crossed a publication boundary.
     deferred_reclamation: Mutex<DeferredPageReclamation>,
+    /// Evicted dirty images that have reached the file. Equal to the cache's
+    /// count of dirty evictions when none is between the cache and the file.
+    evictions_written: std::sync::atomic::AtomicU64,
     /// Excludes page ownership changes while a host publishes an epoch.
     /// Reentrant so the publishing thread can use ordinary pager methods.
     ownership_mutations: parking_lot::ReentrantMutex<()>,
@@ -341,6 +348,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             read_only_recovery: RwLock::new(std::collections::HashMap::new()),
             freelist: RwLock::new(FreeList::new()),
             deferred_reclamation: Mutex::new(DeferredPageReclamation::default()),
+            evictions_written: std::sync::atomic::AtomicU64::new(0),
             ownership_mutations: parking_lot::ReentrantMutex::new(()),
             allocation_reused: std::sync::atomic::AtomicBool::new(false),
             allocation_fence_pending: std::sync::atomic::AtomicBool::new(false),
@@ -370,17 +378,53 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         self.ownership_mutations.lock()
     }
 
-    /// [`Self::read_page`] that never waits for another thread's ownership
-    /// publication: `None` when the page is not cached and the epoch is held
-    /// elsewhere. The owning thread itself re-enters and always answers.
+    /// [`Self::read_page`] that never waits: `None` only while a dirty image
+    /// another thread's ownership epoch evicted is on its way to the file.
     pub fn try_read_page(&self, page_id: u32) -> Result<Option<Page>, PagerError> {
+        self.read_page_now(page_id, true)
+    }
+
+    /// Between two [`Self::try_read_page`] calls that declined. An eviction
+    /// write is a few file syncs.
+    pub fn wait_to_retry_read(&self) {
+        std::thread::sleep(EVICTION_WRITE_POLL);
+    }
+
+    /// A miss while another thread holds the ownership epoch.
+    ///
+    /// An epoch can last a whole checkpoint, and a reader that waits for it
+    /// keeps what it holds until then. A collection whose base that reader
+    /// holds is then published again in full, because its delta needs the
+    /// base to itself. The reader has no reason to wait: the file holds the
+    /// newest image of every page the cache does not, except a page the cache
+    /// evicted dirty and whose write has not finished. The cache counts those
+    /// as they leave and this pager as they land, so the two counts say
+    /// whether one was in between while this read ran.
+    ///
+    /// Nothing is admitted to the cache. Admission can evict, and an eviction
+    /// write belongs to the epoch.
+    fn read_outside_epoch(
+        &self,
+        page_id: u32,
+        read: impl FnOnce() -> Result<Page, PagerError>,
+    ) -> Result<Option<Page>, PagerError> {
+        use std::sync::atomic::Ordering;
+        let evicted = self.cache.dirty_evictions();
+        // After a failed writeback the evicted image is lost and the file is
+        // all any reader will get, inside the epoch or not.
+        if self.evictions_written.load(Ordering::SeqCst) != evicted
+            && !self.writeback_failed.load(Ordering::Acquire)
+        {
+            return Ok(None);
+        }
         if let Some(page) = self.cache.get(page_id) {
             return Ok(Some(page));
         }
-        let Some(_ownership) = self.ownership_mutations.try_lock() else {
+        let page = read();
+        if self.cache.dirty_evictions() != evicted {
             return Ok(None);
-        };
-        self.read_page(page_id).map(Some)
+        }
+        page.map(Some)
     }
 
     /// An interrupted publication must be recovered before any more writes.
@@ -880,6 +924,17 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         page: Page,
         pending_page: Option<u32>,
     ) -> Result<(), PagerError> {
+        self.write_evicted_dirty_page_batch(page, pending_page)?;
+        self.evictions_written
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn write_evicted_dirty_page_batch(
+        &self,
+        page: Page,
+        pending_page: Option<u32>,
+    ) -> Result<(), PagerError> {
         if self.bounded_writeback()? {
             return self.write_dirty_page_batch(&[(page.page_id(), page)]);
         }
@@ -920,6 +975,15 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
 
     /// Read a page (cache-aware)
     pub fn read_page(&self, page_id: u32) -> Result<Page, PagerError> {
+        loop {
+            if let Some(page) = self.read_page_now(page_id, true)? {
+                return Ok(page);
+            }
+            self.wait_to_retry_read();
+        }
+    }
+
+    fn read_page_now(&self, page_id: u32, verify: bool) -> Result<Option<Page>, PagerError> {
         if self.config.read_only {
             if let Some(page) = self
                 .read_only_recovery
@@ -927,27 +991,38 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 .map_err(|_| PagerError::LockPoisoned)?
                 .get(&page_id)
             {
-                if self.config.verify_checksums {
+                if verify && self.config.verify_checksums {
                     page.verify_checksum()?;
                 }
-                return Ok(page.clone());
+                return Ok(Some(page.clone()));
             }
         }
         // Check cache first
         if let Some(page) = self.cache.get(page_id) {
-            return Ok(page);
+            return Ok(Some(page));
         }
+        let read = || {
+            if verify {
+                return self.read_page_raw(page_id);
+            }
+            // The same byte I/O without a page CRC check.
+            let mut file = self.file_lock()?;
+            Ok(pager_io::read_page(&mut *file, page_id, false)?)
+        };
 
-        // A miss can evict and write dirty pages. Keep disk loading and cache
-        // publication inside the same ownership epoch as writers/checkpoints.
-        // Hits retain their existing path without taking this guard.
-        let _ownership = self.lock_ownership_mutations();
+        // A miss can evict and write dirty pages. Keep cache publication
+        // inside the same ownership epoch as writers/checkpoints. Hits retain
+        // their existing path without taking this guard, and a miss during
+        // another thread's epoch takes the page without publishing it.
+        let Some(_ownership) = self.ownership_mutations.try_lock() else {
+            return self.read_outside_epoch(page_id, read);
+        };
         if let Some(page) = self.cache.get(page_id) {
-            return Ok(page);
+            return Ok(Some(page));
         }
 
         // Cache miss - read from disk
-        let page = self.read_page_raw(page_id)?;
+        let page = read()?;
 
         // Add to cache
         if let Some(dirty_page) = self.cache.insert_if_absent(page_id, page.clone()) {
@@ -955,7 +1030,7 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             self.write_evicted_dirty_page(dirty_page, None)?;
         }
 
-        Ok(page)
+        Ok(Some(page))
     }
 
     /// Read a page without verifying checksum (for encrypted pages)
@@ -963,38 +1038,12 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
     /// Use this when the page content has its own integrity protection
     /// (e.g., AES-GCM authentication tag for encrypted pages).
     pub fn read_page_no_checksum(&self, page_id: u32) -> Result<Page, PagerError> {
-        if self.config.read_only {
-            if let Some(page) = self
-                .read_only_recovery
-                .read()
-                .map_err(|_| PagerError::LockPoisoned)?
-                .get(&page_id)
-            {
-                return Ok(page.clone());
+        loop {
+            if let Some(page) = self.read_page_now(page_id, false)? {
+                return Ok(page);
             }
+            self.wait_to_retry_read();
         }
-        // Check cache first
-        if let Some(page) = self.cache.get(page_id) {
-            return Ok(page);
-        }
-
-        let _ownership = self.lock_ownership_mutations();
-        if let Some(page) = self.cache.get(page_id) {
-            return Ok(page);
-        }
-
-        // Cache miss - use the same byte I/O without a page CRC check.
-        let mut file = self.file_lock()?;
-        let page = pager_io::read_page(&mut *file, page_id, false)?;
-        drop(file);
-
-        // Add to cache (no checksum verification)
-        if let Some(dirty_page) = self.cache.insert_if_absent(page_id, page.clone()) {
-            // Evicted page was dirty, need to write it back
-            self.write_evicted_dirty_page(dirty_page, None)?;
-        }
-
-        Ok(page)
     }
 
     /// Write a page (cache-aware)
@@ -1666,6 +1715,10 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
         for batch in dirty_pages.chunks(FLUSH_BATCH_PAGES) {
             self.write_dirty_page_batch(batch)?;
         }
+        self.evictions_written.fetch_add(
+            dirty_pages.len() as u64,
+            std::sync::atomic::Ordering::SeqCst,
+        );
         drop(dirty_pages);
         // Batch dirty IDs, not every resident ID: otherwise a few edits in
         // a mostly clean cache pay a protected write per cache-sized slice.

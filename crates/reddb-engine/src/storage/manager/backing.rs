@@ -377,10 +377,10 @@ impl SegmentManager {
     /// mutation/publication fence and must not re-enter backing methods here.
     /// A successful projection updates the root and its exact physical count.
     ///
-    /// The host calls this inside the pager's ownership epoch, and a base
-    /// reader that has to load a page waits for that epoch while holding the
-    /// base. Waiting for such a reader here would never end, so a base that
-    /// stays in use is declined like any other reader pin.
+    /// The host calls this inside the pager's ownership epoch. A base reader
+    /// loads its pages without waiting for that epoch, so the bounded wait
+    /// here outlasts a read in progress; a base that stays in use longer is
+    /// declined like any other reader pin.
     #[doc(hidden)]
     pub fn try_with_unshared_backing<T>(
         &self,

@@ -391,6 +391,9 @@ impl reddb_engine::storage::page_store::PageStore for Pager {
     fn try_read_page(&self, id: u32) -> Result<Option<Page>, PagerError> {
         self.core.try_read_page(id)
     }
+    fn wait_to_retry_read(&self) {
+        self.core.wait_to_retry_read()
+    }
     fn ownership_guard(&self) -> Option<parking_lot::ReentrantMutexGuard<'_, ()>> {
         Some(self.core.lock_ownership_mutations())
     }
