@@ -358,6 +358,9 @@ pub struct SegmentManager {
     visibility_map: VisibilityMap,
     physical_root_cache: parking_lot::Mutex<Option<PhysicalRootCacheEntry>>,
     backing: RwLock<Option<backing::BackingRead>>,
+    /// Removals whose WAL record was appended while a reader held the backing.
+    /// The next holder of the backing lock folds them into its proof.
+    unconfirmed_removals: parking_lot::Mutex<Vec<EntityId>>,
 }
 
 impl SegmentManager {
@@ -372,6 +375,7 @@ impl SegmentManager {
             row_constraint_lock: Arc::new(parking_lot::ReentrantMutex::new(())),
             physical_root_cache: parking_lot::Mutex::new(None),
             backing: RwLock::new(None),
+            unconfirmed_removals: parking_lot::Mutex::new(Vec::new()),
             collection: collection.into(),
             config,
             next_segment_id: AtomicU64::new(1),
@@ -3494,6 +3498,60 @@ mod tests {
     use crate::storage::entity::{EntityData, EntityKind, RowData};
     use crate::transaction::snapshot::{Snapshot, SnapshotManager};
     use reddb_types::Value;
+
+    #[test]
+    fn a_removal_confirmed_while_a_reader_holds_the_backing_stays_confirmed() {
+        use crate::storage::collection_read::{CollectionCursor, CollectionRead, EncodedRecord};
+
+        struct Empty;
+        impl CollectionRead for Empty {
+            fn get_record(
+                &self,
+                _: EntityId,
+                _: usize,
+            ) -> Result<Option<EncodedRecord>, crate::storage::error::StoreError> {
+                Ok(None)
+            }
+            fn cursor(
+                &self,
+            ) -> Result<Box<dyn CollectionCursor + '_>, crate::storage::error::StoreError>
+            {
+                Err(std::io::Error::other("not read").into())
+            }
+            fn owned_cursor(
+                &self,
+            ) -> Result<Box<dyn CollectionCursor>, crate::storage::error::StoreError> {
+                Err(std::io::Error::other("not read").into())
+            }
+        }
+        let manager = SegmentManager::new("rows");
+        manager.install_backing(Arc::new(Empty), 7, 1, 128 * 1024, 3);
+        let logged = EntityId::new(2);
+        manager.remember_backing_delete(logged);
+        {
+            // A base reader in the middle of a page read.
+            let _reader = manager.backing.read();
+            manager.confirm_logged_removals(&[logged]);
+        }
+        let seen = manager
+            .try_with_unshared_backing_delta(7, 8, |removed| (removed.contains(&logged), None));
+        assert_eq!(
+            seen,
+            Some(true),
+            "the confirmation was lost: {}",
+            manager.backing_delta_refusal(7, 8)
+        );
+
+        // A removal nobody confirmed still needs the collection published again.
+        manager.remember_backing_delete(EntityId::new(3));
+        assert!(manager
+            .try_with_unshared_backing_delta(7, 8, |_| ((), None))
+            .is_none());
+        assert_eq!(
+            manager.backing_delta_refusal(7, 8),
+            "rows were removed without a WAL record"
+        );
+    }
 
     #[test]
     fn recovery_view_projection_keeps_schema_bounds_without_retaining_rows_or_identities() {
