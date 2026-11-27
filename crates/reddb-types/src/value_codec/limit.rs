@@ -66,6 +66,10 @@ pub(super) fn preflight(data: &[u8], limit_bytes: usize) -> Result<(usize, usize
                 cursor.string(2)?;
                 cursor.string(2)?;
             }
+            DataType::Cron => {
+                cursor.string(2)?;
+                cursor.charge(std::mem::size_of::<crate::CronSchedule>())?;
+            }
             DataType::Money => {
                 cursor.string(2)?;
                 cursor.take(9)?;

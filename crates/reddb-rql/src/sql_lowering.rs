@@ -2,7 +2,7 @@ use crate::ast::{
     BinOp, CompareOp, DeleteQuery, Expr, FieldRef, Filter, GraphQuery, InsertQuery, JoinQuery,
     PathQuery, Projection, SelectItem, Span, TableQuery, UnaryOp, UpdateQuery, VectorQuery,
 };
-use reddb_types::types::Value;
+use reddb_types::types::{DataType, Value};
 use reddb_types::vector_metadata::MetadataFilter;
 
 pub const PARAMETER_PROJECTION_PREFIX: &str = "__user_param_projection__:";
@@ -803,6 +803,13 @@ pub fn fold_expr_to_value(expr: Expr) -> Result<Value, String> {
                     Value::Secret(format!("@@plain@@{plaintext}").into_bytes())
                 });
             }
+            if name.eq_ignore_ascii_case("CRON") {
+                let arguments = args
+                    .into_iter()
+                    .map(fold_expr_to_value)
+                    .collect::<Result<Vec<_>, _>>()?;
+                return reddb_types::cron::construct(&arguments);
+            }
             // ADR 0067 (#1721): `JSON_PARSE('{…}')` is the sanctioned escape
             // hatch for writing JSON from a runtime string. Fold a literal
             // string argument to a `Value::Json` here so it is accepted in
@@ -840,6 +847,11 @@ pub fn fold_expr_to_value(expr: Expr) -> Result<Value, String> {
                 )),
             }
         }
+        Expr::Cast {
+            inner,
+            target: DataType::Cron,
+            ..
+        } => reddb_types::cron::construct(&[fold_expr_to_value(*inner)?]),
         Expr::Cast { inner, .. } => fold_expr_to_value(*inner),
         other => Err(format!("expression is not a foldable literal: {other:?}")),
     }

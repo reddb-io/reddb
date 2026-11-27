@@ -1,0 +1,138 @@
+use reddb_file::{
+    decode_published_database_header, FILE_CAPABILITY_CRON, PAGED_SUPERBLOCK_SLOT_SIZE,
+};
+use reddb_server::{RedDBOptions, RedDBRuntime, StorageDeployPreset};
+use reddb_types::Value;
+
+fn execute(runtime: &RedDBRuntime, sql: &str) -> reddb_server::runtime::RuntimeQueryResult {
+    runtime
+        .execute_query(sql)
+        .unwrap_or_else(|error| panic!("{sql}: {error:?}"))
+}
+
+fn timestamp(iso: &str) -> Value {
+    reddb_types::coerce::coerce(iso, reddb_types::DataType::TimestampMs, None)
+        .expect("test timestamp")
+}
+
+#[test]
+fn cron_type_uses_column_default_and_filters_prepared_windows_after_reopen() {
+    let directory = tempfile::tempdir().expect("temporary database directory");
+    let path = directory.path().join("cron.rdb");
+    let open = || {
+        let options = RedDBOptions::persistent(&path)
+            .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+            .expect("native paged profile");
+        RedDBRuntime::with_options(options).expect("open database")
+    };
+
+    {
+        let runtime = open();
+        execute(
+            &runtime,
+            "CREATE TABLE jobs (id BIGINT PRIMARY KEY, schedule CRON('America/Sao_Paulo'))",
+        );
+        runtime.checkpoint().expect("publish the schema");
+    }
+    let data = std::fs::read(&path).expect("read database header");
+    for slot in data.chunks_exact(PAGED_SUPERBLOCK_SLOT_SIZE).take(2) {
+        let header = decode_published_database_header(slot).expect("decode superblock");
+        assert_ne!(header.required_capabilities & FILE_CAPABILITY_CRON, 0);
+    }
+
+    {
+        let runtime = open();
+        execute(
+            &runtime,
+            "INSERT INTO jobs (id, schedule) VALUES (1, '0 9 * * 1-5'), \
+            (2, CRON('0 9 * * 1-5', 'America/New_York')), (3, NULL)",
+        );
+        assert!(runtime
+            .execute_query("INSERT INTO jobs (id, schedule) VALUES (4, '60 9 * * *')")
+            .is_err());
+        assert!(runtime
+            .execute_query("UPDATE jobs SET schedule = 'invalid' WHERE id = 1")
+            .is_err());
+        execute(
+            &runtime,
+            "UPDATE jobs SET schedule = '15 9 * * 1-5' WHERE id = 1",
+        );
+    }
+
+    let runtime = open();
+    let start = timestamp("2026-11-27T12:14:59.999Z");
+    let end = timestamp("2026-11-27T12:15:00.001Z");
+    let rows = runtime
+        .execute_query_with_params(
+            "SELECT id, schedule, cron_next(schedule, $1) AS first_occurrence FROM jobs \
+         WHERE cron_overlaps(schedule, $1, $2) ORDER BY id",
+            &[start, end],
+        )
+        .expect("query a time window")
+        .result
+        .records;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get("id"), Some(&Value::BigInt(1)));
+    assert_eq!(
+        rows[0].get("first_occurrence"),
+        Some(&timestamp("2026-11-27T12:15:00Z"))
+    );
+    assert_eq!(
+        rows[0].get("schedule").unwrap().display_string(),
+        "15 9 * * 1-5 [America/Sao_Paulo]"
+    );
+
+    let rows = execute(
+        &runtime,
+        "SELECT schedule, cron_next(schedule, \
+        CAST('2026-11-27T12:00:00Z' AS TIMESTAMPTZ)) AS first_occurrence FROM jobs \
+        WHERE id = 2",
+    )
+    .result
+    .records;
+    assert_eq!(
+        rows[0].get("schedule").unwrap().display_string(),
+        "0 9 * * 1-5 [America/New_York]"
+    );
+    assert_eq!(
+        rows[0].get("first_occurrence"),
+        Some(&timestamp("2026-11-27T14:00:00Z"))
+    );
+}
+
+#[test]
+fn cron_uses_utc_without_a_column_modifier_and_rejects_invalid_zones_and_windows() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("memory database");
+    for sql in [
+        "CREATE TABLE bad (schedule CRON('America/Missing'))",
+        "CREATE TABLE bad (schedule CRON(3))",
+        "CREATE TABLE bad (schedule CRON('UTC', 'UTC'))",
+    ] {
+        assert!(runtime.execute_query(sql).is_err(), "{sql}");
+    }
+    execute(
+        &runtime,
+        "CREATE TABLE jobs (id BIGINT PRIMARY KEY, schedule CRON)",
+    );
+    execute(
+        &runtime,
+        "INSERT INTO jobs (id, schedule) VALUES (1, '0 9 * * *')",
+    );
+    let rows = execute(&runtime, "SELECT schedule FROM jobs")
+        .result
+        .records;
+    assert_eq!(
+        rows[0].get("schedule").unwrap().display_string(),
+        "0 9 * * * [UTC]"
+    );
+    let args = [
+        timestamp("2026-11-27T09:00:01Z"),
+        timestamp("2026-11-27T09:00:00Z"),
+    ];
+    assert!(runtime
+        .execute_query_with_params(
+            "SELECT id FROM jobs WHERE cron_overlaps(schedule, $1, $2)",
+            &args,
+        )
+        .is_err());
+}

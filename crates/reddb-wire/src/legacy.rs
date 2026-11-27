@@ -71,6 +71,7 @@ impl From<&Value> for WireValue {
             Value::UnsignedInteger(n) => WireValue::U64(*n),
             Value::Float(f) => WireValue::F64(*f),
             Value::Text(s) => WireValue::Text(s.to_string()),
+            Value::Cron(value) => WireValue::Text(value.to_string()),
             Value::Temperature(temperature) => WireValue::Text(temperature.to_string()),
             Value::Blob(bytes) => WireValue::Bytes(bytes.clone()),
             Value::Boolean(b) => WireValue::Bool(*b),
@@ -88,6 +89,7 @@ impl From<Value> for WireValue {
             Value::UnsignedInteger(n) => WireValue::U64(n),
             Value::Float(f) => WireValue::F64(f),
             Value::Text(s) => WireValue::Text(s.to_string()),
+            Value::Cron(value) => WireValue::Text(value.to_string()),
             Value::Temperature(temperature) => WireValue::Text(temperature.to_string()),
             Value::Blob(bytes) => WireValue::Bytes(bytes),
             Value::Boolean(b) => WireValue::Bool(b),
@@ -230,6 +232,7 @@ pub fn encode_native_value(buf: &mut Vec<u8>, value: &Value) {
             buf.extend_from_slice(&(text.len() as u32).to_le_bytes());
             buf.extend_from_slice(text.as_bytes());
         }
+        Value::Cron(value) => encode_value(buf, &WireValue::Text(value.to_string())),
         Value::Temperature(temperature) => {
             encode_value(buf, &WireValue::Text(temperature.to_string()))
         }
@@ -247,6 +250,7 @@ pub fn encode_native_value(buf: &mut Vec<u8>, value: &Value) {
 pub fn native_value_encoded_len(value: &Value) -> usize {
     match value {
         Value::Text(text) => 5 + text.len(),
+        Value::Cron(value) => 5 + value.as_str().len(),
         Value::Temperature(temperature) => 5 + temperature.to_string().len(),
         Value::Integer(_) | Value::UnsignedInteger(_) | Value::Float(_) | Value::Timestamp(_) => 9,
         Value::Boolean(_) => 2,

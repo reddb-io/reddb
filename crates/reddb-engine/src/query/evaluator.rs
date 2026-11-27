@@ -120,11 +120,17 @@ pub enum EvalError {
         rhs: DataType,
     },
     /// Unary operator doesn't accept the operand type.
-    UnaryMismatch { op: UnaryOp, operand: DataType },
+    UnaryMismatch {
+        op: UnaryOp,
+        operand: DataType,
+    },
     /// Function catalog has no overload matching this call's
     /// argument types. Includes user-defined functions because
     /// today's catalog is the static built-in table only.
-    UnknownFunction { name: String, args: Vec<DataType> },
+    UnknownFunction {
+        name: String,
+        args: Vec<DataType>,
+    },
     /// Implicit cast required by the spine failed at runtime — the
     /// catalog said the conversion was legal at `Implicit` context
     /// but the value's bytes couldn't be converted (e.g. overflow on
@@ -141,14 +147,22 @@ pub enum EvalError {
         reason: String,
     },
     /// Signed-integer overflow during arithmetic.
-    ArithmeticOverflow { op: BinOp },
+    ArithmeticOverflow {
+        op: BinOp,
+    },
     /// `n / 0` or `n % 0`.
     DivisionByZero,
     /// Numeric scalar evaluation produced an undefined or non-finite
     /// float result (domain error, overflow, NaN, or infinity).
-    InvalidNumericResult { function: String, reason: String },
+    InvalidNumericResult {
+        function: String,
+        reason: String,
+    },
     /// JSON_PARSE input was not valid JSON text.
-    JsonParseFailed { reason: String },
+    JsonParseFailed {
+        reason: String,
+    },
+    CronFailed(String),
     /// Decoding an expression input would exceed the host's read allowance.
     ReadLimitExceeded {
         required_bytes: usize,
@@ -189,6 +203,7 @@ impl std::fmt::Display for EvalError {
             EvalError::InvalidNumericResult { function, reason } => {
                 write!(f, "invalid numeric result in {function}: {reason}")
             }
+            EvalError::CronFailed(message) => f.write_str(message),
             EvalError::JsonParseFailed { reason } => {
                 write!(f, "JSON_PARSE failed to parse JSON: {reason}")
             }
@@ -762,6 +777,10 @@ fn eval_function(
 
 fn dispatch_function(name: &str, args: &[Value]) -> Result<Value, EvalError> {
     match name {
+        "CRON" | "CRON_NEXT" | "CRON_OVERLAPS" => {
+            super::runtime::value_functions::evaluate_cron_function(name, args)
+                .map_err(|reason| EvalError::CronFailed(format!("{name}: {reason}")))
+        }
         "TEMPERATURE" | "TEMPERATURE_UNIT" | "TEMPERATURE_VALUE" => {
             super::runtime::value_functions::temperature_function(name, args).ok_or_else(|| {
                 EvalError::UnknownFunction {

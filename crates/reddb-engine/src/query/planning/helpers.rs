@@ -360,5 +360,6 @@ pub fn summarize_value(value: &Value) -> String {
         Value::Secret(bytes) => format!("secret({} bytes)", bytes.len()),
         Value::Password(_) => "password(***)".to_string(),
         Value::Temperature(value) => format!("CAST('{value}' AS TEMPERATURE)"),
+        Value::Cron(value) => format!("CAST('{value}' AS CRON)"),
     }
 }

@@ -260,6 +260,7 @@ pub fn evaluate_value_function_with_host<H: ValueFunctionHost>(
             let exp = value_as_f64(args.get(1)?)?;
             Some(Value::Float(base.powf(exp)))
         }
+        "CRON" | "CRON_NEXT" | "CRON_OVERLAPS" => evaluate_cron_function(name, args).ok(),
         "TEMPERATURE" | "TEMPERATURE_UNIT" | "TEMPERATURE_VALUE" => {
             temperature_function(name, args)
         }
@@ -419,6 +420,32 @@ pub fn value_as_f64(value: &Value) -> Option<f64> {
         Value::UnsignedInteger(value) => Some(*value as f64),
         Value::BigInt(value) => Some(*value as f64),
         _ => None,
+    }
+}
+
+pub fn evaluate_cron_function(name: &str, args: &[Value]) -> Result<Value, String> {
+    if name == "CRON" {
+        return reddb_types::cron::construct(args);
+    }
+
+    let timestamp_ms = |value: &Value| match value {
+        Value::TimestampMs(ms) => Ok(*ms),
+        Value::Timestamp(seconds) => seconds
+            .checked_mul(1000)
+            .ok_or_else(|| "cron timestamp is out of range".to_string()),
+        _ => Err("cron requires timestamp arguments".into()),
+    };
+    match (name, args) {
+        ("CRON_NEXT", [_, _]) | ("CRON_OVERLAPS", [_, _, _]) if args.iter().any(Value::is_null) => {
+            Ok(Value::Null)
+        }
+        ("CRON_NEXT", [Value::Cron(schedule), start]) => Ok(schedule
+            .next(timestamp_ms(start)?)?
+            .map_or(Value::Null, Value::TimestampMs)),
+        ("CRON_OVERLAPS", [Value::Cron(schedule), start, end]) => Ok(Value::Boolean(
+            schedule.overlaps(timestamp_ms(start)?, timestamp_ms(end)?)?,
+        )),
+        _ => Err(format!("invalid arguments to {name}")),
     }
 }
 

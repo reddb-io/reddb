@@ -255,5 +255,8 @@ fn scalar_heap_bytes(value: &Value) -> usize {
         | Value::BigInt(_)
         | Value::PageRef(_)
         | Value::Temperature(_) => 0,
+        Value::Cron(value) => {
+            std::mem::size_of::<reddb_types::CronSchedule>() + value.as_str().len()
+        }
     }
 }

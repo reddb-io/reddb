@@ -264,6 +264,7 @@ pub fn runtime_value_text(value: &Value) -> Option<String> {
         Value::PageRef(page_id) => Some(format!("page:{}", page_id)),
         Value::Secret(_) | Value::Password(_) => Some("***".to_string()),
         Value::Temperature(value) => Some(value.to_string()),
+        Value::Cron(value) => Some(value.to_string()),
     }
 }
 

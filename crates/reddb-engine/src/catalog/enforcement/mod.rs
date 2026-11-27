@@ -870,6 +870,15 @@ fn coerce_contract_literal(
                 column_name, collection, column.data_type_name, err
             ))
         }),
+        DataType::Cron => {
+            let sql_type = reddb_types::SqlTypeName::parse_declared(&column.data_type_name);
+            reddb_types::cron::column_timezone(&sql_type)
+                .and_then(|timezone| reddb_types::CronSchedule::parse(raw, timezone))
+                .map(|value| Value::Cron(std::sync::Arc::new(value)))
+                .map_err(|error| ContractError::Query(format!(
+                    "invalid CRON for column '{column_name}' in collection '{collection}': {error}"
+                )))
+        }
         DataType::Vector | DataType::Array => Err(ContractError::Query(format!(
             "column '{}' in collection '{}' requires '{}' and only typed values are accepted for this type",
             column_name, collection, column.data_type_name
@@ -893,6 +902,7 @@ pub(crate) fn value_matches_declared_type(value: &Value, target: DataType) -> bo
             | (Value::UnsignedInteger(_), DataType::UnsignedInteger)
             | (Value::Float(_), DataType::Float)
             | (Value::Temperature(_), DataType::Temperature)
+            | (Value::Cron(_), DataType::Cron)
             | (Value::Text(_), DataType::Text)
             | (Value::Blob(_), DataType::Blob)
             | (Value::Boolean(_), DataType::Boolean)

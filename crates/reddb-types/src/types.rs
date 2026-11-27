@@ -317,6 +317,8 @@ pub enum DataType {
     DecimalText = 55,
     /// Exact measured temperature with explicit C/F/K unit.
     Temperature = 56,
+    /// Validated five-field recurrence with an IANA time zone.
+    Cron = 57,
 }
 
 /// Type categories used by the Fase 3 coercion resolver. Mirrors
@@ -419,6 +421,7 @@ impl DataType {
             | DataType::AssetCode
             | DataType::Money
             | DataType::Temperature
+            | DataType::Cron
             | DataType::Enum => TypeCategory::Domain,
             DataType::Uuid => TypeCategory::Uuid,
             DataType::Secret | DataType::Password => TypeCategory::Opaque,
@@ -532,6 +535,7 @@ impl DataType {
             54 => Some(DataType::Money),
             55 => Some(DataType::DecimalText),
             56 => Some(DataType::Temperature),
+            57 => Some(DataType::Cron),
             _ => None,
         }
     }
@@ -594,6 +598,7 @@ impl DataType {
             "ASSETCODE" | "ASSET_CODE" | "ASSET" => DataType::AssetCode,
             "MONEY" => DataType::Money,
             "TEMPERATURE" => DataType::Temperature,
+            "CRON" => DataType::Cron,
             "DECIMAL_TEXT" | "DECIMALTEXT" => DataType::DecimalText,
             "ENUM" => DataType::Enum,
             "ARRAY" => DataType::Array,
@@ -661,6 +666,7 @@ impl DataType {
             DataType::BigInt => Some(8),       // i64
             DataType::AssetCode => None,       // variable-length normalized code
             DataType::Temperature => Some(10), // unit + scale + i64 minor units
+            DataType::Cron => None,            // variable-length expression and time zone
             DataType::Money => None,           // variable-length asset + scale + i64
             DataType::KeyRef => None,          // variable-length (collection + key)
             DataType::DocRef => None,          // variable-length (collection + u64)
@@ -792,6 +798,7 @@ impl fmt::Display for DataType {
             DataType::AssetCode => write!(f, "ASSET_CODE"),
             DataType::Money => write!(f, "MONEY"),
             DataType::Temperature => write!(f, "TEMPERATURE"),
+            DataType::Cron => write!(f, "CRON"),
             DataType::DecimalText => write!(f, "DECIMAL_TEXT"),
             DataType::ColorAlpha => write!(f, "COLOR_ALPHA"),
             DataType::BigInt => write!(f, "BIGINT"),
@@ -900,6 +907,7 @@ pub enum Value {
     AssetCode(String),
     /// Exact measured temperature retaining its input unit and decimal scale.
     Temperature(crate::Temperature),
+    Cron(std::sync::Arc<crate::CronSchedule>),
     /// Monetary amount stored as integer minor units plus explicit scale and asset code
     Money {
         asset_code: String,
@@ -940,6 +948,7 @@ impl std::hash::Hash for Value {
         std::mem::discriminant(self).hash(state);
         match self {
             Value::Temperature(v) => v.hash(state),
+            Value::Cron(v) => v.hash(state),
             Value::Null => {}
             Value::Integer(v) => v.hash(state),
             Value::UnsignedInteger(v) => v.hash(state),
@@ -1095,6 +1104,7 @@ impl Value {
             Value::AssetCode(_) => DataType::AssetCode,
             Value::Money { .. } => DataType::Money,
             Value::Temperature(_) => DataType::Temperature,
+            Value::Cron(_) => DataType::Cron,
             Value::ColorAlpha(_) => DataType::ColorAlpha,
             Value::BigInt(_) => DataType::BigInt,
             Value::KeyRef(..) => DataType::KeyRef,
@@ -1383,6 +1393,7 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Temperature(v) => write!(f, "{v}"),
+            Value::Cron(v) => write!(f, "{v}"),
             Value::Null => write!(f, "NULL"),
             Value::Integer(v) => write!(f, "{}", v),
             Value::UnsignedInteger(v) => write!(f, "{}", v),

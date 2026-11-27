@@ -86,7 +86,7 @@ by surface-area parity. The split that landed:
 | Durable streams with per-consumer offsets   | **Adopted** as a separate `Durable stream` collection model with monotonic offsets.             |
 | Named locks                                 | **Out of scope.** Not a queue/stream/notification semantic.                                     |
 | Public rate-limiting primitive              | **Out of scope.** Separate coordination/infra concern, not in PRD #718.                         |
-| Scheduler / cron                            | **Out of scope.** No PRD has been written for this yet.                                         |
+| Scheduler / cron                            | The application can query recurring schedules with the CRON column type. Job execution stays with the application. |
 | Task result storage / `WAIT RESULT`         | **Out of scope.** Not in PRD #718; no later PRD covers it.                                      |
 | Job get-by-id / cancel API                  | **Out of scope.** Workers can use queue inspection (`SELECT ... FROM QUEUE`) instead.           |
 
@@ -96,6 +96,38 @@ coordination primitives. A named lock is not a queue read; a rate limiter is
 not a stream offset; a cron tick is not an ephemeral notification. Picking
 those up later requires its own PRD — naming the primitive, scoping the
 state, and recording the boundary in an ADR — not a queue extension.
+
+## Querying recurring schedules
+
+A `CRON` column stores a five-field rule and its effective IANA time zone.
+Declare a column-wide default if users normally schedule jobs in the same
+time zone.
+
+```sql
+CREATE TABLE jobs (
+    id BIGINT PRIMARY KEY,
+    schedule CRON('America/Sao_Paulo') NOT NULL
+);
+
+INSERT INTO jobs (id, schedule) VALUES
+    (1, '0 9 * * 1-5'),
+    (2, CRON('0 9 * * 1-5', 'America/New_York'));
+
+SELECT id, cron_next(schedule, $1) AS first_occurrence
+FROM jobs
+WHERE cron_overlaps(schedule, $1, $2);
+```
+
+The window parameters are absolute timestamps. `cron_overlaps` matches at
+the start of the window and excludes its end. `cron_next` returns the first
+occurrence at or after its input, or `NULL` if the rule has no occurrence in
+the supported timestamp domain. The result is an absolute timestamp. Hours
+skipped by a time zone transition have zero occurrences. Repeated local
+hours can have two occurrences.
+
+A bare expression uses the column's time zone, with UTC as the default
+for `CRON` without a modifier. An explicit time zone applies to its own row.
+The lossless text form is `0 9 * * 1-5 [America/Sao_Paulo]`.
 
 ## Out of scope (current PRD)
 

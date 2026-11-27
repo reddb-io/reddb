@@ -43,7 +43,15 @@ pub fn resolved_contract_columns(
             .map(|column| ResolvedColumnRule {
                 name: column.name.clone(),
                 data_type: column.data_type,
-                data_type_name: data_type_name(column.data_type).to_string(),
+                data_type_name: if column.data_type == DataType::Cron {
+                    column
+                        .metadata
+                        .get("ddl_data_type")
+                        .cloned()
+                        .unwrap_or_else(|| "CRON".into())
+                } else {
+                    data_type_name(column.data_type).to_string()
+                },
                 not_null: !column.nullable,
                 default: column
                     .default
@@ -130,6 +138,7 @@ fn data_type_name(data_type: DataType) -> &'static str {
         DataType::AssetCode => "asset_code",
         DataType::Money => "money",
         DataType::Temperature => "temperature",
+        DataType::Cron => "cron",
         DataType::ColorAlpha => "color_alpha",
         DataType::BigInt => "bigint",
         DataType::KeyRef => "keyref",

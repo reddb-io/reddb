@@ -95,6 +95,7 @@ impl Value {
             }
             Value::Lang5(code) => JsonValue::String(String::from_utf8_lossy(code).to_string()),
             Value::AssetCode(code) => JsonValue::String(code.clone()),
+            Value::Cron(value) => JsonValue::String(value.to_string()),
             Value::Temperature(value) => JsonValue::Object(
                 [
                     (
