@@ -1661,43 +1661,40 @@ impl RedDBRuntime {
         // branch returned an empty field list, so `CREATE INDEX` built
         // a zero-entity index over HTTP-inserted data even though the
         // data was queryable via `SELECT`.
+        let index_fields = |e: &crate::storage::UnifiedEntity| -> Vec<(String, Value)> {
+            match &e.data {
+                crate::storage::EntityData::Row(row) => {
+                    if let Some(ref named) = row.named {
+                        named.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                    } else if let Some(ref schema) = row.schema {
+                        // Columnar layout — pair each column
+                        // with its positional name from the
+                        // shared schema Arc.
+                        schema
+                            .iter()
+                            .zip(row.columns.iter())
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                }
+                crate::storage::EntityData::Node(node) => node
+                    .properties
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                crate::storage::EntityData::TimeSeries(ts) => ts
+                    .fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
         let entities = manager.query_all(|_| true);
         let mut entity_fields: Vec<(crate::storage::unified::EntityId, Vec<(String, Value)>)> =
-            entities
-                .iter()
-                .map(|e| {
-                    let fields = match &e.data {
-                        crate::storage::EntityData::Row(row) => {
-                            if let Some(ref named) = row.named {
-                                named.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-                            } else if let Some(ref schema) = row.schema {
-                                // Columnar layout — pair each column
-                                // with its positional name from the
-                                // shared schema Arc.
-                                schema
-                                    .iter()
-                                    .zip(row.columns.iter())
-                                    .map(|(k, v)| (k.clone(), v.clone()))
-                                    .collect()
-                            } else {
-                                Vec::new()
-                            }
-                        }
-                        crate::storage::EntityData::Node(node) => node
-                            .properties
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect(),
-                        crate::storage::EntityData::TimeSeries(ts) => ts
-                            .fields
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                    (e.id, fields)
-                })
-                .collect();
+            entities.iter().map(|e| (e.id, index_fields(e))).collect();
 
         if query.unique
             && matches!(
@@ -1716,9 +1713,38 @@ impl RedDBRuntime {
                 snapshots.row_reserves_unique_key(entity.xmin, entity.xmax, &own_xids)
             });
             entity_fields.retain(|_| live.next().unwrap_or(false));
-            if let Some((earlier, later)) =
+            let duplicate = if manager.has_backing() {
+                // `entities` holds the rows in memory; a row that was
+                // checkpointed is on disk. A table whose duplicates had been
+                // checkpointed got its unique index, over the duplicates.
+                // One digest a row stays in memory for the scan.
+                let mut seen = std::collections::HashMap::new();
+                let mut duplicate = None;
+                manager
+                    .try_scan_for_each(None, usize::MAX, |entity| {
+                        if !snapshots.row_reserves_unique_key(entity.xmin, entity.xmax, &own_xids) {
+                            return true;
+                        }
+                        let Some(key) = super::index_store::unique_index_key(
+                            &query.columns,
+                            &index_fields(entity),
+                        ) else {
+                            return true;
+                        };
+                        match seen.insert(*blake3::hash(&key).as_bytes(), entity.id) {
+                            Some(earlier) => {
+                                duplicate = Some((earlier, entity.id));
+                                false
+                            }
+                            None => true,
+                        }
+                    })
+                    .map_err(|error| RedDBError::Internal(error.to_string()))?;
+                duplicate
+            } else {
                 super::index_store::first_duplicate_unique_key(&query.columns, &entity_fields)
-            {
+            };
+            if let Some((earlier, later)) = duplicate {
                 return Err(RedDBError::Query(format!(
                     "cannot create unique index '{}' on '{}': rows {} and {} share the same ({}) key",
                     query.name,
@@ -2902,6 +2928,58 @@ mod tests {
     use crate::{RedDBOptions, RedDBRuntime};
     use reddb_types::Value;
     use std::sync::Arc;
+
+    /// The duplicate check read the rows in memory. Checkpointed rows are on
+    /// disk, and a table that held duplicates there got its unique index.
+    #[test]
+    fn a_unique_index_is_refused_over_duplicates_that_are_only_on_disk() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("unique.rdb"))
+                .with_memory_budget(32 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .expect("runtime");
+        for table in ["duplicated", "clean"] {
+            runtime
+                .execute_query(&format!("CREATE TABLE {table} (id TEXT, holder TEXT)"))
+                .expect("table");
+        }
+        runtime
+            .execute_query(
+                "INSERT INTO duplicated (id, holder) VALUES ('a', 'one'), ('a', 'two'), ('b', 'three')",
+            )
+            .expect("seed duplicates");
+        runtime
+            .execute_query("INSERT INTO clean (id, holder) VALUES ('a', 'one'), ('b', 'two')")
+            .expect("seed");
+        let store = runtime.db().store();
+        store.persist().expect("checkpoint");
+        for table in ["duplicated", "clean"] {
+            let manager = store.get_collection(table).expect("collection");
+            assert!(manager.has_backing(), "{table} must be read from disk");
+            assert!(
+                manager.query_all(|_| true).is_empty(),
+                "{table} must have no row in memory"
+            );
+        }
+
+        let error = runtime
+            .execute_query("CREATE UNIQUE INDEX idx_duplicated_id ON duplicated (id)")
+            .expect_err("the duplicates are on disk");
+        assert!(
+            error.to_string().contains("share the same (id) key"),
+            "{error}"
+        );
+
+        runtime
+            .execute_query("CREATE UNIQUE INDEX idx_clean_id ON clean (id)")
+            .expect("no duplicates");
+        let error = runtime
+            .execute_query("INSERT INTO clean (id, holder) VALUES ('a', 'again')")
+            .expect_err("a duplicate of a row on disk");
+        assert!(error.to_string().contains("idx_clean_id"), "{error}");
+    }
 
     fn make_allow_policy(id: &str, action: &str, collection: &str) -> Policy {
         Policy {
