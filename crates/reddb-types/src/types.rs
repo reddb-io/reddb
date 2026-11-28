@@ -3006,6 +3006,7 @@ mod tests {
             ("BYTEA", DataType::Blob),
             ("TIMESTAMP_MS", DataType::TimestampMs),
             ("INTERVAL", DataType::Duration),
+            ("CRON('America/Sao_Paulo')", DataType::Cron),
             ("NUMERIC(10,2)", DataType::Decimal),
             ("JSONB", DataType::Json),
             ("INET", DataType::IpAddr),
@@ -3027,7 +3028,8 @@ mod tests {
         assert_eq!(DataType::from_sql_name("definitely_not_a_type"), None);
         assert_eq!(DataType::from_byte(0), None);
         assert_eq!(DataType::from_byte(56), Some(DataType::Temperature));
-        assert_eq!(DataType::from_byte(57), None);
+        assert_eq!(DataType::from_byte(57), Some(DataType::Cron));
+        assert_eq!(DataType::from_byte(58), None);
     }
 
     #[test]
