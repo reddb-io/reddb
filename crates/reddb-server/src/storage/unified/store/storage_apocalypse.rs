@@ -204,8 +204,12 @@ fn space(path: &Path) -> Space {
 }
 
 fn assert_plateau(baseline: Space, now: Space, context: &str) {
+    assert_plateau_within(baseline, now, context, 2);
+}
+
+fn assert_plateau_within(baseline: Space, now: Space, context: &str, pages: u64) {
     // Fixed working set, four warmup generations; only allocator/metadata rounding is allowed.
-    let slack = 2 * crate::storage::engine::PAGE_SIZE as u64;
+    let slack = pages * crate::storage::engine::PAGE_SIZE as u64;
     assert!(
         now.data <= baseline.data + slack,
         "{context}: data grows: {baseline:?} -> {now:?}"
@@ -345,11 +349,30 @@ fn run_checkpoint_crash_matrix(disk_residency: bool) {
                         checkpoint.0, recovery.0
                     );
                     eprintln!("{context} {sample:?}");
+                    // A page nobody owns is the leak this matrix exists to
+                    // catch, and the scrub names it exactly.
+                    let scrub = crate::storage::compact::scrub_paged(&path)
+                        .unwrap_or_else(|error| panic!("{context}: scrub: {error}"));
+                    assert!(
+                        scrub.trees.findings.is_empty(),
+                        "{context}: {:?}",
+                        scrub.trees.findings
+                    );
+                    assert_eq!(
+                        scrub.unclassified_pages, 0,
+                        "{context}: a page has no owner"
+                    );
                     if round == 4 {
                         baseline = Some(sample);
                     }
                     if let Some(baseline) = baseline {
-                        assert_plateau(baseline, sample, &context);
+                        // The allocator's high-water mark is still settling at
+                        // the fourth round: after a crash once the retired
+                        // pages are free, 24 rounds end five pages above the
+                        // first, three of them after this baseline, with no
+                        // unowned page in any. Two pages of slack made the
+                        // matrix fail in a third of its runs.
+                        assert_plateau_within(baseline, sample, &context, 4);
                     }
                 }
             }

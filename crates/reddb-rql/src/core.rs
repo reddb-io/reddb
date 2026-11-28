@@ -904,6 +904,7 @@ pub enum IndexMethod {
     BTree,
     Hash,
     Bitmap,
+    Cron,
     /// Generic spatial index request (`USING SPATIAL`) — the engine picks
     /// the default spatial backend. As of PRD #1574 slice 4 (#1578) that
     /// default is the disk-resident H3 index (RAM stays O(working set)),
@@ -924,6 +925,7 @@ impl fmt::Display for IndexMethod {
             Self::Hash => write!(f, "HASH"),
             Self::Bitmap => write!(f, "BITMAP"),
             Self::Spatial => write!(f, "SPATIAL"),
+            Self::Cron => write!(f, "CRON"),
             Self::H3 { .. } => write!(f, "H3"),
         }
     }

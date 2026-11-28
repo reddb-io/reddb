@@ -58,7 +58,7 @@ fn filter_records_result(
     Ok(filtered)
 }
 
-fn runtime_filter_contains_compare_expr(filter: &Filter) -> bool {
+pub(super) fn runtime_filter_contains_compare_expr(filter: &Filter) -> bool {
     match filter {
         Filter::CompareExpr { .. } => true,
         Filter::And(left, right) | Filter::Or(left, right) => {
@@ -281,6 +281,7 @@ pub(crate) struct RuntimeTableExecutionContext<'a> {
     pub(crate) query: &'a TableQuery,
     pub(crate) table_name: &'a str,
     pub(crate) table_alias: &'a str,
+    pub(crate) candidate_ids: Option<&'a [EntityId]>,
 }
 
 fn append_order_by_columns(cols: &mut Vec<String>, query: &TableQuery) -> bool {
@@ -712,7 +713,7 @@ pub(crate) fn execute_runtime_canonical_table_query_current(
     };
     // A transaction, AS OF or a branch pins the snapshot: nothing to wait for.
     if (snapshot.requires_index_fallback && !snapshot.hidden_writers_only)
-        || !indexed_query_can_retry(query)
+        || !indexed_query_can_retry(query, store)
         || crate::runtime::function_budget::stored_function_active()
     {
         return execute_runtime_canonical_table_query_indexed(db, query, index_store);
@@ -762,7 +763,7 @@ fn try_indexed_table_query(
     // Only mutations of this collection (and those that name none) can leave
     // its indexes behind this read.
     let start = index_store.indexed_mutation_generation_for(&query.table);
-    if !indexed_query_can_retry(query)
+    if !indexed_query_can_retry(query, index_store)
         || crate::runtime::function_budget::stored_function_active()
         || index_store.indexed_mutation_active_for(&query.table)
         || !index_store.await_insert_publications(&query.table, Some(&snapshot.snapshot))
@@ -805,7 +806,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 
 // The optimistic path may repeat a read when a writer races it. Never repeat
 // arbitrary expressions, subqueries, graph expansion, or metered work.
-fn indexed_query_can_retry(query: &TableQuery) -> bool {
+fn indexed_query_can_retry(query: &TableQuery, store: &super::index_store::IndexStore) -> bool {
     use reddb_rql::ast::{Expr, SelectItem, TableSource};
 
     let plain_source = matches!(query.source, None | Some(TableSource::Name(_)));
@@ -828,10 +829,15 @@ fn indexed_query_can_retry(query: &TableQuery) -> bool {
                 | Projection::Field(_, _)
         )
     });
-    let plain_filter = effective_table_filter(query)
+    let plain_filter = effective_table_filter(query).as_ref().is_none_or(|filter| {
+        !runtime_filter_contains_compare_expr(filter)
+            || cron_filter_window(filter, query)
+                .is_some_and(|(column, _, _)| store.has_cron_index(&query.table, column))
+    });
+    let plain_where = query
+        .where_expr
         .as_ref()
-        .is_none_or(|filter| !runtime_filter_contains_compare_expr(filter));
-    let plain_where = query.where_expr.as_ref().is_none_or(indexed_pure_expr);
+        .is_none_or(indexed_where_can_retry);
     plain_source
         && plain_select
         && plain_columns
@@ -848,6 +854,98 @@ fn indexed_query_can_retry(query: &TableQuery) -> bool {
         && query.expand.is_none()
         && query.sessionize.is_none()
         && query.as_of.is_none()
+}
+
+/// Only a bound timestamp or a constant timestamp cast is safe to probe.
+fn cron_timestamp_literal(expr: &Expr) -> Option<i64> {
+    use reddb_engine::query::runtime::value_functions::cron_timestamp_ms;
+    match expr {
+        Expr::Literal { value, .. } => cron_timestamp_ms(value).ok(),
+        Expr::Cast {
+            inner,
+            target: reddb_types::DataType::Timestamp | reddb_types::DataType::TimestampMs,
+            ..
+        } if matches!(inner.as_ref(), Expr::Literal { .. }) => {
+            let value = crate::runtime::expr_eval::evaluate_runtime_expr(
+                expr,
+                &UnifiedRecord::new(),
+                None,
+                None,
+            )?;
+            cron_timestamp_ms(&value).ok()
+        }
+        _ => None,
+    }
+}
+
+fn cron_call_window(expr: &Expr) -> Option<(&str, &str, i64, i64)> {
+    let Expr::FunctionCall { name, args, .. } = expr else {
+        return None;
+    };
+    if !name.eq_ignore_ascii_case("cron_overlaps") {
+        return None;
+    }
+    let [Expr::Column {
+        field: FieldRef::TableColumn { table, column },
+        ..
+    }, start, end] = args.as_slice()
+    else {
+        return None;
+    };
+    Some((
+        table,
+        column,
+        cron_timestamp_literal(start)?,
+        cron_timestamp_literal(end)?,
+    ))
+}
+
+fn cron_filter_window<'a>(filter: &'a Filter, query: &TableQuery) -> Option<(&'a str, i64, i64)> {
+    // A leading positive test may skip the right side of AND exactly as the
+    // residual would. Never push through NOT, OR, or a preceding fallible test.
+    if let Filter::And(left, right) = filter {
+        if runtime_filter_contains_compare_expr(right) {
+            return None;
+        }
+        return cron_filter_window(left, query);
+    }
+    let Filter::CompareExpr {
+        lhs,
+        op: CompareOp::Eq,
+        rhs,
+    } = filter
+    else {
+        return None;
+    };
+    let truth = |expr: &Expr| {
+        matches!(
+            expr,
+            Expr::Literal {
+                value: Value::Boolean(true),
+                ..
+            }
+        )
+    };
+    let call = if truth(rhs) {
+        lhs
+    } else if truth(lhs) {
+        rhs
+    } else {
+        return None;
+    };
+    let (qualifier, column, start, end) = cron_call_window(call)?;
+    (qualifier.is_empty() || qualifier == query.alias.as_deref().unwrap_or(&query.table))
+        .then_some((column, start, end))
+}
+
+fn indexed_where_can_retry(expr: &Expr) -> bool {
+    match expr {
+        Expr::FunctionCall { .. } => cron_call_window(expr).is_some(),
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            indexed_where_can_retry(lhs) && indexed_where_can_retry(rhs)
+        }
+        _ => indexed_pure_expr(expr),
+    }
 }
 
 fn indexed_pure_expr(expr: &reddb_rql::ast::Expr) -> bool {
@@ -1051,6 +1149,30 @@ fn execute_runtime_canonical_table_query_inner(
 
     let requires_mvcc_index_fallback =
         crate::runtime::impl_core::current_snapshot_requires_index_fallback();
+
+    if let (false, Some(store), Some(filter)) = (
+        requires_mvcc_index_fallback,
+        index_store,
+        effective_filter.as_ref(),
+    ) {
+        if let Some((column, start, end)) = cron_filter_window(filter, query) {
+            if indexed_query_can_retry(query, store) && !is_universal_query_source(&query.table) {
+                // Keep exact WHERE, projection, ordering and pagination in the normal plan.
+                let ids = store.cron_candidates(&query.table, column, start, end);
+                if let Some(ids) = &ids {
+                    if std::env::var("REDDB_INDEX_TRACE").as_deref() == Ok("1") {
+                        eprintln!(
+                            "cron_index_lookup table={} column={} candidates={}",
+                            query.table,
+                            column,
+                            ids.len()
+                        );
+                    }
+                }
+                return execute_table_plan_with_candidates(db, query, ids.as_deref());
+            }
+        }
+    }
 
     // ── GEO H3 CANDIDATE PATH ─────────────────────────────────────────────────
     // `WHERE GEO_DISTANCE(col, lat, lon) < r` over an H3-indexed column can
@@ -2227,6 +2349,14 @@ fn execute_runtime_canonical_table_query_inner(
         return Ok(records);
     }
 
+    execute_table_plan_with_candidates(db, query, None)
+}
+
+fn execute_table_plan_with_candidates(
+    db: &RedDB,
+    query: &TableQuery,
+    candidate_ids: Option<&[EntityId]>,
+) -> RedDBResult<Vec<UnifiedRecord>> {
     let plan = CanonicalPlanner::new(db).build(&QueryExpr::Table(query.clone()));
     let table_name = query.table.as_str();
     let table_alias = query.alias.as_deref().unwrap_or(table_name);
@@ -2234,6 +2364,7 @@ fn execute_runtime_canonical_table_query_inner(
         query,
         table_name,
         table_alias,
+        candidate_ids,
     };
     execute_runtime_canonical_table_node(db, &plan.root, &context)
 }
@@ -2337,6 +2468,44 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
         let effective_projections = effective_table_projections(context.query);
         let uses_document_projection =
             runtime_projections_use_document_path(&effective_projections, context.query);
+        if let Some(ids) = context.candidate_ids {
+            let mut columns = extract_select_column_names(&effective_projections);
+            if !columns.is_empty()
+                && !uses_document_projection
+                && !effective_filter
+                    .as_ref()
+                    .is_some_and(|filter| runtime_filter_uses_document_path(filter, context.query))
+            {
+                use crate::runtime::authz::policy_columns::{
+                    collect_expr_columns, collect_field_ref_column, collect_filter_columns,
+                };
+                let mut fields = std::collections::BTreeSet::from_iter(columns);
+                let table = context.table_name;
+                let alias = Some(context.table_alias);
+                if let Some(filter) = &effective_filter {
+                    collect_filter_columns(filter, table, alias, &mut fields);
+                }
+                for order in &context.query.order_by {
+                    if let Some(expr) = &order.expr {
+                        collect_expr_columns(expr, table, alias, &mut fields);
+                    } else {
+                        collect_field_ref_column(&order.field, table, alias, &mut fields);
+                    }
+                }
+                columns = fields.into_iter().collect();
+            } else {
+                columns.clear();
+            }
+            if let Some(rows) =
+                indexed_table_records(db, context.table_name, ids, &columns, usize::MAX, |_| {
+                    Ok(true)
+                })?
+            {
+                return Ok(rows);
+            }
+            // A dangling posting cannot prove coverage. Use the authoritative snapshot.
+            return scan_runtime_table_source_records_limited(db, context.table_name, None);
+        }
         // ── FAST PATH 1: Direct entity_id lookup (O(1) instead of full scan) ──
         if !projections_require_runtime_projection(&effective_projections)
             && !uses_document_projection
@@ -2497,10 +2666,22 @@ impl reddb_engine::query::runtime::table_plan::TablePlanHost for RuntimeTablePla
             }
 
         // ── DEFAULT: Full scan with LIMIT pushdown ──
-        let scan_cap = reddb_engine::query::runtime::table_plan::table_scan_cap(context.query);
+        // A calendar test runs above the source. LIMIT cannot truncate its input
+        // when a dense window or an older snapshot needs a scan.
+        let scan_cap = if effective_filter
+            .as_ref()
+            .is_some_and(|f| cron_filter_window(f, context.query).is_some())
+        {
+            None
+        } else {
+            reddb_engine::query::runtime::table_plan::table_scan_cap(context.query)
+        };
         scan_runtime_table_source_records_limited(db, context.query.table.as_str(), scan_cap)
     }
     fn try_filter_lookup(&self) -> RedDBResult<Option<Vec<UnifiedRecord>>> {
+        if self.context.candidate_ids.is_some() {
+            return Ok(None); // the filter must recheck every calendar candidate
+        }
         let db = self.db;
         let context = self.context;
         let effective_filter = effective_table_filter(context.query);

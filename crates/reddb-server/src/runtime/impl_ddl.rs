@@ -1622,25 +1622,44 @@ impl RedDBRuntime {
             .get_collection(&query.table)
             .ok_or_else(|| RedDBError::NotFound(format!("table '{}' not found", query.table)))?;
 
-        if query.if_not_exists
-            && self
-                .inner
-                .index_store
-                .list_indices(&query.table)
-                .iter()
-                .any(|index| index.name == query.name)
+        if let Some(existing) = self
+            .inner
+            .index_store
+            .list_indices(&query.table)
+            .into_iter()
+            .find(|index| index.name == query.name)
         {
-            return Ok(RuntimeQueryResult::ok_message(
-                raw_query.to_string(),
-                &format!(
-                    "index '{}' already exists on '{}'; skipped",
-                    query.name, query.table
-                ),
-                "create",
-            ));
+            if query.if_not_exists {
+                return Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    &format!(
+                        "index '{}' already exists on '{}'; skipped",
+                        query.name, query.table
+                    ),
+                    "create",
+                ));
+            }
+            if query.method == IndexMethod::Cron
+                || existing.method == super::index_store::IndexMethodKind::Cron
+            {
+                return Err(RedDBError::Query(format!(
+                    "index '{}' already exists",
+                    query.name
+                )));
+            }
         }
 
         let method_kind = match query.method {
+            IndexMethod::Cron => {
+                let count = self.build_cron_index(query, &manager)?;
+                return self.finish_create_index(
+                    raw_query,
+                    query,
+                    super::index_store::IndexMethodKind::Cron,
+                    count,
+                    count,
+                );
+            }
             IndexMethod::Hash => super::index_store::IndexMethodKind::Hash,
             IndexMethod::BTree => super::index_store::IndexMethodKind::BTree,
             IndexMethod::Bitmap => super::index_store::IndexMethodKind::Bitmap,
@@ -1788,25 +1807,39 @@ impl RedDBRuntime {
             &entity_fields,
         );
         crate::storage::query::planner::stats_catalog::persist_table_stats(&store, &analyzed);
+        self.finish_create_index(
+            raw_query,
+            query,
+            method_kind,
+            indexed_count,
+            entity_fields.len(),
+        )
+    }
+
+    fn finish_create_index(
+        &self,
+        raw_query: &str,
+        query: &CreateIndexQuery,
+        method_kind: super::index_store::IndexMethodKind,
+        indexed_count: usize,
+        total_count: usize,
+    ) -> RedDBResult<RuntimeQueryResult> {
         self.invalidate_plan_cache();
 
-        // Register metadata
-        self.inner
-            .index_store
-            .register(super::index_store::RegisteredIndex {
-                name: query.name.clone(),
-                collection: query.table.clone(),
-                columns: query.columns.clone(),
-                method: method_kind,
-                unique: query.unique,
-            });
-        self.persist_runtime_index_descriptor(super::index_store::RegisteredIndex {
+        let descriptor = super::index_store::RegisteredIndex {
             name: query.name.clone(),
             collection: query.table.clone(),
             columns: query.columns.clone(),
             method: method_kind,
             unique: query.unique,
-        })?;
+        };
+        self.inner.index_store.register(descriptor.clone());
+        if let Err(error) = self.persist_runtime_index_descriptor(descriptor) {
+            if method_kind == super::index_store::IndexMethodKind::Cron {
+                self.inner.index_store.drop_index(&query.name, &query.table);
+            }
+            return Err(error);
+        }
         // Issue #120 — surface the index name + indexed columns in
         // the schema-vocabulary so AskPipeline (#121) can resolve
         // "the email index" back to its collection.
@@ -1819,7 +1852,6 @@ impl RedDBRuntime {
         let method_str = format!("{}", query.method);
         let unique_str = if query.unique { "unique " } else { "" };
         let cols = query.columns.join(", ");
-        let total_count = entity_fields.len();
         let coverage_detail =
             if matches!(method_kind, super::index_store::IndexMethodKind::H3 { .. })
                 && total_count > 0

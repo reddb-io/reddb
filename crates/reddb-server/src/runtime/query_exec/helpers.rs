@@ -65,6 +65,9 @@ pub(crate) fn extract_entity_id_from_filter(
                 _ => None,
             }
         }
+        // A point shortcut returns the row directly. Expression predicates
+        // such as cron_overlaps still need the canonical residual evaluator.
+        Filter::And(_, _) if super::table::runtime_filter_contains_compare_expr(filter) => None,
         Filter::And(left, right) => extract_entity_id_from_filter(&Some(*left.clone()))
             .or_else(|| extract_entity_id_from_filter(&Some(*right.clone()))),
         _ => None,

@@ -98,6 +98,23 @@ fn first_conflict_includes_carry_in_and_respects_visibility_and_updates() {
         timestamp("2026-11-27T00:30:00Z"),
     ];
     let sql = "SELECT id, cron_occurrences(schedule, $1 - duration_ms + 1, $2) AS begins_at FROM bookings ORDER BY begins_at, id LIMIT 1";
+    execute(
+        &rt,
+        "CREATE INDEX calendar ON bookings (schedule) USING CRON",
+    );
+    let indexed_sql = "SELECT id, cron_occurrences(schedule, $1 - duration_ms + 1, $2) AS begins_at FROM bookings WHERE cron_overlaps(schedule, $3, $2) ORDER BY begins_at, id LIMIT 1";
+    let bounds = [
+        window[0].clone(),
+        window[1].clone(),
+        timestamp("2026-11-26T22:00:00.001Z"),
+    ];
+    let indexed = rt
+        .execute_query_with_params(indexed_sql, &bounds)
+        .expect("indexed conflict")
+        .result
+        .records;
+    assert_eq!(indexed.len(), 1);
+    assert_eq!(indexed[0].get("id"), Some(&Value::Integer(2)));
     let rows = rt
         .execute_query_with_params(sql, &window)
         .expect("occupied across midnight")
@@ -287,4 +304,163 @@ fn cron_uses_utc_without_a_column_modifier_and_rejects_invalid_zones_and_windows
             &args,
         )
         .is_err());
+}
+
+#[test]
+fn cron_index_matches_the_scan_after_reopen_and_mutations() {
+    let directory = tempfile::tempdir().expect("temporary database directory");
+    let path = directory.path().join("indexed-cron.rdb");
+    let open = || {
+        RedDBRuntime::with_options(
+            RedDBOptions::persistent(&path)
+                .with_storage_profile(StorageDeployPreset::PrimaryReplicaDev.selection())
+                .expect("paged profile"),
+        )
+        .expect("open database")
+    };
+    let runtime = open();
+    execute(
+        &runtime,
+        "CREATE TABLE jobs (id INTEGER PRIMARY KEY, schedule CRON('America/New_York'))",
+    );
+    execute(&runtime, "INSERT INTO jobs (id, schedule) VALUES (1, '30 1 * * *'), (2, '45 1 * * *'), (3, NULL), (4, '30 5 * * * [UTC]'), (5, '30 1 5 * SUN')");
+    let select = |rt: &RedDBRuntime, start: &str, end: &str| {
+        rt.execute_query_with_params(
+            "SELECT id FROM jobs WHERE cron_overlaps(schedule, $1, $2) ORDER BY id",
+            &[timestamp(start), timestamp(end)],
+        )
+        .expect("query window")
+        .result
+        .records
+        .into_iter()
+        .map(|r| r.get("id").cloned().expect("id"))
+        .collect::<Vec<_>>()
+    };
+    let windows = [
+        ("2026-11-01T05:30:00Z", "2026-11-01T05:30:00.001Z"),
+        ("2026-11-01T06:30:00Z", "2026-11-01T06:45:00Z"),
+        ("2026-11-01T05:45:00.001Z", "2026-11-01T06:30:00Z"),
+        ("2026-03-08T06:00:00Z", "2026-03-09T04:00:00Z"),
+        ("2026-10-01T00:00:00Z", "2026-12-01T00:00:00Z"),
+    ];
+    let expected = windows.map(|(a, b)| select(&runtime, a, b));
+    assert_eq!(
+        expected[0],
+        [Value::Integer(1), Value::Integer(4), Value::Integer(5)]
+    );
+    assert_eq!(expected[1], [Value::Integer(1), Value::Integer(5)]);
+    assert!(expected[2].is_empty());
+    runtime.checkpoint().expect("publish rows before backfill");
+    for ddl in [
+        "CREATE UNIQUE INDEX bad ON jobs (schedule) USING CRON",
+        "CREATE INDEX bad ON jobs (id) USING CRON",
+        "CREATE INDEX bad ON jobs (schedule, id) USING CRON",
+    ] {
+        assert!(runtime.execute_query(ddl).is_err(), "{ddl}");
+    }
+    execute(
+        &runtime,
+        "CREATE INDEX schedule_calendar ON jobs (schedule) USING CRON",
+    );
+    for ((a, b), want) in windows.iter().zip(&expected) {
+        assert_eq!(&select(&runtime, a, b), want);
+    }
+    runtime.checkpoint().expect("publish index descriptor");
+    drop(runtime);
+    let runtime = open();
+    let index = runtime
+        .index_store_ref()
+        .find_index_for_column("jobs", "schedule")
+        .expect("restored index");
+    assert_eq!(index.name, "schedule_calendar");
+    assert_eq!(runtime.index_store_ref().entries_indexed(&index), Some(4));
+    for ((a, b), want) in windows.iter().zip(&expected) {
+        assert_eq!(&select(&runtime, a, b), want);
+    }
+    execute(
+        &runtime,
+        "UPDATE jobs SET schedule = '0 0 * * *' WHERE id = 1",
+    );
+    execute(&runtime, "DELETE FROM jobs WHERE id = 4");
+    execute(
+        &runtime,
+        "INSERT INTO jobs (id, schedule) VALUES (6, '30 5 * * * [UTC]')",
+    );
+    let (a, b) = windows[0];
+    let after = select(&runtime, a, b);
+    assert_eq!(after, [Value::Integer(5), Value::Integer(6)]);
+    execute(&runtime, "BEGIN");
+    execute(
+        &runtime,
+        "UPDATE jobs SET schedule = '5 5 * * *' WHERE id = 6",
+    );
+    assert_eq!(select(&runtime, a, b), [Value::Integer(5)]);
+    execute(&runtime, "ROLLBACK");
+    assert_eq!(select(&runtime, a, b), after);
+    execute(&runtime, "DROP INDEX schedule_calendar ON jobs");
+    assert_eq!(select(&runtime, a, b), after);
+}
+
+#[test]
+fn cron_index_prunes_selective_minutes_and_rechecks_cross_hour_windows() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime");
+    execute(
+        &runtime,
+        "CREATE TABLE clock_slots (id INTEGER, schedule CRON)",
+    );
+    execute(
+        &runtime,
+        "CREATE INDEX by_slot ON clock_slots (schedule) USING CRON",
+    );
+    let values = (0..240)
+        .map(|id| format!("({id}, '{} {} * * *')", id % 60, id / 60))
+        .collect::<Vec<_>>()
+        .join(", ");
+    execute(
+        &runtime,
+        &format!("INSERT INTO clock_slots (id, schedule) VALUES {values}"),
+    );
+    let rid = execute(&runtime, "SELECT rid FROM clock_slots WHERE id = 0")
+        .result
+        .records[0]
+        .get("rid")
+        .cloned()
+        .expect("physical row");
+    let bounded = runtime
+        .execute_query_with_params(
+            "SELECT id FROM clock_slots WHERE rid = $3 AND cron_overlaps(schedule, $1, $2)",
+            &[
+                timestamp("2026-11-01T01:30:00Z"),
+                timestamp("2026-11-01T01:31:00Z"),
+                rid,
+            ],
+        )
+        .expect("row ID with calendar residual");
+    assert!(bounded.result.records.is_empty());
+    let sql = "SELECT id FROM clock_slots WHERE cron_overlaps(schedule, $1, $2) ORDER BY id";
+    for (a, b, expected) in [
+        ("2026-11-01T01:30:00Z", "2026-11-01T01:31:00Z", vec![90]),
+        (
+            "2026-11-01T01:58:00Z",
+            "2026-11-01T02:02:00Z",
+            vec![118, 119, 120, 121],
+        ),
+    ] {
+        let result = runtime
+            .execute_query_with_params(sql, &[timestamp(a), timestamp(b)])
+            .expect("lookup");
+        let ids: Vec<_> = result
+            .result
+            .records
+            .iter()
+            .map(|r| r.get("id").cloned())
+            .collect();
+        assert_eq!(
+            ids,
+            expected
+                .into_iter()
+                .map(|i| Some(Value::Integer(i)))
+                .collect::<Vec<_>>()
+        );
+    }
 }
