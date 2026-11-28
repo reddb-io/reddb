@@ -55,11 +55,11 @@ impl Partition {
         };
         let mut selected: Option<RoaringTreemap> = None;
         let axes = if day_and_weekday { 5 } else { 3 };
-        for axis in 0..axes {
+        for (axis, &mask) in masks.iter().enumerate().take(axes) {
             if unrestricted(axis) {
                 continue;
             }
-            let matching = self.matches_axis(axis, masks[axis]);
+            let matching = self.matches_axis(axis, mask);
             if let Some(ids) = &mut selected {
                 *ids &= matching;
             } else {
