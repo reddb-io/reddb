@@ -48,6 +48,23 @@ fn assert_float(actual: &Value, expected: f64, sql: &str) {
 macro_rules! exact_function_cases {
     ($case:ident) => {
         $case!("UPPER", "SELECT UPPER('RedDB') AS value", Value::text("REDDB"));
+        $case!(
+            "CRON",
+            "SELECT CRON('0 9 * * *', 'UTC') AS value",
+            Value::Cron(std::sync::Arc::new(
+                reddb_types::CronSchedule::new("0 9 * * *", "UTC").expect("schedule")
+            ))
+        );
+        $case!(
+            "CRON_NEXT",
+            "SELECT CRON_NEXT(CRON('0 9 * * *', 'UTC'), CAST('2026-11-27T12:00:00Z' AS TIMESTAMPTZ)) AS value",
+            Value::TimestampMs(1_795_856_400_000)
+        );
+        $case!(
+            "CRON_OVERLAPS",
+            "SELECT CRON_OVERLAPS(CRON('0 9 * * *', 'UTC'), CAST('2026-11-27T12:00:00Z' AS TIMESTAMPTZ), CAST('2026-11-28T12:00:00Z' AS TIMESTAMPTZ)) AS value",
+            Value::Boolean(true)
+        );
         $case!("LOWER", "SELECT LOWER('RedDB') AS value", Value::text("reddb"));
         $case!("LENGTH", "SELECT LENGTH('é') AS value", Value::Integer(1));
         $case!("CHAR_LENGTH", "SELECT CHAR_LENGTH('é') AS value", Value::Integer(1));
