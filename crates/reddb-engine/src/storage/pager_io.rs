@@ -179,14 +179,14 @@ pub fn dwb_zone_is_clear(buffer: &[u8]) -> bool {
 /// With DWB enabled: stage+sync and home pages+sync for each bounded frame,
 /// then clear+sync once. With DWB disabled, the caller's proven atomic-write
 /// policy applies.
-pub fn write_pages<F: VfsFile>(
+pub fn write_pages<F: VfsFile, P: std::borrow::Borrow<Page>>(
     file: &mut F,
-    pages: &[(u32, Page)],
+    pages: &[(u32, P)],
     double_write: bool,
 ) -> Result<(), PagerIoError> {
     if !double_write {
         for (page_id, page) in pages {
-            write_page(file, *page_id, page)?;
+            write_page(file, *page_id, page.borrow())?;
         }
         return Ok(());
     }
@@ -196,7 +196,7 @@ pub fn write_pages<F: VfsFile>(
         let buffer = reddb_file::encode_paged_dwb_frame(
             chunk
                 .iter()
-                .map(|(page_id, page)| (*page_id, page.as_bytes())),
+                .map(|(page_id, page)| (*page_id, page.borrow().as_bytes())),
         );
         assert!(buffer.len() <= DWB_ZONE_BYTES, "DWB frame fits its zone");
         let mut publication = protected.then(|| dwb_publication::publication(&buffer));
@@ -223,7 +223,7 @@ pub fn write_pages<F: VfsFile>(
             dwb_publication::publish(file, *publication)?;
         }
         for (page_id, page) in chunk {
-            write_page(file, *page_id, page)?;
+            write_page(file, *page_id, page.borrow())?;
         }
         file.sync_all()?;
         if let Some(publication) = publication {

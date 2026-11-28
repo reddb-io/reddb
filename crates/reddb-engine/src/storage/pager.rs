@@ -2029,15 +2029,16 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                 // frames for one that changed 20 small tables. Those pages
                 // go straight home; `sync` makes them durable before the
                 // manifest names them. The catalog root, the page the
-                // manifest will name, keeps its frame.
-                let mut guarded = Vec::new();
+                // manifest will name, keeps its frame. The frames borrow their
+                // pages: a flush must not hold a second copy of its batch.
+                let mut guarded: Vec<(u32, &Page)> = Vec::new();
                 for (id, page) in pages {
                     if page.page_type().ok() != Some(PageType::Header)
                         && self.wal.unpublished_reservation(*id)
                     {
                         pager_io::write_page(&mut *file, *id, page)?;
                     } else {
-                        guarded.push((*id, page.clone()));
+                        guarded.push((*id, page));
                     }
                 }
                 Ok(pager_io::write_pages(&mut *file, &guarded, true)?)
