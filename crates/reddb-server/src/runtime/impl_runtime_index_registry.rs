@@ -134,6 +134,7 @@ fn index_method_kind_as_str(method: super::index_store::IndexMethodKind) -> &'st
         super::index_store::IndexMethodKind::Hash => "hash",
         super::index_store::IndexMethodKind::Bitmap => "bitmap",
         super::index_store::IndexMethodKind::BTree => "btree",
+        super::index_store::IndexMethodKind::Cron => "cron",
         // The H3 resolution rides in a sibling `resolution` column of the
         // persisted descriptor; the method tag itself is just "h3".
         super::index_store::IndexMethodKind::H3 { .. } => "h3",
@@ -157,6 +158,7 @@ fn index_method_kind_from_str(
         "hash" => Some(super::index_store::IndexMethodKind::Hash),
         "bitmap" => Some(super::index_store::IndexMethodKind::Bitmap),
         "btree" => Some(super::index_store::IndexMethodKind::BTree),
+        "cron" => Some(super::index_store::IndexMethodKind::Cron),
         "h3" => Some(super::index_store::IndexMethodKind::H3 { resolution }),
         _ => None,
     }
@@ -444,6 +446,62 @@ impl RedDBRuntime {
             }
             read_bytes_max = (read_bytes_max / 2).max(read_bytes_min);
         }
+    }
+
+    /// Stream the same physical versions and compact rows that restoration will see.
+    pub(super) fn build_cron_index(
+        &self,
+        query: &CreateIndexQuery,
+        manager: &crate::storage::unified::SegmentManager,
+    ) -> RedDBResult<usize> {
+        use super::index_store::cron::CronIndex;
+        let [column] = query.columns.as_slice() else {
+            return Err(RedDBError::Query(
+                "USING CRON requires exactly one column".into(),
+            ));
+        };
+        let typed_column = self
+            .db()
+            .collection_contract(&query.table)
+            .is_some_and(|contract| {
+                contract.declared_model == crate::catalog::CollectionModel::Table
+                    && contract.declared_columns.iter().any(|col| {
+                        col.name == *column
+                            && reddb_types::DataType::from_sql_name(&col.data_type)
+                                == Some(reddb_types::DataType::Cron)
+                    })
+            });
+        if query.unique || !typed_column {
+            return Err(RedDBError::Query(
+                "USING CRON requires a non-unique index on a declared CRON column".into(),
+            ));
+        }
+        let (_scratch, read_bytes_max) = self.reserve_index_scan(manager)?;
+        let columns = std::collections::HashSet::from([column.clone()]);
+        let mut growth = 0u64;
+        for_each_index_row(manager, &columns, read_bytes_max, |_, fields| {
+            if let Some((_, value)) = fields.iter().find(|(name, _)| name == column) {
+                growth = growth.saturating_add(CronIndex::growth(value));
+            }
+            Ok(())
+        })?;
+        let _reservation = self.admit_non_evictable_growth(
+            crate::storage::memory_pools::MemoryPool::IndexMemory,
+            "create CRON index",
+            growth,
+        )?;
+        let mut index = CronIndex::default();
+        for_each_index_row(manager, &columns, read_bytes_max, |id, fields| {
+            if let Some((_, value)) = fields.iter().find(|(name, _)| name == column) {
+                index.update(id, value, true);
+            }
+            Ok(())
+        })?;
+        let count = index.len() as usize;
+        self.inner
+            .index_store
+            .install_cron_index(&query.table, &query.name, index);
+        Ok(count)
     }
 
     /// Install paged HASH and BTREE descriptors without hydrating

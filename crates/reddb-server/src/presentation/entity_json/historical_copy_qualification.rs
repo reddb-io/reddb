@@ -161,6 +161,7 @@ fn runtime_index_descriptors(runtime: &crate::runtime::RedDBRuntime) -> JsonValu
         for index in runtime.index_store_ref().list_indices(&collection) {
             let (method, resolution) = match index.method {
                 IndexMethodKind::Hash => ("hash", 0),
+                IndexMethodKind::Cron => ("cron", 0),
                 IndexMethodKind::Bitmap => ("bitmap", 0),
                 IndexMethodKind::BTree => ("btree", 0),
                 IndexMethodKind::H3 { resolution } => ("h3", resolution),

@@ -105,6 +105,16 @@ impl CronSchedule {
         &self.encoded
     }
 
+    /// Calendar axes used by the inverted index, in minute, hour, month,
+    /// day-of-month and weekday order. The flag selects Vixie day conjunction.
+    pub fn index_fields(&self) -> (&str, [u64; 5], bool) {
+        (
+            self.zone.iana_name().unwrap_or("UTC"),
+            [self.minute, self.hour, self.month, self.day, self.weekday],
+            self.day_and_weekday,
+        )
+    }
+
     /// Find the first scheduled instant at or after the supplied instant.
     pub fn next(&self, start_ms: i64) -> Result<Option<i64>, String> {
         self.first_in_window(start_ms, None)
@@ -219,6 +229,49 @@ impl CronSchedule {
     }
 }
 
+/// Union of local field values at minute boundaries in [start, end).
+/// Combining fields from different hours or dates is conservative. Callers
+/// must recheck the schedule. Bound work for long windows by declining the probe.
+pub fn index_window_fields(timezone: &str, start_ms: i64, end_ms: i64) -> Option<[u64; 5]> {
+    let span = end_ms.checked_sub(start_ms)?;
+    if !(0..=31 * DAY_MS).contains(&span) {
+        return None;
+    }
+    let zone = timezone_from_name(timezone).ok()?;
+    let start = Timestamp::from_millisecond(start_ms).ok()?;
+    Timestamp::from_millisecond(end_ms).ok()?;
+    let mut masks = [0u64; 5];
+    let mut from = start;
+    let mut transitions = zone.following(start);
+    while from.as_millisecond() < end_ms {
+        let boundary = transitions.next().map(|t| t.timestamp());
+        let until = boundary.map_or(end_ms, |t| end_ms.min(t.as_millisecond()));
+        let offset = i64::from(zone.to_offset(from).seconds()) * 1000;
+        let local = from.as_millisecond() + offset;
+        // First whole civil minute on or after the segment start.
+        let mut first = local.div_euclid(MINUTE_MS) + i64::from(local.rem_euclid(MINUTE_MS) != 0);
+        let last = (until + offset - 1).div_euclid(MINUTE_MS);
+        while first <= last {
+            let hour_end = (first.div_euclid(60) * 60 + 59).min(last);
+            let instant = Timestamp::from_millisecond(first * MINUTE_MS - offset).ok()?;
+            let civil = zone.to_datetime(instant);
+            let low = first.rem_euclid(60);
+            let high = hour_end.rem_euclid(60);
+            masks[0] |= ((1u64 << (high + 1)) - 1) & (u64::MAX << low);
+            masks[1] |= 1 << civil.hour();
+            masks[2] |= 1 << civil.month();
+            masks[3] |= 1 << civil.day();
+            masks[4] |= 1 << civil.date().weekday().to_sunday_zero_offset();
+            first = hour_end + 1;
+        }
+        if until == end_ms {
+            break;
+        }
+        from = boundary?;
+    }
+    Some(masks)
+}
+
 /// Resolve the optional type modifier before writing a column declaration.
 pub fn column_timezone(sql_type: &crate::SqlTypeName) -> Result<&str, String> {
     match sql_type.modifiers.as_slice() {
@@ -316,6 +369,54 @@ mod tests {
         s.parse::<Timestamp>()
             .expect("test timestamp")
             .as_millisecond()
+    }
+
+    #[test]
+    fn index_masks_cover_transitions_and_subminute_local_offsets() {
+        for (zone, start, end) in [
+            (
+                "Europe/Paris",
+                "1900-01-01T00:00:00Z",
+                "1900-01-01T00:02:00Z",
+            ),
+            (
+                "America/New_York",
+                "2026-11-01T05:59:59Z",
+                "2026-11-01T06:01:00Z",
+            ),
+            (
+                "America/New_York",
+                "2026-03-08T06:59:59Z",
+                "2026-03-08T07:01:00Z",
+            ),
+            (
+                "Australia/Lord_Howe",
+                "2026-04-04T14:59:00Z",
+                "2026-04-04T15:02:00Z",
+            ),
+        ] {
+            let (start, end) = (timestamp(start), timestamp(end));
+            let masks = index_window_fields(zone, start, end).expect("short window");
+            let zone = timezone_from_name(zone).expect("test zone");
+            let mut expected = [0; 5];
+            for second_ms in (start..end).step_by(1000) {
+                let civil =
+                    zone.to_datetime(Timestamp::from_millisecond(second_ms).expect("timestamp"));
+                if civil.second() == 0 {
+                    let fields = [
+                        civil.minute(),
+                        civil.hour(),
+                        civil.month(),
+                        civil.day(),
+                        civil.date().weekday().to_sunday_zero_offset(),
+                    ];
+                    for (axis, value) in fields.into_iter().enumerate() {
+                        expected[axis] |= 1 << value;
+                    }
+                }
+            }
+            assert_eq!(masks, expected);
+        }
     }
 
     #[test]

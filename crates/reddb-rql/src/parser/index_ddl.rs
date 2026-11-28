@@ -45,6 +45,7 @@ impl<'a> Parser<'a> {
 
         if unique && !matches!(method, IndexMethod::BTree | IndexMethod::Hash) {
             let method_name = match method {
+                IndexMethod::Cron => "CRON",
                 IndexMethod::Bitmap => "BITMAP",
                 IndexMethod::Spatial => "SPATIAL",
                 IndexMethod::H3 { .. } => "H3",
@@ -119,6 +120,7 @@ impl<'a> Parser<'a> {
                 let method = match upper.as_str() {
                     "HASH" => IndexMethod::Hash,
                     "BTREE" => IndexMethod::BTree,
+                    "CRON" => IndexMethod::Cron,
                     "BITMAP" => IndexMethod::Bitmap,
                     "RTREE" => {
                         return Err(ParseError::new(
@@ -130,7 +132,7 @@ impl<'a> Parser<'a> {
                     _ => {
                         return Err(ParseError::new(
                             format!(
-                                "unknown index method '{}', expected HASH, BTREE, BITMAP, SPATIAL, or H3",
+                                "unknown index method '{}', expected HASH, BTREE, BITMAP, CRON, SPATIAL, or H3",
                                 name
                             ),
                             self.position(),
@@ -141,7 +143,7 @@ impl<'a> Parser<'a> {
                 Ok(method)
             }
             other => Err(ParseError::expected(
-                vec!["HASH", "BTREE", "BITMAP", "SPATIAL", "H3"],
+                vec!["HASH", "BTREE", "BITMAP", "CRON", "SPATIAL", "H3"],
                 &other,
                 self.position(),
             )),
@@ -240,7 +242,7 @@ mod tests {
     fn unique_is_rejected_for_methods_that_cannot_enforce_it() {
         // BITMAP, SPATIAL and H3 were accepted with UNIQUE and then silently
         // ignored it; reject instead of advertising a constraint nobody checks.
-        for method in ["BITMAP", "SPATIAL", "H3"] {
+        for method in ["BITMAP", "CRON", "SPATIAL", "H3"] {
             let input = format!("CREATE UNIQUE INDEX idx ON t (c) USING {method}");
             let mut parser = parser(&input);
             parser.expect(Token::Create).expect("CREATE");
@@ -260,7 +262,7 @@ mod tests {
         }
         assert!(parse_create_index("CREATE UNIQUE INDEX idx ON t (c)").unique);
         // Non-unique indexes of every method are unaffected.
-        for method in ["BITMAP", "SPATIAL", "H3"] {
+        for method in ["BITMAP", "CRON", "SPATIAL", "H3"] {
             let query = parse_create_index(&format!("CREATE INDEX idx ON t (c) USING {method}"));
             assert!(!query.unique, "{method}");
         }
@@ -280,6 +282,7 @@ mod tests {
         for (method, expected) in [
             ("BTREE", IndexMethod::BTree),
             ("BITMAP", IndexMethod::Bitmap),
+            ("cron", IndexMethod::Cron),
             ("hash", IndexMethod::Hash),
         ] {
             let query = parse_create_index(&format!(
@@ -364,7 +367,7 @@ mod tests {
         let err = p.parse_create_index_query().unwrap_err();
         assert!(
             err.to_string()
-                .contains("expected: HASH, BTREE, BITMAP, SPATIAL"),
+                .contains("expected: HASH, BTREE, BITMAP, CRON, SPATIAL, H3"),
             "{err}"
         );
     }

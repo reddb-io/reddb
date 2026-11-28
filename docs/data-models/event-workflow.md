@@ -130,6 +130,27 @@ for `CRON` without a modifier. An explicit time zone applies to its own row.
 The one-argument `CRON(expression)` constructor resolves a bare expression to
 UTC. The lossless text form is `0 9 * * 1-5 [America/Sao_Paulo]`.
 
+For a table with many rules, create an optional inverted index. This query
+returns each job scheduled in the window once.
+
+```sql
+CREATE INDEX by_schedule ON jobs (schedule) USING CRON;
+SELECT id FROM jobs WHERE cron_overlaps(schedule, $1, $2) ORDER BY id;
+```
+
+The index groups rule IDs by time zone and calendar field. A selective
+lookup intersects compressed bitmaps, fetches candidate rows and checks the
+exact interval. Inserts, edits and deletes maintain these resident postings.
+The index definition persists and the postings rebuild on reopen. Storage
+depends on the indexed rules and their fields, independently of the number
+of future occurrences.
+
+The lookup supports a positive `cron_overlaps` predicate with bound timestamp
+parameters or constant timestamp casts in simple table reads. Windows over
+31 days, dense candidate sets and snapshots for which current postings cannot
+establish visibility use the scan path. For a local day, its two midnight
+bounds can be 23 or 25 hours apart.
+
 Use `cron_occurrences(schedule, start, end)` in the SELECT list to return
 one row per scheduled instant. The engine evaluates each rule in its stored
 time zone. For a local day, bind its two successive local
@@ -157,6 +178,19 @@ ORDER BY begins_at, id
 LIMIT 1;
 ```
 
+If the table enforces a maximum positive booking duration, a constant
+prefilter can use the calendar index for this conflict query. Bind `$4` to
+`window_start - maximum_duration_ms + 1` and keep the per-row duration in
+the occurrence projection. Without a guaranteed maximum, use the query above.
+
+```sql
+SELECT id, cron_occurrences(schedule, $1 - duration_ms + 1, $2) AS begins_at
+FROM bookings
+WHERE cron_overlaps(schedule, $4, $2) AND room = $3
+ORDER BY begins_at, id
+LIMIT 1;
+```
+
 Each SELECT supports one top-level occurrence projection alongside scalar
 columns. An ordinary index on `room` can narrow the input rules. Ordered
 queries buffer occurrences under `stream.executor.max_materialized_rows`.
@@ -172,9 +206,8 @@ features hidden behind a flag:
 - **Named locks** — no `LOCK` / `UNLOCK` primitive on any transport.
 - **Public rate limiting** — no token-bucket / leaky-bucket primitive
   exposed to clients. Internal admission control is unrelated.
-- **Scheduler / cron** — RedDB does not expose recurring schedules. Use
-  `QUEUE PUSH ... AVAILABLE AT <instant>` from an external scheduler if you
-  need one-shot timing.
+- **Job execution** — Applications can query recurring schedules and submit
+  individual jobs with `QUEUE PUSH ... AVAILABLE AT <instant>`.
 - **Task result storage / `WAIT RESULT`** — `QUEUE READ ... WAIT` returns the
   message envelope, not a worker-produced result. Result handoff is the
   application's responsibility.
