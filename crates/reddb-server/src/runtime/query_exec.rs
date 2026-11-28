@@ -9,6 +9,7 @@ use reddb_rql::sql_lowering::{
 mod aggregate;
 mod aggregate_planner;
 mod aggregate_pushdown_dispatch;
+mod cron_occurrences;
 mod filter_compiled;
 mod helpers;
 mod hybrid;
@@ -102,6 +103,9 @@ fn execute_runtime_table_query_materialized(
     index_store: Option<&super::index_store::IndexStore>,
 ) -> RedDBResult<UnifiedResult> {
     let effective_projections = effective_table_projections(query);
+    if let Some(index) = cron_occurrences::projection_index(query) {
+        return cron_occurrences::execute(db, query, index_store, index, &effective_projections);
+    }
     let effective_filter = effective_table_filter(query);
     let effective_group_by = effective_table_group_by_exprs(query);
     let effective_having = effective_table_having_filter(query);

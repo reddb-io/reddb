@@ -708,6 +708,11 @@ fn eval_function(
     row: &dyn Row,
     decode_literal: &impl Fn(&Value) -> Result<Value, EvalError>,
 ) -> Result<Value, EvalError> {
+    if name.eq_ignore_ascii_case("CRON_OCCURRENCES") {
+        return Err(EvalError::CronFailed(
+            "cron_occurrences requires a top-level SELECT projection".into(),
+        ));
+    }
     // COALESCE has SQL-special semantics that the catalog can't
     // express (variadic + uniform arg type unifies poorly with
     // first-non-null). Handle it before catalog dispatch so we

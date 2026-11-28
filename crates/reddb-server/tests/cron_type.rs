@@ -16,6 +16,116 @@ fn timestamp(iso: &str) -> Value {
 }
 
 #[test]
+fn occurrences_expand_filtered_rules_before_order_offset_and_limit() {
+    let runtime = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("memory database");
+    execute(&runtime, "CREATE TABLE bookings (id INTEGER PRIMARY KEY, room INTEGER, schedule CRON('America/New_York'))");
+    execute(&runtime, "INSERT INTO bookings (id, room, schedule) VALUES (1, 7, '30 1 * * *'), (2, 7, '45 1 * * *'), (3, 8, '* * * * *'), (4, 7, NULL)");
+    execute(&runtime, "CREATE INDEX by_room ON bookings (room)");
+    let window = [
+        timestamp("2026-11-01T05:30:00Z"),
+        timestamp("2026-11-01T06:45:00Z"),
+    ];
+    let sql = "SELECT id, cron_occurrences(schedule, $1, $2) AS at_time FROM bookings WHERE room = 7 ORDER BY at_time OFFSET 1";
+    let result = runtime
+        .execute_query_with_params(sql, &window)
+        .expect("expand the repeated hour")
+        .result;
+    assert_eq!(result.columns, ["id", "at_time"]);
+    let rows = result.records;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0].get("id"), Some(&Value::Integer(2)));
+    assert_eq!(
+        rows[0].get("at_time"),
+        Some(&timestamp("2026-11-01T05:45:00Z"))
+    );
+    assert_eq!(rows[1].get("id"), Some(&Value::Integer(1)));
+    assert_eq!(
+        rows[1].get("at_time"),
+        Some(&timestamp("2026-11-01T06:30:00Z"))
+    );
+
+    let limited = runtime
+        .execute_query_with_params(
+            "SELECT cron_occurrences(CRON('* * * * *'), $1, $2) AS t LIMIT 1 OFFSET 2",
+            &window,
+        )
+        .expect("source-free expansion")
+        .result
+        .records;
+    assert_eq!(limited.len(), 1);
+    assert_eq!(
+        limited[0].get("t"),
+        Some(&timestamp("2026-11-01T05:32:00Z"))
+    );
+    let sql = "SELECT cron_occurrences(schedule, $1, $2) AS t FROM bookings WHERE id = 1";
+    assert!(runtime
+        .execute_query_with_params(sql, &[window[1].clone(), window[0].clone()])
+        .is_err());
+    assert!(runtime
+        .execute_query_with_params(sql, &[window[0].clone(), window[0].clone()])
+        .expect("empty window")
+        .result
+        .records
+        .is_empty());
+    execute(
+        &runtime,
+        "SET CONFIG stream.executor.max_materialized_rows = 2",
+    );
+    assert!(runtime.execute_query_with_params("SELECT cron_occurrences(schedule, $1, $2) AS t FROM bookings WHERE room = 7 ORDER BY t", &window).is_err());
+    let first = runtime.execute_query_with_params("SELECT cron_occurrences(schedule, $1, $2) AS t FROM bookings WHERE room = 8 ORDER BY t LIMIT 1", &window)
+        .expect("only the first occurrence of a dense rule is needed");
+    assert_eq!(first.result.records[0].get("t"), Some(&window[0]));
+    let outer = runtime.execute_query_with_params(
+        "SELECT t FROM (SELECT cron_occurrences(schedule, $1, $2) AS t FROM bookings WHERE id = 1) AS agenda ORDER BY t DESC LIMIT 1",
+        &window,
+    ).expect("query the expanded rows").result.records;
+    assert_eq!(outer.len(), 1);
+    assert_eq!(outer[0].get("t"), Some(&timestamp("2026-11-01T06:30:00Z")));
+}
+
+#[test]
+fn first_conflict_includes_carry_in_and_respects_visibility_and_updates() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("memory database");
+    execute(&rt, "CREATE TABLE bookings (id INTEGER PRIMARY KEY, room INTEGER, schedule CRON, duration_ms INTEGER)");
+    execute(&rt, "INSERT INTO bookings (id, room, schedule, duration_ms) VALUES (1,7,'30 23 * * *',1800000),(2,7,'45 23 * * *',3600000),(3,8,'0 23 * * *',7200000),(4,7,'30 0 * * *',900000)");
+    execute(
+        &rt,
+        "CREATE POLICY visible ON bookings FOR SELECT USING (room = 7)",
+    );
+    execute(&rt, "ALTER TABLE bookings ENABLE ROW LEVEL SECURITY");
+    let window = [
+        timestamp("2026-11-27T00:00:00Z"),
+        timestamp("2026-11-27T00:30:00Z"),
+    ];
+    let sql = "SELECT id, cron_occurrences(schedule, $1 - duration_ms + 1, $2) AS begins_at FROM bookings ORDER BY begins_at, id LIMIT 1";
+    let rows = rt
+        .execute_query_with_params(sql, &window)
+        .expect("occupied across midnight")
+        .result
+        .records;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].get("id"), Some(&Value::Integer(2)));
+    assert_eq!(
+        rows[0].get("begins_at"),
+        Some(&timestamp("2026-11-26T23:45:00Z"))
+    );
+    execute(
+        &rt,
+        "CREATE POLICY editable ON bookings FOR UPDATE USING (room = 7)",
+    );
+    execute(
+        &rt,
+        "UPDATE bookings SET schedule = '0 3 * * *' WHERE id = 2",
+    );
+    assert!(rt
+        .execute_query_with_params(sql, &window)
+        .expect("free after rescheduling")
+        .result
+        .records
+        .is_empty());
+}
+
+#[test]
 fn cron_type_uses_column_default_and_filters_prepared_windows_after_reopen() {
     let directory = tempfile::tempdir().expect("temporary database directory");
     let path = directory.path().join("cron.rdb");

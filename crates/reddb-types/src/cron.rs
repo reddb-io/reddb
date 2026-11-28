@@ -118,6 +118,31 @@ impl CronSchedule {
         Ok(self.first_in_window(start_ms, Some(end_ms))?.is_some())
     }
 
+    /// Scheduled instants in [start_ms, end_ms), in absolute time order.
+    pub fn occurrences(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<impl Iterator<Item = Result<i64, String>> + '_, String> {
+        if end_ms < start_ms {
+            return Err("cron window end precedes its start".into());
+        }
+        let mut cursor = Some(start_ms);
+        Ok(std::iter::from_fn(move || {
+            let start = cursor.take()?;
+            match self.first_in_window(start, Some(end_ms)) {
+                Ok(Some(instant)) => {
+                    // Offsets can change by sub-minute amounts in historical
+                    // IANA data. Resume one millisecond after the match.
+                    cursor = Some(instant + 1);
+                    Some(Ok(instant))
+                }
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            }
+        }))
+    }
+
     fn first_in_window(&self, start_ms: i64, end_ms: Option<i64>) -> Result<Option<i64>, String> {
         let timestamp = |ms| Timestamp::from_millisecond(ms).map_err(|error| error.to_string());
         let start = timestamp(start_ms)?;
@@ -322,6 +347,20 @@ mod tests {
         assert_eq!(
             rule.next(before_gap).unwrap(),
             Some(timestamp("2026-03-09T05:00:00Z"))
+        );
+        let midnight = timestamp("2026-03-08T05:00:00Z");
+        let next_midnight = timestamp("2026-03-09T04:00:00Z");
+        let instants = rule
+            .occurrences(midnight, next_midnight)
+            .expect("spring day")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("valid window");
+        assert_eq!(
+            instants,
+            [
+                timestamp("2026-03-08T06:00:00Z"),
+                timestamp("2026-03-08T06:30:00Z")
+            ]
         );
     }
 

@@ -130,6 +130,39 @@ for `CRON` without a modifier. An explicit time zone applies to its own row.
 The one-argument `CRON(expression)` constructor resolves a bare expression to
 UTC. The lossless text form is `0 9 * * 1-5 [America/Sao_Paulo]`.
 
+Use `cron_occurrences(schedule, start, end)` in the SELECT list to return
+one row per scheduled instant. The engine evaluates each rule in its stored
+time zone. For a local day, bind its two successive local
+midnights as absolute timestamps. A null argument or an empty window
+produces zero rows. A reversed window raises a query error.
+
+```sql
+SELECT id, cron_occurrences(schedule, $1, $2) AS begins_at
+FROM bookings
+WHERE room = $3
+ORDER BY begins_at, id;
+```
+
+To find the first booking occupying a room during a nonempty window, include
+starts from before the window. With positive durations stored in milliseconds,
+the earliest possible conflicting start is one millisecond after
+`window_start - duration_ms`. An appointment ending at the window start
+leaves the room available.
+
+```sql
+SELECT id, cron_occurrences(schedule, $1 - duration_ms + 1, $2) AS begins_at
+FROM bookings
+WHERE room = $3
+ORDER BY begins_at, id
+LIMIT 1;
+```
+
+Each SELECT supports one top-level occurrence projection alongside scalar
+columns. An ordinary index on `room` can narrow the input rules. Ordered
+queries buffer occurrences under `stream.executor.max_materialized_rows`.
+The query describes planned occupancy. An executor can record actual runs
+in its own history table.
+
 ## Out of scope (current PRD)
 
 These items are explicitly **not** delivered by PRD #718 and have no later

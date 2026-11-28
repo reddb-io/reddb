@@ -938,8 +938,14 @@ fn execute_runtime_canonical_table_query_inner(
     if let Some(reddb_rql::ast::TableSource::Subquery(inner)) = &query.source {
         match inner.as_ref() {
             reddb_rql::ast::QueryExpr::Table(inner_table) => {
-                let mut records =
-                    execute_runtime_canonical_table_query_indexed(db, inner_table, index_store)?;
+                let mut records = if super::cron_occurrences::projection_index(inner_table)
+                    .is_some()
+                {
+                    super::execute_runtime_table_query_materialized(db, inner_table, index_store)?
+                        .records
+                } else {
+                    execute_runtime_canonical_table_query_indexed(db, inner_table, index_store)?
+                };
 
                 // Outer WHERE: re-evaluate the legacy filter walker
                 // against each materialised record. The alias is the
