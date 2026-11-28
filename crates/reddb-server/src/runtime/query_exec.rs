@@ -549,6 +549,7 @@ pub(super) fn execute_runtime_canonical_expr_node(
             let table_alias = table.alias.as_deref().unwrap_or(table_name);
             let context = RuntimeTableExecutionContext {
                 query: table,
+                candidate_ids: None,
                 table_name,
                 table_alias,
             };

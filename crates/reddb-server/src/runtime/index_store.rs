@@ -18,6 +18,8 @@ use crate::storage::unified::hash_index::{HashIndexConfig, HashIndexManager};
 use reddb_types::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily, Value};
 
 pub(crate) mod candidates;
+pub(super) mod cron;
+use cron::CronIndex;
 
 enum CanonicalizedValue {
     Exact(CanonicalKey),
@@ -1018,6 +1020,12 @@ pub struct RegisteredIndex {
 }
 
 impl RegisteredIndex {
+    fn is_cron_on(&self, table: &str, column: &str) -> bool {
+        self.collection == table
+            && self.method == IndexMethodKind::Cron
+            && self.columns.first().is_some_and(|col| col == column)
+    }
+
     /// Name under which this index is registered in the hash store.
     /// Pure Hash indexes use their own name; single-col BTree indexes
     /// store an auxiliary hash side-pocket as `{name}_hash` (see
@@ -1027,7 +1035,7 @@ impl RegisteredIndex {
         match self.method {
             IndexMethodKind::Hash => std::borrow::Cow::Borrowed(self.name.as_str()),
             IndexMethodKind::BTree => std::borrow::Cow::Owned(format!("{}_hash", self.name)),
-            IndexMethodKind::Bitmap | IndexMethodKind::H3 { .. } => {
+            IndexMethodKind::Cron | IndexMethodKind::Bitmap | IndexMethodKind::H3 { .. } => {
                 std::borrow::Cow::Borrowed(self.name.as_str())
             }
         }
@@ -1040,7 +1048,7 @@ impl RegisteredIndex {
         let has_pocket = match self.method {
             IndexMethodKind::Hash => true,
             IndexMethodKind::BTree => self.unique,
-            IndexMethodKind::Bitmap | IndexMethodKind::H3 { .. } => false,
+            IndexMethodKind::Cron | IndexMethodKind::Bitmap | IndexMethodKind::H3 { .. } => false,
         };
         (has_pocket && self.columns.len() > 1).then(|| self.hash_lookup_name())
     }
@@ -1048,6 +1056,7 @@ impl RegisteredIndex {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexMethodKind {
+    Cron,
     Hash,
     Bitmap,
     BTree,
@@ -1115,6 +1124,7 @@ type PagedBtreeProviders =
 pub struct IndexStore {
     pub hash: HashIndexManager,
     pub bitmap: BitmapIndexManager,
+    cron: RwLock<HashMap<(String, String), CronIndex>>,
     pub sorted: SortedIndexManager,
     pub(super) paged_btrees: RwLock<PagedBtreeProviders>,
     /// Registry of all created indices: (collection, index_name) → metadata
@@ -1318,6 +1328,7 @@ impl IndexStore {
         Self {
             hash: HashIndexManager::new(),
             bitmap: BitmapIndexManager::new(),
+            cron: RwLock::default(),
             sorted: SortedIndexManager::new(),
             paged_btrees: RwLock::new(HashMap::new()),
             registry: RwLock::new(HashMap::new()),
@@ -1494,6 +1505,11 @@ impl IndexStore {
         self.mutation_test_hook(collection, MutationTestPhase::IndexTopologyPublishing);
         self.bitmap
             .replace_collection_from(collection, prepared.bitmap);
+        {
+            let mut cron = self.cron.write();
+            cron.retain(|(table, _), _| table != collection);
+            cron.extend(prepared.cron.into_inner());
+        }
         let mut sorted = self.sorted.indices.write();
         sorted.retain(|(table, _), _| table != collection);
         sorted.extend(prepared.sorted.indices.into_inner());
@@ -1562,6 +1578,13 @@ impl IndexStore {
         self.hash
             .memory_bytes()
             .saturating_add(self.bitmap.memory_bytes())
+            .saturating_add(
+                self.cron
+                    .read()
+                    .values()
+                    .map(CronIndex::memory_bytes)
+                    .sum::<u64>(),
+            )
             .saturating_add(self.sorted.memory_bytes())
             .saturating_add(
                 self.paged_btrees
@@ -1688,6 +1711,20 @@ impl IndexStore {
         }
 
         match method {
+            IndexMethodKind::Cron => {
+                if unique || columns.len() != 1 {
+                    return Err("USING CRON requires a single non-unique CRON column".into());
+                }
+                let mut index = CronIndex::default();
+                for (id, fields) in entities {
+                    if let Some(value) = index_field_value(fields, col) {
+                        index.update(*id, value.as_ref(), true);
+                    }
+                }
+                let count = index.len() as usize;
+                self.install_cron_index(collection, name, index);
+                Ok(count)
+            }
             IndexMethodKind::Hash => {
                 self.hash
                     .create_index(&HashIndexConfig {
@@ -1812,6 +1849,7 @@ impl IndexStore {
             self.mutation_test_hook(collection, MutationTestPhase::IndexTopologyDropping);
             self.paged_btrees.write().remove(&key);
             match info.method {
+                IndexMethodKind::Cron => self.cron.write().remove(&key).is_some(),
                 IndexMethodKind::Hash => self.hash.drop_index(collection, name),
                 IndexMethodKind::Bitmap => {
                     let col = info.columns.first().map(|s| s.as_str()).unwrap_or("");
@@ -1870,6 +1908,49 @@ impl IndexStore {
         self.bitmap
             .count(collection, column, value)
             .map_err(|err| err.to_string())
+    }
+
+    pub(super) fn install_cron_index(&self, table: &str, name: &str, index: CronIndex) {
+        self.cron
+            .write()
+            .insert((table.to_owned(), name.to_owned()), index);
+    }
+
+    pub(super) fn has_cron_index(&self, table: &str, column: &str) -> bool {
+        self.registry
+            .read()
+            .values()
+            .any(|idx| idx.is_cron_on(table, column))
+    }
+
+    /// Return physical candidate IDs only while both descriptor and postings are published.
+    pub(super) fn cron_candidates(
+        &self,
+        collection: &str,
+        column: &str,
+        start: i64,
+        end: i64,
+    ) -> Option<Vec<EntityId>> {
+        let registry = self.registry.read();
+        let (key, _) = registry
+            .iter()
+            .find(|(_, idx)| idx.is_cron_on(collection, column))?;
+        self.cron.read().get(key)?.candidates(start, end)
+    }
+
+    fn update_cron_postings(
+        &self,
+        idx: &RegisteredIndex,
+        id: EntityId,
+        value: &Value,
+        insert: bool,
+    ) -> Result<(), String> {
+        let mut indexes = self.cron.write();
+        let index = indexes
+            .get_mut(&(idx.collection.clone(), idx.name.clone()))
+            .ok_or_else(|| format!("missing CRON index '{}'", idx.name))?;
+        index.update(id, value, insert);
+        Ok(())
     }
 
     /// Find a single-column index for method-aware planning, including H3.
@@ -1962,6 +2043,11 @@ impl IndexStore {
             return None;
         }
         Some(match index.method {
+            IndexMethodKind::Cron => self
+                .cron
+                .read()
+                .get(&(index.collection.clone(), index.name.clone()))?
+                .len(),
             IndexMethodKind::Hash => self
                 .hash
                 .index_stats(&index.collection, &index.name)
@@ -2103,20 +2189,23 @@ impl IndexStore {
                 matches!(idx.method, IndexMethodKind::BTree).then(|| format!("{}_hash", idx.name));
             for (entity_id, fields) in rows {
                 if let Some(value) = index_field_value(fields, col) {
-                    let key = value_to_bytes(value.as_ref());
+                    let key = || value_to_bytes(value.as_ref());
                     match idx.method {
+                        IndexMethodKind::Cron => {
+                            self.update_cron_postings(idx, *entity_id, value.as_ref(), true)?
+                        }
                         IndexMethodKind::Hash => {
                             // A NULL never equals another NULL: no unique key.
                             if idx.unique && matches!(value.as_ref(), Value::Null) {
                                 continue;
                             }
                             self.hash
-                                .insert(collection, &idx.name, key, *entity_id)
+                                .insert(collection, &idx.name, key(), *entity_id)
                                 .map_err(|err| err.to_string())?;
                         }
                         IndexMethodKind::Bitmap => {
                             self.bitmap
-                                .insert(collection, col, *entity_id, &key)
+                                .insert(collection, col, *entity_id, &key())
                                 .map_err(|err| err.to_string())?;
                         }
                         IndexMethodKind::BTree => {
@@ -2129,7 +2218,7 @@ impl IndexStore {
                                 .insert_one(collection, col, value.as_ref(), *entity_id);
                             let hash_name = btree_hash_name.as_deref().unwrap_or("");
                             self.hash
-                                .insert(collection, hash_name, key, *entity_id)
+                                .insert(collection, hash_name, key(), *entity_id)
                                 .map_err(|err| err.to_string())?;
                         }
                         IndexMethodKind::H3 { resolution } => {
@@ -2187,20 +2276,23 @@ impl IndexStore {
 
             let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
             if let Some(value) = index_field_value(fields, col) {
-                let key = value_to_bytes(value.as_ref());
+                let key = || value_to_bytes(value.as_ref());
                 match idx.method {
+                    IndexMethodKind::Cron => {
+                        self.update_cron_postings(idx, entity_id, value.as_ref(), true)?
+                    }
                     IndexMethodKind::Hash => {
                         // A NULL never equals another NULL: no unique key.
                         if idx.unique && matches!(value.as_ref(), Value::Null) {
                             continue;
                         }
                         self.hash
-                            .insert(collection, &idx.name, key, entity_id)
+                            .insert(collection, &idx.name, key(), entity_id)
                             .map_err(|err| err.to_string())?;
                     }
                     IndexMethodKind::Bitmap => {
                         self.bitmap
-                            .insert(collection, col, entity_id, &key)
+                            .insert(collection, col, entity_id, &key())
                             .map_err(|err| err.to_string())?;
                     }
                     IndexMethodKind::BTree => {
@@ -2212,7 +2304,7 @@ impl IndexStore {
                         self.sorted
                             .insert_one(collection, col, value.as_ref(), entity_id);
                         self.hash
-                            .insert(collection, &format!("{}_hash", idx.name), key, entity_id)
+                            .insert(collection, &format!("{}_hash", idx.name), key(), entity_id)
                             .map_err(|err| err.to_string())?;
                     }
                     IndexMethodKind::H3 { resolution } => {
@@ -2280,11 +2372,14 @@ impl IndexStore {
 
             let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
             if let Some(value) = index_field_value(fields, col) {
-                let key = value_to_bytes(value.as_ref());
+                let key = || value_to_bytes(value.as_ref());
                 match idx.method {
+                    IndexMethodKind::Cron => {
+                        self.update_cron_postings(idx, entity_id, value.as_ref(), false)?
+                    }
                     IndexMethodKind::Hash => {
                         // Missing index on delete is non-fatal.
-                        let _ = self.hash.remove(collection, &idx.name, &key, entity_id);
+                        let _ = self.hash.remove(collection, &idx.name, &key(), entity_id);
                     }
                     IndexMethodKind::Bitmap => {
                         let _ = self.bitmap.remove(collection, col, entity_id);
@@ -2295,7 +2390,7 @@ impl IndexStore {
                         let _ = self.hash.remove(
                             collection,
                             &format!("{}_hash", idx.name),
-                            &key,
+                            &key(),
                             entity_id,
                         );
                     }
@@ -2659,6 +2754,7 @@ fn estimate_registered_index_growth(index: &RegisteredIndex, fields: &[(String, 
         return 0;
     };
     match index.method {
+        IndexMethodKind::Cron => CronIndex::growth(value.as_ref()),
         // H3 stores a fixed-width canonical cell, not the source geometry.
         IndexMethodKind::H3 { .. } => INDEX_GROWTH_ENTRY_BYTES
             .saturating_add(canonical_bytes)

@@ -141,6 +141,7 @@ fn index_method_kind_name(kind: super::index_store::IndexMethodKind) -> &'static
         super::index_store::IndexMethodKind::Hash => "hash",
         super::index_store::IndexMethodKind::BTree => "btree",
         super::index_store::IndexMethodKind::Bitmap => "bitmap",
+        super::index_store::IndexMethodKind::Cron => "cron",
         super::index_store::IndexMethodKind::H3 { .. } => "spatial.h3",
     }
 }
@@ -442,6 +443,7 @@ fn render_index_method_for_ddl(method: super::index_store::IndexMethodKind) -> &
         super::index_store::IndexMethodKind::Hash => "HASH",
         super::index_store::IndexMethodKind::BTree => "BTREE",
         super::index_store::IndexMethodKind::Bitmap => "BITMAP",
+        super::index_store::IndexMethodKind::Cron => "CRON",
         super::index_store::IndexMethodKind::H3 { .. } => "H3",
     }
 }
