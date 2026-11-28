@@ -385,6 +385,9 @@ struct StoreOwnershipRecorder {
     coordinator: Arc<StoreCommitCoordinator>,
     epoch: u64,
     images: parking_lot::Mutex<CheckpointPageImages>,
+    /// The manifest reference of this epoch's generation has been, or is
+    /// being, written: recovery now acts on the epoch's retirements.
+    published: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -403,6 +406,7 @@ impl StoreOwnershipRecorder {
             coordinator,
             epoch,
             images: parking_lot::Mutex::new(CheckpointPageImages::default()),
+            published: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -498,6 +502,28 @@ impl crate::storage::engine::pager::PageOwnershipRecorder for StoreOwnershipReco
         self.append_pages(pages, |epoch, page_id| {
             reddb_file::page_ownership_journal::PageOwnershipRecord::Retire { epoch, page_id }
         })
+    }
+
+    fn retire_deferred_page(&self, page_id: u32) -> io::Result<()> {
+        if self.published.load(Ordering::Acquire) {
+            // A crash from here on finds the generation published and frees
+            // exactly the retirements it can read.
+            return self.retire_pages(&[page_id]);
+        }
+        // An unpublished generation's retirements are not acted on, and the
+        // manifest is not written before `flush_page_ownership`. A checkpoint
+        // frees a page for every node it replaces; waiting for each record
+        // was 284 of the 407 syncs of one that changed 20 small tables.
+        self.coordinator.append_deferred_page_ownership_batch(&[
+            reddb_file::page_ownership_journal::PageOwnershipRecord::Retire {
+                epoch: self.epoch,
+                page_id,
+            },
+        ])
+    }
+
+    fn generation_published(&self) {
+        self.published.store(true, Ordering::Release);
     }
 }
 
@@ -2923,6 +2949,71 @@ mod tests {
             .finish_page_ownership_epoch(&store, 2)
             .expect("finish epoch");
         assert_eq!(store.ownership_active_epoch.load(Ordering::Acquire), 0);
+    }
+
+    /// A checkpoint frees a page for every node it replaces. Recovery acts on
+    /// a retirement only once its generation is published, so until then the
+    /// record is queued; after that it is awaited again.
+    #[test]
+    fn a_deferred_retirement_waits_only_once_the_generation_is_published() {
+        use crate::storage::engine::pager::PageOwnershipRecorder;
+        use reddb_file::page_ownership_journal::PageOwnershipRecord;
+
+        let directory = tempfile::tempdir().expect("temporary store");
+        let wal_path = directory.path().join("ownership.wal");
+        let coordinator = Arc::new(
+            StoreCommitCoordinator::open(
+                &wal_path,
+                DurabilityMode::Strict,
+                GroupCommitOptions::default(),
+            )
+            .expect("open WAL"),
+        );
+        let recorder =
+            StoreOwnershipRecorder::begin(Arc::clone(&coordinator), 7).expect("begin epoch");
+        let begun = coordinator.fsync_count();
+
+        recorder.retire_deferred_page(70).expect("queue");
+        recorder.retire_deferred_page(71).expect("queue");
+        assert_eq!(
+            coordinator.fsync_count(),
+            begun,
+            "a retirement of an unpublished generation was awaited"
+        );
+        recorder.flush_page_ownership().expect("flush");
+        assert_eq!(
+            coordinator.fsync_count(),
+            begun + 1,
+            "one sync makes both durable"
+        );
+
+        recorder.generation_published();
+        recorder.retire_deferred_page(72).expect("durable");
+        assert_eq!(
+            coordinator.fsync_count(),
+            begun + 2,
+            "a retirement of a published generation was not awaited"
+        );
+
+        let records: Vec<_> = WalReader::open(&wal_path)
+            .expect("read WAL")
+            .iter()
+            .map(|item| item.expect("WAL record").1)
+            .collect();
+        let retire = |page_id| WalRecord::PageOwnership {
+            record: PageOwnershipRecord::Retire { epoch: 7, page_id },
+        };
+        assert_eq!(
+            records,
+            vec![
+                WalRecord::PageOwnership {
+                    record: PageOwnershipRecord::Begin { epoch: 7 }
+                },
+                retire(70),
+                retire(71),
+                retire(72),
+            ]
+        );
     }
 
     #[test]

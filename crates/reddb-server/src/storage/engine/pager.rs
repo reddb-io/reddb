@@ -261,6 +261,14 @@ pub(crate) trait PageOwnershipRecorder: Send + Sync {
     }
     fn detach_free_pages(&self, pages: &[u32]) -> std::io::Result<()>;
     fn retire_pages(&self, pages: &[u32]) -> std::io::Result<()>;
+    /// A page freed while reclamation is deferred: until
+    /// `generation_published` the record may be queued behind
+    /// `flush_page_ownership`; afterwards it must be durable on return.
+    fn retire_deferred_page(&self, page_id: u32) -> std::io::Result<()> {
+        self.retire_pages(&[page_id])
+    }
+    /// The manifest reference of the generation is about to be written.
+    fn generation_published(&self) {}
     fn needs_page_image(&self, _page_id: u32) -> std::io::Result<bool> {
         Ok(false)
     }
@@ -371,6 +379,19 @@ impl WalBarrier for NativeWalBarrier {
             recorder.retire_pages(pages)?;
         }
         Ok(())
+    }
+
+    fn retire_deferred_page(&self, page_id: u32) -> std::io::Result<()> {
+        if let Some(recorder) = self.ownership_recorder()? {
+            recorder.retire_deferred_page(page_id)?;
+        }
+        Ok(())
+    }
+
+    fn generation_published(&self) {
+        if let Ok(Some(recorder)) = self.ownership_recorder() {
+            recorder.generation_published();
+        }
     }
 }
 

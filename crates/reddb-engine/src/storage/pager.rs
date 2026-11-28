@@ -241,6 +241,19 @@ pub trait WalBarrier {
     fn retire_pages(&self, _pages: &[u32]) -> std::io::Result<()> {
         Ok(())
     }
+
+    /// Called for a page freed while reclamation is deferred. Recovery acts
+    /// on a retirement only once its generation is published, and nothing is
+    /// published before `flush_page_ownership`. So until
+    /// `generation_published` a host may only queue this record; from then on
+    /// it must be durable before returning, or a crash leaves the page owned
+    /// by nobody.
+    fn retire_deferred_page(&self, page_id: u32) -> std::io::Result<()> {
+        self.retire_pages(&[page_id])
+    }
+
+    /// Called before the manifest reference of a new generation is written.
+    fn generation_published(&self) {}
 }
 
 /// A pager without a WAL may only publish pages whose LSN is zero.
@@ -1340,7 +1353,9 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                     "invalid deferred free page".into(),
                 ));
             }
-            self.record_ownership(|wal| wal.retire_pages(&[page_id]))?;
+            // The host waits for this record only once the generation is
+            // published: see `WalBarrier::retire_deferred_page`.
+            self.record_ownership(|wal| wal.retire_deferred_page(page_id))?;
             // Keep dirty forwarding/empty nodes until publication. An
             // incidental flush must leave the previous root traversable.
             deferred.pending.insert(page_id);
@@ -1944,6 +1959,8 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
             ));
         }
         let header = self.header_read()?.clone();
+        // From here a crash may find this generation published.
+        self.wal.generation_published();
         let _publication = self
             .superblock_publication
             .lock()
