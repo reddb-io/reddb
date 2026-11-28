@@ -314,6 +314,14 @@ struct RuntimeHashIndex {
     overlay: parking_lot::RwLock<OverlayHash>,
 }
 
+/// True while no row of the collection is on disk: it has no base, or the
+/// empty one the catalog records for a table when it is created. A table that
+/// crashes before its first checkpoint reopens with that empty base and every
+/// row replayed into memory, exactly like a table with no base at all.
+fn no_rows_on_disk(manager: &crate::storage::unified::SegmentManager) -> bool {
+    manager.backing_root_page().unwrap_or(0) == 0
+}
+
 fn read_error(error: impl std::fmt::Display) -> HashIndexError {
     HashIndexError::Read(error.to_string())
 }
@@ -519,10 +527,10 @@ impl RuntimeHashIndex {
         // Postings first: the published candidates this index has not seen
         // change, plus the overlay's resident rows for exactly this key. No
         // walk over the collection, however many rows are resident. Before
-        // the first publication there is no published index and no disk
-        // base: every row is resident and in the overlay.
+        // the first publication there is no published index and no row on
+        // disk: every row is resident and in the overlay.
         let overlay_alone =
-            index.is_none() && !manager.has_backing() && self.overlay.read().holds_every_row;
+            index.is_none() && no_rows_on_disk(&manager) && self.overlay.read().holds_every_row;
         if index.is_some() || overlay_alone {
             let mut candidates = Vec::new();
             if let Some(index) = &index {
@@ -693,7 +701,7 @@ impl RedDBRuntime {
                 }
                 true
             });
-            overlay.holds_every_row = !manager.has_backing() && !overlay.overflowed;
+            overlay.holds_every_row = no_rows_on_disk(&manager) && !overlay.overflowed;
         }
         prepared.hash.install_paged(
             &index.collection,
@@ -1368,6 +1376,68 @@ mod tests {
         assert_eq!(affected("DELETE FROM replayed WHERE id = 'fresh'"), 1);
         assert_eq!(rows("SELECT v FROM replayed WHERE id = 'fresh'"), 0);
         assert_eq!(rows("SELECT id FROM replayed"), 2);
+    }
+
+    const UNPUBLISHED_REPLAY_CHILD: &str = "REDDB_HASH_UNPUBLISHED_REPLAY_PATH";
+    const UNPUBLISHED_REPLAY_TEST: &str =
+        "runtime::paged_hash_index::tests::a_table_that_crashed_before_its_first_checkpoint_is_read_by_key_without_a_scan";
+
+    #[test]
+    fn a_table_that_crashed_before_its_first_checkpoint_is_read_by_key_without_a_scan() {
+        if let Some(path) = std::env::var_os(UNPUBLISHED_REPLAY_CHILD) {
+            // The table is created, filled and lost with the process: no
+            // checkpoint ever saw it, only the WAL has it.
+            let runtime = replay_runtime(std::path::Path::new(&path));
+            for sql in [
+                "CREATE TABLE loaded (id TEXT PRIMARY KEY, email TEXT, v TEXT)",
+                "CREATE UNIQUE INDEX loaded_email ON loaded (email) USING HASH",
+                "INSERT INTO loaded (id, email, v) VALUES \
+                 ('a', 'a@x', '1'), ('b', 'b@x', '2'), ('c', 'c@x', '3')",
+            ] {
+                runtime.execute_query(sql).expect(sql);
+            }
+            std::process::exit(0);
+        }
+        let directory = tempfile::tempdir().expect("replay fixture");
+        let path = directory.path().join("unpublished-replay.rdb");
+        drop(replay_runtime(&path));
+        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", UNPUBLISHED_REPLAY_TEST, "--nocapture"])
+            .env(UNPUBLISHED_REPLAY_CHILD, &path)
+            .status()
+            .expect("writer child");
+        assert!(status.success(), "writer child failed: {status}");
+
+        let runtime = replay_runtime(&path);
+        let rows = |sql: &str| runtime.execute_query(sql).expect(sql).result.records.len();
+        let before = SCANNING_LOOKUPS.with(std::cell::Cell::get);
+        assert_eq!(rows("SELECT v FROM loaded WHERE id = 'b'"), 1);
+        assert_eq!(rows("SELECT v FROM loaded WHERE id = 'absent'"), 0);
+        assert_eq!(rows("SELECT v FROM loaded WHERE email = 'c@x'"), 1);
+        runtime
+            .execute_query("INSERT INTO loaded (id, email, v) VALUES ('d', 'd@x', '4')")
+            .expect("a new key is admitted");
+        assert!(
+            runtime
+                .execute_query("INSERT INTO loaded (id, email, v) VALUES ('a', 'e@x', '5')")
+                .is_err(),
+            "the primary key must still see the replayed row"
+        );
+        assert!(
+            runtime
+                .execute_query("INSERT INTO loaded (id, email, v) VALUES ('f', 'b@x', '6')")
+                .is_err(),
+            "the unique index must still see the replayed row"
+        );
+        // A load that dies before its first checkpoint leaves every row in
+        // the WAL. Reading each key by walking them all made a 1,000-row
+        // INSERT into 358,000 replayed rows take five minutes.
+        assert_eq!(
+            SCANNING_LOOKUPS.with(std::cell::Cell::get),
+            before,
+            "a lookup walked the replayed rows"
+        );
+        assert_eq!(rows("SELECT id FROM loaded"), 4);
     }
 
     const RANGE_REPLAY_CHILD: &str = "REDDB_RANGE_OVERLAY_REPLAY_PATH";
