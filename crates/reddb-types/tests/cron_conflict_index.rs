@@ -232,14 +232,19 @@ fn first_conflict_hot_room() {
             let slots = materialize(&rules);
             let index = increasing_ends(&slots);
             let mut build_times = [0; 7];
-            for elapsed in &mut build_times {
+            let mut summary_times = [0; 7];
+            for (elapsed, summary_elapsed) in build_times.iter_mut().zip(&mut summary_times) {
                 let before = Instant::now();
                 let all = materialize(black_box(&rules));
+                let sorted_at = Instant::now();
                 let summary = increasing_ends(&all);
                 black_box(&summary);
-                *elapsed = before.elapsed().as_micros();
+                let finished = Instant::now();
+                *elapsed = (finished - before).as_micros();
+                *summary_elapsed = (finished - sorted_at).as_nanos();
             }
             build_times.sort_unstable();
+            summary_times.sort_unstable();
             let mut occupied = Vec::new();
             let mut free = Vec::new();
             // One 15-minute request in each hour of the week, on a fixed,
@@ -267,8 +272,8 @@ fn first_conflict_hot_room() {
                         - slots.partition_point(|s| s.start <= w.start - longest)
                 })
                 .sum();
-            println!("rules={count} mixed={mixed} slots={} increasing_ends={} build_us={} ordered_slots_per_miss={:.1}",
-                slots.len(), index.len(), build_times[3], examined as f64 / free.len() as f64);
+            println!("rules={count} mixed={mixed} slots={} increasing_ends={} build_us={} summary_ns={} ordered_slots_per_miss={:.1}",
+                slots.len(), index.len(), build_times[3], summary_times[3], examined as f64 / free.len() as f64);
             for (kind, windows) in [("occupied", occupied), ("free", free)] {
                 assert!(!windows.is_empty());
                 let direct = ns_per_query(&windows, 1, |w| from_rules(&rules, w));
