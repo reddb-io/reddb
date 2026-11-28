@@ -2,7 +2,7 @@ use crate::ast::{
     BinOp, CompareOp, DeleteQuery, Expr, FieldRef, Filter, GraphQuery, InsertQuery, JoinQuery,
     PathQuery, Projection, SelectItem, Span, TableQuery, UnaryOp, UpdateQuery, VectorQuery,
 };
-use reddb_types::types::Value;
+use reddb_types::types::{DataType, Value};
 use reddb_types::vector_metadata::MetadataFilter;
 
 pub const PARAMETER_PROJECTION_PREFIX: &str = "__user_param_projection__:";
@@ -304,16 +304,29 @@ pub fn projection_to_expr(projection: &Projection) -> Option<(Expr, Option<Strin
                     alias,
                 ));
             }
-            if name == "__SECRET_LITERAL" {
+            if name == "CAST" {
+                if let [inner, Projection::Column(target)] = args.as_slice() {
+                    let target = target
+                        .strip_prefix("TYPE:")
+                        .and_then(DataType::from_sql_name);
+                    if let Some(target @ (DataType::Cron | DataType::TimestampMs)) = target {
+                        return Some((
+                            Expr::Cast {
+                                inner: Box::new(projection_to_expr(inner)?.0),
+                                target,
+                                span: Span::synthetic(),
+                            },
+                            alias,
+                        ));
+                    }
+                }
+            }
+            if matches!(name.as_str(), "__SECRET_LITERAL" | "__TYPED_LITERAL") {
                 let [Projection::Expression(filter, None)] = args.as_slice() else {
                     return None;
                 };
                 let Filter::CompareExpr {
-                    lhs:
-                        lhs @ Expr::Literal {
-                            value: Value::Secret(_),
-                            ..
-                        },
+                    lhs: lhs @ Expr::Literal { value, .. },
                     op: CompareOp::Eq,
                     rhs:
                         Expr::Literal {
@@ -324,7 +337,14 @@ pub fn projection_to_expr(projection: &Projection) -> Option<(Expr, Option<Strin
                 else {
                     return None;
                 };
-                return Some((lhs.clone(), alias));
+                return match (name.as_str(), value) {
+                    ("__SECRET_LITERAL", Value::Secret(_))
+                    | (
+                        "__TYPED_LITERAL",
+                        Value::Timestamp(_) | Value::TimestampMs(_) | Value::Cron(_),
+                    ) => Some((lhs.clone(), alias)),
+                    _ => None,
+                };
             }
             let args = args
                 .iter()
@@ -757,6 +777,10 @@ pub fn projection_from_literal(value: &Value) -> Option<Projection> {
             "__SECRET_LITERAL".into(),
             vec![case_condition_projection(Expr::lit(value.clone()))],
         )),
+        Value::Timestamp(_) | Value::TimestampMs(_) | Value::Cron(_) => Some(Projection::Function(
+            "__TYPED_LITERAL".into(),
+            vec![case_condition_projection(Expr::lit(value.clone()))],
+        )),
         Value::Boolean(_) => Some(boolean_expr_projection(Expr::Literal {
             value: value.clone(),
             span: Span::synthetic(),
@@ -803,6 +827,13 @@ pub fn fold_expr_to_value(expr: Expr) -> Result<Value, String> {
                     Value::Secret(format!("@@plain@@{plaintext}").into_bytes())
                 });
             }
+            if name.eq_ignore_ascii_case("CRON") {
+                let arguments = args
+                    .into_iter()
+                    .map(fold_expr_to_value)
+                    .collect::<Result<Vec<_>, _>>()?;
+                return reddb_types::cron::construct(&arguments);
+            }
             // ADR 0067 (#1721): `JSON_PARSE('{…}')` is the sanctioned escape
             // hatch for writing JSON from a runtime string. Fold a literal
             // string argument to a `Value::Json` here so it is accepted in
@@ -840,6 +871,14 @@ pub fn fold_expr_to_value(expr: Expr) -> Result<Value, String> {
                 )),
             }
         }
+        Expr::Cast {
+            inner,
+            target: DataType::Cron,
+            ..
+        } => match fold_expr_to_value(*inner)? {
+            value @ Value::Cron(_) => Ok(value),
+            value => reddb_types::cron::construct(&[value]),
+        },
         Expr::Cast { inner, .. } => fold_expr_to_value(*inner),
         other => Err(format!("expression is not a foldable literal: {other:?}")),
     }

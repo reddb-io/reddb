@@ -158,8 +158,13 @@ pub fn resolve_declared_data_type(declared: &str) -> Result<DataType, AnalysisEr
 }
 
 pub fn resolve_sql_type_name(sql_type: &SqlTypeName) -> Result<DataType, AnalysisError> {
-    DataType::from_sql_type_name(sql_type)
-        .ok_or_else(|| AnalysisError::UnsupportedType(sql_type.base_name()))
+    let data_type = DataType::from_sql_type_name(sql_type)
+        .ok_or_else(|| AnalysisError::UnsupportedType(sql_type.base_name()))?;
+    if data_type == DataType::Cron {
+        reddb_types::cron::column_timezone(sql_type)
+            .map_err(|error| AnalysisError::UnsupportedType(format!("{sql_type}: {error}")))?;
+    }
+    Ok(data_type)
 }
 
 #[cfg(test)]

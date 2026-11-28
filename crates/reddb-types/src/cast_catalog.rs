@@ -256,6 +256,7 @@ pub const CAST_CATALOG: &[CastEntry] = &[
         true,
     ),
     entry(DataType::Text, DataType::Money, CastContext::Explicit, true),
+    entry(DataType::Text, DataType::Cron, CastContext::Explicit, true),
     entry(
         DataType::Text,
         DataType::Temperature,

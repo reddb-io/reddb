@@ -112,6 +112,8 @@ pub fn coerce(
         DataType::Currency => parse_currency(input),
         DataType::AssetCode => parse_asset_code(input),
         DataType::Money => parse_money(input),
+        DataType::Cron => crate::CronSchedule::parse(input, "UTC")
+            .map(|value| Value::Cron(std::sync::Arc::new(value))),
         DataType::Temperature => {
             let (amount, unit) = input
                 .trim()

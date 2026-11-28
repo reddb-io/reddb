@@ -315,6 +315,10 @@ where
 
         match value {
             Value::Null => 0u8.hash(hasher),
+            Value::Cron(value) => {
+                reddb_types::DataType::Cron.to_byte().hash(hasher);
+                value.hash(hasher);
+            }
             Value::Temperature(temperature) => {
                 56u8.hash(hasher);
                 temperature.hash(hasher);

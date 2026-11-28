@@ -43,6 +43,8 @@ pub const FILE_CAPABILITY_RECOVERY_READ_ONLY: u64 = 1 << 3;
 pub const FILE_CAPABILITY_TREE_PROOFS: u64 = 1 << 4;
 /// Double-write frames require independent superblock publication authority.
 pub const FILE_CAPABILITY_DWB_PUBLICATION: u64 = 1 << 5;
+/// Native cron rules may appear in schema and entity payloads.
+pub const FILE_CAPABILITY_CRON: u64 = 1 << 6;
 // Freeze the old entry point's reader contract. An older engine may link a
 // newer compatible codec crate without implementing its new recovery rules.
 const FILE_CAPABILITIES_LEGACY_HEADER: u64 =
@@ -53,7 +55,8 @@ pub const FILE_CAPABILITIES_SUPPORTED: u64 = FILE_CAPABILITY_TEMPERATURE
     | FILE_CAPABILITY_CATALOG_ROOT
     | FILE_CAPABILITY_RECOVERY_READ_ONLY
     | FILE_CAPABILITY_TREE_PROOFS
-    | FILE_CAPABILITY_DWB_PUBLICATION;
+    | FILE_CAPABILITY_DWB_PUBLICATION
+    | FILE_CAPABILITY_CRON;
 
 /// Whether a pre-capability format version implies disk residency.
 /// Capability-aware callers must use [`DatabaseHeader::requires_disk_residency`].

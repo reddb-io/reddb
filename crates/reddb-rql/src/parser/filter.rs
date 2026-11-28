@@ -630,7 +630,8 @@ fn expr_is_booleanish(expr: &Expr) -> bool {
 /// alone as a WHERE predicate — `WHERE GEO_WITHIN(loc, POLYGON(...))`
 /// needs no `= TRUE` to be a filter.
 fn expr_is_boolean_function_call(expr: &Expr) -> bool {
-    matches!(expr, Expr::FunctionCall { name, .. } if name.eq_ignore_ascii_case("GEO_WITHIN"))
+    matches!(expr, Expr::FunctionCall { name, .. }
+        if name.eq_ignore_ascii_case("GEO_WITHIN") || name.eq_ignore_ascii_case("CRON_OVERLAPS"))
 }
 
 #[cfg(test)]

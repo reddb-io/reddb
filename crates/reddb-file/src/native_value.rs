@@ -338,6 +338,17 @@ fn read_atom(reader: &mut NativeReader<'_, '_>, tag: u8) -> RdbFileResult<Value>
                 reddb_types::Temperature::new(minor_units, scale, unit).map_err(invalid)?,
             )
         }
+        54 => {
+            let bytes = reader.bytes()?;
+            if bytes.len() > reddb_types::cron::MAX_ENCODED_LEN {
+                return Err(invalid("cron payload is too long"));
+            }
+            reader.reserve_elements::<reddb_types::CronSchedule>(1)?;
+            reader.reserve_bytes(bytes.len().saturating_mul(2))?;
+            let encoded = std::str::from_utf8(bytes).map_err(invalid)?;
+            let value = reddb_types::CronSchedule::from_encoded(encoded).map_err(invalid)?;
+            Value::Cron(std::sync::Arc::new(value))
+        }
         0x85 => reader.text(true)?,
         0x86 => Value::Blob(reader.compressed()?),
         _ => return Err(invalid(format!("Unknown Value type: {tag}"))),
@@ -633,6 +644,12 @@ pub fn write_native_value(buf: &mut Vec<u8>, value: &Value) {
             write_varu32(buf, value.len() as u32);
             buf.extend_from_slice(value.as_bytes());
         }
+        Value::Cron(value) => {
+            buf.push(54);
+            let encoded = value.as_str().as_bytes();
+            write_varu32(buf, encoded.len() as u32);
+            buf.extend_from_slice(encoded);
+        }
         Value::Temperature(value) => {
             buf.push(53);
             buf.push(value.unit() as u8);
@@ -646,6 +663,7 @@ pub fn write_native_value(buf: &mut Vec<u8>, value: &Value) {
 pub fn required_file_capabilities_for_data_type(data_type: reddb_types::DataType) -> u64 {
     match data_type {
         reddb_types::DataType::Temperature => crate::FILE_CAPABILITY_TEMPERATURE,
+        reddb_types::DataType::Cron => crate::file_format::FILE_CAPABILITY_CRON,
         _ => 0,
     }
 }
@@ -653,6 +671,7 @@ pub fn required_file_capabilities_for_data_type(data_type: reddb_types::DataType
 /// Mandatory paged-file capabilities needed to decode this value.
 pub fn required_file_capabilities(value: &Value) -> u64 {
     match value {
+        Value::Cron(_) => required_file_capabilities_for_data_type(reddb_types::DataType::Cron),
         Value::Temperature(_) => {
             required_file_capabilities_for_data_type(reddb_types::DataType::Temperature)
         }

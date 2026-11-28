@@ -326,6 +326,11 @@ pub fn encode(value: &Value, out: &mut Vec<u8>) {
             write_varint(out, bytes.len() as u64);
             out.extend_from_slice(bytes);
         }
+        Value::Cron(value) => {
+            out.push(DataType::Cron.to_byte());
+            write_varint(out, value.as_str().len() as u64);
+            out.extend_from_slice(value.as_str().as_bytes());
+        }
         Value::Temperature(value) => {
             out.push(DataType::Temperature.to_byte());
             out.push(value.unit() as u8);
@@ -841,6 +846,20 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), ValueError> {
                 .map_err(|_| ValueError::InvalidUtf8)?;
             offset += len as usize;
             Value::AssetCode(code)
+        }
+        DataType::Cron => {
+            let (len, varint_size) = read_varint(&data[offset..])?;
+            offset += varint_size;
+            if len > crate::cron::MAX_ENCODED_LEN as u64 {
+                return Err(ValueError::InvalidType(type_byte));
+            }
+            let end = offset + len as usize;
+            let encoded = data.get(offset..end).ok_or(ValueError::TruncatedData)?;
+            let encoded = std::str::from_utf8(encoded).map_err(|_| ValueError::InvalidUtf8)?;
+            offset = end;
+            let value = crate::CronSchedule::from_encoded(encoded)
+                .map_err(|_| ValueError::InvalidType(type_byte))?;
+            Value::Cron(std::sync::Arc::new(value))
         }
         DataType::Temperature => {
             if data.len() < offset + 10 {

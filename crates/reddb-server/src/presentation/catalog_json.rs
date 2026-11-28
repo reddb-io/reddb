@@ -1619,6 +1619,7 @@ fn schema_data_type_str(data_type: reddb_types::DataType) -> &'static str {
         reddb_types::DataType::AssetCode => "asset_code",
         reddb_types::DataType::Money => "money",
         reddb_types::DataType::Temperature => "temperature",
+        reddb_types::DataType::Cron => "cron",
         reddb_types::DataType::ColorAlpha => "color_alpha",
         reddb_types::DataType::BigInt => "bigint",
         reddb_types::DataType::KeyRef => "keyref",

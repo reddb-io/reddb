@@ -129,7 +129,16 @@ pub(super) fn try_evaluate_projection_function(
         arguments.to_vec(),
     );
     if let Some((expression, _)) = reddb_rql::sql_lowering::projection_to_expr(&projection) {
-        if expression_reads_context(&expression) {
+        if expression_reads_context(&expression)
+            || matches!(
+                name.split(':')
+                    .next()
+                    .unwrap_or(name)
+                    .to_ascii_uppercase()
+                    .as_str(),
+                "CRON" | "CRON_NEXT" | "CRON_OVERLAPS"
+            )
+        {
             return try_evaluate_runtime_expr_with_db(db, &expression, source, None, None);
         }
     }
@@ -237,6 +246,13 @@ impl reddb_engine::query::runtime::expression::FallibleRuntimeExpressionHost
         }
     }
     fn evaluate_function(&self, name: &str, args: &[Value]) -> crate::RedDBResult<Option<Value>> {
+        if matches!(name, "CRON" | "CRON_NEXT" | "CRON_OVERLAPS") {
+            return reddb_engine::query::runtime::value_functions::evaluate_cron_function(
+                name, args,
+            )
+            .map(Some)
+            .map_err(crate::RedDBError::Query);
+        }
         Ok(
             reddb_engine::query::runtime::expression::RuntimeExpressionHost::evaluate_function(
                 self, name, args,
