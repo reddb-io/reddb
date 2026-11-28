@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.43.2
+
+### Patch Changes
+
+- [#3006](https://github.com/reddb-io/reddb/pull/3006) [`b740f5b`](https://github.com/reddb-io/reddb/commit/b740f5bab2b633f5de85d1f0111ce9efda60b856) Thanks [@filipeforattini](https://github.com/filipeforattini)! - A flush no longer holds a second copy of the pages it writes through the double-write buffer. Since 1.43.0 it cloned each batch to separate the pages that skip the frame, which doubled the transient memory of a flush (9.4 MiB instead of 4.5 MiB for a 128 MiB dirty cache). The frames borrow their pages again.
+
 ## 1.43.1
 
 ### Patch Changes
