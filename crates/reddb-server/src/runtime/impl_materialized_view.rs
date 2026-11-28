@@ -105,6 +105,13 @@ impl RedDBRuntime {
             if remaining == 0 {
                 continue;
             }
+            // Marking a row removed changes it. The collection takes a share
+            // of the next checkpoint's delta and the rest waits for the
+            // checkpoint: see `maintenance_allowance`.
+            let allowance = store.maintenance_allowance(name);
+            if allowance == 0 {
+                continue;
+            }
             let cutoff = super::retention_sweeper::cutoff_ms(now_ms, retention_ms);
 
             // The control-event ledger is insert-only and kept by the time
@@ -115,11 +122,12 @@ impl RedDBRuntime {
             let ordered = (name == super::control_events::CONTROL_EVENTS_COLLECTION
                 && ts_column == "created_at")
                 .then_some(&ledger_expired as &dyn Fn(&crate::storage::UnifiedEntity) -> bool);
-            let candidates = self
-                .inner
-                .retention_sweeper
-                .write()
-                .scan_tick(&store, name, remaining, ordered);
+            let candidates = self.inner.retention_sweeper.write().scan_tick(
+                &store,
+                name,
+                remaining.min(allowance),
+                ordered,
+            );
             let (candidates, scanned, all_expired) = match candidates {
                 Ok(result) => result,
                 Err(_) => {
@@ -197,6 +205,7 @@ impl RedDBRuntime {
                 Ok(r) => (r.affected_rows, u64::from(scanned > 0)),
                 Err(_) => (0, 1),
             };
+            store.charge_maintenance(name, usize::try_from(deleted).unwrap_or(usize::MAX));
             // What the sweeper costs and achieves was only visible through a
             // view that scans. One line every ten minutes while it works.
             let activity = self.inner.retention_sweeper.write().note_activity(

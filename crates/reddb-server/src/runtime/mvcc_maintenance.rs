@@ -129,6 +129,107 @@ impl RedDBRuntime {
 mod tests {
     use crate::{RedDBOptions, RedDBRuntime};
 
+    /// Reclaim took 512 rows a second. Over a large backlog it changed more
+    /// rows between two checkpoints than a delta takes, and every checkpoint
+    /// copied the collection again with the writers waiting.
+    #[test]
+    fn reclaim_takes_a_share_of_each_checkpoint_and_the_checkpoint_stays_a_delta() {
+        use crate::storage::unified::store::{
+            take_republished_collections, MAINTENANCE_PACED_FROM_ROWS,
+            MAINTENANCE_ROWS_PER_CHECKPOINT,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("paced.rdb"))
+                .with_memory_budget(64 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .unwrap();
+        drop(runtime.background_tasks.take());
+        runtime
+            .execute_query("CREATE TABLE paced_rows (id INTEGER PRIMARY KEY, payload TEXT)")
+            .unwrap();
+        // A large table whose every row is dead: two shares above the size
+        // from which a table is paced.
+        let rows = MAINTENANCE_PACED_FROM_ROWS as usize + 2 * MAINTENANCE_ROWS_PER_CHECKPOINT + 500;
+        for start in (0..rows).step_by(512) {
+            let values = (start..(start + 512).min(rows))
+                .map(|id| format!("({id}, 'payload-{id}')"))
+                .collect::<Vec<_>>()
+                .join(",");
+            runtime
+                .execute_query(&format!(
+                    "INSERT INTO paced_rows (id, payload) VALUES {values}"
+                ))
+                .unwrap();
+        }
+        runtime.checkpoint().unwrap();
+        runtime
+            .execute_query("DELETE FROM paced_rows WHERE id >= 0")
+            .unwrap();
+        // The statement changed every row; this checkpoint is the baseline.
+        runtime.checkpoint().unwrap();
+
+        let store = runtime.db().store();
+        let manager = store.get_collection("paced_rows").unwrap();
+        let mut total = 0;
+        let mut paced_periods = 0;
+        for period in 1.. {
+            assert!(period <= 12, "reclaim stopped at {total} of {rows} rows");
+            // Large for the whole period: a table that shrinks below the
+            // size from which it is paced is reclaimed at once from there.
+            let large = manager.count() as u64
+                > MAINTENANCE_PACED_FROM_ROWS + MAINTENANCE_ROWS_PER_CHECKPOINT as u64;
+            let mut cursor = store.mvcc_reclaim_cursor("paced_rows".into()).unwrap();
+            let mut reclaimed = 0;
+            for _ in 0..1_000 {
+                reclaimed += store
+                    .reclaim_mvcc_tick(
+                        &mut cursor,
+                        &runtime.snapshot_manager(),
+                        runtime.mvcc_vacuum_cutoff_xid(),
+                        4096,
+                        256,
+                    )
+                    .unwrap();
+                if cursor.finished() {
+                    break;
+                }
+            }
+            assert!(cursor.finished(), "the pass over the table did not end");
+            drop(cursor);
+            total += reclaimed;
+            take_republished_collections();
+            runtime.checkpoint().unwrap();
+            if large {
+                paced_periods += 1;
+                assert_eq!(
+                    reclaimed, MAINTENANCE_ROWS_PER_CHECKPOINT,
+                    "rows reclaimed from the large table before one checkpoint"
+                );
+                let copied: Vec<_> = take_republished_collections()
+                    .into_iter()
+                    .filter(|collection| collection.starts_with("paced_rows:"))
+                    .collect();
+                assert!(
+                    copied.is_empty(),
+                    "after {reclaimed} reclaimed rows the checkpoint copied {copied:?}"
+                );
+            }
+            if total == rows {
+                break;
+            }
+        }
+        assert!(paced_periods >= 2, "{paced_periods} paced periods");
+        let result = runtime
+            .execute_query("SELECT COUNT(*) AS n FROM paced_rows")
+            .unwrap();
+        assert_eq!(
+            result.result.records[0].get("n").unwrap().display_string(),
+            "0"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn constant_live_data_churn_reuses_pages_after_cold_gc() {

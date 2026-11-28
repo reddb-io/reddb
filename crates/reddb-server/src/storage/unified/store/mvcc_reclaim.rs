@@ -21,12 +21,17 @@ pub(crate) struct MvccReclaimCursor {
     /// An ordered pass met a row still inside the window: nothing after it
     /// has expired.
     ordered_done: bool,
+    /// The collection has used its share of the next checkpoint's delta.
+    waits_for_checkpoint: bool,
     invalidated: bool,
 }
 
 impl MvccReclaimCursor {
     pub(crate) fn finished(&self) -> bool {
-        self.invalidated || self.ordered_done || (self.scan.finished() && self.cold_finished)
+        self.invalidated
+            || self.ordered_done
+            || self.waits_for_checkpoint
+            || (self.scan.finished() && self.cold_finished)
     }
 
     /// Whether the pass ended because nothing was left to visit.
@@ -78,6 +83,7 @@ impl UnifiedStore {
             cold_is_visibility: None,
             cold_finished: false,
             ordered_done: false,
+            waits_for_checkpoint: false,
             invalidated: false,
         })
     }
@@ -325,6 +331,13 @@ impl UnifiedStore {
             cursor.invalidated = true;
             return Ok(0);
         }
+        let reclaim_budget = reclaim_budget.min(self.maintenance_allowance(&cursor.collection));
+        if reclaim_budget == 0 {
+            // The pass ends here: the caller moves on to the next collection
+            // and comes back to this one after the checkpoint.
+            cursor.waits_for_checkpoint = true;
+            return Ok(0);
+        }
         let cutoff = cutoff(&cursor.collection)?;
         let mut scan_left = scan_budget;
         let mut reclaim = Vec::with_capacity(reclaim_budget);
@@ -455,9 +468,11 @@ impl UnifiedStore {
         } // Release primary and visibility generation pins before publication.
         reclaim.sort_unstable();
         reclaim.dedup();
-        Ok(self
+        let reclaimed = self
             .delete_batch_between_walks(&cursor.collection, &reclaim)?
-            .len())
+            .len();
+        self.charge_maintenance(&cursor.collection, reclaimed);
+        Ok(reclaimed)
     }
 
     pub(crate) fn mvcc_reclaim_read_limit(&self) -> usize {

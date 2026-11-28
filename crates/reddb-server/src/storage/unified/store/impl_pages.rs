@@ -146,10 +146,18 @@ impl CheckpointTreeBuilder {
     }
 }
 
+/// The collections this thread's checkpoints copied whole since the last
+/// call, each with the reason.
+#[cfg(test)]
+pub(crate) fn take_republished_collections() -> Vec<String> {
+    CHECKPOINT_REPUBLISHED_COLLECTIONS.with(|log| std::mem::take(&mut *log.borrow_mut()))
+}
+
 #[cfg(test)]
 thread_local! {
     static CHECKPOINT_SERIALIZED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CHECKPOINT_REPUBLISHED: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+    static CHECKPOINT_REPUBLISHED_COLLECTIONS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     static REPLAY_SERIALIZED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CHECKPOINT_BUFFERED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -682,6 +690,14 @@ impl UnifiedStore {
         live: &HashMap<String, Arc<BTree>>,
         keys: &HashMap<String, PublishedKeyIndex>,
     ) -> Result<(), StoreError> {
+        // Publication is most of what a checkpoint costs the writers on a store
+        // with many collections; its own steps say where that time goes.
+        let mut lap_started = std::time::Instant::now();
+        let mut lap = || {
+            let elapsed = lap_started.elapsed().as_millis() as u64;
+            lap_started = std::time::Instant::now();
+            elapsed
+        };
         let mut next_xid_summary = None;
         let publishes_proofs = pager
             .header()
@@ -741,6 +757,7 @@ impl UnifiedStore {
         roots.dedup();
         reddb_file::encode_native_paged_retired_trees(metadata, &roots)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let retired_ms = lap();
         // Sealing writes the proof entries a generation set, which copies its
         // proof nodes and frees the ones they replace. Seal before reading the
         // deferred pages below, or those freed nodes would belong to nobody.
@@ -778,6 +795,7 @@ impl UnifiedStore {
                 return Err(page_integrity(1, None, "live tree has no generation proof"));
             }
         }
+        let proofs_ms = lap();
         let (pending_pages, published_pages) = pager
             .deferred_reclamation_pages()
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
@@ -950,10 +968,12 @@ impl UnifiedStore {
                 }
             });
         }
+        let resume_ms = lap();
         #[cfg(test)]
         let retires_trees = !reclaim.is_empty();
         let reclaim = switch_paged_catalog(pager, metadata, reclaim, &released_pages)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        let catalog_switch_ms = lap();
         // PAGE_RESULT_CACHE_FILE_VERSION predates the disk-resident cache
         // catalog. Publish the complete resume metadata first, then promote
         // the header so the next boot may trust and reuse its derived roots.
@@ -1021,6 +1041,20 @@ impl UnifiedStore {
                 reclaim.len()
             );
             std::process::exit(185);
+        }
+        let release_ms = lap();
+        if retired_ms + proofs_ms + resume_ms + catalog_switch_ms + release_ms
+            >= CHECKPOINT_PHASES_REPORTED_FROM_MS
+        {
+            tracing::info!(
+                retired_ms,
+                proofs_ms,
+                resume_ms,
+                catalog_switch_ms,
+                release_ms,
+                trees = live.len(),
+                "checkpoint publication"
+            );
         }
         Ok(())
     }
@@ -1414,6 +1448,7 @@ impl UnifiedStore {
             queue_dedup_cursors: parking_lot::Mutex::new(HashMap::new()),
             recovery_xid_summary: RwLock::new(None),
             checkpoint_versions: RwLock::new(HashMap::new()),
+            maintenance_spent: parking_lot::Mutex::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             config_reads: parking_lot::RwLock::default(),
             versioned_reads: parking_lot::RwLock::default(),
@@ -1589,6 +1624,7 @@ impl UnifiedStore {
             queue_dedup_cursors: parking_lot::Mutex::new(HashMap::new()),
             recovery_xid_summary: RwLock::new(None),
             checkpoint_versions: RwLock::new(HashMap::new()),
+            maintenance_spent: parking_lot::Mutex::new(HashMap::new()),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             config_reads: parking_lot::RwLock::default(),
             versioned_reads: parking_lot::RwLock::default(),
@@ -2935,6 +2971,9 @@ impl UnifiedStore {
                     .unwrap_or("the incremental path was not attempted");
                 #[cfg(test)]
                 CHECKPOINT_REPUBLISHED.with(|log| log.borrow_mut().push(reason));
+                #[cfg(test)]
+                CHECKPOINT_REPUBLISHED_COLLECTIONS
+                    .with(|log| log.borrow_mut().push(format!("{name}: {reason}")));
                 tracing::info!(
                     collection = %name,
                     rows = manager.count(),
@@ -3089,6 +3128,8 @@ impl UnifiedStore {
         *self.key_indices.write() = rebuilt_keys;
         drop(previous_versions);
         *self.checkpoint_versions.write() = checkpoint_versions;
+        // Every collection starts a new delta here.
+        self.maintenance_spent.lock().clear();
 
         if let Some((commit, epoch, boundary)) = checkpoint {
             commit

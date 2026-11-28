@@ -343,6 +343,9 @@ pub struct UnifiedStore {
     recovery_xid_summary: RwLock<Option<recovery_xid::RecoveryXidSummary>>,
     /// Reuse only a successfully published generation with the same live rows.
     checkpoint_versions: RwLock<HashMap<String, CheckpointVersion>>,
+    /// Rows background maintenance changed in each collection since the last
+    /// checkpoint, which it must not outrun: see `maintenance_allowance`.
+    maintenance_spent: parking_lot::Mutex<HashMap<String, checkpoint_delta::MaintenanceSpend>>,
     checkpoint_durable_rows: RwLock<checkpoint_delta::DurableRows>,
     /// `red.config` values already read, valid for one state of that
     /// collection. Statements consult configuration on every execution and
@@ -425,7 +428,11 @@ mod impl_native_a;
 mod impl_native_b;
 mod impl_native_c;
 mod impl_pages;
+#[cfg(test)]
+pub(crate) use checkpoint_delta::{MAINTENANCE_PACED_FROM_ROWS, MAINTENANCE_ROWS_PER_CHECKPOINT};
 pub(crate) use impl_pages::paced_primary::PreparedPrimary;
+#[cfg(test)]
+pub(crate) use impl_pages::take_republished_collections;
 
 /// Identity of the `red.config` contents a cached read was taken from: the
 /// collection itself, its published base and that base's read allowance, its

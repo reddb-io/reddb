@@ -60,6 +60,137 @@ pub(super) fn delta_fits(changed: usize, indexes: usize) -> bool {
         && changed.saturating_mul(indexes) <= POSTING_CHANGES_MAX
 }
 
+/// Rows maintenance may change in one large collection between two
+/// checkpoints. Each of them costs the checkpoint about half a millisecond
+/// with the writers waiting, so this is also what maintenance adds to it.
+pub(crate) const MAINTENANCE_ROWS_PER_CHECKPOINT: usize =
+    crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX / 4;
+/// A collection up to this size is not paced: copying it whole costs a
+/// checkpoint about what a full delta does.
+pub(crate) const MAINTENANCE_PACED_FROM_ROWS: u64 =
+    4 * crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX as u64;
+/// Part of a delta kept for the statements that arrive before the checkpoint.
+const STATEMENT_ROWS_RESERVED: usize =
+    crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX / 8;
+/// What maintenance may do in a period however busy the collection is, so
+/// retention never stops for good on a table that is always being written.
+const MAINTENANCE_ROWS_FLOOR: usize = 256;
+/// A period ends at a checkpoint, or after this long on a store that takes none.
+const MAINTENANCE_PERIOD_MAX: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+pub(in crate::storage::unified) struct MaintenanceSpend {
+    since: std::time::Instant,
+    rows: usize,
+    reported: bool,
+}
+
+impl UnifiedStore {
+    /// Rows of `collection` that background maintenance (version reclaim,
+    /// retention) may still remove or mark before the next checkpoint.
+    ///
+    /// A checkpoint writes a collection's changes as a delta only while they
+    /// fit `delta_fits`; past that it copies the whole collection with every
+    /// writer waiting. Version reclaim takes 512 rows a second: over an
+    /// 800,000-row backlog it passed the bound in sixteen seconds, and each
+    /// checkpoint then copied the collection again, two minutes at a time.
+    /// Maintenance has no deadline, so on a large collection it takes a share
+    /// of the next delta and leaves the rest for after the checkpoint.
+    ///
+    /// It is not held back where that buys nothing: on a small collection, and
+    /// once statements alone have changed more rows than a delta takes. The
+    /// share is also a ceiling on what retention and reclaim keep up with in a
+    /// large collection, until a delta removes rows in batches.
+    pub(crate) fn maintenance_allowance(&self, collection: &str) -> usize {
+        if self.pager.is_none() {
+            return usize::MAX;
+        }
+        let collection = Self::canonical_collection(collection);
+        let Some(manager) = self.get_collection(collection) else {
+            return usize::MAX;
+        };
+        if manager.count() as u64 <= MAINTENANCE_PACED_FROM_ROWS {
+            return usize::MAX;
+        }
+        // With no baseline, or one the journal no longer reaches, the next
+        // checkpoint copies the collection whatever maintenance does now.
+        // Maintenance stops at its share, so it is not what got it there.
+        let Some(pending) = self.checkpoint_pending_rows(collection, &manager) else {
+            return usize::MAX;
+        };
+        let mut all = self.maintenance_spent.lock();
+        if all
+            .get(collection)
+            .is_some_and(|period| period.since.elapsed() >= MAINTENANCE_PERIOD_MAX)
+        {
+            all.remove(collection);
+        }
+        let spent = all.get(collection).map_or(0, |period| period.rows);
+        let delta = (crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX
+            - STATEMENT_ROWS_RESERVED)
+            .saturating_sub(pending);
+        let allowance = MAINTENANCE_ROWS_PER_CHECKPOINT
+            .saturating_sub(spent)
+            .min(delta)
+            .max(MAINTENANCE_ROWS_FLOOR.saturating_sub(spent));
+        if allowance == 0 {
+            if let Some(period) = all.get_mut(collection).filter(|period| !period.reported) {
+                period.reported = true;
+                tracing::info!(
+                    target: "reddb::maintenance",
+                    collection,
+                    rows = period.rows,
+                    "maintenance waits for the next checkpoint"
+                );
+            }
+        }
+        allowance
+    }
+
+    /// Record `rows` changed by maintenance against the collection's period.
+    pub(crate) fn charge_maintenance(&self, collection: &str, rows: usize) {
+        if rows == 0 || self.pager.is_none() {
+            return;
+        }
+        let collection = Self::canonical_collection(collection);
+        let mut all = self.maintenance_spent.lock();
+        let period = all
+            .entry(collection.to_string())
+            .or_insert_with(|| MaintenanceSpend {
+                since: std::time::Instant::now(),
+                rows: 0,
+                reported: false,
+            });
+        period.rows = period.rows.saturating_add(rows);
+    }
+
+    /// Distinct rows the next checkpoint's delta already has to write for
+    /// `collection`; `None` when it cannot be a delta.
+    fn checkpoint_pending_rows(
+        &self,
+        collection: &str,
+        manager: &Arc<SegmentManager>,
+    ) -> Option<usize> {
+        let (segments, deferred) = {
+            let versions = self.checkpoint_versions.read();
+            let previous = versions.get(collection)?;
+            if !previous.manager.ptr_eq(&Arc::downgrade(manager)) {
+                return None;
+            }
+            (
+                previous.segments.clone(),
+                Arc::clone(previous.deferred_rows.as_ref()?),
+            )
+        };
+        let mut rows: std::collections::HashSet<EntityId> = manager
+            .checkpoint_mutations_since(&segments)?
+            .into_iter()
+            .collect();
+        rows.extend(deferred.iter().copied());
+        rows.extend(manager.backing_removed_rows());
+        Some(rows.len())
+    }
+}
+
 #[derive(Default)]
 pub(super) struct DurableRows {
     rows: HashMap<(String, EntityId), Vec<u8>>,

@@ -451,6 +451,39 @@ mod tests {
         assert_eq!(visible_ids(&runtime), vec!["fresh".to_string()]);
     }
 
+    /// Marking an event removed changes it. A sweep over a large expired
+    /// backlog changed more rows between two checkpoints than a delta takes.
+    #[test]
+    fn a_sweep_of_a_large_ledger_takes_a_share_of_each_checkpoint() {
+        use crate::storage::unified::store::{
+            MAINTENANCE_PACED_FROM_ROWS, MAINTENANCE_ROWS_PER_CHECKPOINT,
+        };
+        let share = MAINTENANCE_ROWS_PER_CHECKPOINT as u64;
+        let (_directory, runtime) = ledger_on_disk("ledger-paced.rdb", |runtime| {
+            for n in 0..MAINTENANCE_PACED_FROM_ROWS + 100 {
+                insert_event(runtime, &format!("stale-{n}"), 8 * 86_400);
+            }
+            insert_event(runtime, "fresh", 3_600);
+        });
+        for _ in 0..40 {
+            runtime.sweep_retention_tick(1_000);
+        }
+        assert_eq!(
+            swept_total(&runtime),
+            Some(Value::UnsignedInteger(share)),
+            "the sweep did not stop at its share of the next checkpoint"
+        );
+        runtime.checkpoint().expect("checkpoint");
+        for _ in 0..40 {
+            runtime.sweep_retention_tick(1_000);
+        }
+        assert_eq!(
+            swept_total(&runtime),
+            Some(Value::UnsignedInteger(2 * share)),
+            "the sweep did not go on after the checkpoint"
+        );
+    }
+
     #[test]
     fn set_config_override_narrows_the_window_at_runtime() {
         let runtime = runtime();
