@@ -907,7 +907,6 @@ pub enum Value {
     AssetCode(String),
     /// Exact measured temperature retaining its input unit and decimal scale.
     Temperature(crate::Temperature),
-    Cron(std::sync::Arc<crate::CronSchedule>),
     /// Monetary amount stored as integer minor units plus explicit scale and asset code
     Money {
         asset_code: String,
@@ -930,6 +929,8 @@ pub enum Value {
     Secret(Vec<u8>),
     /// Argon2id password hash string
     Password(String),
+    /// Validated recurrence with a resolved IANA time zone.
+    Cron(std::sync::Arc<crate::CronSchedule>),
 }
 
 /// Manual `Eq` impl: consistent with the manual `Hash` impl below.

@@ -30,7 +30,7 @@ fn cron_type_uses_column_default_and_filters_prepared_windows_after_reopen() {
         let runtime = open();
         execute(
             &runtime,
-            "CREATE TABLE jobs (id BIGINT PRIMARY KEY, schedule CRON('America/Sao_Paulo'))",
+            "CREATE TABLE jobs (id INTEGER PRIMARY KEY, schedule CRON('America/Sao_Paulo'))",
         );
         runtime.checkpoint().expect("publish the schema");
     }
@@ -57,11 +57,43 @@ fn cron_type_uses_column_default_and_filters_prepared_windows_after_reopen() {
             &runtime,
             "UPDATE jobs SET schedule = '15 9 * * 1-5' WHERE id = 1",
         );
+        let rows = execute(&runtime, "SELECT id, schedule FROM jobs ORDER BY id")
+            .result
+            .records;
+        assert_eq!(
+            rows[0].get("schedule").unwrap().display_string(),
+            "15 9 * * 1-5 [America/Sao_Paulo]",
+            "{rows:?}"
+        );
     }
 
     let runtime = open();
+    let persisted_rows = execute(&runtime, "SELECT id, schedule FROM jobs ORDER BY id")
+        .result
+        .records;
+    assert_eq!(persisted_rows.len(), 3, "{persisted_rows:?}");
+    assert_eq!(
+        persisted_rows[0].get("schedule").unwrap().display_string(),
+        "15 9 * * 1-5 [America/Sao_Paulo]",
+        "{persisted_rows:?}"
+    );
     let start = timestamp("2026-11-27T12:14:59.999Z");
     let end = timestamp("2026-11-27T12:15:00.001Z");
+    let projected = runtime
+        .execute_query_with_params(
+            "SELECT id, cron_overlaps(schedule, $1, $2) AS in_window FROM jobs ORDER BY id",
+            &[start.clone(), end.clone()],
+        )
+        .expect("project window membership")
+        .result
+        .records;
+    assert_eq!(
+        projected[0].get("in_window"),
+        Some(&Value::Boolean(true)),
+        "{projected:?}"
+    );
+    assert_eq!(projected[1].get("in_window"), Some(&Value::Boolean(false)));
+    assert_eq!(projected[2].get("in_window"), Some(&Value::Null));
     let rows = runtime
         .execute_query_with_params(
             "SELECT id, schedule, cron_next(schedule, $1) AS first_occurrence FROM jobs \
@@ -72,7 +104,7 @@ fn cron_type_uses_column_default_and_filters_prepared_windows_after_reopen() {
         .result
         .records;
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].get("id"), Some(&Value::BigInt(1)));
+    assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
     assert_eq!(
         rows[0].get("first_occurrence"),
         Some(&timestamp("2026-11-27T12:15:00Z"))
@@ -125,6 +157,16 @@ fn cron_uses_utc_without_a_column_modifier_and_rejects_invalid_zones_and_windows
         rows[0].get("schedule").unwrap().display_string(),
         "0 9 * * * [UTC]"
     );
+    let rows = execute(
+        &runtime,
+        "SELECT cron_next(schedule, NOW()) AS next_run FROM jobs",
+    )
+    .result
+    .records;
+    assert!(matches!(
+        rows[0].get("next_run"),
+        Some(Value::TimestampMs(_))
+    ));
     let args = [
         timestamp("2026-11-27T09:00:01Z"),
         timestamp("2026-11-27T09:00:00Z"),

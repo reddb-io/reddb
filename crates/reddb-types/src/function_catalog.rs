@@ -909,6 +909,20 @@ pub const FUNCTION_CATALOG: &[FunctionEntry] = &[
         false,
     ),
     entry(
+        "CRON_OVERLAPS",
+        &[DataType::Cron, DataType::TimestampMs, DataType::Timestamp],
+        DataType::Boolean,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "CRON_OVERLAPS",
+        &[DataType::Cron, DataType::Timestamp, DataType::TimestampMs],
+        DataType::Boolean,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
         "TEMPERATURE",
         ARGS_ONE_TEXT,
         DataType::Temperature,

@@ -304,16 +304,29 @@ pub fn projection_to_expr(projection: &Projection) -> Option<(Expr, Option<Strin
                     alias,
                 ));
             }
-            if name == "__SECRET_LITERAL" {
+            if name == "CAST" {
+                if let [inner, Projection::Column(target)] = args.as_slice() {
+                    let target = target
+                        .strip_prefix("TYPE:")
+                        .and_then(DataType::from_sql_name);
+                    if let Some(target @ (DataType::Cron | DataType::TimestampMs)) = target {
+                        return Some((
+                            Expr::Cast {
+                                inner: Box::new(projection_to_expr(inner)?.0),
+                                target,
+                                span: Span::synthetic(),
+                            },
+                            alias,
+                        ));
+                    }
+                }
+            }
+            if matches!(name.as_str(), "__SECRET_LITERAL" | "__TYPED_LITERAL") {
                 let [Projection::Expression(filter, None)] = args.as_slice() else {
                     return None;
                 };
                 let Filter::CompareExpr {
-                    lhs:
-                        lhs @ Expr::Literal {
-                            value: Value::Secret(_),
-                            ..
-                        },
+                    lhs: lhs @ Expr::Literal { value, .. },
                     op: CompareOp::Eq,
                     rhs:
                         Expr::Literal {
@@ -324,7 +337,14 @@ pub fn projection_to_expr(projection: &Projection) -> Option<(Expr, Option<Strin
                 else {
                     return None;
                 };
-                return Some((lhs.clone(), alias));
+                return match (name.as_str(), value) {
+                    ("__SECRET_LITERAL", Value::Secret(_))
+                    | (
+                        "__TYPED_LITERAL",
+                        Value::Timestamp(_) | Value::TimestampMs(_) | Value::Cron(_),
+                    ) => Some((lhs.clone(), alias)),
+                    _ => None,
+                };
             }
             let args = args
                 .iter()
@@ -755,6 +775,10 @@ pub fn projection_from_literal(value: &Value) -> Option<Projection> {
         // in the existing expression payload instead of rendering it as text.
         Value::Secret(_) => Some(Projection::Function(
             "__SECRET_LITERAL".into(),
+            vec![case_condition_projection(Expr::lit(value.clone()))],
+        )),
+        Value::Timestamp(_) | Value::TimestampMs(_) | Value::Cron(_) => Some(Projection::Function(
+            "__TYPED_LITERAL".into(),
             vec![case_condition_projection(Expr::lit(value.clone()))],
         )),
         Value::Boolean(_) => Some(boolean_expr_projection(Expr::Literal {

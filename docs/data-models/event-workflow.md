@@ -127,7 +127,8 @@ hours can have two occurrences.
 
 A bare expression uses the column's time zone, with UTC as the default
 for `CRON` without a modifier. An explicit time zone applies to its own row.
-The lossless text form is `0 9 * * 1-5 [America/Sao_Paulo]`.
+The one-argument `CRON(expression)` constructor resolves a bare expression to
+UTC. The lossless text form is `0 9 * * 1-5 [America/Sao_Paulo]`.
 
 ## Out of scope (current PRD)
 
