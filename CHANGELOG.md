@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.43.0
+
+### Minor Changes
+
+- [#3001](https://github.com/reddb-io/reddb/pull/3001) [`0b67758`](https://github.com/reddb-io/reddb/commit/0b6775882242ef435521c4fc1e43996bc5df5d88) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add USING CRON indexes for selective time-window queries on recurring schedules.
+
+### Patch Changes
+
+- [#3002](https://github.com/reddb-io/reddb/pull/3002) [`31015ac`](https://github.com/reddb-io/reddb/commit/31015acc384f4de52e7b419b68d6e19ab7f8ba30) Thanks [@filipeforattini](https://github.com/filipeforattini)! - A checkpoint writes the pages of the generation it is building straight to their place instead of through the double-write buffer: nothing reads them before the manifest names them, and recovery releases them whatever they hold. A checkpoint that changed 20 of 173 small tables went from about 157 fsync calls to about 115. The catalog root, pages written after publication and pages that existed before keep the double-write path.
+
 ## 1.42.0
 
 ### Minor Changes
