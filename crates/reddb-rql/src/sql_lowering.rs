@@ -875,7 +875,10 @@ pub fn fold_expr_to_value(expr: Expr) -> Result<Value, String> {
             inner,
             target: DataType::Cron,
             ..
-        } => reddb_types::cron::construct(&[fold_expr_to_value(*inner)?]),
+        } => match fold_expr_to_value(*inner)? {
+            value @ Value::Cron(_) => Ok(value),
+            value => reddb_types::cron::construct(&[value]),
+        },
         Expr::Cast { inner, .. } => fold_expr_to_value(*inner),
         other => Err(format!("expression is not a foldable literal: {other:?}")),
     }

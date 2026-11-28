@@ -45,7 +45,7 @@ fn cron_type_uses_column_default_and_filters_prepared_windows_after_reopen() {
         execute(
             &runtime,
             "INSERT INTO jobs (id, schedule) VALUES (1, '0 9 * * 1-5'), \
-            (2, CRON('0 9 * * 1-5', 'America/New_York')), (3, NULL)",
+            (2, CAST(CRON('0 9 * * 1-5', 'America/New_York') AS CRON)), (3, NULL)",
         );
         assert!(runtime
             .execute_query("INSERT INTO jobs (id, schedule) VALUES (4, '60 9 * * *')")
