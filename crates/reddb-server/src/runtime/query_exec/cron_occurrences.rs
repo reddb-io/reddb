@@ -1,6 +1,6 @@
 use super::*;
 use crate::runtime::authz::policy_columns::{collect_expr_columns, collect_field_ref_column};
-use crate::runtime::{materialization_limit, query_budget};
+use crate::runtime::{function_budget, materialization_limit};
 use reddb_engine::query::runtime::value_functions::cron_timestamp_ms;
 use reddb_rql::ast::Span;
 use std::collections::BTreeSet;
@@ -53,58 +53,19 @@ pub(super) fn execute(
     let table = query.table.as_str();
     let alias = query.alias.as_deref();
     let columns = projected_columns(&[], projections);
+    if columns
+        .iter()
+        .filter(|name| *name == &columns[index])
+        .count()
+        > 1
+    {
+        return Err(RedDBError::Query(
+            "use a distinct output name for cron_occurrences".into(),
+        ));
+    }
     let output_schema: Arc<Vec<Arc<str>>> =
         Arc::new(columns.iter().map(|c| Arc::from(c.as_str())).collect());
-    let mut sort_inputs = BTreeSet::new();
-    for order in &query.order_by {
-        if let Some(expr) = &order.expr {
-            collect_expr_columns(expr, table, alias, &mut sort_inputs);
-        } else {
-            collect_field_ref_column(&order.field, table, alias, &mut sort_inputs);
-        }
-    }
-    sort_inputs.retain(|column| !columns.contains(column));
-
-    // Keep the base read on the ordinary authorized table/filter/index path.
-    // Its pagination belongs to the expanded rows, not the source rules.
-    let mut input = query.clone();
-    let mut fields = sort_inputs.clone();
-    for item in &query.select_items {
-        if let SelectItem::Expr { expr, .. } = item {
-            collect_expr_columns(expr, table, alias, &mut fields);
-        }
-    }
-    if let Some(contract) = db.collection_contract(table) {
-        if contract.retention_duration_ms.is_some() {
-            fields.extend(crate::runtime::retention_filter::resolve_timestamp_column(
-                &contract,
-            ));
-        }
-    }
-    input.select_items = fields
-        .into_iter()
-        .map(|column| SelectItem::Expr {
-            expr: Expr::Column {
-                field: FieldRef::column("", &column),
-                span: Span::synthetic(),
-            },
-            alias: None,
-        })
-        .collect();
-    if input.select_items.is_empty() {
-        input.select_items.push(SelectItem::Expr {
-            expr: Expr::Literal {
-                value: Value::Integer(1),
-                span: Span::synthetic(),
-            },
-            alias: None,
-        });
-    }
-    input.columns = effective_table_projections(&input);
-    input.order_by.clear();
-    input.offset = None;
-    input.limit = None;
-    input.distinct = false;
+    let (input, sort_inputs) = source_query(db, query, &columns);
     let sources = execute_runtime_table_query_materialized(db, &input, index_store)?;
     let max_rows = materialization_limit::max_materialized_rows(db)?;
     let mut records = Vec::new();
@@ -120,56 +81,18 @@ pub(super) fn execute(
     } else {
         0
     };
-    // A rule's instants strictly increase. When the first sort key is
-    // the occurrence itself, later instants cannot displace its first k.
-    let ordered_by_instant = query.order_by.first().is_some_and(|order| {
-        order.ascending
-            && order
-                .expr
-                .as_ref()
-                .is_none_or(|expr| matches!(expr, Expr::Column { .. }))
-            && matches!(&order.field, FieldRef::TableColumn { table, column }
-                if table.is_empty() && column == &columns[index])
-    });
-    let per_rule_limit = query
-        .limit
-        .filter(|_| ordered_by_instant && !query.distinct)
-        .map(|limit| {
-            usize::try_from(limit.saturating_add(query.offset.unwrap_or(0))).unwrap_or(usize::MAX)
-        })
-        .unwrap_or(usize::MAX);
+    let per_rule_limit = per_rule_limit(query, &columns[index]);
 
     'sources: for source in &sources.records {
         if early_limit && query.limit == Some(records.len() as u64) {
             break;
         }
-        query_budget::charge(1)?;
-        let evaluate = |expr: &Expr| -> RedDBResult<Value> {
-            if super::super::join_filter::expression_uses_secret(expr, source, Some(table), alias) {
-                return Err(RedDBError::Query(
-                    "cron_occurrences requires public schedule and window arguments".into(),
-                ));
-            }
-            Ok(super::super::expr_eval::try_evaluate_runtime_expr_with_db(
-                Some(db),
-                expr,
-                source,
-                Some(table),
-                alias,
-            )?
-            .unwrap_or(Value::Null))
-        };
-        let (schedule, start, end) = (evaluate(rule)?, evaluate(start)?, evaluate(end)?);
-        if schedule.is_null() || start.is_null() || end.is_null() {
+        function_budget::charge(1)?;
+        let Some((schedule, start, end)) =
+            occurrence_window(db, source, query, [rule, start, end])?
+        else {
             continue;
-        }
-        let Value::Cron(schedule) = schedule else {
-            return Err(RedDBError::Query(
-                "cron_occurrences expects a CRON schedule".into(),
-            ));
         };
-        let start = cron_timestamp_ms(&start).map_err(RedDBError::Query)?;
-        let end = cron_timestamp_ms(&end).map_err(RedDBError::Query)?;
         let mut template = None;
         for instant in schedule
             .occurrences(start, end)
@@ -177,7 +100,7 @@ pub(super) fn execute(
             .take(per_rule_limit)
         {
             let instant = instant.map_err(RedDBError::Query)?;
-            query_budget::charge(1)?;
+            function_budget::charge(1)?;
             if skip > 0 {
                 skip -= 1;
                 continue;
@@ -258,4 +181,122 @@ pub(super) fn execute(
         stats: sources.stats,
         pre_serialized_json: None,
     })
+}
+
+fn source_query(
+    db: &RedDB,
+    query: &TableQuery,
+    columns: &[String],
+) -> (TableQuery, BTreeSet<String>) {
+    let table = query.table.as_str();
+    let alias = query.alias.as_deref();
+    let mut sort_inputs = BTreeSet::new();
+    for order in &query.order_by {
+        if let Some(expr) = &order.expr {
+            collect_expr_columns(expr, table, alias, &mut sort_inputs);
+        } else {
+            collect_field_ref_column(&order.field, table, alias, &mut sort_inputs);
+        }
+    }
+    sort_inputs.retain(|column| !columns.contains(column));
+
+    // Keep the base read on the ordinary authorized table/filter/index path.
+    // Its pagination belongs to the expanded rows, not the source rules.
+    let mut input = query.clone();
+    let mut fields = sort_inputs.clone();
+    for item in &query.select_items {
+        if let SelectItem::Expr { expr, .. } = item {
+            collect_expr_columns(expr, table, alias, &mut fields);
+        }
+    }
+    if let Some(contract) = db.collection_contract(table) {
+        if contract.retention_duration_ms.is_some() {
+            fields.extend(crate::runtime::retention_filter::resolve_timestamp_column(
+                &contract,
+            ));
+        }
+    }
+    input.select_items = fields
+        .into_iter()
+        .map(|column| SelectItem::Expr {
+            expr: Expr::Column {
+                field: FieldRef::column("", &column),
+                span: Span::synthetic(),
+            },
+            alias: None,
+        })
+        .collect();
+    if input.select_items.is_empty() {
+        input.select_items.push(SelectItem::Expr {
+            expr: Expr::Literal {
+                value: Value::Integer(1),
+                span: Span::synthetic(),
+            },
+            alias: None,
+        });
+    }
+    input.columns = effective_table_projections(&input);
+    input.order_by.clear();
+    input.offset = None;
+    input.limit = None;
+    input.distinct = false;
+    (input, sort_inputs)
+}
+
+fn per_rule_limit(query: &TableQuery, occurrence_column: &str) -> usize {
+    // A rule's instants strictly increase. When the first sort key is
+    // the occurrence itself, later instants cannot displace its first k.
+    let ordered_by_instant = query.order_by.first().is_some_and(|order| {
+        order.ascending
+            && order
+                .expr
+                .as_ref()
+                .is_none_or(|expr| matches!(expr, Expr::Column { .. }))
+            && matches!(&order.field, FieldRef::TableColumn { table, column }
+                if table.is_empty() && column == occurrence_column)
+    });
+    query
+        .limit
+        .filter(|_| ordered_by_instant && !query.distinct)
+        .map(|limit| {
+            usize::try_from(limit.saturating_add(query.offset.unwrap_or(0))).unwrap_or(usize::MAX)
+        })
+        .unwrap_or(usize::MAX)
+}
+
+fn occurrence_window(
+    db: &RedDB,
+    source: &UnifiedRecord,
+    query: &TableQuery,
+    [rule, start, end]: [&Expr; 3],
+) -> RedDBResult<Option<(Arc<reddb_types::cron::CronSchedule>, i64, i64)>> {
+    let table = query.table.as_str();
+    let alias = query.alias.as_deref();
+    let evaluate = |expr: &Expr| -> RedDBResult<Value> {
+        if super::super::join_filter::expression_uses_secret(expr, source, Some(table), alias) {
+            return Err(RedDBError::Query(
+                "cron_occurrences requires public schedule and window arguments".into(),
+            ));
+        }
+        Ok(super::super::expr_eval::try_evaluate_runtime_expr_with_db(
+            Some(db),
+            expr,
+            source,
+            Some(table),
+            alias,
+        )?
+        .unwrap_or(Value::Null))
+    };
+    let (schedule, start, end) = (evaluate(rule)?, evaluate(start)?, evaluate(end)?);
+    if schedule.is_null() || start.is_null() || end.is_null() {
+        return Ok(None);
+    }
+    let Value::Cron(schedule) = schedule else {
+        return Err(RedDBError::Query(
+            "cron_occurrences expects a CRON schedule".into(),
+        ));
+    };
+    let start = cron_timestamp_ms(&start).map_err(RedDBError::Query)?;
+    let end = cron_timestamp_ms(&end).map_err(RedDBError::Query)?;
+    Ok(Some((schedule, start, end)))
 }

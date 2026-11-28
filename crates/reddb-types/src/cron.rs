@@ -348,6 +348,20 @@ mod tests {
             rule.next(before_gap).unwrap(),
             Some(timestamp("2026-03-09T05:00:00Z"))
         );
+        let midnight = timestamp("2026-03-08T05:00:00Z");
+        let next_midnight = timestamp("2026-03-09T04:00:00Z");
+        let instants = rule
+            .occurrences(midnight, next_midnight)
+            .expect("spring day")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("valid window");
+        assert_eq!(
+            instants,
+            [
+                timestamp("2026-03-08T06:00:00Z"),
+                timestamp("2026-03-08T06:30:00Z")
+            ]
+        );
     }
 
     #[test]

@@ -246,6 +246,11 @@ impl reddb_engine::query::runtime::expression::FallibleRuntimeExpressionHost
         }
     }
     fn evaluate_function(&self, name: &str, args: &[Value]) -> crate::RedDBResult<Option<Value>> {
+        if name == "CRON_OCCURRENCES" {
+            return Err(crate::RedDBError::Query(
+                "cron_occurrences requires a top-level SELECT projection".into(),
+            ));
+        }
         if matches!(name, "CRON" | "CRON_NEXT" | "CRON_OVERLAPS") {
             return reddb_engine::query::runtime::value_functions::evaluate_cron_function(
                 name, args,

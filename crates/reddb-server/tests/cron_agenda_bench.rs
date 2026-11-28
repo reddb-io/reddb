@@ -21,7 +21,7 @@ fn load(rt: &RedDBRuntime, dense: bool) -> usize {
     sql(rt, "CREATE TABLE jobs (id INTEGER PRIMARY KEY, room INTEGER, schedule CRON, duration_ms INTEGER)");
     sql(
         rt,
-        "CREATE TABLE slots (job_id INTEGER, room INTEGER, begins_ms BIGINT, ends_ms BIGINT)",
+        "CREATE TABLE slots (id INTEGER, room INTEGER, at_time BIGINT, ends_ms BIGINT)",
     );
     let mut slots = Vec::new();
     for room in 0..ROOMS {
@@ -51,7 +51,7 @@ fn load(rt: &RedDBRuntime, dense: bool) -> usize {
         sql(
             rt,
             &format!(
-                "INSERT INTO slots (job_id, room, begins_ms, ends_ms) VALUES {}",
+                "INSERT INTO slots (id, room, at_time, ends_ms) VALUES {}",
                 batch.join(",")
             ),
         );
@@ -59,11 +59,11 @@ fn load(rt: &RedDBRuntime, dense: bool) -> usize {
     sql(rt, "CREATE INDEX rules_by_room ON jobs (room) USING BTREE");
     sql(
         rt,
-        "CREATE INDEX slots_by_room ON slots (room, begins_ms) USING BTREE",
+        "CREATE INDEX slots_by_room ON slots (room, at_time) USING BTREE",
     );
     sql(
         rt,
-        "CREATE INDEX slots_by_time ON slots (begins_ms) USING BTREE",
+        "CREATE INDEX slots_by_time ON slots (at_time) USING BTREE",
     );
     slots.len()
 }
@@ -150,9 +150,9 @@ fn agenda_queries() {
             let lower = if conflict {
                 "ends_ms > $1"
             } else {
-                "begins_ms >= $1"
+                "at_time >= $1"
             };
-            let slot_sql = format!("SELECT job_id AS id, begins_ms AS at_time FROM slots WHERE {scope}{lower} AND begins_ms < $2 ORDER BY at_time, id");
+            let slot_sql = format!("SELECT id, at_time FROM slots WHERE {scope}{lower} AND at_time < $2 ORDER BY at_time, id");
             let limit = if conflict { " LIMIT 1" } else { "" };
             let end = DAY_START + if conflict { 10 * MINUTE } else { DAY };
             let (count, rule_p95, slot_p95) = measure(
@@ -173,11 +173,12 @@ fn agenda_queries() {
                 }
             };
             assert_eq!(count, expected);
-            let rules = if resource {
-                RULES_PER_ROOM
-            } else {
-                ROOMS * RULES_PER_ROOM
-            };
+            let rules = rt
+                .execute_query(&format!("SELECT id FROM jobs {where_room}"))
+                .expect("count the input rows admitted by the resource filter")
+                .result
+                .records
+                .len();
             println!("{name}: rows={count} candidate_rules={rules} expanded_p95_us={rule_p95} materialized_p95_us={slot_p95}");
         }
     }
