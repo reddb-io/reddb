@@ -282,6 +282,7 @@ mod tests {
         for (method, expected) in [
             ("BTREE", IndexMethod::BTree),
             ("BITMAP", IndexMethod::Bitmap),
+            ("cron", IndexMethod::Cron),
             ("hash", IndexMethod::Hash),
         ] {
             let query = parse_create_index(&format!(
@@ -366,7 +367,7 @@ mod tests {
         let err = p.parse_create_index_query().unwrap_err();
         assert!(
             err.to_string()
-                .contains("expected: HASH, BTREE, BITMAP, SPATIAL"),
+                .contains("expected: HASH, BTREE, BITMAP, CRON, SPATIAL, H3"),
             "{err}"
         );
     }
