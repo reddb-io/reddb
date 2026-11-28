@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.41.0
+
+### Minor Changes
+
+- [#2993](https://github.com/reddb-io/reddb/pull/2993) [`e67da84`](https://github.com/reddb-io/reddb/commit/e67da841c689b3addec85d280be9a23843eccd42) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Add the native `CRON` column type with an optional IANA time zone default and per-row overrides. Use `cron_next` and `cron_overlaps` to query scheduled occurrences without running jobs.
+
+### Patch Changes
+
+- [#2995](https://github.com/reddb-io/reddb/pull/2995) [`ac721f4`](https://github.com/reddb-io/reddb/commit/ac721f4c95ca8a1648aa47820f0f51595a6648ad) Thanks [@filipeforattini](https://github.com/filipeforattini)! - Version reclaim and retention no longer make a checkpoint copy a large collection. A checkpoint writes a collection's changes as a delta only up to 8,192 rows; reclaim took 512 rows a second, so over a large backlog every checkpoint copied the collection again with all writers waiting (two minutes for a 580,000-row ledger). On a collection above 32,768 rows, maintenance now takes 2,048 rows of each checkpoint's delta and continues after the checkpoint.
+
+  `CREATE UNIQUE INDEX` checks the rows on disk for duplicates. It read only the rows in memory, so a table whose duplicates had been checkpointed got its unique index.
+
+  A slow checkpoint also logs where its publication step spent the time (`checkpoint publication`).
+
 ## 1.40.10
 
 ### Patch Changes
