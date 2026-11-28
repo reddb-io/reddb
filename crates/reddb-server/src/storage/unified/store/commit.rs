@@ -525,6 +525,10 @@ impl crate::storage::engine::pager::PageOwnershipRecorder for StoreOwnershipReco
     fn generation_published(&self) {
         self.published.store(true, Ordering::Release);
     }
+
+    fn unpublished_reservation(&self, page_id: u32) -> bool {
+        !self.published.load(Ordering::Acquire) && self.images.lock().reserved.contains(page_id)
+    }
 }
 
 impl StoreCommitCoordinator {
@@ -2971,6 +2975,13 @@ mod tests {
         );
         let recorder =
             StoreOwnershipRecorder::begin(Arc::clone(&coordinator), 7).expect("begin epoch");
+        // A page reserved for the unpublished generation is nobody's to read:
+        // its home write needs no double-write frame.
+        recorder.reserve_pages(90, 2).expect("reserve");
+        recorder.flush_page_ownership().expect("flush reservations");
+        assert!(recorder.unpublished_reservation(90));
+        assert!(recorder.unpublished_reservation(91));
+        assert!(!recorder.unpublished_reservation(92), "never reserved");
         let begun = coordinator.fsync_count();
 
         recorder.retire_deferred_page(70).expect("queue");
@@ -2988,6 +2999,10 @@ mod tests {
         );
 
         recorder.generation_published();
+        assert!(
+            !recorder.unpublished_reservation(90),
+            "a published page is double-written again"
+        );
         recorder.retire_deferred_page(72).expect("durable");
         assert_eq!(
             coordinator.fsync_count(),
@@ -3003,12 +3018,17 @@ mod tests {
         let retire = |page_id| WalRecord::PageOwnership {
             record: PageOwnershipRecord::Retire { epoch: 7, page_id },
         };
+        let reserve = |page_id| WalRecord::PageOwnership {
+            record: PageOwnershipRecord::Reserve { epoch: 7, page_id },
+        };
         assert_eq!(
             records,
             vec![
                 WalRecord::PageOwnership {
                     record: PageOwnershipRecord::Begin { epoch: 7 }
                 },
+                reserve(90),
+                reserve(91),
                 retire(70),
                 retire(71),
                 retire(72),

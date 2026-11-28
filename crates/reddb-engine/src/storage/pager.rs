@@ -254,6 +254,14 @@ pub trait WalBarrier {
 
     /// Called before the manifest reference of a new generation is written.
     fn generation_published(&self) {}
+
+    /// Whether `page_id` was reserved for a generation that is not published.
+    /// Nothing reads such a page until `sync` and the manifest make it part
+    /// of the database, and recovery releases it whatever it holds: a torn
+    /// home write of it harms nobody, so it needs no double-write frame.
+    fn unpublished_reservation(&self, _page_id: u32) -> bool {
+        false
+    }
 }
 
 /// A pager without a WAL may only publish pages whose LSN is zero.
@@ -2015,8 +2023,26 @@ impl<F: VfsFile, W: WalBarrier> Pager<F, W> {
                     batch.stage(&mut *file, *id, page)?;
                 }
                 Ok(())
+            } else if self.dwb_enabled {
+                // A frame costs nine syncs for 63 pages, and a checkpoint
+                // writes mostly pages of the generation it is building: nine
+                // frames for one that changed 20 small tables. Those pages
+                // go straight home; `sync` makes them durable before the
+                // manifest names them. The catalog root, the page the
+                // manifest will name, keeps its frame.
+                let mut guarded = Vec::new();
+                for (id, page) in pages {
+                    if page.page_type().ok() != Some(PageType::Header)
+                        && self.wal.unpublished_reservation(*id)
+                    {
+                        pager_io::write_page(&mut *file, *id, page)?;
+                    } else {
+                        guarded.push((*id, page.clone()));
+                    }
+                }
+                Ok(pager_io::write_pages(&mut *file, &guarded, true)?)
             } else {
-                Ok(pager_io::write_pages(&mut *file, pages, self.dwb_enabled)?)
+                Ok(pager_io::write_pages(&mut *file, pages, false)?)
             }
         })();
         if result.is_err() {

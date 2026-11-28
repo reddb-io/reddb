@@ -269,6 +269,10 @@ pub(crate) trait PageOwnershipRecorder: Send + Sync {
     }
     /// The manifest reference of the generation is about to be written.
     fn generation_published(&self) {}
+    /// Whether the page was reserved for a generation not yet published.
+    fn unpublished_reservation(&self, _page_id: u32) -> bool {
+        false
+    }
     fn needs_page_image(&self, _page_id: u32) -> std::io::Result<bool> {
         Ok(false)
     }
@@ -392,6 +396,13 @@ impl WalBarrier for NativeWalBarrier {
         if let Ok(Some(recorder)) = self.ownership_recorder() {
             recorder.generation_published();
         }
+    }
+
+    fn unpublished_reservation(&self, page_id: u32) -> bool {
+        matches!(
+            self.ownership_recorder(),
+            Ok(Some(recorder)) if recorder.unpublished_reservation(page_id)
+        )
     }
 }
 
