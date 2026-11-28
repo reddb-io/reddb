@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.42.0
+
+### Minor Changes
+
+- [#2994](https://github.com/reddb-io/reddb/pull/2994) [`23d8814`](https://github.com/reddb-io/reddb/commit/23d881415694ea62c10b07fef1dabdb7f2d08f2e) Thanks [@filipeforattini](https://github.com/filipeforattini)! - List scheduled occurrences within a time window with the `cron_occurrences` SELECT projection.
+
+### Patch Changes
+
+- [#2999](https://github.com/reddb-io/reddb/pull/2999) [`1f4b0f4`](https://github.com/reddb-io/reddb/commit/1f4b0f4639eb2621f70409b00fff08cc69d5d371) Thanks [@filipeforattini](https://github.com/filipeforattini)! - A checkpoint no longer waits for one WAL sync per page it frees. While the new generation is unpublished, recovery ignores its retirements, so those records are queued behind the reservations and made durable with them before the manifest is written; a checkpoint that changed 20 of 173 small tables went from about 400 fsync calls to about 155. Retirements recorded after publication are awaited as before.
+
 ## 1.41.0
 
 ### Minor Changes
