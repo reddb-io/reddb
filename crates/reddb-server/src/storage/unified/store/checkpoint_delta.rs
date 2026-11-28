@@ -189,14 +189,30 @@ impl UnifiedStore {
             .filter(|(_, manager)| manager.count() as u64 > MAINTENANCE_PACED_FROM_ROWS)
             .map(|(name, manager)| (name.clone(), Arc::clone(manager)))
             .collect();
+        // A delta also needs the WAL reference of every changed row, and
+        // those are kept within a byte budget: about 3,000 rows of a table
+        // name this long on a small page cache. Past it the references of the
+        // collection are dropped and the checkpoint copies the collection.
+        let references_nearly_full = self
+            .checkpoint_durable_rows
+            .read()
+            .references
+            .memory_bytes()
+            >= self.checkpoint_rows_budget() / 2 / 4 * 3;
         large
             .into_iter()
             .find(|(name, manager)| {
                 // Mutations first: cheap, and an upper bound on the rows.
-                self.checkpoint_mutations(name, manager) >= DELTA_CHECKPOINT_ROWS as u64
+                let mutations = self.checkpoint_mutations(name, manager);
+                let due = if references_nearly_full {
+                    super::impl_pages::CHECKPOINT_BATCH_ROWS
+                } else {
+                    DELTA_CHECKPOINT_ROWS
+                };
+                mutations >= due as u64
                     && self
                         .checkpoint_pending_rows(name, manager)
-                        .is_some_and(|rows| rows >= DELTA_CHECKPOINT_ROWS)
+                        .is_some_and(|rows| rows >= due)
             })
             .map(|(name, _)| name)
     }
@@ -418,6 +434,19 @@ impl UnifiedStore {
         })
     }
 
+    /// Bytes of WAL images and references kept for the next delta.
+    fn checkpoint_rows_budget(&self) -> usize {
+        // A store that does not size its page cache runs the pager's default
+        // one. Budgeting this as if it had none kept a few hundred rows, and
+        // every checkpoint of more than that republished its collection.
+        let slots = self
+            .config
+            .page_cache_slots
+            .unwrap_or_else(|| crate::storage::engine::PagerConfig::default().cache_size);
+        (slots.saturating_mul(crate::storage::engine::PAGE_SIZE) / 32)
+            .clamp(16 * 1024, 8 * 1024 * 1024)
+    }
+
     /// Called only after the WAL append succeeds. The ordinary inline KV path
     /// does not retain records here. The checkpoint's existing force_sync is
     /// the durability fence before any sparse projection changes pager pages.
@@ -429,15 +458,7 @@ impl UnifiedStore {
         if self.pager.is_none() || self.commit.is_none() {
             return;
         }
-        // A store that does not size its page cache runs the pager's default
-        // one. Budgeting this as if it had none kept a few hundred rows, and
-        // every checkpoint of more than that republished its collection.
-        let slots = self
-            .config
-            .page_cache_slots
-            .unwrap_or_else(|| crate::storage::engine::PagerConfig::default().cache_size);
-        let limit = (slots.saturating_mul(crate::storage::engine::PAGE_SIZE) / 32)
-            .clamp(16 * 1024, 8 * 1024 * 1024);
+        let limit = self.checkpoint_rows_budget();
         let mut removed: Vec<(String, EntityId)> = Vec::new();
         {
             let mut retained = self.checkpoint_durable_rows.write();

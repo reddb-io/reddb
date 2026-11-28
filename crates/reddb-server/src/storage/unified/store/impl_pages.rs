@@ -2,7 +2,7 @@ use super::*;
 use parking_lot::RwLock;
 
 const CHECKPOINT_BATCH_BYTES: usize = 1024 * 1024;
-const CHECKPOINT_BATCH_ROWS: usize = 512;
+pub(super) const CHECKPOINT_BATCH_ROWS: usize = 512;
 
 /// A checkpoint that held writers for at least this long logs where the time
 /// went. Shorter ones, such as the second pass of a flush, are not worth a line.
