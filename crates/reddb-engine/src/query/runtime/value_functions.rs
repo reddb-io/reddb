@@ -423,27 +423,29 @@ pub fn value_as_f64(value: &Value) -> Option<f64> {
     }
 }
 
-pub fn evaluate_cron_function(name: &str, args: &[Value]) -> Result<Value, String> {
-    if name == "CRON" {
-        return reddb_types::cron::construct(args);
-    }
-
-    let timestamp_ms = |value: &Value| match value {
+pub fn cron_timestamp_ms(value: &Value) -> Result<i64, String> {
+    match value {
         Value::TimestampMs(ms) => Ok(*ms),
         Value::Timestamp(seconds) => seconds
             .checked_mul(1000)
             .ok_or_else(|| "cron timestamp is out of range".to_string()),
         _ => Err("cron requires timestamp arguments".into()),
-    };
+    }
+}
+
+pub fn evaluate_cron_function(name: &str, args: &[Value]) -> Result<Value, String> {
+    if name == "CRON" {
+        return reddb_types::cron::construct(args);
+    }
     match (name, args) {
         ("CRON_NEXT", [_, _]) | ("CRON_OVERLAPS", [_, _, _]) if args.iter().any(Value::is_null) => {
             Ok(Value::Null)
         }
         ("CRON_NEXT", [Value::Cron(schedule), start]) => Ok(schedule
-            .next(timestamp_ms(start)?)?
+            .next(cron_timestamp_ms(start)?)?
             .map_or(Value::Null, Value::TimestampMs)),
         ("CRON_OVERLAPS", [Value::Cron(schedule), start, end]) => Ok(Value::Boolean(
-            schedule.overlaps(timestamp_ms(start)?, timestamp_ms(end)?)?,
+            schedule.overlaps(cron_timestamp_ms(start)?, cron_timestamp_ms(end)?)?,
         )),
         _ => Err(format!("invalid arguments to {name}")),
     }
