@@ -2,7 +2,7 @@ use super::*;
 use parking_lot::RwLock;
 
 const CHECKPOINT_BATCH_BYTES: usize = 1024 * 1024;
-const CHECKPOINT_BATCH_ROWS: usize = 512;
+pub(super) const CHECKPOINT_BATCH_ROWS: usize = 512;
 
 /// A checkpoint that held writers for at least this long logs where the time
 /// went. Shorter ones, such as the second pass of a flush, are not worth a line.
@@ -1449,6 +1449,9 @@ impl UnifiedStore {
             recovery_xid_summary: RwLock::new(None),
             checkpoint_versions: RwLock::new(HashMap::new()),
             maintenance_spent: parking_lot::Mutex::new(HashMap::new()),
+            delta_sampled_ms: std::sync::atomic::AtomicU64::new(0),
+            volume_checkpoint_ms: std::sync::atomic::AtomicU64::new(0),
+            volume_warned_ms: std::sync::atomic::AtomicU64::new(0),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             config_reads: parking_lot::RwLock::default(),
             versioned_reads: parking_lot::RwLock::default(),
@@ -1625,6 +1628,9 @@ impl UnifiedStore {
             recovery_xid_summary: RwLock::new(None),
             checkpoint_versions: RwLock::new(HashMap::new()),
             maintenance_spent: parking_lot::Mutex::new(HashMap::new()),
+            delta_sampled_ms: std::sync::atomic::AtomicU64::new(0),
+            volume_checkpoint_ms: std::sync::atomic::AtomicU64::new(0),
+            volume_warned_ms: std::sync::atomic::AtomicU64::new(0),
             checkpoint_durable_rows: RwLock::new(super::checkpoint_delta::DurableRows::default()),
             config_reads: parking_lot::RwLock::default(),
             versioned_reads: parking_lot::RwLock::default(),
