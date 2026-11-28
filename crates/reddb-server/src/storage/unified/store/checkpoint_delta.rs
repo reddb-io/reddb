@@ -78,6 +78,17 @@ const MAINTENANCE_ROWS_FLOOR: usize = 256;
 /// A period ends at a checkpoint, or after this long on a store that takes none.
 const MAINTENANCE_PERIOD_MAX: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
+/// Changed rows of one large collection at which a checkpoint is due. Half a
+/// delta, so that a statement of a few thousand rows still fits behind it.
+pub(crate) const DELTA_CHECKPOINT_ROWS: usize =
+    crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX / 2;
+/// How often a statement looks for such a collection.
+const DELTA_SAMPLE_MS: u64 = 5;
+/// Checkpoints by volume closer together than this are worth a warning,
+/// at most one a minute.
+const VOLUME_CHECKPOINT_WARNING_MS: u64 = 30_000;
+const VOLUME_WARNING_EVERY_MS: u64 = 60_000;
+
 pub(in crate::storage::unified) struct MaintenanceSpend {
     since: std::time::Instant,
     rows: usize,
@@ -144,6 +155,87 @@ impl UnifiedStore {
             }
         }
         allowance
+    }
+
+    /// A large collection whose changes since the last checkpoint are about to
+    /// outgrow what a checkpoint writes as a delta.
+    ///
+    /// A checkpoint used to be due by time (the operator's schedule) and by
+    /// memory pressure only. A load passes 8,192 changed rows long before
+    /// either, and the checkpoint that comes then copies the whole collection
+    /// with every writer waiting: a 406,000-row table held its INSERT for 31
+    /// seconds. A checkpoint is also due by volume, the way WAL size makes one
+    /// due in PostgreSQL (`max_wal_size`): taken while the delta still fits,
+    /// it costs the changed rows instead of the table. Smaller collections are
+    /// left alone; copying one costs about what a full delta does.
+    pub(crate) fn collection_outgrowing_its_delta(&self) -> Option<String> {
+        use std::sync::atomic::Ordering;
+        self.pager.as_ref()?;
+        let now = crate::utils::now_unix_millis();
+        let last = self.delta_sampled_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < DELTA_SAMPLE_MS
+            || self
+                .delta_sampled_ms
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            return None;
+        }
+        let large: Vec<(String, Arc<SegmentManager>)> = self
+            .resident
+            .collections
+            .read()
+            .iter()
+            .filter(|(_, manager)| manager.count() as u64 > MAINTENANCE_PACED_FROM_ROWS)
+            .map(|(name, manager)| (name.clone(), Arc::clone(manager)))
+            .collect();
+        large
+            .into_iter()
+            .find(|(name, manager)| {
+                // Mutations first: cheap, and an upper bound on the rows.
+                self.checkpoint_mutations(name, manager) >= DELTA_CHECKPOINT_ROWS as u64
+                    && self
+                        .checkpoint_pending_rows(name, manager)
+                        .is_some_and(|rows| rows >= DELTA_CHECKPOINT_ROWS)
+            })
+            .map(|(name, _)| name)
+    }
+
+    /// Mutations a collection's segments recorded since its last checkpoint.
+    fn checkpoint_mutations(&self, collection: &str, manager: &Arc<SegmentManager>) -> u64 {
+        let before: HashMap<u64, u64> = {
+            let versions = self.checkpoint_versions.read();
+            let Some(previous) = versions.get(collection) else {
+                return 0;
+            };
+            previous.segments.iter().copied().collect()
+        };
+        manager
+            .checkpoint_revisions()
+            .into_iter()
+            .map(|(segment, revision)| {
+                revision.saturating_sub(before.get(&segment).copied().unwrap_or(0))
+            })
+            .sum()
+    }
+
+    /// Note a checkpoint taken for volume. Returns the seconds since the
+    /// previous one when they are close together and no warning went out in
+    /// the last minute.
+    pub(crate) fn note_volume_checkpoint(&self) -> Option<u64> {
+        use std::sync::atomic::Ordering;
+        let now = crate::utils::now_unix_millis();
+        let previous = self.volume_checkpoint_ms.swap(now, Ordering::Relaxed);
+        let apart = now.saturating_sub(previous);
+        if previous == 0 || apart >= VOLUME_CHECKPOINT_WARNING_MS {
+            return None;
+        }
+        let warned = self.volume_warned_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(warned) < VOLUME_WARNING_EVERY_MS {
+            return None;
+        }
+        self.volume_warned_ms.store(now, Ordering::Relaxed);
+        Some(apart / 1_000)
     }
 
     /// Record `rows` changed by maintenance against the collection's period.

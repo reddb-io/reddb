@@ -293,27 +293,39 @@ impl crate::RedDBRuntime {
     /// Drain before admitting a new mutation, never after acknowledging it or
     /// inside an unfinished WAL capture. Keep checkpoint workspace below the
     /// shared ceiling by starting at three quarters of the resident arena share.
+    /// A checkpoint is also taken here when a large collection's changes are
+    /// about to outgrow a delta.
     pub(super) fn drain_committed_writes_under_pressure(
         &self,
         growth_bytes: u64,
     ) -> RedDBResult<()> {
         let store = self.inner.db.store();
-        let Some(limit) = store.config().resident_memory_bytes_max else {
-            return Ok(());
-        };
-        let threshold = limit.saturating_sub(limit / 4);
         if self.inner.db.options().read_only
             || self.inner.lifecycle.phase() != super::lifecycle::Phase::Ready
             || !store.is_paged()
-            || self
-                .memory_accounting()
-                .used_bytes(MemoryPool::SegmentArena)
-                .saturating_add(growth_bytes)
-                < threshold
             || store.vault_publication_lock.is_owned_by_current_thread()
             || crate::storage::UnifiedStore::deferred_store_wal_capture_active()
             || self.current_xid().is_some()
         {
+            return Ok(());
+        }
+        let threshold = store
+            .config()
+            .resident_memory_bytes_max
+            .map(|limit| limit.saturating_sub(limit / 4));
+        let memory = threshold.is_some_and(|threshold| {
+            self.memory_accounting()
+                .used_bytes(MemoryPool::SegmentArena)
+                .saturating_add(growth_bytes)
+                >= threshold
+        });
+        // By volume too: see `collection_outgrowing_its_delta`.
+        let outgrowing = if memory {
+            None
+        } else {
+            store.collection_outgrowing_its_delta()
+        };
+        if !memory && outgrowing.is_none() {
             return Ok(());
         }
         // Never wait while a caller may hold row/index locks. A competing
@@ -321,8 +333,23 @@ impl crate::RedDBRuntime {
         let Some(_publication) = store.vault_publication_lock.try_lock() else {
             return Ok(());
         };
-        if store.segment_memory_bytes().saturating_add(growth_bytes) < threshold {
-            return Ok(());
+        match (&outgrowing, threshold) {
+            (Some(collection), _) => {
+                if let Some(seconds_apart) = store.note_volume_checkpoint() {
+                    tracing::warn!(
+                        target: "reddb::checkpoint",
+                        collection = %collection,
+                        seconds_apart,
+                        "checkpoints by write volume are close together"
+                    );
+                }
+            }
+            (None, Some(threshold)) => {
+                if store.segment_memory_bytes().saturating_add(growth_bytes) < threshold {
+                    return Ok(());
+                }
+            }
+            (None, None) => return Ok(()),
         }
         self.checkpoint_local()
     }

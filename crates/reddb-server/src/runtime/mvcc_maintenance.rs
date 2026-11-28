@@ -230,6 +230,61 @@ mod tests {
         );
     }
 
+    /// A load passes the rows a delta takes long before a checkpoint is due
+    /// by time or memory, and that checkpoint then copied the whole table with
+    /// every writer waiting.
+    #[test]
+    fn a_load_into_a_large_table_checkpoints_by_volume_and_never_copies_it() {
+        use crate::storage::unified::segment::CHECKPOINT_MUTATIONS_MAX;
+        use crate::storage::unified::store::{
+            take_republished_collections, DELTA_CHECKPOINT_ROWS, MAINTENANCE_PACED_FROM_ROWS,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime = RedDBRuntime::with_options(
+            RedDBOptions::persistent(directory.path().join("loaded.rdb"))
+                .with_memory_budget(64 * 1024 * 1024)
+                .with_bounded_disk_residency(true),
+        )
+        .unwrap();
+        drop(runtime.background_tasks.take());
+        runtime
+            .execute_query("CREATE TABLE loaded (id INTEGER PRIMARY KEY, payload TEXT)")
+            .unwrap();
+        let load = |from: usize, to: usize| {
+            // Statements smaller than the trigger's margin, as a client sends them.
+            for start in (from..to).step_by(DELTA_CHECKPOINT_ROWS / 8) {
+                let values = (start..(start + DELTA_CHECKPOINT_ROWS / 8).min(to))
+                    .map(|id| format!("({id}, 'payload-{id}')"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                runtime
+                    .execute_query(&format!("INSERT INTO loaded (id, payload) VALUES {values}"))
+                    .unwrap();
+            }
+        };
+        let large = MAINTENANCE_PACED_FROM_ROWS as usize + 1_000;
+        load(0, large);
+        runtime.checkpoint().unwrap();
+        take_republished_collections();
+
+        // Three deltas' worth of new rows.
+        let total = large + 3 * CHECKPOINT_MUTATIONS_MAX;
+        load(large, total);
+        runtime.checkpoint().unwrap();
+        let copied: Vec<_> = take_republished_collections()
+            .into_iter()
+            .filter(|collection| collection.starts_with("loaded:"))
+            .collect();
+        assert!(copied.is_empty(), "the load copied the table: {copied:?}");
+        let result = runtime
+            .execute_query("SELECT COUNT(*) AS n FROM loaded")
+            .unwrap();
+        assert_eq!(
+            result.result.records[0].get("n").unwrap().display_string(),
+            total.to_string()
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn constant_live_data_churn_reuses_pages_after_cold_gc() {

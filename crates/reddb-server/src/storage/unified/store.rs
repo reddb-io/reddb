@@ -346,6 +346,11 @@ pub struct UnifiedStore {
     /// Rows background maintenance changed in each collection since the last
     /// checkpoint, which it must not outrun: see `maintenance_allowance`.
     maintenance_spent: parking_lot::Mutex<HashMap<String, checkpoint_delta::MaintenanceSpend>>,
+    /// When `collection_outgrowing_its_delta` last looked, and when a
+    /// checkpoint was last taken, and warned about, for that reason (unix ms).
+    delta_sampled_ms: std::sync::atomic::AtomicU64,
+    volume_checkpoint_ms: std::sync::atomic::AtomicU64,
+    volume_warned_ms: std::sync::atomic::AtomicU64,
     checkpoint_durable_rows: RwLock<checkpoint_delta::DurableRows>,
     /// `red.config` values already read, valid for one state of that
     /// collection. Statements consult configuration on every execution and
@@ -429,7 +434,9 @@ mod impl_native_b;
 mod impl_native_c;
 mod impl_pages;
 #[cfg(test)]
-pub(crate) use checkpoint_delta::{MAINTENANCE_PACED_FROM_ROWS, MAINTENANCE_ROWS_PER_CHECKPOINT};
+pub(crate) use checkpoint_delta::{
+    DELTA_CHECKPOINT_ROWS, MAINTENANCE_PACED_FROM_ROWS, MAINTENANCE_ROWS_PER_CHECKPOINT,
+};
 pub(crate) use impl_pages::paced_primary::PreparedPrimary;
 #[cfg(test)]
 pub(crate) use impl_pages::take_republished_collections;
